@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["version", "mode", "repos"],
+  "additionalProperties": true,
+  "properties": {
+    "version": {"type": "integer", "const": 1},
+    "mode": {"type": "string", "enum": ["dry-run", "live"]},
+    "clone_root": {"type": ["string", "null"]},
+    "worktree_root": {"type": ["string", "null"]},
+    "branch_prefix": {"type": "string"},
+    "automerge": {"type": "boolean", "const": false},
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cli": {"type": "string"},
+        "default_limit": {"type": "integer", "minimum": 1, "maximum": 100}
+      }
+    },
+    "executor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "command": {"type": "string"},
+        "timeout_seconds": {"type": "integer", "minimum": 1}
+      }
+    },
+    "repos": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["repo", "board"],
+        "additionalProperties": true,
+        "properties": {
+          "repo": {"type": "string"},
+          "board": {"type": "string"},
+          "clone_path": {"type": ["string", "null"]},
+          "trusted_authors": {"type": "array", "items": {"type": "string"}},
+          "trusted_branch_prefixes": {"type": "array", "items": {"type": "string"}},
+          "allowed_base_branches": {"type": "array", "items": {"type": "string"}},
+          "external_pr_policy": {"type": "string", "enum": ["block", "report", "ignore"]}
+        }
+      }
+    }
+  }
+}

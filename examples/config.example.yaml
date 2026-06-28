@@ -1,0 +1,26 @@
+version: 1
+mode: dry-run
+clone_root: <clone-root>
+worktree_root: <worktree-root>
+branch_prefix: ai/fix
+automerge: false
+github:
+  cli: gh
+  default_limit: 10
+labels:
+  ready: ai:ready
+  in_progress: ai:in-progress
+  blocked: ai:blocked
+  pr_opened: ai:pr-opened
+  generated: ai:generated
+executor:
+  enabled: false
+  command: opencode
+repos:
+  - repo: owner/example-repo
+    board: owner-example-repo
+    clone_path: <clone-root>/example-repo
+    trusted_authors: [owner]
+    trusted_branch_prefixes: [ai/fix]
+    allowed_base_branches: [main]
+    external_pr_policy: block
