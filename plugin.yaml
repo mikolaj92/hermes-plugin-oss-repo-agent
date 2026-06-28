@@ -1,0 +1,7 @@
+manifest_version: 1
+name: oss-repo-agent
+version: 0.1.0
+description: Generic guarded GitHub issue to PR workflow for Hermes.
+author: mikolaj92
+kind: standalone
+provides_hooks: []
