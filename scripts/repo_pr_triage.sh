@@ -190,7 +190,7 @@ Policy:
 - Run relevant tests and update the existing PR with evidence. Do not merge; repo_pr_triage owns the merge gate."
 
   hermes kanban --board "$board" create \
-    --title "$task_title" \
+    "$task_title" \
     --body "$body" \
     --assignee repo-fixer \
     --workspace "worktree:${clone_path}" \
