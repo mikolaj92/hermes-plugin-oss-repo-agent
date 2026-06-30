@@ -17,6 +17,19 @@ grep -Fq 'comment_pr_once' "$ROOT/scripts/repo_pr_triage.sh"
 
 python3 -m unittest discover -s "$ROOT/tests"
 
+if [[ "${HERMES_REPO_AGENT_SMOKE_MODEL:-0}" == 1 ]]; then
+  provider="${HERMES_REPO_AGENT_SMOKE_PROVIDER:-custom}"
+  model="${HERMES_REPO_AGENT_SMOKE_MODEL_NAME:-auto/claude-sonnet}"
+  response="$(
+    cd /tmp
+    HERMES_ACCEPT_HOOKS=1 hermes --provider "$provider" -m "$model" --ignore-rules -z 'Respond exactly OK'
+  )"
+  [[ "$response" == OK ]] || {
+    printf 'repo-agent model smoke failed provider=%s model=%s response=%s\n' "$provider" "$model" "$response" >&2
+    exit 1
+  }
+fi
+
 if [[ "${HERMES_REPO_AGENT_SMOKE_HEALTH:-0}" == 1 ]]; then
   "$ROOT/scripts/repo_agent_health.sh"
 fi
