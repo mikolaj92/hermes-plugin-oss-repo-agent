@@ -168,6 +168,30 @@ PY
 }
 
 
+release_clean_worktree_for_branch() {
+  local clone_path="$1" branch="$2"
+  local path="" wt_branch="" line
+  [[ -d "$clone_path/.git" ]] || return 0
+
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        path="${line#worktree }"
+        wt_branch=""
+        ;;
+      branch\ refs/heads/*)
+        wt_branch="${line#branch refs/heads/}"
+        if [[ "$wt_branch" == "$branch" && "$path" == "$clone_path/.worktrees/"* ]]; then
+          if [[ -z "$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" ]]; then
+            GIT_MASTER=1 git -C "$clone_path" worktree remove "$path" >/dev/null 2>&1 || true
+          fi
+        fi
+        ;;
+    esac
+  done < <(GIT_MASTER=1 git -C "$clone_path" worktree list --porcelain 2>/dev/null || true)
+}
+
+
 
 create_review_fix_task() {
   local repo="$1" number="$2" title="$3" url="$4" head="$5" reason="$6"
@@ -176,6 +200,7 @@ create_review_fix_task() {
   board="$(board_for_repo "$repo")" || return 2
   clone_path="$(clone_for_repo "$repo")" || return 2
   command -v hermes >/dev/null 2>&1 || return 2
+  release_clean_worktree_for_branch "$clone_path" "$head"
 
   task_title="[fix-pr-review] ${repo}#${number}: address review feedback"
   idempotency_key="fix-pr-review:${repo}:${number}:${reason}"

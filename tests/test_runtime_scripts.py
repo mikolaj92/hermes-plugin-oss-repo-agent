@@ -37,6 +37,8 @@ class RuntimeScriptTests(unittest.TestCase):
         self.assertIn("review-not-approved", triage)
         self.assertIn("checks-not-passing", triage)
         self.assertIn("FIX_TASK_CREATED", triage)
+        self.assertIn("release_clean_worktree_for_branch", triage)
+        self.assertIn('worktree remove "$path"', triage)
 
     def test_health_and_launchd_templates_exist(self):
         health = self.read("scripts/repo_agent_health.sh")
