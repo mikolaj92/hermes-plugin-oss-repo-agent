@@ -57,7 +57,7 @@ class GitHubConfig:
 @dataclass(frozen=True)
 class ExecutorConfig:
     enabled: bool = False
-    command: str = "opencode"
+    command: str = "claude"
     timeout_seconds: int = 1800
 
     @classmethod
@@ -66,7 +66,7 @@ class ExecutorConfig:
         timeout = int(data.get("timeout_seconds", 1800))
         if timeout < 1:
             raise ConfigError("executor.timeout_seconds must be positive")
-        command = str(data.get("command", "opencode"))
+        command = str(data.get("command", "claude"))
         if not command or any(part in command for part in ("/", "\\", " ")):
             raise ConfigError("executor.command must be a command name")
         return cls(enabled=bool(data.get("enabled", False)), command=command, timeout_seconds=timeout)
@@ -129,8 +129,7 @@ class OssRepoAgentConfig:
         branch_prefix = str(data.get("branch_prefix", "ai/fix")).strip("/")
         if not branch_prefix or not BRANCH_PREFIX_RE.match(branch_prefix):
             raise ConfigError("branch_prefix contains unsafe characters")
-        if bool(data.get("automerge", False)):
-            raise ConfigError("automerge is not supported in v0")
+        automerge = bool(data.get("automerge", False))
         live = mode == "live"
         clone_root = data.get("clone_root")
         worktree_root = data.get("worktree_root")
@@ -145,7 +144,7 @@ class OssRepoAgentConfig:
             clone_root=str(clone_root) if clone_root is not None else None,
             worktree_root=str(worktree_root) if worktree_root is not None else None,
             branch_prefix=branch_prefix,
-            automerge=False,
+            automerge=automerge,
             github=GitHubConfig.from_mapping(data.get("github")),
             labels=Labels.from_mapping(data.get("labels")),
             executor=ExecutorConfig.from_mapping(data.get("executor")),

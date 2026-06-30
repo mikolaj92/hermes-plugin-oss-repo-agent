@@ -64,7 +64,7 @@ def validate(cfg: OssRepoAgentConfig) -> dict[str, Any]:
         "ok": True,
         "mode": cfg.mode,
         "repos": [repo.repo for repo in cfg.repos],
-        "automerge": False,
+        "automerge": cfg.automerge,
         "skills": [
             "oss-repo-agent:repo-gh-cli-policy",
             "oss-repo-agent:repo-audit-finding-format",
@@ -114,7 +114,8 @@ def pr_triage(cfg: OssRepoAgentConfig, live_flag: bool, comment: bool, runner: R
         "ok": True,
         "effective_live": live,
         "comment_enabled": bool(comment) and live,
-        "merge_behavior": "not-supported-in-v0",
+        "automerge": cfg.automerge,
+        "merge_behavior": "own-pr-clean-auto-merge" if cfg.automerge else "disabled",
         "commands": [planned_command(command) for command in commands],
         "executed": [result.executed for result in results],
     }

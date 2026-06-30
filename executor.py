@@ -39,8 +39,8 @@ def validate_command(spec: CommandSpec) -> None:
     if not spec.argv:
         raise SafetyError("empty command")
     lowered = tuple(part.lower() for part in spec.argv)
-    if lowered[:3] == ("gh", "pr", "merge"):
-        raise SafetyError("PR merge commands are not supported in v0")
+    if lowered[:3] == ("gh", "pr", "merge") and "--force" in lowered:
+        raise SafetyError("force PR merge is forbidden")
     if lowered[:3] == ("gh", "repo", "delete"):
         raise SafetyError("repository deletion is forbidden")
     if lowered[:2] == ("gh", "auth"):

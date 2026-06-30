@@ -3,7 +3,9 @@ mode: dry-run
 clone_root: <clone-root>
 worktree_root: <worktree-root>
 branch_prefix: ai/fix
-automerge: false
+# Set to true to auto-merge own PRs (author == repo owner) when mergeStateStatus == CLEAN.
+# External PRs are never auto-merged.
+automerge: true
 github:
   cli: gh
   default_limit: 10
@@ -15,7 +17,9 @@ labels:
   generated: ai:generated
 executor:
   enabled: false
-  command: opencode
+  # Uses claude --dangerously-skip-permissions in background (nohup ... &).
+  # Max concurrent agents is controlled by HERMES_ISSUE_TO_PR_MAX_CLAUDE_AGENTS (default 3).
+  command: claude
 repos:
   - repo: owner/example-repo
     board: owner-example-repo
