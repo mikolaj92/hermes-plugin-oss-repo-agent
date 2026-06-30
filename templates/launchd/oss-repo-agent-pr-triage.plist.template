@@ -3,19 +3,17 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.example.hermes.oss-repo-agent.intake</string>
+  <string>com.mikolaj92.hermes.repo-pr-triage</string>
   <key>ProgramArguments</key>
   <array>
-    <string>hermes</string>
-    <string>oss-repo-agent</string>
-    <string>intake</string>
-    <string>--config</string>
-    <string>&lt;config-path&gt;</string>
+    <string>/Users/mini-m4-main/.hermes/scripts/repo_pr_triage.sh</string>
+    <string>--live</string>
+    <string>--comment</string>
   </array>
   <key>StartInterval</key>
-  <integer>300</integer>
+  <integer>600</integer>
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
   <key>LimitLoadToSessionType</key>
   <string>Background</string>
 </dict>

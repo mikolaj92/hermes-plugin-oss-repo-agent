@@ -14,6 +14,7 @@ REQUIRE_APPROVED="${HERMES_PR_REQUIRE_APPROVED:-1}"
 ALLOW_NO_CHECKS="${HERMES_PR_ALLOW_NO_CHECKS:-0}"
 LOG_FILE="${HERMES_PR_TRIAGE_LOG:-/Users/mini-m4-main/.hermes/logs/repo-pr-triage.log}"
 LOCK_DIR="${HERMES_PR_TRIAGE_LOCK_DIR:-/tmp/hermes-repo-pr-triage.lock}"
+STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
 
 usage() {
   cat <<'USAGE'
@@ -63,6 +64,9 @@ require_cmd() {
 require_cmd gh
 require_cmd python3
 
+if [[ -d "$LOCK_DIR" ]]; then
+  find "$LOCK_DIR" -maxdepth 0 -mmin "+$STALE_LOCK_MINUTES" -exec rmdir {} \; 2>/dev/null || true
+fi
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   log "LOCK_HELD path=$LOCK_DIR"
   exit 0
@@ -201,10 +205,29 @@ Policy:
     --skill repo-fix-issue-pr >/dev/null
 }
 
+comment_pr_once() {
+  local repo="$1" number="$2" reason="$3" title="$4"
+  local marker body comments
+  [[ "$COMMENT_ENABLED" == 1 && "$DRY_RUN" == 0 ]] || return 0
+  marker="<!-- hermes-repo-agent:${reason} -->"
+  comments="$(gh api "/repos/${repo}/issues/${number}/comments" --jq '.[].body' 2>/dev/null || true)"
+  if grep -Fq "$marker" <<<"$comments"; then
+    return 0
+  fi
+  body="${marker}
+Hermes repo-agent blocked this PR: ${reason}.
+
+${title}
+
+The triage loop will keep watching this PR and queue Kanban repair work when the reason is fixable."
+  gh pr comment "$number" --repo "$repo" --body "$body" >/dev/null 2>&1 || return 1
+}
+
 processed=0
 merged=0
 blocked=0
 skipped=0
+commented=0
 failures=0
 
 log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) comment=$COMMENT_ENABLED automerge=$AUTOMERGE require_approved=$REQUIRE_APPROVED allow_no_checks=$ALLOW_NO_CHECKS"
@@ -240,8 +263,22 @@ for repo in "${REPOS[@]}"; do
       reason="missing-required-ai-labels"
       skipped=$((skipped + 1))
     elif [[ "$merge_state" == "CLEAN" ]]; then
-      decision="merge"
-      reason="own-pr-clean"
+      if [[ "$REQUIRE_APPROVED" == 1 && "$review_decision" != "APPROVED" ]]; then
+        decision="merge-blocked"
+        reason="review-not-approved"
+        blocked=$((blocked + 1))
+      elif ! checks_pass "$repo" "$number"; then
+        decision="fix"
+        reason="checks-not-passing"
+        blocked=$((blocked + 1))
+      elif [[ "$AUTOMERGE" != 1 ]]; then
+        decision="merge-blocked"
+        reason="automerge-disabled"
+        blocked=$((blocked + 1))
+      else
+        decision="merge"
+        reason="own-pr-clean"
+      fi
     else
       decision="fix"
       reason="merge-state-${merge_state:-unknown}"
@@ -254,11 +291,18 @@ for repo in "${REPOS[@]}"; do
       gh pr merge "$number" --repo "$repo" --merge >/dev/null
       merged=$((merged + 1))
     elif [[ "$DRY_RUN" == 0 && "$decision" == "fix" ]]; then
+      if comment_pr_once "$repo" "$number" "$reason" "Queued Kanban follow-up for PR ${repo}#${number}."; then
+        commented=$((commented + 1))
+      fi
       if create_review_fix_task "$repo" "$number" "$title" "$url" "$head" "$reason"; then
         log "FIX_TASK_CREATED repo=$repo pr=$number reason=$reason head=$head"
       else
         log "FIX_TASK_FAILED repo=$repo pr=$number reason=$reason head=$head"
         failures=$((failures + 1))
+      fi
+    elif [[ "$DRY_RUN" == 0 && "$decision" == "merge-blocked" ]]; then
+      if comment_pr_once "$repo" "$number" "$reason" "No repair task was queued for PR ${repo}#${number}."; then
+        commented=$((commented + 1))
       fi
     elif [[ "$DRY_RUN" == 1 ]]; then
       log "DRY_RUN repo=$repo pr=$number action=would-$decision reason=$reason"
@@ -266,5 +310,5 @@ for repo in "${REPOS[@]}"; do
   done < <(extract_prs "$prs_json")
 done
 
-log "DONE mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) processed=$processed skipped=$skipped blocked=$blocked merged=$merged failures=$failures"
+log "DONE mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) processed=$processed skipped=$skipped blocked=$blocked commented=$commented merged=$merged failures=$failures"
 [[ "$failures" -eq 0 ]]

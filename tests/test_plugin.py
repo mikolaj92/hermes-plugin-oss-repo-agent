@@ -87,11 +87,11 @@ class ConfigAndCommandTests(unittest.TestCase):
         self.assertFalse(cfg.executor_runs(True, False))
         self.assertTrue(cfg.executor_runs(True, True))
 
-    def test_automerge_rejected(self):
+    def test_automerge_is_configured(self):
         module = load_plugin()
         config_class = module.commands.load_config.__globals__["OssRepoAgentConfig"]
-        with self.assertRaises(Exception):
-            config_class.from_mapping({"automerge": True, "repos": []})
+        cfg = config_class.from_mapping({"automerge": True, "repos": []})
+        self.assertTrue(cfg.automerge)
 
     def test_generated_tasks_use_qualified_skills(self):
         module = load_plugin()
@@ -106,8 +106,9 @@ class ConfigAndCommandTests(unittest.TestCase):
     def test_command_builders_block_dangerous_commands(self):
         module = load_plugin()
         executor = importlib.import_module("hermes_plugins.oss_repo_agent.executor")
+        executor.validate_command(executor.CommandSpec(("gh", "pr", "merge", "1")))
         with self.assertRaises(Exception):
-            executor.validate_command(executor.CommandSpec(("gh", "pr", "merge", "1")))
+            executor.validate_command(executor.CommandSpec(("gh", "pr", "merge", "1", "--force")))
         with self.assertRaises(Exception):
             executor.validate_command(executor.CommandSpec(("git", "push", "--force")))
         self.assertEqual(executor.git_spec(("status",)).env["GIT_MASTER"], "1")

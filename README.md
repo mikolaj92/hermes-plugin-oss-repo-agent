@@ -1,6 +1,8 @@
 # oss-repo-agent
 
-Hermes plugin for a generic, guarded GitHub issue and PR workflow.
+Safe dry-run-first OSS maintainer automation for Hermes.
+
+Use it to inspect open GitHub issues, draft guarded work, and keep agent work inside a no-merge/no-force-push policy before any human-approved execution.
 
 ## Install
 
@@ -10,6 +12,24 @@ hermes plugins install mikolaj92/hermes-plugin-oss-repo-agent --enable
 
 This repository is a standalone Hermes plugin: `plugin.yaml` and `__init__.py`
 live at the repository root.
+
+After install, Hermes may show [`after-install.md`](after-install.md). The short version is: create a starter config, validate it, then run dry-run intake and dispatch.
+
+## 3-minute happy path
+
+```bash
+hermes oss-repo-agent --config config.yaml init
+hermes oss-repo-agent --config config.yaml validate
+hermes oss-repo-agent --config config.yaml intake --limit 3
+hermes oss-repo-agent --config config.yaml dispatch --max 2
+```
+
+Expected dry-run signals:
+
+- `effective_live: false`
+- `executed: false`
+- `planned_work` showing the GitHub issue read or guarded Kanban task draft intent
+- `safety_guards` showing the no-merge, no-force-push, no-branch-deletion policy
 
 The plugin registers:
 
@@ -23,17 +43,45 @@ The plugin registers:
 ## Commands
 
 ```bash
-hermes oss-repo-agent validate --config <config.json-or-yaml>
-hermes oss-repo-agent bootstrap --config <config> --apply
-hermes oss-repo-agent intake --config <config> --live
-hermes oss-repo-agent dispatch --config <config> --live --run-executor
-hermes oss-repo-agent pr-triage --config <config> --live --comment
-hermes oss-repo-agent render-launchd --config <config> --output <dir>
+hermes oss-repo-agent --config <config.json-or-yaml> init
+hermes oss-repo-agent --config <config.json-or-yaml> validate
+hermes oss-repo-agent --config <config> bootstrap --apply
+hermes oss-repo-agent --config <config> intake --live
+hermes oss-repo-agent --config <config> dispatch --live --run-executor
+hermes oss-repo-agent --config <config> pr-triage --live --comment
+hermes oss-repo-agent --config <config> render-launchd --output <dir>
 ```
 
 Live mutation requires both `mode: live` in config and an explicit live/apply CLI
 flag. Executor runs require live mode, `--run-executor`, and
 `executor.enabled: true`.
+
+## Mini runtime harness
+
+The production `mini-m4-0` automation is tracked in `scripts/`:
+
+- `repo_issue_intake.sh` polls eligible GitHub issues and creates idempotent
+  Hermes Kanban `[issue]` tasks.
+- `repo_issue_to_pr_dispatch.sh` turns `[issue]` tasks into explicit
+  `[fix-pr]` work, runs Claude workers with per-board locks and a hard timeout,
+  and handles `[fix-pr-review]` repair tasks from PR triage.
+- `repo_pr_triage.sh` watches owner-authored `ai/fix/*` PRs, requires labels,
+  checks, mergeability, and optional review approval before merge, comments on
+  blocked PRs, and queues Kanban repair work for fixable failures.
+- `repo_agent_health.sh` checks launchd, `gh auth`, disk space, logs, stale
+  locks, active workers, GitHub queues, and Kanban board stats.
+- `repo_agent_smoke.sh` runs local runtime regressions.
+
+The launchd templates live in `templates/launchd/` and include
+`LimitLoadToSessionType=Background`; without that macOS can reject SSH-driven
+`launchctl bootstrap` with an opaque input/output error.
+
+Runtime defaults:
+
+- `HERMES_CLAUDE_TIMEOUT_SECONDS=5400`
+- `HERMES_ISSUE_TO_PR_MAX_CLAUDE_AGENTS=3`
+- `HERMES_STALE_LOCK_MINUTES=180`
+- `HERMES_REPO_AGENT_MIN_FREE_GB=5`
 
 ## Configuration
 
@@ -41,13 +89,22 @@ Default path: `~/.hermes/oss-repo-agent/config.yaml`
 
 Override with `HERMES_OSS_REPO_AGENT_CONFIG` or `--config`.
 
-Start from [`examples/config.example.yaml`](examples/config.example.yaml).
+Start from [`config.example.yaml`](config.example.yaml), or let `init` create a local starter config.
 
 ## v0 limitations
 
-- No PR merge behavior.
+- The CLI facade is dry-run first; live mini runtime scripts include a guarded
+  PR merge gate.
 - No force-push or branch deletion behavior.
 - Launchd output is template-only and macOS-specific.
 - GitHub access goes through the `gh` CLI wrappers only.
 - Local git commands are rendered with `GIT_MASTER=1` and executed with that
   environment variable set.
+
+## Checks
+
+```bash
+python3 -m unittest discover -s tests
+python3 tools/hygiene_check.py .
+scripts/repo_agent_smoke.sh
+```

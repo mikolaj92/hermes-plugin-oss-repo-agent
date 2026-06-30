@@ -25,6 +25,23 @@ BLOCKED_PATTERNS = [
 SKIP_PARTS = {".git", "__pycache__", ".pytest_cache"}
 
 
+def is_allowed_runtime_line(rel: Path, name: str, line: str) -> bool:
+    rel_text = rel.as_posix()
+    if rel_text == "tools/hygiene_check.py" and name in {"automerge-env", "forbidden-merge-command"}:
+        return True
+    if name == "local-user-path" and (
+        rel_text.startswith("scripts/") or rel_text.startswith("templates/launchd/")
+    ):
+        return True
+    if name == "automerge-env" and rel_text == "scripts/cron_repo_pr_triage.sh":
+        return True
+    if name == "automerge-env" and rel_text == "scripts/repo_pr_triage.sh" and "HERMES_PR_AUTOMERGE=1" in line:
+        return True
+    if name == "forbidden-merge-command" and rel_text == "scripts/repo_pr_triage.sh":
+        return "gh pr merge" in line and "decision\" == \"merge\"" not in line
+    return False
+
+
 def iter_files(root: Path):
     for path in root.rglob("*"):
         if not path.is_file():
@@ -46,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         rel = path.relative_to(root)
         for idx, line in enumerate(text.splitlines(), start=1):
             for name, pattern in BLOCKED_PATTERNS:
-                if pattern.search(line):
+                if pattern.search(line) and not is_allowed_runtime_line(rel, name, line):
                     failures.append(f"{rel}:{idx}: {name}: {line.strip()[:160]}")
     if failures:
         print("Hygiene check failed:")

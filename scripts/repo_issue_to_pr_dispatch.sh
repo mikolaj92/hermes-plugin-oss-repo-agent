@@ -13,6 +13,8 @@ MAX_PER_BOARD="${HERMES_ISSUE_TO_PR_MAX_PER_BOARD:-20}"
 RUN_OPENCODE="${HERMES_ISSUE_TO_PR_RUN_OPENCODE:-0}"
 BLOCK_INTAKE="${HERMES_ISSUE_TO_PR_BLOCK_INTAKE:-0}"
 MAX_CLAUDE_AGENTS="${HERMES_ISSUE_TO_PR_MAX_CLAUDE_AGENTS:-3}"
+CLAUDE_TIMEOUT_SECONDS="${HERMES_CLAUDE_TIMEOUT_SECONDS:-5400}"
+STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
 LOG_FILE="${HERMES_ISSUE_TO_PR_LOG:-/Users/mini-m4-main/.hermes/logs/repo-issue-to-pr-dispatch.log}"
 LOCK_DIR="${HERMES_ISSUE_TO_PR_LOCK_DIR:-/tmp/hermes-repo-issue-to-pr-dispatch.lock}"
 WORKTREE_ROOT="${HERMES_WORKTREE_ROOT:-/Users/mini-m4-main/.hermes/worktrees/repo-fixer}"
@@ -82,6 +84,9 @@ if [[ "$RUN_OPENCODE" == 1 ]]; then
   require_cmd claude
 fi
 
+if [[ -d "$LOCK_DIR" ]]; then
+  find "$LOCK_DIR" -maxdepth 0 -mmin "+$STALE_LOCK_MINUTES" -exec rmdir {} \; 2>/dev/null || true
+fi
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   log "LOCK_HELD path=$LOCK_DIR"
   exit 0
@@ -124,9 +129,11 @@ rows = []
 for task in tasks:
     title = str(task.get("title") or "")
     status = str(task.get("status") or "")
-    if status not in {"ready", "todo", "triage"}:
+    is_review_fix = title.startswith("[fix-pr-review]")
+    is_fix = title.startswith("[fix-pr]")
+    if status not in {"ready", "todo", "triage"} and not ((is_fix or is_review_fix) and status == "blocked"):
         continue
-    if not (title.startswith("[issue]") or title.startswith("[fix-pr]")):
+    if not (title.startswith("[issue]") or title.startswith("[fix-pr]") or is_review_fix):
         continue
     body = str(task.get("body") or "")
     workspace_path = str(task.get("workspace_path") or "")
@@ -227,6 +234,38 @@ print(f"{pr.get('number')}\t{pr.get('url')}")
 PY
 }
 
+pr_state() {
+  local repo="$1" number="$2"
+  gh pr view "$number" --repo "$repo" --json state --jq .state 2>/dev/null || printf '%s\n' "UNKNOWN"
+}
+
+issue_state() {
+  local repo="$1" number="$2"
+  gh issue view "$number" --repo "$repo" --json state --jq .state 2>/dev/null || printf '%s\n' "UNKNOWN"
+}
+
+board_lock_dir() {
+  local board="$1"
+  printf '%s/%s/.agent.lock\n' "$WORKTREE_ROOT" "$board"
+}
+
+board_agent_active() {
+  local board="$1" lock pid_file pid
+  lock="$(board_lock_dir "$board")"
+  pid_file="$lock/pid"
+  if [[ ! -f "$pid_file" ]]; then
+    return 1
+  fi
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  log "STALE_BOARD_LOCK board=$board lock=$lock pid=${pid:-none}"
+  rm -f "$pid_file"
+  rmdir "$lock" 2>/dev/null || true
+  return 1
+}
+
 ensure_worktree_ready() {
   local clone_path="$1" worktree="$2" branch="$3"
   if [[ ! -d "$worktree" ]]; then
@@ -254,12 +293,12 @@ ensure_worktree_ready() {
 }
 
 active_claude_agents() {
-  pgrep -c -f "claude.*--dangerously-skip-permissions" 2>/dev/null || echo 0
+  pgrep -c -f "claude.*Hermes task" 2>/dev/null || echo 0
 }
 
 run_claude_for_fix() {
   local board="$1" clone_path="$2" task_id="$3" title="$4" repo="$5" issue="$6" task_branch="$7"
-  local slug branch worktree prompt log_file
+  local slug branch worktree prompt log_file lock pid_file
   if [[ -n "$task_branch" && "$task_branch" == ai/fix/* ]]; then
     branch="$task_branch"
   else
@@ -268,6 +307,8 @@ run_claude_for_fix() {
   fi
   worktree="${WORKTREE_ROOT}/${board}/${task_id}"
   log_file="$(dirname "$LOG_FILE")/claude-${task_id}.log"
+  lock="$(board_lock_dir "$board")"
+  pid_file="$lock/pid"
 
   local active
   active="$(active_claude_agents)"
@@ -285,8 +326,28 @@ run_claude_for_fix() {
   if ! ensure_worktree_ready "$clone_path" "$worktree" "$branch"; then
     return 1
   fi
+  if ! mkdir "$lock" 2>/dev/null; then
+    log "CLAUDE_SKIPPED task=$task_id reason=board-agent-active board=$board lock=$lock"
+    return 1
+  fi
 
-  prompt="TASK: Fix ${repo}#${issue} (Hermes task ${task_id}) and open a PR.
+  if [[ "$title" == \[fix-pr-review\]* ]]; then
+    prompt="TASK: Update existing PR ${repo}#${issue} (Hermes task ${task_id}) so it becomes merge-ready.
+
+DELIVERABLE: update branch ${branch} on the existing PR. Do not create a replacement PR.
+
+CONSTRAINTS:
+- Use gh for all GitHub operations.
+- Use GIT_MASTER=1 for every git command.
+- Do not expose secrets, merge, delete branches, or force-push.
+- Work only in this worktree: ${worktree}. Branch must remain ${branch}.
+- Inspect PR ${repo}#${issue}, review comments, checks, and merge/conflict state before editing.
+- Make the smallest safe update, run relevant tests, push the existing branch, and comment evidence on the PR if useful.
+- Do not open a new PR.
+
+TITLE: ${title}"
+  else
+    prompt="TASK: Fix ${repo}#${issue} (Hermes task ${task_id}) and open a PR.
 
 DELIVERABLE: a merged-ready GitHub PR for the smallest safe fix.
 
@@ -301,12 +362,37 @@ CONSTRAINTS:
 - After gh pr create, add labels: ai:generated and ai:pr-opened.
 
 TITLE: ${title}"
+  fi
 
-  nohup claude --dangerously-skip-permissions -p "$prompt" \
-    --add-dir "$worktree" \
-    --model sonnet \
-    >"$log_file" 2>&1 &
-  log "CLAUDE_SPAWNED task=$task_id repo=$repo branch=$branch pid=$! log=$log_file"
+  (
+    printf '%s CLAUDE_START task=%s repo=%s branch=%s timeout=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$repo" "$branch" "$CLAUDE_TIMEOUT_SECONDS"
+    claude --dangerously-skip-permissions -p "$prompt" \
+      --add-dir "$worktree" \
+      --model sonnet &
+    child=$!
+    printf '%s\n' "$child" >"$pid_file"
+    (
+      sleep "$CLAUDE_TIMEOUT_SECONDS"
+      if kill -0 "$child" 2>/dev/null; then
+        printf '%s CLAUDE_TIMEOUT task=%s pid=%s timeout=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$child" "$CLAUDE_TIMEOUT_SECONDS"
+        kill "$child" 2>/dev/null || true
+        sleep 10
+        kill -9 "$child" 2>/dev/null || true
+      fi
+    ) &
+    timer=$!
+    wait "$child"
+    rc=$?
+    kill "$timer" 2>/dev/null || true
+    wait "$timer" 2>/dev/null || true
+    printf '%s CLAUDE_EXIT task=%s pid=%s rc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$child" "$rc"
+    rm -f "$pid_file"
+    rmdir "$lock" 2>/dev/null || true
+    exit "$rc"
+  ) >>"$log_file" 2>&1 &
+  printf '%s\n' "$!" >"$pid_file"
+  hermes kanban --board "$board" block "$task_id" "Hermes repo-agent started Claude worker for ${repo}#${issue}; log: ${log_file}" >/dev/null 2>&1 || true
+  log "CLAUDE_SPAWNED task=$task_id repo=$repo branch=$branch pid=$! log=$log_file timeout=$CLAUDE_TIMEOUT_SECONDS board=$board"
 }
 
 processed=0
@@ -319,6 +405,7 @@ log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) max_per_bo
 
 for mapping in "${REPOS[@]}"; do
   IFS='|' read -r repo board clone_path <<<"$mapping"
+  board_spawned=0
   if [[ ! -d "$clone_path" ]]; then
     log "CLONE_MISSING repo=$repo clone=$clone_path"
     failures=$((failures + 1))
@@ -352,6 +439,14 @@ for mapping in "${REPOS[@]}"; do
         log "DECISION board=$board task=$task_id action=skip reason=missing-issue-number title=$(printf '%q' "$title")"
         continue
       fi
+      state="$(issue_state "$task_repo" "$issue")"
+      if [[ "$state" != "OPEN" ]]; then
+        log "DECISION board=$board task=$task_id action=complete-stale-issue reason=issue-${state} repo=$task_repo issue=$issue"
+        if [[ "$DRY_RUN" == 0 ]]; then
+          complete_task "$board" "$task_id" "Skipped stale intake task because ${task_repo}#${issue} is ${state}."
+        fi
+        continue
+      fi
 
       log "DECISION board=$board task=$task_id action=create-fix-pr-task repo=$task_repo issue=$issue clone=$task_clone"
       if [[ "$DRY_RUN" == 0 ]]; then
@@ -366,15 +461,43 @@ for mapping in "${REPOS[@]}"; do
       continue
     fi
 
-    if [[ "$title" == \[fix-pr\]* ]]; then
+    if [[ "$title" == \[fix-pr\]* || "$title" == \[fix-pr-review\]* ]]; then
       if [[ -z "$issue" ]]; then
         log "DECISION board=$board task=$task_id action=skip reason=missing-issue-number title=$(printf '%q' "$title")"
+        continue
+      fi
+      if [[ "$title" == \[fix-pr-review\]* ]]; then
+        state="$(pr_state "$task_repo" "$issue")"
+        if [[ "$state" != "OPEN" ]]; then
+          log "DECISION board=$board task=$task_id action=complete-stale-review reason=pr-${state} repo=$task_repo pr=$issue"
+          if [[ "$DRY_RUN" == 0 ]]; then
+            complete_task "$board" "$task_id" "Skipped stale PR follow-up because ${task_repo}#${issue} is ${state}."
+          fi
+          continue
+        fi
+      else
+        state="$(issue_state "$task_repo" "$issue")"
+        if [[ "$state" != "OPEN" ]]; then
+          log "DECISION board=$board task=$task_id action=complete-stale-fix reason=issue-${state} repo=$task_repo issue=$issue"
+          if [[ "$DRY_RUN" == 0 ]]; then
+            complete_task "$board" "$task_id" "Skipped stale fixer task because ${task_repo}#${issue} is ${state}."
+          fi
+          continue
+        fi
+        if [[ "$status" == "blocked" ]]; then
+          log "DECISION board=$board task=$task_id action=skip reason=blocked-fix-task repo=$task_repo issue=$issue"
+          continue
+        fi
+      fi
+      if [[ "$board_spawned" == 1 ]] || board_agent_active "$board"; then
+        log "DECISION board=$board task=$task_id action=skip reason=board-agent-active repo=$task_repo issue=$issue"
         continue
       fi
       log "DECISION board=$board task=$task_id action=run-claude repo=$task_repo issue=$issue clone=$task_clone"
       if [[ "$DRY_RUN" == 0 && "$RUN_OPENCODE" == 1 ]]; then
         if run_claude_for_fix "$board" "$task_clone" "$task_id" "$title" "$task_repo" "$issue" "$task_branch"; then
           claude_spawned=$((claude_spawned + 1))
+          board_spawned=1
         else
           failures=$((failures + 1))
         fi
