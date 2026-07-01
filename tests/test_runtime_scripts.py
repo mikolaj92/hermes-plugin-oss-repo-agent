@@ -59,6 +59,8 @@ class RuntimeScriptTests(unittest.TestCase):
         self.assertIn('checks_pass "$repo" "$number"', triage)
         self.assertIn("--add-assignee", triage)
         self.assertIn("comment_pr_once", triage)
+        self.assertIn("pr_repair_context", triage)
+        self.assertIn("Repair context:", triage)
         self.assertIn("review-not-approved", triage)
         self.assertIn("checks-not-passing", triage)
         self.assertIn("test-evidence-missing", triage)
@@ -97,6 +99,8 @@ class RuntimeScriptTests(unittest.TestCase):
         updater = self.read("scripts/repo_agent_hermes_update.sh")
         self.assertIn("WORKTREE_REMOVED", cleanup)
         self.assertIn("LOCAL_BRANCH_REMOVED", cleanup)
+        self.assertIn("[maintenance] dirty worktree", cleanup)
+        self.assertIn("MAINTENANCE_TASK_ENSURED", cleanup)
         self.assertIn("open_pr_for_branch", cleanup)
         self.assertIn("Recent Decisions", status)
         self.assertIn("repo-agent status", status)
@@ -105,7 +109,22 @@ class RuntimeScriptTests(unittest.TestCase):
         self.assertIn("hermes update --backup --yes", updater)
         self.assertIn("active-worker-locks", updater)
 
-    def test_runtime_scripts_include_added_public_repos(self):
+    def test_repo_registry_is_shared_by_runtime_scripts(self):
+        registry = self.read("scripts/repo_agent_repos.sh")
+        for repo in [
+            "mikolaj92/Fala",
+            "mikolaj92/datasource-kit",
+            "mikolaj92/reviewkit",
+            "mikolaj92/anonimizator3000",
+            "mikolaj92/splot",
+            "mikolaj92/my-auth",
+            "mikolaj92/my-usermanager",
+            "mikolaj92/msds-portal",
+            "mikolaj92/swift-openapi-dynamic",
+            "mikolaj92/OpenAPITransportKit",
+        ]:
+            self.assertIn(repo, registry)
+
         for relative in [
             "scripts/repo_issue_intake.sh",
             "scripts/repo_issue_to_pr_dispatch.sh",
@@ -115,9 +134,20 @@ class RuntimeScriptTests(unittest.TestCase):
             "scripts/repo_agent_status.sh",
         ]:
             text = self.read(relative)
-            self.assertIn("mikolaj92/splot", text)
-            self.assertIn("mikolaj92/my-auth", text)
-            self.assertIn("mikolaj92/my-usermanager", text)
+            self.assertIn('source "$SCRIPT_DIR/repo_agent_repos.sh"', text)
+
+    def test_backfill_and_webhook_are_thin_reconciliation_wrappers(self):
+        backfill = self.read("scripts/repo_agent_backfill.sh")
+        webhook = self.read("scripts/repo_agent_webhook.sh")
+        self.assertIn("repo_issue_intake.sh", backfill)
+        self.assertIn("repo_issue_to_pr_dispatch.sh", backfill)
+        self.assertIn("repo_pr_triage.sh", backfill)
+        self.assertIn("repo_agent_cleanup.sh", backfill)
+        self.assertIn("HERMES_ISSUE_TO_PR_RUN_OPENCODE=0", backfill)
+        self.assertIn("not an HTTP listener", webhook)
+        self.assertIn("issues|issue_comment", webhook)
+        self.assertIn("pull_request|pull_request_review", webhook)
+        self.assertIn("repo_pr_triage.sh", webhook)
 
     def test_intake_claims_github_issue_before_kanban_task(self):
         intake = self.read("scripts/repo_issue_intake.sh")

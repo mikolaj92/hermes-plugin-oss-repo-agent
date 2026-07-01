@@ -12,6 +12,9 @@ LOG_FILE="${HERMES_REPO_CLEANUP_LOG:-/Users/mini-m4-main/.hermes/logs/repo-agent
 LOCK_DIR="${HERMES_REPO_CLEANUP_LOCK_DIR:-/tmp/hermes-repo-agent-cleanup.lock}"
 STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
 WORKTREE_ROOT="${HERMES_WORKTREE_ROOT:-/Users/mini-m4-main/.hermes/worktrees/repo-fixer}"
+MAINTENANCE_ASSIGNEE="${HERMES_KANBAN_MAINTENANCE_ASSIGNEE:-repo-agent-fixer}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/repo_agent_repos.sh"
 
 usage() {
   cat <<'USAGE'
@@ -46,6 +49,7 @@ require_cmd() {
 require_cmd git
 require_cmd gh
 require_cmd python3
+require_cmd hermes
 
 if [[ -d "$LOCK_DIR" ]]; then
   find "$LOCK_DIR" -maxdepth 0 -mmin "+$STALE_LOCK_MINUTES" -exec rmdir {} \; 2>/dev/null || true
@@ -57,18 +61,10 @@ fi
 cleanup_lock() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
 trap cleanup_lock EXIT
 
-REPOS=(
-  "mikolaj92/Fala|mikolaj92-fala|/Users/mini-m4-main/Developer/hermes-repos/Fala"
-  "mikolaj92/reviewkit|mikolaj92-reviewkit|/Users/mini-m4-main/Developer/hermes-repos/reviewkit"
-  "mikolaj92/anonimizator3000|mikolaj92-anonimizator3000|/Users/mini-m4-main/Developer/hermes-repos/anonimizator3000"
-  "mikolaj92/datasource-kit|mikolaj92-datasource-kit|/Users/mini-m4-main/Developer/hermes-repos/datasource-kit"
-  "mikolaj92/splot|mikolaj92-splot|/Users/mini-m4-main/Developer/hermes-repos/splot"
-  "mikolaj92/my-auth|mikolaj92-my-auth|/Users/mini-m4-main/Developer/hermes-repos/my-auth"
-  "mikolaj92/my-usermanager|mikolaj92-my-usermanager|/Users/mini-m4-main/Developer/hermes-repos/my-usermanager"
-  "mikolaj92/msds-portal|mikolaj92-msds-portal|/Users/mini-m4-main/Developer/hermes-repos/msds-portal"
-  "mikolaj92/swift-openapi-dynamic|mikolaj92-swift-openapi-dynamic|/Users/mini-m4-main/Developer/hermes-repos/swift-openapi-dynamic"
-  "mikolaj92/OpenAPITransportKit|mikolaj92-openapi-transport-kit|/Users/mini-m4-main/Developer/hermes-repos/OpenAPITransportKit"
-)
+REPOS=()
+while IFS= read -r repo_entry; do
+  REPOS+=("$repo_entry")
+done < <(repo_agent_repos)
 
 issue_from_branch() {
   local branch="$1" rest
@@ -86,6 +82,30 @@ issue_state() {
 open_pr_for_branch() {
   local repo="$1" branch="$2"
   gh pr list --repo "$repo" --head "$branch" --state open --json number --jq 'length' 2>/dev/null || printf '%s\n' unknown
+}
+
+create_dirty_worktree_task() {
+  local repo="$1" board="$2" path="$3" branch="$4" issue="$5"
+  local title body key
+  title="[maintenance] dirty worktree ${repo}#${issue}: ${branch}"
+  key="maintenance-dirty-worktree:${repo}:${branch}"
+  body="Repository: ${repo}
+Issue: #${issue}
+Branch: ${branch}
+Worktree: ${path}
+
+GitHub issue is closed, but cleanup could not remove this controlled worktree
+because it contains local changes. Inspect the worktree, preserve anything
+valuable, then clean or remove it so repo_agent_cleanup can finish."
+
+  hermes kanban --board "$board" create "$title" \
+    --body "$body" \
+    --assignee "$MAINTENANCE_ASSIGNEE" \
+    --workspace "dir:${path}" \
+    --priority 2 \
+    --idempotency-key "$key" \
+    --skill repo-gh-cli-policy \
+    --json >/dev/null 2>&1 || true
 }
 
 worktree_rows() {
@@ -116,7 +136,7 @@ failures=0
 log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) delete_local_branches=$DELETE_LOCAL_BRANCHES"
 
 for entry in "${REPOS[@]}"; do
-  IFS='|' read -r repo board clone_path <<<"$entry"
+  IFS='|' read -r repo board clone_path repo_priority <<<"$entry"
   if [[ ! -d "$clone_path/.git" ]]; then
     log "SKIP repo=$repo reason=missing-clone clone=$clone_path"
     skipped=$((skipped + 1))
@@ -145,6 +165,10 @@ for entry in "${REPOS[@]}"; do
     fi
     if [[ -n "$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" ]]; then
       log "SKIP repo=$repo issue=$issue branch=$branch path=$path reason=dirty-worktree"
+      if [[ "$DRY_RUN" == 0 ]]; then
+        create_dirty_worktree_task "$repo" "$board" "$path" "$branch" "$issue"
+        log "MAINTENANCE_TASK_ENSURED repo=$repo issue=$issue branch=$branch path=$path"
+      fi
       skipped=$((skipped + 1))
       continue
     fi

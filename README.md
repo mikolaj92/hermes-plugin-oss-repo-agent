@@ -16,6 +16,8 @@ tasks. This plugin only bridges the two where needed:
   commenting evidence, labeling, or merging through the guarded triage gate.
 
 It intentionally does not mirror every Kanban status back into GitHub.
+The explicit mapping contract lives in
+[`docs/github-kanban-mapping.md`](docs/github-kanban-mapping.md).
 
 ## Install
 
@@ -93,6 +95,13 @@ The production `mini-m4-0` automation is tracked in `scripts/`:
   worker locks, queue counts, and recent dispatch/triage/cleanup decisions.
 - `repo_agent_hermes_update.sh` checks for Hermes updates and can run
   `hermes update --backup --yes` only when no repo-agent worker lock is active.
+- `repo_agent_backfill.sh` runs intake, dispatch, PR triage, and cleanup
+  reconciliation without starting code workers.
+- `repo_agent_webhook.sh` is an optional trusted event entrypoint that maps
+  GitHub events to the same reconciliation scripts; it is not an HTTP listener
+  and does not validate webhook signatures.
+- `repo_agent_repos.sh` is the single runtime repo registry used by intake,
+  dispatch, PR triage, cleanup, health, and status.
 - `repo_agent_smoke.sh` runs local runtime regressions.
 
 The launchd templates live in `templates/launchd/` and include
@@ -113,6 +122,8 @@ Runtime defaults:
 - `HERMES_REPO_AGENT_UPDATE_DRY_RUN=1`
 - `HERMES_STALE_LOCK_MINUTES=180`
 - `HERMES_REPO_AGENT_MIN_FREE_GB=5`
+- `HERMES_REPO_AGENT_REPOS_FILE` optional pipe-delimited repo registry override:
+  `owner/repo|board|clone_path|priority`
 
 ## Configuration
 

@@ -8,6 +8,8 @@ export PATH="/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local/bin:/us
 
 LOG_DIR="${HERMES_REPO_AGENT_LOG_DIR:-/Users/mini-m4-main/.hermes/logs}"
 WORKTREE_ROOT="${HERMES_WORKTREE_ROOT:-/Users/mini-m4-main/.hermes/worktrees/repo-fixer}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/repo_agent_repos.sh"
 
 usage() {
   cat <<'USAGE'
@@ -42,18 +44,10 @@ jobs=(
   "update|com.mikolaj92.hermes.repo-agent-hermes-update"
   "health|com.mikolaj92.hermes.repo-agent-health"
 )
-repos=(
-  "mikolaj92/Fala|mikolaj92-fala"
-  "mikolaj92/reviewkit|mikolaj92-reviewkit"
-  "mikolaj92/anonimizator3000|mikolaj92-anonimizator3000"
-  "mikolaj92/datasource-kit|mikolaj92-datasource-kit"
-  "mikolaj92/splot|mikolaj92-splot"
-  "mikolaj92/my-auth|mikolaj92-my-auth"
-  "mikolaj92/my-usermanager|mikolaj92-my-usermanager"
-  "mikolaj92/msds-portal|mikolaj92-msds-portal"
-  "mikolaj92/swift-openapi-dynamic|mikolaj92-swift-openapi-dynamic"
-  "mikolaj92/OpenAPITransportKit|mikolaj92-openapi-transport-kit"
-)
+repos=()
+while IFS= read -r repo_entry; do
+  repos+=("$repo_entry")
+done < <(repo_agent_repos)
 
 printf 'repo-agent status %s\n\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
@@ -88,7 +82,7 @@ fi
 
 printf '\nQueues\n'
 for entry in "${repos[@]}"; do
-  IFS='|' read -r repo board <<<"$entry"
+  IFS='|' read -r repo board clone_path repo_priority <<<"$entry"
   open_prs="$(gh pr list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || echo '?')"
   open_issues="$(gh issue list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || echo '?')"
   stats="$(hermes kanban --board "$board" stats 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g' || echo 'kanban=?')"

@@ -17,6 +17,8 @@ LOG_FILE="${HERMES_PR_TRIAGE_LOG:-/Users/mini-m4-main/.hermes/logs/repo-pr-triag
 LOCK_DIR="${HERMES_PR_TRIAGE_LOCK_DIR:-/tmp/hermes-repo-pr-triage.lock}"
 STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
 CLAIM_ASSIGNEE="${HERMES_REPO_AGENT_ASSIGNEE:-mikolaj92}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/repo_agent_repos.sh"
 
 usage() {
   cat <<'USAGE'
@@ -76,49 +78,17 @@ fi
 cleanup() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
 trap cleanup EXIT
 
-REPOS=(
-  "mikolaj92/Fala"
-  "mikolaj92/reviewkit"
-  "mikolaj92/anonimizator3000"
-  "mikolaj92/datasource-kit"
-  "mikolaj92/splot"
-  "mikolaj92/my-auth"
-  "mikolaj92/my-usermanager"
-  "mikolaj92/msds-portal"
-  "mikolaj92/swift-openapi-dynamic"
-  "mikolaj92/OpenAPITransportKit"
-)
+REPOS=()
+while IFS= read -r repo_entry; do
+  REPOS+=("$repo_entry")
+done < <(repo_agent_repos)
 
 board_for_repo() {
-  case "$1" in
-    mikolaj92/Fala) printf '%s\n' "mikolaj92-fala" ;;
-    mikolaj92/reviewkit) printf '%s\n' "mikolaj92-reviewkit" ;;
-    mikolaj92/anonimizator3000) printf '%s\n' "mikolaj92-anonimizator3000" ;;
-    mikolaj92/datasource-kit) printf '%s\n' "mikolaj92-datasource-kit" ;;
-    mikolaj92/splot) printf '%s\n' "mikolaj92-splot" ;;
-    mikolaj92/my-auth) printf '%s\n' "mikolaj92-my-auth" ;;
-    mikolaj92/my-usermanager) printf '%s\n' "mikolaj92-my-usermanager" ;;
-    mikolaj92/msds-portal) printf '%s\n' "mikolaj92-msds-portal" ;;
-    mikolaj92/swift-openapi-dynamic) printf '%s\n' "mikolaj92-swift-openapi-dynamic" ;;
-    mikolaj92/OpenAPITransportKit) printf '%s\n' "mikolaj92-openapi-transport-kit" ;;
-    *) return 1 ;;
-  esac
+  repo_agent_board_for_repo "$1"
 }
 
 clone_for_repo() {
-  case "$1" in
-    mikolaj92/Fala) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/Fala" ;;
-    mikolaj92/reviewkit) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/reviewkit" ;;
-    mikolaj92/anonimizator3000) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/anonimizator3000" ;;
-    mikolaj92/datasource-kit) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/datasource-kit" ;;
-    mikolaj92/splot) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/splot" ;;
-    mikolaj92/my-auth) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/my-auth" ;;
-    mikolaj92/my-usermanager) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/my-usermanager" ;;
-    mikolaj92/msds-portal) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/msds-portal" ;;
-    mikolaj92/swift-openapi-dynamic) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/swift-openapi-dynamic" ;;
-    mikolaj92/OpenAPITransportKit) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/OpenAPITransportKit" ;;
-    *) return 1 ;;
-  esac
+  repo_agent_clone_for_repo "$1"
 }
 
 extract_prs() {
@@ -208,16 +178,43 @@ release_clean_worktree_for_branch() {
   done < <(GIT_MASTER=1 git -C "$clone_path" worktree list --porcelain 2>/dev/null || true)
 }
 
+pr_repair_context() {
+  local repo="$1" number="$2"
+  local checks reviews comments
+
+  checks="$(
+    gh pr checks "$number" --repo "$repo" --json name,state,bucket,description \
+      --jq '.[] | "- check: \(.name) bucket=\(.bucket) state=\(.state) \((.description // "") | gsub("[\r\n]+"; " ") | .[0:180])"' \
+      2>/dev/null | head -n 20 || true
+  )"
+  reviews="$(
+    gh api "/repos/${repo}/pulls/${number}/reviews" \
+      --jq '.[] | select(.state == "CHANGES_REQUESTED" or .state == "COMMENTED") | "- review: \(.user.login) state=\(.state) \((.body // "") | gsub("[\r\n]+"; " ") | .[0:220])"' \
+      2>/dev/null | tail -n 12 || true
+  )"
+  comments="$(
+    gh api "/repos/${repo}/pulls/${number}/comments" \
+      --jq '.[] | "- file: \(.path):\(.line // .original_line // 0) by \(.user.login) \((.body // "") | gsub("[\r\n]+"; " ") | .[0:220])"' \
+      2>/dev/null | tail -n 12 || true
+  )"
+
+  printf 'Checks:\n%s\n\nReviews:\n%s\n\nReview comments:\n%s\n' \
+    "${checks:-not available}" \
+    "${reviews:-not available}" \
+    "${comments:-not available}"
+}
+
 
 
 create_review_fix_task() {
   local repo="$1" number="$2" title="$3" url="$4" head="$5" reason="$6"
-  local board clone_path task_title body idempotency_key
+  local board clone_path task_title body idempotency_key context
 
   board="$(board_for_repo "$repo")" || return 2
   clone_path="$(clone_for_repo "$repo")" || return 2
   command -v hermes >/dev/null 2>&1 || return 2
   release_clean_worktree_for_branch "$clone_path" "$head"
+  context="$(pr_repair_context "$repo" "$number")"
 
   task_title="[fix-pr-review] ${repo}#${number}: address review feedback"
   idempotency_key="fix-pr-review:${repo}:${number}:${reason}"
@@ -226,6 +223,9 @@ create_review_fix_task() {
 PR: ${url}
 Head branch: ${head}
 Triage reason: ${reason}
+
+Repair context:
+${context}
 
 Policy:
 - This is an owner/agent PR follow-up. Update the existing PR branch; do not create a replacement PR.
@@ -280,7 +280,8 @@ failures=0
 
 log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) comment=$COMMENT_ENABLED automerge=$AUTOMERGE require_approved=$REQUIRE_APPROVED allow_no_checks=$ALLOW_NO_CHECKS require_test_evidence=$REQUIRE_TEST_EVIDENCE"
 
-for repo in "${REPOS[@]}"; do
+for entry in "${REPOS[@]}"; do
+  IFS='|' read -r repo board clone_path repo_priority <<<"$entry"
   repo_owner="${repo%%/*}"
   prs_json="$(gh pr list --repo "$repo" --state open --json number,title,url,headRefName,baseRefName,isDraft,mergeStateStatus,reviewDecision,labels,author)"
   if [[ "$prs_json" == "[]" ]]; then

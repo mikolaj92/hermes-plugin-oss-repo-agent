@@ -14,6 +14,8 @@ LIMIT="${HERMES_INTAKE_LIMIT:-10}"
 DRY_RUN="${HERMES_INTAKE_DRY_RUN:-0}"
 CLAIM_ASSIGNEE="${HERMES_REPO_AGENT_ASSIGNEE:-mikolaj92}"
 KANBAN_INTAKE_ASSIGNEE="${HERMES_KANBAN_INTAKE_ASSIGNEE:-repo-agent-intake}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/repo_agent_repos.sh"
 
 usage() {
   printf '%s\n' \
@@ -128,18 +130,10 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 readonly READY_LABEL='ai:ready'
 readonly ISSUE_JQ='.[] | select(([.labels[].name] | index("ai:in-progress") | not) and ([.labels[].name] | index("ai:blocked") | not) and ([.labels[].name] | index("ai:pr-opened") | not)) | [.number, (.title | gsub("[\t\r\n]"; " ")), .url, ([.labels[].name] | join(", ")), (([.labels[].name] | index("ai:ready")) != null)] | @tsv'
 
-repos=(
-  'mikolaj92/Fala|mikolaj92-fala|/Users/mini-m4-main/Developer/hermes-repos/Fala'
-  'mikolaj92/reviewkit|mikolaj92-reviewkit|/Users/mini-m4-main/Developer/hermes-repos/reviewkit'
-  'mikolaj92/anonimizator3000|mikolaj92-anonimizator3000|/Users/mini-m4-main/Developer/hermes-repos/anonimizator3000'
-  'mikolaj92/datasource-kit|mikolaj92-datasource-kit|/Users/mini-m4-main/Developer/hermes-repos/datasource-kit'
-  'mikolaj92/splot|mikolaj92-splot|/Users/mini-m4-main/Developer/hermes-repos/splot'
-  'mikolaj92/my-auth|mikolaj92-my-auth|/Users/mini-m4-main/Developer/hermes-repos/my-auth'
-  'mikolaj92/my-usermanager|mikolaj92-my-usermanager|/Users/mini-m4-main/Developer/hermes-repos/my-usermanager'
-  'mikolaj92/msds-portal|mikolaj92-msds-portal|/Users/mini-m4-main/Developer/hermes-repos/msds-portal'
-  'mikolaj92/swift-openapi-dynamic|mikolaj92-swift-openapi-dynamic|/Users/mini-m4-main/Developer/hermes-repos/swift-openapi-dynamic'
-  'mikolaj92/OpenAPITransportKit|mikolaj92-openapi-transport-kit|/Users/mini-m4-main/Developer/hermes-repos/OpenAPITransportKit'
-)
+repos=()
+while IFS= read -r repo_entry; do
+  repos+=("$repo_entry")
+done < <(repo_agent_repos)
 
 log "START dry_run=$DRY_RUN limit=$LIMIT repos=${#repos[@]}"
 
@@ -149,7 +143,7 @@ skipped=0
 failures=0
 
 for entry in "${repos[@]}"; do
-  IFS='|' read -r repo board clone_path <<< "$entry"
+  IFS='|' read -r repo board clone_path repo_priority <<< "$entry"
 
   if [ ! -d "$clone_path/.git" ]; then
     log "ERROR repo=$repo missing clone git dir path=$clone_path"
@@ -193,10 +187,12 @@ for entry in "${repos[@]}"; do
 
     key="github-issue:${repo}:${number}"
     task_title="[issue] ${repo}#${number}: ${title}"
+    kanban_priority="$(repo_agent_kanban_priority_for_text "$title $labels")"
     body="GitHub issue: ${url}
 Repository: ${repo}
 Issue: #${number}
 Labels at intake: ${labels:-none}
+Mapping: GitHub labels/title -> Kanban priority ${kanban_priority}
 
 Intake-only instructions:
 - Triage this issue using repo-gh-cli-policy and repo-audit-finding-format.
@@ -246,7 +242,7 @@ Intake-only instructions:
       --body "$body" \
       --assignee "$KANBAN_INTAKE_ASSIGNEE" \
       --workspace "dir:${clone_path}" \
-      --priority 1 \
+      --priority "$kanban_priority" \
       --idempotency-key "$key" \
       --skill repo-gh-cli-policy \
       --skill repo-audit-finding-format \

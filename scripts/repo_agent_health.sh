@@ -11,6 +11,8 @@ STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
 MAX_LOG_AGE_SECONDS="${HERMES_REPO_AGENT_MAX_LOG_AGE_SECONDS:-1800}"
 MIN_FREE_GB="${HERMES_REPO_AGENT_MIN_FREE_GB:-5}"
 REPAIR=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/repo_agent_repos.sh"
 
 usage() {
   cat <<'USAGE'
@@ -59,18 +61,10 @@ jobs=(
   "com.mikolaj92.hermes.repo-agent-cleanup|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-cleanup.plist|$HOME/.hermes/logs/repo-agent-cleanup.log"
   "com.mikolaj92.hermes.repo-agent-hermes-update|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-hermes-update.plist|$HOME/.hermes/logs/repo-agent-hermes-update.log"
 )
-repos=(
-  "mikolaj92/Fala|mikolaj92-fala"
-  "mikolaj92/reviewkit|mikolaj92-reviewkit"
-  "mikolaj92/anonimizator3000|mikolaj92-anonimizator3000"
-  "mikolaj92/datasource-kit|mikolaj92-datasource-kit"
-  "mikolaj92/splot|mikolaj92-splot"
-  "mikolaj92/my-auth|mikolaj92-my-auth"
-  "mikolaj92/my-usermanager|mikolaj92-my-usermanager"
-  "mikolaj92/msds-portal|mikolaj92-msds-portal"
-  "mikolaj92/swift-openapi-dynamic|mikolaj92-swift-openapi-dynamic"
-  "mikolaj92/OpenAPITransportKit|mikolaj92-openapi-transport-kit"
-)
+repos=()
+while IFS= read -r repo_entry; do
+  repos+=("$repo_entry")
+done < <(repo_agent_repos)
 
 failures=0
 warnings=0
@@ -207,7 +201,7 @@ if [[ "$active_worker_seen" == 0 ]]; then
 fi
 
 for entry in "${repos[@]}"; do
-  IFS='|' read -r repo board <<<"$entry"
+  IFS='|' read -r repo board clone_path repo_priority <<<"$entry"
   open_prs="$(gh pr list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || echo unknown)"
   open_issues="$(gh issue list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || echo unknown)"
   board_counts="$(hermes kanban --board "$board" stats 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g' || echo kanban-unavailable)"
