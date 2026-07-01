@@ -163,6 +163,7 @@ class OssInitAndDryRunTests(unittest.TestCase):
             self.assertEqual(result["planned_work"][0]["repo"], "owner/example-repo")
             self.assertFalse(result["planned_work"][0]["mutation"])
             self.assertIn("Kanban", result["planned_work"][0]["action"])
+            self.assertEqual(self.commands.INTAKE_ASSIGNEE, "repo-agent-intake")
             self.assertTrue(result["safety_guards"])
 
     def test_dispatch_dry_run_reinforces_executor_and_merge_safety(self):

@@ -102,6 +102,7 @@ class ConfigAndCommandTests(unittest.TestCase):
         kanban = importlib.import_module("hermes_plugins.oss_repo_agent.kanban")
         item = kanban.issue_task("owner/repo", "owner-repo", 1, "title", "body", None)
         self.assertIn("oss-repo-agent:repo-gh-cli-policy", item.skills)
+        self.assertEqual(item.idempotency_key, "github-issue:owner/repo:1")
 
     def test_command_builders_block_dangerous_commands(self):
         module = load_plugin()
@@ -140,6 +141,23 @@ class ConfigAndCommandTests(unittest.TestCase):
         self.assertEqual(spec.argv[:4], ("hermes", "kanban", "--board", "owner-repo"))
         self.assertIn("--idempotency-key", spec.argv)
         self.assertIn(draft.idempotency_key, spec.argv)
+
+    def test_schema_keys_match_runtime_scripts(self):
+        load_plugin()
+        schema = importlib.import_module("hermes_plugins.oss_repo_agent.schema")
+        self.assertEqual(schema.issue_key("owner/repo", 1), "github-issue:owner/repo:1")
+        self.assertEqual(schema.fix_key("owner/repo", 1), "fix-pr:owner/repo:1")
+
+    def test_existing_open_issue_work_detects_migrated_tasks(self):
+        module = load_plugin()
+        tasks = [
+            {"title": "[issue] owner/repo#1: old key", "status": "blocked", "body": ""},
+            {"title": "[fix-pr] owner/repo#2: fix", "status": "ready", "body": ""},
+            {"title": "[issue] owner/repo#3: done", "status": "done", "body": ""},
+        ]
+        self.assertTrue(module.commands._existing_open_issue_work(tasks, "owner/repo", 1))
+        self.assertTrue(module.commands._existing_open_issue_work(tasks, "owner/repo", 2))
+        self.assertFalse(module.commands._existing_open_issue_work(tasks, "owner/repo", 3))
 
     def test_prompt_injection_kept_as_untrusted_evidence(self):
         schema = importlib.import_module("hermes_plugins.oss_repo_agent.schema")

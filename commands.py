@@ -7,7 +7,9 @@ from typing import Any
 
 from . import github_cli, kanban
 from .config import ConfigError, OssRepoAgentConfig, default_config_path, load_config
-from .executor import Runner, planned_command
+from .executor import CommandSpec, Runner, planned_command
+
+INTAKE_ASSIGNEE = "repo-agent-intake"
 
 
 def setup_parser(parser: ArgumentParser) -> None:
@@ -194,10 +196,41 @@ def _issue_rows(result_stdout: str) -> list[dict[str, Any]]:
     return [item for item in data if isinstance(item, dict)]
 
 
+def _kanban_task_rows(result_stdout: str) -> list[dict[str, Any]]:
+    if not result_stdout.strip():
+        return []
+    data = json.loads(result_stdout)
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _existing_open_issue_work(tasks: list[dict[str, Any]], repo: str, number: int) -> bool:
+    title_needle = f"{repo}#{number}"
+    repo_line = f"Repository: {repo}"
+    issue_line = f"Issue: #{number}"
+    for task in tasks:
+        if str(task.get("status") or "") == "done":
+            continue
+        title = str(task.get("title") or "")
+        if not title.startswith(("[issue]", "[fix-pr]", "[fix-pr-review]")):
+            continue
+        body = str(task.get("body") or "")
+        if title_needle in title or (repo_line in body and issue_line in body):
+            return True
+    return False
+
+
+def _kanban_list_spec(board: str) -> CommandSpec:
+    return CommandSpec(("hermes", "kanban", "--board", board, "list", "--json", "--sort", "created-desc"))
+
+
 def intake(cfg: OssRepoAgentConfig, live_flag: bool, limit: int, runner: Runner) -> dict[str, Any]:
     live = cfg.effective_live(live_flag)
     list_commands = [github_cli.issue_list(repo.repo, limit) for repo in cfg.repos]
     list_results = [runner.run(command, live=live) for command in list_commands]
+    inspection_commands = []
+    inspection_results = []
     mutation_commands = []
     mutation_results = []
     ensured_tasks = []
@@ -205,11 +238,19 @@ def intake(cfg: OssRepoAgentConfig, live_flag: bool, limit: int, runner: Runner)
         for repo, result in zip(cfg.repos, list_results):
             if result.returncode != 0:
                 continue
+            board_list = _kanban_list_spec(repo.board)
+            inspection_commands.append(board_list)
+            board_result = runner.run(board_list, live=True)
+            inspection_results.append(board_result)
+            existing_tasks = _kanban_task_rows(board_result.stdout) if board_result.returncode == 0 else []
             for issue in _issue_rows(result.stdout):
                 if not _eligible_issue(issue, cfg):
                     continue
                 number = int(issue.get("number", 0))
                 if number <= 0:
+                    continue
+                if _existing_open_issue_work(existing_tasks, repo.repo, number):
+                    ensured_tasks.append({"repo": repo.repo, "issue": number, "board": repo.board, "existing": True})
                     continue
                 title = str(issue.get("title") or "")
                 body = f"GitHub issue: {issue.get('url') or ''}"
@@ -221,7 +262,7 @@ def intake(cfg: OssRepoAgentConfig, live_flag: bool, limit: int, runner: Runner)
                     if claim_result.returncode != 0:
                         continue
                 draft = kanban.issue_task(repo.repo, repo.board, number, title, body, repo.clone_path)
-                create = kanban.create_task_spec(draft, assignee="repo-orchestrator")
+                create = kanban.create_task_spec(draft, assignee=INTAKE_ASSIGNEE)
                 mutation_commands.append(create)
                 create_result = runner.run(create, live=True)
                 mutation_results.append(create_result)
@@ -235,8 +276,8 @@ def intake(cfg: OssRepoAgentConfig, live_flag: bool, limit: int, runner: Runner)
             for repo in cfg.repos
         ],
         "safety_guards": safety_guards(),
-        "commands": [planned_command(command) for command in (*list_commands, *mutation_commands)],
-        "executed": [result.executed for result in (*list_results, *mutation_results)],
+        "commands": [planned_command(command) for command in (*list_commands, *inspection_commands, *mutation_commands)],
+        "executed": [result.executed for result in (*list_results, *inspection_results, *mutation_results)],
         "ensured_tasks": ensured_tasks,
     }
 

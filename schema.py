@@ -8,11 +8,11 @@ SAFE_BRANCH_PART = re.compile(r"[^A-Za-z0-9._/-]+")
 
 
 def issue_key(repo: str, number: int) -> str:
-    return f"github:issue:{repo}#{number}"
+    return f"github-issue:{repo}:{number}"
 
 
 def fix_key(repo: str, number: int) -> str:
-    return f"github:fix:{repo}#{number}"
+    return f"fix-pr:{repo}:{number}"
 
 
 def short_hash(value: str) -> str:

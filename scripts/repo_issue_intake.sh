@@ -13,6 +13,7 @@ LOCK_DIR="${HERMES_INTAKE_LOCK_DIR:-/tmp/hermes-repo-issue-intake.lock}"
 LIMIT="${HERMES_INTAKE_LIMIT:-10}"
 DRY_RUN="${HERMES_INTAKE_DRY_RUN:-0}"
 CLAIM_ASSIGNEE="${HERMES_REPO_AGENT_ASSIGNEE:-mikolaj92}"
+KANBAN_INTAKE_ASSIGNEE="${HERMES_KANBAN_INTAKE_ASSIGNEE:-repo-agent-intake}"
 
 usage() {
   printf '%s\n' \
@@ -86,6 +87,33 @@ json_escape_for_body() {
   python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])'
 }
 
+existing_issue_task() {
+  local tasks_json="$1" repo="$2" issue="$3"
+  TASKS_JSON="$tasks_json" python3 - "$repo" "$issue" <<'PY'
+import json, os, sys
+repo = sys.argv[1]
+issue = sys.argv[2]
+title_needle = f"{repo}#{issue}"
+repo_line = f"Repository: {repo}"
+issue_line = f"Issue: #{issue}"
+try:
+    tasks = json.loads(os.environ.get("TASKS_JSON", "[]"))
+except Exception:
+    sys.exit(1)
+for task in tasks if isinstance(tasks, list) else []:
+    status = str(task.get("status") or "")
+    if status == "done":
+        continue
+    title = str(task.get("title") or "")
+    if not title.startswith(("[issue]", "[fix-pr]", "[fix-pr-review]")):
+        continue
+    body = str(task.get("body") or "")
+    if title_needle in title or (repo_line in body and issue_line in body):
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 require_command gh
 require_command hermes
 require_command git
@@ -154,6 +182,11 @@ for entry in "${repos[@]}"; do
     continue
   fi
 
+  board_tasks_json="[]"
+  if [ "$DRY_RUN" != "1" ] && [ "$DRY_RUN" != "true" ]; then
+    board_tasks_json="$(hermes kanban --board "$board" list --json --sort created-desc 2>/dev/null || printf '[]')"
+  fi
+
   while IFS=$'\t' read -r number title url labels has_ready; do
     [ -n "${number:-}" ] || continue
     processed=$((processed + 1))
@@ -186,6 +219,12 @@ Intake-only instructions:
       continue
     fi
 
+    if existing_issue_task "$board_tasks_json" "$repo" "$number"; then
+      skipped=$((skipped + 1))
+      log "KANBAN_TASK_EXISTS repo=$repo issue=$number board=$board action=skip-create"
+      continue
+    fi
+
     if [ -n "$CLAIM_ASSIGNEE" ]; then
       if gh issue edit "$number" --repo "$repo" --add-assignee "$CLAIM_ASSIGNEE" >/dev/null; then
         log "ISSUE_ASSIGNED repo=$repo issue=$number assignee=$CLAIM_ASSIGNEE"
@@ -205,7 +244,7 @@ Intake-only instructions:
 
     hermes kanban --board "$board" create "$task_title" \
       --body "$body" \
-      --assignee repo-orchestrator \
+      --assignee "$KANBAN_INTAKE_ASSIGNEE" \
       --workspace "dir:${clone_path}" \
       --priority 1 \
       --idempotency-key "$key" \

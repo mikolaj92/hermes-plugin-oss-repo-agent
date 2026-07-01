@@ -84,6 +84,29 @@ else
   failures=$((failures + 1))
 fi
 
+if [[ -f "$HOME/.hermes/cron/jobs.json" ]]; then
+  duplicate_cron="$(python3 - "$HOME/.hermes/cron/jobs.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+watched = {"repo-pr-triage", "repo-issue-to-pr-dispatch"}
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+names = []
+for job in data.get("jobs", []):
+    if job.get("enabled") and job.get("name") in watched:
+        names.append(f"{job.get('name')}:{job.get('id')}")
+if names:
+    print(",".join(names))
+PY
+)"
+  if [[ -n "$duplicate_cron" ]]; then
+    log WARN "duplicate-hermes-cron jobs=$duplicate_cron"
+    warnings=$((warnings + 1))
+  fi
+fi
+
 free_kb="$(df -Pk "$HOME" | awk 'NR==2 {print $4}')"
 free_gb=$((free_kb / 1024 / 1024))
 if [[ "$free_gb" -lt "$MIN_FREE_GB" ]]; then

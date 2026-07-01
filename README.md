@@ -78,7 +78,8 @@ The production `mini-m4-0` automation is tracked in `scripts/`:
   tasks.
 - `repo_issue_to_pr_dispatch.sh` turns `[issue]` tasks into explicit
   `[fix-pr]` work, runs Claude workers with per-board locks and a hard timeout,
-  and handles `[fix-pr-review]` repair tasks from PR triage.
+  finalizes Kanban tasks when an open PR appears, and handles `[fix-pr-review]`
+  repair tasks from PR triage.
 - `repo_pr_triage.sh` watches and claims owner-authored `ai/fix/*` PRs, requires
   labels, checks, mergeability, and optional review approval before merge,
   comments on blocked PRs, and queues Kanban repair work for fixable failures.
@@ -93,6 +94,8 @@ The launchd templates live in `templates/launchd/` and include
 Runtime defaults:
 
 - `HERMES_REPO_AGENT_ASSIGNEE=mikolaj92`
+- `HERMES_KANBAN_INTAKE_ASSIGNEE=repo-agent-intake`
+- `HERMES_KANBAN_FIXER_ASSIGNEE=repo-agent-fixer`
 - `HERMES_CLAUDE_TIMEOUT_SECONDS=5400`
 - `HERMES_ISSUE_TO_PR_MAX_CLAUDE_AGENTS=3`
 - `HERMES_STALE_LOCK_MINUTES=180`

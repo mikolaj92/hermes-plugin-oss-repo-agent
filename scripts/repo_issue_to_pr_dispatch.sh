@@ -18,6 +18,7 @@ STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
 LOG_FILE="${HERMES_ISSUE_TO_PR_LOG:-/Users/mini-m4-main/.hermes/logs/repo-issue-to-pr-dispatch.log}"
 LOCK_DIR="${HERMES_ISSUE_TO_PR_LOCK_DIR:-/tmp/hermes-repo-issue-to-pr-dispatch.lock}"
 WORKTREE_ROOT="${HERMES_WORKTREE_ROOT:-/Users/mini-m4-main/.hermes/worktrees/repo-fixer}"
+KANBAN_FIXER_ASSIGNEE="${HERMES_KANBAN_FIXER_ASSIGNEE:-repo-agent-fixer}"
 
 usage() {
   cat <<'USAGE'
@@ -134,7 +135,7 @@ for task in tasks:
     status = str(task.get("status") or "")
     is_review_fix = title.startswith("[fix-pr-review]")
     is_fix = title.startswith("[fix-pr]")
-    if status not in {"ready", "todo", "triage"} and not ((is_fix or is_review_fix) and status == "blocked"):
+    if status not in {"ready", "todo", "triage"} and not ((title.startswith("[issue]") or is_fix or is_review_fix) and status == "blocked"):
         continue
     if not (title.startswith("[issue]") or title.startswith("[fix-pr]") or is_review_fix):
         continue
@@ -207,7 +208,7 @@ Required policy:
 
   hermes kanban --board "$board" create "$fix_title" \
     --body "$body" \
-    --assignee repo-fixer \
+    --assignee "$KANBAN_FIXER_ASSIGNEE" \
     --workspace "worktree:${clone_path}" \
     --branch "$branch" \
     --priority 1 \
@@ -257,6 +258,10 @@ board_agent_active() {
   lock="$(board_lock_dir "$board")"
   pid_file="$lock/pid"
   if [[ ! -f "$pid_file" ]]; then
+    if [[ -d "$lock" ]]; then
+      log "STALE_BOARD_LOCK board=$board lock=$lock reason=missing-pid-file"
+      rmdir "$lock" 2>/dev/null || true
+    fi
     return 1
   fi
   pid="$(cat "$pid_file" 2>/dev/null || true)"
@@ -267,6 +272,15 @@ board_agent_active() {
   rm -f "$pid_file"
   rmdir "$lock" 2>/dev/null || true
   return 1
+}
+
+blocked_task_retriable() {
+  local board="$1" task_id="$2" show_text
+  show_text="$(hermes kanban --board "$board" show "$task_id" 2>/dev/null || true)"
+  if grep -Fq "repo-agent worker finished without an open PR" <<<"$show_text"; then
+    return 1
+  fi
+  grep -Eq "Hermes repo-agent started Claude worker|protocol_violation|worker exited cleanly .* protocol violation" <<<"$show_text"
 }
 
 ensure_worktree_ready() {
@@ -384,17 +398,33 @@ TITLE: ${title}"
       fi
     ) &
     timer=$!
+    set +e
     wait "$child"
     rc=$?
+    set -e
     kill "$timer" 2>/dev/null || true
     wait "$timer" 2>/dev/null || true
     printf '%s CLAUDE_EXIT task=%s pid=%s rc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$child" "$rc"
+    pr_info=""
+    if pr_info="$(open_pr_for_branch "$repo" "$branch" 2>/dev/null)"; then
+      pr_number="${pr_info%%$'\t'*}"
+      pr_url="${pr_info#*$'\t'}"
+      gh pr edit "$pr_number" --repo "$repo" --add-label ai:generated --add-label ai:pr-opened >/dev/null 2>&1 || true
+      complete_task "$board" "$task_id" "Open PR for ${repo}#${issue}: ${pr_url}" || true
+      printf '%s CLAUDE_FINALIZED task=%s outcome=pr-open pr=%s url=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$pr_url"
+    elif [[ "$rc" -eq 0 ]]; then
+      hermes kanban --board "$board" block "$task_id" "repo-agent worker finished without an open PR for branch ${branch}; manual inspection required before retry." >/dev/null 2>&1 || true
+      printf '%s CLAUDE_FINALIZED task=%s outcome=no-pr rc=%s branch=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch"
+    else
+      hermes kanban --board "$board" block "$task_id" "repo-agent worker exited with rc=${rc}; log: ${log_file}" >/dev/null 2>&1 || true
+      printf '%s CLAUDE_FINALIZED task=%s outcome=failed rc=%s branch=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch"
+    fi
     rm -f "$pid_file"
     rmdir "$lock" 2>/dev/null || true
     exit "$rc"
   ) >>"$log_file" 2>&1 &
   printf '%s\n' "$!" >"$pid_file"
-  hermes kanban --board "$board" block "$task_id" "Hermes repo-agent started Claude worker for ${repo}#${issue}; log: ${log_file}" >/dev/null 2>&1 || true
+  hermes kanban --board "$board" comment --author repo-agent "$task_id" "Hermes repo-agent started Claude worker for ${repo}#${issue}; log: ${log_file}" >/dev/null 2>&1 || true
   log "CLAUDE_SPAWNED task=$task_id repo=$repo branch=$branch pid=$! log=$log_file timeout=$CLAUDE_TIMEOUT_SECONDS board=$board"
 }
 
@@ -419,6 +449,7 @@ for mapping in "${REPOS[@]}"; do
     failures=$((failures + 1))
     continue
   fi
+  board_agent_active "$board" >/dev/null || true
 
   json="$(hermes kanban --board "$board" list --json --sort created-desc)"
   while IFS=$'\x1f' read -r task_id title status parsed_repo issue workspace_path frozen task_branch body_preview; do
@@ -451,7 +482,7 @@ for mapping in "${REPOS[@]}"; do
         continue
       fi
 
-      log "DECISION board=$board task=$task_id action=create-fix-pr-task repo=$task_repo issue=$issue clone=$task_clone"
+        log "DECISION board=$board task=$task_id action=create-fix-pr-task repo=$task_repo issue=$issue clone=$task_clone status=$status"
       if [[ "$DRY_RUN" == 0 ]]; then
         if create_fix_task "$board" "$task_clone" "$task_id" "$task_repo" "$issue" "$title"; then
           complete_task "$board" "$task_id" "Created or confirmed idempotent explicit [fix-pr] task for ${task_repo}#${issue}."
@@ -488,8 +519,24 @@ for mapping in "${REPOS[@]}"; do
           continue
         fi
         if [[ "$status" == "blocked" ]]; then
-          log "DECISION board=$board task=$task_id action=skip reason=blocked-fix-task repo=$task_repo issue=$issue"
-          continue
+          if [[ -n "$task_branch" ]] && pr_row="$(open_pr_for_branch "$task_repo" "$task_branch" 2>/dev/null)"; then
+            pr_url="${pr_row#*$'\t'}"
+            log "DECISION board=$board task=$task_id action=complete-blocked-with-existing-pr repo=$task_repo issue=$issue pr=$pr_url"
+            if [[ "$DRY_RUN" == 0 ]]; then
+              complete_task "$board" "$task_id" "Open PR for ${task_repo}#${issue}: ${pr_url}"
+            fi
+            continue
+          fi
+          if blocked_task_retriable "$board" "$task_id"; then
+            log "DECISION board=$board task=$task_id action=recover-blocked-fix-task repo=$task_repo issue=$issue"
+            if [[ "$DRY_RUN" == 0 ]]; then
+              hermes kanban --board "$board" reassign "$task_id" "$KANBAN_FIXER_ASSIGNEE" --reason "repo-agent recovery owns this fixer task" >/dev/null 2>&1 || true
+              hermes kanban --board "$board" unblock "$task_id" --reason "repo-agent retrying stale worker/protocol-violation task" >/dev/null 2>&1 || true
+            fi
+          else
+            log "DECISION board=$board task=$task_id action=skip reason=blocked-fix-task repo=$task_repo issue=$issue"
+            continue
+          fi
         fi
       fi
       if [[ "$board_spawned" == 1 ]] || board_agent_active "$board"; then
@@ -497,6 +544,10 @@ for mapping in "${REPOS[@]}"; do
         continue
       fi
       log "DECISION board=$board task=$task_id action=run-claude repo=$task_repo issue=$issue clone=$task_clone"
+      if [[ "$DRY_RUN" == 1 ]]; then
+        board_spawned=1
+        continue
+      fi
       if [[ "$DRY_RUN" == 0 && "$RUN_OPENCODE" == 1 ]]; then
         if run_claude_for_fix "$board" "$task_clone" "$task_id" "$title" "$task_repo" "$issue" "$task_branch"; then
           claude_spawned=$((claude_spawned + 1))
