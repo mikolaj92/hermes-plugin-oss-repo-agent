@@ -165,12 +165,33 @@ while IFS= read -r lock; do
   fi
 done < <(find /tmp "$HOME/.hermes/worktrees" -maxdepth 4 -type d \( -name 'hermes-repo-*.lock' -o -name '.agent.lock' \) -mmin "+$STALE_LOCK_MINUTES" 2>/dev/null)
 
+active_worker_seen=0
 active_workers="$(pgrep -fl 'claude.*Hermes task' 2>/dev/null || true)"
 if [[ -n "$active_workers" ]]; then
   while IFS= read -r line; do
     log OK "active-worker $line"
+    active_worker_seen=1
   done <<<"$active_workers"
-else
+fi
+
+while IFS= read -r pid_file; do
+  [[ -n "$pid_file" ]] || continue
+  lock="$(dirname "$pid_file")"
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    log OK "active-worker-lock pid=$pid path=$lock"
+    active_worker_seen=1
+  else
+    log WARN "dead-worker-lock pid=${pid:-missing} path=$lock"
+    warnings=$((warnings + 1))
+    if [[ "$REPAIR" == 1 ]]; then
+      rm -f "$pid_file" 2>/dev/null || true
+      rmdir "$lock" 2>/dev/null && log OK "dead-worker-lock-removed path=$lock" || true
+    fi
+  fi
+done < <(find "$HOME/.hermes/worktrees" -maxdepth 5 -type f -path '*/.agent.lock/pid' 2>/dev/null)
+
+if [[ "$active_worker_seen" == 0 ]]; then
   log OK "active-worker none"
 fi
 

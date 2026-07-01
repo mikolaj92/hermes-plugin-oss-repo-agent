@@ -64,6 +64,8 @@ class RuntimeScriptTests(unittest.TestCase):
         self.assertIn("gh auth status", health)
         self.assertIn("launchctl bootstrap", health)
         self.assertIn("stale-lock", health)
+        self.assertIn("active-worker-lock", health)
+        self.assertIn("dead-worker-lock", health)
         self.assertIn("launchd-last-exit-nonzero", health)
         self.assertIn("duplicate-hermes-cron", health)
         for name in [
