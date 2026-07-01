@@ -314,7 +314,7 @@ active_claude_agents() {
 
 run_claude_for_fix() {
   local board="$1" clone_path="$2" task_id="$3" title="$4" repo="$5" issue="$6" task_branch="$7" existing_worktree="${8:-}"
-  local slug branch worktree prompt log_file lock pid_file
+  local slug branch worktree prompt log_file lock pid_file child timer rc pr_info pr_number pr_url
   if [[ -n "$task_branch" && "$task_branch" == ai/fix/* ]]; then
     branch="$task_branch"
   else
@@ -384,7 +384,9 @@ CONSTRAINTS:
 TITLE: ${title}"
   fi
 
-  (
+  hermes kanban --board "$board" comment --author repo-agent "$task_id" "Hermes repo-agent started Claude worker for ${repo}#${issue}; log: ${log_file}" >/dev/null 2>&1 || true
+  log "CLAUDE_RUNNING task=$task_id repo=$repo branch=$branch log=$log_file timeout=$CLAUDE_TIMEOUT_SECONDS board=$board"
+  {
     printf '%s CLAUDE_START task=%s repo=%s branch=%s timeout=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$repo" "$branch" "$CLAUDE_TIMEOUT_SECONDS"
     claude --dangerously-skip-permissions -p "$prompt" \
       --add-dir "$worktree" \
@@ -424,11 +426,9 @@ TITLE: ${title}"
     fi
     rm -f "$pid_file"
     rmdir "$lock" 2>/dev/null || true
-    exit "$rc"
-  ) >>"$log_file" 2>&1 &
-  printf '%s\n' "$!" >"$pid_file"
-  hermes kanban --board "$board" comment --author repo-agent "$task_id" "Hermes repo-agent started Claude worker for ${repo}#${issue}; log: ${log_file}" >/dev/null 2>&1 || true
-  log "CLAUDE_SPAWNED task=$task_id repo=$repo branch=$branch pid=$! log=$log_file timeout=$CLAUDE_TIMEOUT_SECONDS board=$board"
+  } >>"$log_file" 2>&1
+  log "CLAUDE_FINISHED task=$task_id repo=$repo branch=$branch rc=$rc log=$log_file board=$board"
+  return 0
 }
 
 processed=0
