@@ -12,6 +12,7 @@ COMMENT_ENABLED="${HERMES_PR_TRIAGE_COMMENT:-0}"
 AUTOMERGE="${HERMES_PR_AUTOMERGE:-0}"
 REQUIRE_APPROVED="${HERMES_PR_REQUIRE_APPROVED:-1}"
 ALLOW_NO_CHECKS="${HERMES_PR_ALLOW_NO_CHECKS:-0}"
+REQUIRE_TEST_EVIDENCE="${HERMES_PR_REQUIRE_TEST_EVIDENCE:-1}"
 LOG_FILE="${HERMES_PR_TRIAGE_LOG:-/Users/mini-m4-main/.hermes/logs/repo-pr-triage.log}"
 LOCK_DIR="${HERMES_PR_TRIAGE_LOCK_DIR:-/tmp/hermes-repo-pr-triage.lock}"
 STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
@@ -177,6 +178,12 @@ sys.exit(0)
 PY
 }
 
+pr_has_test_evidence() {
+  local repo="$1" number="$2" body
+  body="$(gh pr view "$number" --repo "$repo" --json body --jq .body 2>/dev/null || true)"
+  grep -Eiq 'test evidence|tests?|pytest|unittest|xcodebuild|swift test|uv run|npm test|cargo test|go test' <<<"$body"
+}
+
 
 release_clean_worktree_for_branch() {
   local clone_path="$1" branch="$2"
@@ -271,7 +278,7 @@ skipped=0
 commented=0
 failures=0
 
-log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) comment=$COMMENT_ENABLED automerge=$AUTOMERGE require_approved=$REQUIRE_APPROVED allow_no_checks=$ALLOW_NO_CHECKS"
+log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) comment=$COMMENT_ENABLED automerge=$AUTOMERGE require_approved=$REQUIRE_APPROVED allow_no_checks=$ALLOW_NO_CHECKS require_test_evidence=$REQUIRE_TEST_EVIDENCE"
 
 for repo in "${REPOS[@]}"; do
   repo_owner="${repo%%/*}"
@@ -323,6 +330,10 @@ for repo in "${REPOS[@]}"; do
       elif ! checks_pass "$repo" "$number"; then
         decision="fix"
         reason="checks-not-passing"
+        blocked=$((blocked + 1))
+      elif [[ "$REQUIRE_TEST_EVIDENCE" == 1 ]] && ! pr_has_test_evidence "$repo" "$number"; then
+        decision="fix"
+        reason="test-evidence-missing"
         blocked=$((blocked + 1))
       elif [[ "$AUTOMERGE" != 1 ]]; then
         decision="merge-blocked"

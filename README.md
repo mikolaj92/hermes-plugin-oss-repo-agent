@@ -81,10 +81,18 @@ The production `mini-m4-0` automation is tracked in `scripts/`:
   finalizes Kanban tasks when an open PR appears, and handles `[fix-pr-review]`
   repair tasks from PR triage.
 - `repo_pr_triage.sh` watches and claims owner-authored `ai/fix/*` PRs, requires
-  labels, checks, mergeability, and optional review approval before merge,
-  comments on blocked PRs, and queues Kanban repair work for fixable failures.
+  labels, checks, mergeability, test evidence, and optional review approval
+  before merge, comments on blocked PRs, and queues Kanban repair work for
+  fixable failures.
+- `repo_agent_cleanup.sh` removes clean controlled `ai/fix` worktrees, and local
+  branches, after their GitHub issue is closed and no open PR remains.
 - `repo_agent_health.sh` checks launchd, `gh auth`, disk space, logs, stale
-  locks, active workers, GitHub queues, and Kanban board stats.
+  locks, active workers, GitHub queues, Kanban board stats, and Hermes update
+  availability.
+- `repo_agent_status.sh` prints a one-screen dashboard with launchd state,
+  worker locks, queue counts, and recent dispatch/triage/cleanup decisions.
+- `repo_agent_hermes_update.sh` checks for Hermes updates and can run
+  `hermes update --backup --yes` only when no repo-agent worker lock is active.
 - `repo_agent_smoke.sh` runs local runtime regressions.
 
 The launchd templates live in `templates/launchd/` and include
@@ -98,6 +106,11 @@ Runtime defaults:
 - `HERMES_KANBAN_FIXER_ASSIGNEE=repo-agent-fixer`
 - `HERMES_CLAUDE_TIMEOUT_SECONDS=5400`
 - `HERMES_ISSUE_TO_PR_MAX_CLAUDE_AGENTS=3`
+- `HERMES_REPO_AGENT_MAX_TASK_ATTEMPTS=3`
+- `HERMES_REPO_AGENT_RETRY_BACKOFF_SECONDS=1800`
+- `HERMES_PR_REQUIRE_TEST_EVIDENCE=1`
+- `HERMES_REPO_CLEANUP_DELETE_LOCAL_BRANCHES=1`
+- `HERMES_REPO_AGENT_UPDATE_DRY_RUN=1`
 - `HERMES_STALE_LOCK_MINUTES=180`
 - `HERMES_REPO_AGENT_MIN_FREE_GB=5`
 

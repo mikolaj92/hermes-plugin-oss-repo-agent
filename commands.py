@@ -362,7 +362,7 @@ def render_launchd(cfg: OssRepoAgentConfig, output: str) -> dict[str, Any]:
     return {
         "ok": True,
         "output": output,
-        "templates": ["intake", "dispatch", "pr-triage", "health"],
+        "templates": ["intake", "dispatch", "pr-triage", "cleanup", "hermes-update", "health"],
         "macos_only": True,
         "mode": cfg.mode,
     }

@@ -56,6 +56,8 @@ jobs=(
   "com.mikolaj92.hermes.repo-issue-intake|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-issue-intake.plist|$HOME/.hermes/logs/repo-issue-intake.log"
   "com.mikolaj92.hermes.repo-issue-to-pr-dispatch|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-issue-to-pr-dispatch.plist|$HOME/.hermes/logs/repo-issue-to-pr-dispatch.log"
   "com.mikolaj92.hermes.repo-pr-triage|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-pr-triage.plist|$HOME/.hermes/logs/repo-pr-triage.log"
+  "com.mikolaj92.hermes.repo-agent-cleanup|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-cleanup.plist|$HOME/.hermes/logs/repo-agent-cleanup.log"
+  "com.mikolaj92.hermes.repo-agent-hermes-update|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-hermes-update.plist|$HOME/.hermes/logs/repo-agent-hermes-update.log"
 )
 repos=(
   "mikolaj92/Fala|mikolaj92-fala"
@@ -82,6 +84,15 @@ if gh auth status >/dev/null 2>&1; then
 else
   log ERROR "gh-auth bad"
   failures=$((failures + 1))
+fi
+
+hermes_version="$(hermes --version 2>&1 || true)"
+if grep -Eiq 'update available|commits? behind|new version' <<<"$hermes_version"; then
+  compact_version="$(printf '%s' "$hermes_version" | tr '\n' ' ' | sed 's/  */ /g')"
+  log WARN "hermes-update-available details=$(printf '%q' "$compact_version")"
+  warnings=$((warnings + 1))
+else
+  log OK "hermes-version $(printf '%s' "$hermes_version" | head -n 1 | sed 's/  */ /g')"
 fi
 
 if [[ -f "$HOME/.hermes/cron/jobs.json" ]]; then

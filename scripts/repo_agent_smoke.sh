@@ -7,6 +7,9 @@ bash -n "$ROOT/scripts/repo_issue_intake.sh"
 bash -n "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
 bash -n "$ROOT/scripts/repo_pr_triage.sh"
 bash -n "$ROOT/scripts/repo_agent_health.sh"
+bash -n "$ROOT/scripts/repo_agent_cleanup.sh"
+bash -n "$ROOT/scripts/repo_agent_status.sh"
+bash -n "$ROOT/scripts/repo_agent_hermes_update.sh"
 
 grep -Fq '[fix-pr-review]' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
 grep -Fq 'complete-stale-review' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
@@ -14,6 +17,9 @@ grep -Fq 'HERMES_CLAUDE_TIMEOUT_SECONDS' "$ROOT/scripts/repo_issue_to_pr_dispatc
 grep -Fq 'board-agent-active' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
 grep -Fq 'checks_pass "$repo" "$number"' "$ROOT/scripts/repo_pr_triage.sh"
 grep -Fq 'comment_pr_once' "$ROOT/scripts/repo_pr_triage.sh"
+grep -Fq 'WORKTREE_REMOVED' "$ROOT/scripts/repo_agent_cleanup.sh"
+grep -Fq 'Recent Decisions' "$ROOT/scripts/repo_agent_status.sh"
+grep -Fq 'hermes update --backup --yes' "$ROOT/scripts/repo_agent_hermes_update.sh"
 
 python3 -m unittest discover -s "$ROOT/tests"
 

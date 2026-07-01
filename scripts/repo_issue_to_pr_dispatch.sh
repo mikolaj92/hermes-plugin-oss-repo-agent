@@ -19,6 +19,8 @@ LOG_FILE="${HERMES_ISSUE_TO_PR_LOG:-/Users/mini-m4-main/.hermes/logs/repo-issue-
 LOCK_DIR="${HERMES_ISSUE_TO_PR_LOCK_DIR:-/tmp/hermes-repo-issue-to-pr-dispatch.lock}"
 WORKTREE_ROOT="${HERMES_WORKTREE_ROOT:-/Users/mini-m4-main/.hermes/worktrees/repo-fixer}"
 KANBAN_FIXER_ASSIGNEE="${HERMES_KANBAN_FIXER_ASSIGNEE:-repo-agent-fixer}"
+MAX_TASK_ATTEMPTS="${HERMES_REPO_AGENT_MAX_TASK_ATTEMPTS:-3}"
+RETRY_BACKOFF_SECONDS="${HERMES_REPO_AGENT_RETRY_BACKOFF_SECONDS:-1800}"
 
 usage() {
   cat <<'USAGE'
@@ -96,16 +98,16 @@ cleanup() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
 trap cleanup EXIT
 
 REPOS=(
-  "mikolaj92/Fala|mikolaj92-fala|/Users/mini-m4-main/Developer/hermes-repos/Fala"
-  "mikolaj92/reviewkit|mikolaj92-reviewkit|/Users/mini-m4-main/Developer/hermes-repos/reviewkit"
-  "mikolaj92/anonimizator3000|mikolaj92-anonimizator3000|/Users/mini-m4-main/Developer/hermes-repos/anonimizator3000"
-  "mikolaj92/datasource-kit|mikolaj92-datasource-kit|/Users/mini-m4-main/Developer/hermes-repos/datasource-kit"
-  "mikolaj92/splot|mikolaj92-splot|/Users/mini-m4-main/Developer/hermes-repos/splot"
-  "mikolaj92/my-auth|mikolaj92-my-auth|/Users/mini-m4-main/Developer/hermes-repos/my-auth"
-  "mikolaj92/my-usermanager|mikolaj92-my-usermanager|/Users/mini-m4-main/Developer/hermes-repos/my-usermanager"
-  "mikolaj92/msds-portal|mikolaj92-msds-portal|/Users/mini-m4-main/Developer/hermes-repos/msds-portal"
-  "mikolaj92/swift-openapi-dynamic|mikolaj92-swift-openapi-dynamic|/Users/mini-m4-main/Developer/hermes-repos/swift-openapi-dynamic"
-  "mikolaj92/OpenAPITransportKit|mikolaj92-openapi-transport-kit|/Users/mini-m4-main/Developer/hermes-repos/OpenAPITransportKit"
+  "mikolaj92/Fala|mikolaj92-fala|/Users/mini-m4-main/Developer/hermes-repos/Fala|100"
+  "mikolaj92/datasource-kit|mikolaj92-datasource-kit|/Users/mini-m4-main/Developer/hermes-repos/datasource-kit|90"
+  "mikolaj92/reviewkit|mikolaj92-reviewkit|/Users/mini-m4-main/Developer/hermes-repos/reviewkit|80"
+  "mikolaj92/anonimizator3000|mikolaj92-anonimizator3000|/Users/mini-m4-main/Developer/hermes-repos/anonimizator3000|70"
+  "mikolaj92/splot|mikolaj92-splot|/Users/mini-m4-main/Developer/hermes-repos/splot|60"
+  "mikolaj92/msds-portal|mikolaj92-msds-portal|/Users/mini-m4-main/Developer/hermes-repos/msds-portal|50"
+  "mikolaj92/OpenAPITransportKit|mikolaj92-openapi-transport-kit|/Users/mini-m4-main/Developer/hermes-repos/OpenAPITransportKit|45"
+  "mikolaj92/swift-openapi-dynamic|mikolaj92-swift-openapi-dynamic|/Users/mini-m4-main/Developer/hermes-repos/swift-openapi-dynamic|40"
+  "mikolaj92/my-auth|mikolaj92-my-auth|/Users/mini-m4-main/Developer/hermes-repos/my-auth|30"
+  "mikolaj92/my-usermanager|mikolaj92-my-usermanager|/Users/mini-m4-main/Developer/hermes-repos/my-usermanager|30"
 )
 
 slugify() {
@@ -118,11 +120,12 @@ PY
 }
 
 extract_records() {
-  local tasks_json="$1"
-  TASKS_JSON="$tasks_json" python3 - "$MAX_PER_BOARD" <<'PY'
+  local tasks_json="$1" repo_priority="$2"
+  TASKS_JSON="$tasks_json" python3 - "$MAX_PER_BOARD" "$repo_priority" <<'PY'
 import json, os, re, sys
 try:
     limit = int(sys.argv[1])
+    repo_priority = int(sys.argv[2])
     if limit <= 0:
         sys.exit(0)
     tasks = json.loads(os.environ.get("TASKS_JSON", "[]"))
@@ -157,14 +160,46 @@ for task in tasks:
         if "label" in line.lower():
             labels_line += " " + line.lower()
     frozen = "frozen" in labels_line or "frozen" in body_lower or "frozen" in title.lower()
+    text = f"{title} {body} {labels_line}".lower()
+    score = repo_priority
+    reasons = [f"repo={repo_priority}"]
+    if is_review_fix:
+        score += 240
+        reasons.append("review-fix=240")
+    elif is_fix:
+        score += 200
+        reasons.append("fix-pr=200")
+    elif title.startswith("[issue]"):
+        score += 100
+        reasons.append("issue=100")
+    if status == "blocked":
+        score -= 40
+        reasons.append("blocked=-40")
+    if any(token in text for token in ("p0", "critical", "urgent")):
+        score += 120
+        reasons.append("urgent=120")
+    if "security" in text:
+        score += 100
+        reasons.append("security=100")
+    if any(token in text for token in ("bug", "regression", "crash", "failing")):
+        score += 40
+        reasons.append("bug=40")
+    if any(token in text for token in ("docs", "documentation", "readme")):
+        score -= 20
+        reasons.append("docs=-20")
+    if frozen:
+        score -= 1000
+        reasons.append("frozen=-1000")
     rows.append([
         str(task.get("id") or ""), title.replace("\t", " ").replace("\n", " "),
         status, repo, issue, workspace_path, "1" if frozen else "0",
         branch,
         body.replace("\t", " ").replace("\n", "\\n")[:500],
+        str(score),
+        ",".join(reasons),
     ])
-    if len(rows) >= limit:
-        break
+rows.sort(key=lambda row: int(row[9]), reverse=True)
+rows = rows[:limit]
 for row in rows:
     print("\x1f".join(row))
 PY
@@ -282,6 +317,54 @@ blocked_task_retriable() {
   grep -Eq "Hermes repo-agent started Claude worker|protocol_violation|worker exited cleanly .* protocol violation" <<<"$show_text"
 }
 
+retry_gate() {
+  local board="$1" task_id="$2" show_text
+  show_text="$(hermes kanban --board "$board" show "$task_id" 2>/dev/null || true)"
+  TASK_SHOW="$show_text" python3 - "$MAX_TASK_ATTEMPTS" <<'PY'
+import datetime as dt
+import os
+import re
+import sys
+
+max_attempts = int(sys.argv[1])
+text = os.environ.get("TASK_SHOW", "")
+attempts = [int(value) for value in re.findall(r"repo-agent retry attempt=(\d+)/\d+", text)]
+attempt = max(attempts) if attempts else 0
+if attempt >= max_attempts:
+    print(f"attempts-exhausted attempts={attempt}/{max_attempts}")
+    sys.exit(1)
+
+next_values = re.findall(r"next_retry_after=([0-9T:\-]+Z)", text)
+if next_values:
+    next_time = dt.datetime.strptime(next_values[-1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
+    if next_time > now:
+        print(f"backoff-active attempts={attempt}/{max_attempts} next_retry_after={next_values[-1]}")
+        sys.exit(1)
+
+print(f"retry-ready attempts={attempt}/{max_attempts}")
+PY
+}
+
+retry_failure_note() {
+  local board="$1" task_id="$2" show_text
+  show_text="$(hermes kanban --board "$board" show "$task_id" 2>/dev/null || true)"
+  TASK_SHOW="$show_text" python3 - "$MAX_TASK_ATTEMPTS" "$RETRY_BACKOFF_SECONDS" <<'PY'
+import datetime as dt
+import os
+import re
+import sys
+
+max_attempts = int(sys.argv[1])
+backoff = int(sys.argv[2])
+text = os.environ.get("TASK_SHOW", "")
+attempts = [int(value) for value in re.findall(r"repo-agent retry attempt=(\d+)/\d+", text)]
+attempt = (max(attempts) if attempts else 0) + 1
+next_retry = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=backoff)
+print(f"repo-agent retry attempt={attempt}/{max_attempts} next_retry_after={next_retry.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+PY
+}
+
 ensure_worktree_ready() {
   local clone_path="$1" worktree="$2" branch="$3"
   if [[ ! -d "$worktree" ]]; then
@@ -314,7 +397,7 @@ active_claude_agents() {
 
 run_claude_for_fix() {
   local board="$1" clone_path="$2" task_id="$3" title="$4" repo="$5" issue="$6" task_branch="$7" existing_worktree="${8:-}"
-  local slug branch worktree prompt log_file lock pid_file child timer rc pr_info pr_number pr_url
+  local slug branch worktree prompt log_file lock pid_file child timer rc pr_info pr_number pr_url retry_note
   if [[ -n "$task_branch" && "$task_branch" == ai/fix/* ]]; then
     branch="$task_branch"
   else
@@ -418,11 +501,13 @@ TITLE: ${title}"
       complete_task "$board" "$task_id" "Open PR for ${repo}#${issue}: ${pr_url}" || true
       printf '%s CLAUDE_FINALIZED task=%s outcome=pr-open pr=%s url=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$pr_url"
     elif [[ "$rc" -eq 0 ]]; then
-      hermes kanban --board "$board" block "$task_id" "repo-agent worker finished without an open PR for branch ${branch}; manual inspection required before retry." >/dev/null 2>&1 || true
-      printf '%s CLAUDE_FINALIZED task=%s outcome=no-pr rc=%s branch=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch"
+      retry_note="$(retry_failure_note "$board" "$task_id")"
+      hermes kanban --board "$board" block "$task_id" "repo-agent worker finished without an open PR for branch ${branch}; ${retry_note}; manual inspection required if attempts are exhausted." >/dev/null 2>&1 || true
+      printf '%s CLAUDE_FINALIZED task=%s outcome=no-pr rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
     else
-      hermes kanban --board "$board" block "$task_id" "repo-agent worker exited with rc=${rc}; log: ${log_file}" >/dev/null 2>&1 || true
-      printf '%s CLAUDE_FINALIZED task=%s outcome=failed rc=%s branch=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch"
+      retry_note="$(retry_failure_note "$board" "$task_id")"
+      hermes kanban --board "$board" block "$task_id" "repo-agent worker exited with rc=${rc}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
+      printf '%s CLAUDE_FINALIZED task=%s outcome=failed rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
     fi
     rm -f "$pid_file"
     rmdir "$lock" 2>/dev/null || true
@@ -437,10 +522,11 @@ blocked=0
 claude_spawned=0
 failures=0
 
-log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) max_per_board=$MAX_PER_BOARD run_claude=$RUN_OPENCODE max_agents=$MAX_CLAUDE_AGENTS block_intake=$BLOCK_INTAKE"
+log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) max_per_board=$MAX_PER_BOARD run_claude=$RUN_OPENCODE max_agents=$MAX_CLAUDE_AGENTS block_intake=$BLOCK_INTAKE max_attempts=$MAX_TASK_ATTEMPTS backoff_seconds=$RETRY_BACKOFF_SECONDS"
 
 for mapping in "${REPOS[@]}"; do
-  IFS='|' read -r repo board clone_path <<<"$mapping"
+  IFS='|' read -r repo board clone_path repo_priority <<<"$mapping"
+  repo_priority="${repo_priority:-0}"
   board_spawned=0
   if [[ ! -d "$clone_path" ]]; then
     log "CLONE_MISSING repo=$repo clone=$clone_path"
@@ -455,7 +541,7 @@ for mapping in "${REPOS[@]}"; do
   board_agent_active "$board" >/dev/null || true
 
   json="$(hermes kanban --board "$board" list --json --sort created-desc)"
-  while IFS=$'\x1f' read -r task_id title status parsed_repo issue workspace_path frozen task_branch body_preview; do
+  while IFS=$'\x1f' read -r task_id title status parsed_repo issue workspace_path frozen task_branch body_preview task_score selection_reason; do
     [[ -n "${task_id:-}" ]] || continue
     processed=$((processed + 1))
     task_repo="${parsed_repo:-$repo}"
@@ -492,7 +578,7 @@ for mapping in "${REPOS[@]}"; do
         continue
       fi
 
-        log "DECISION board=$board task=$task_id action=create-fix-pr-task repo=$task_repo issue=$issue clone=$task_clone status=$status"
+        log "DECISION board=$board task=$task_id action=create-fix-pr-task repo=$task_repo issue=$issue clone=$task_clone status=$status score=$task_score reason=$selection_reason"
       if [[ "$DRY_RUN" == 0 ]]; then
         if create_fix_task "$board" "$task_clone" "$task_id" "$task_repo" "$issue" "$title"; then
           complete_task "$board" "$task_id" "Created or confirmed idempotent explicit [fix-pr] task for ${task_repo}#${issue}."
@@ -538,7 +624,11 @@ for mapping in "${REPOS[@]}"; do
             continue
           fi
           if blocked_task_retriable "$board" "$task_id"; then
-            log "DECISION board=$board task=$task_id action=recover-blocked-fix-task repo=$task_repo issue=$issue"
+            if ! retry_status="$(retry_gate "$board" "$task_id")"; then
+              log "DECISION board=$board task=$task_id action=skip reason=retry-gate repo=$task_repo issue=$issue retry=$(printf '%q' "$retry_status")"
+              continue
+            fi
+            log "DECISION board=$board task=$task_id action=recover-blocked-fix-task repo=$task_repo issue=$issue retry=$(printf '%q' "$retry_status")"
             if [[ "$DRY_RUN" == 0 ]]; then
               hermes kanban --board "$board" reassign "$task_id" "$KANBAN_FIXER_ASSIGNEE" --reason "repo-agent recovery owns this fixer task" >/dev/null 2>&1 || true
               hermes kanban --board "$board" unblock "$task_id" --reason "repo-agent retrying stale worker/protocol-violation task" >/dev/null 2>&1 || true
@@ -553,12 +643,13 @@ for mapping in "${REPOS[@]}"; do
         log "DECISION board=$board task=$task_id action=skip reason=board-agent-active repo=$task_repo issue=$issue"
         continue
       fi
-      log "DECISION board=$board task=$task_id action=run-claude repo=$task_repo issue=$issue clone=$task_clone"
+      log "DECISION board=$board task=$task_id action=run-claude repo=$task_repo issue=$issue clone=$task_clone score=$task_score reason=$selection_reason"
       if [[ "$DRY_RUN" == 1 ]]; then
         board_spawned=1
         continue
       fi
       if [[ "$DRY_RUN" == 0 && "$RUN_OPENCODE" == 1 ]]; then
+        hermes kanban --board "$board" comment --author repo-agent "$task_id" "repo-agent selected this task now: score=${task_score}; reason=${selection_reason}; repo_priority=${repo_priority}; one-worker-per-board=${board}; max_agents=${MAX_CLAUDE_AGENTS}." >/dev/null 2>&1 || true
         if run_claude_for_fix "$board" "$task_clone" "$task_id" "$title" "$task_repo" "$issue" "$task_branch" "$task_existing_worktree"; then
           claude_spawned=$((claude_spawned + 1))
           board_spawned=1
@@ -567,7 +658,7 @@ for mapping in "${REPOS[@]}"; do
         fi
       fi
     fi
-  done < <(extract_records "$json")
+  done < <(extract_records "$json" "$repo_priority")
 done
 
 log "DONE mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) processed=$processed created_fix_tasks=$created blocked=$blocked claude_spawned=$claude_spawned failures=$failures"

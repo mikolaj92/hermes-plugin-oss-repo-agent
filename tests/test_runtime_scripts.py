@@ -19,6 +19,8 @@ class RuntimeScriptTests(unittest.TestCase):
     def test_dispatch_serializes_workers_and_times_out_claude(self):
         dispatch = self.read("scripts/repo_issue_to_pr_dispatch.sh")
         self.assertIn("HERMES_CLAUDE_TIMEOUT_SECONDS", dispatch)
+        self.assertIn("HERMES_REPO_AGENT_MAX_TASK_ATTEMPTS", dispatch)
+        self.assertIn("HERMES_REPO_AGENT_RETRY_BACKOFF_SECONDS", dispatch)
         self.assertIn("CLAUDE_TIMEOUT", dispatch)
         self.assertIn("board_agent_active", dispatch)
         self.assertIn("board_spawned=1", dispatch)
@@ -35,10 +37,14 @@ class RuntimeScriptTests(unittest.TestCase):
     def test_dispatch_finalizes_workers_and_recovers_stale_blocks(self):
         dispatch = self.read("scripts/repo_issue_to_pr_dispatch.sh")
         self.assertIn("blocked_task_retriable", dispatch)
+        self.assertIn("retry_gate", dispatch)
+        self.assertIn("retry_failure_note", dispatch)
         self.assertIn("recover-blocked-fix-task", dispatch)
         self.assertIn("reassign", dispatch)
         self.assertIn("diff --quiet", dispatch)
         self.assertIn("existing_worktree", dispatch)
+        self.assertIn("repo-agent selected this task now", dispatch)
+        self.assertIn("selection_reason", dispatch)
         self.assertIn("repo-agent worker finished without an open PR", dispatch)
         self.assertIn("CLAUDE_FINALIZED", dispatch)
         self.assertIn("CLAUDE_RUNNING", dispatch)
@@ -55,6 +61,8 @@ class RuntimeScriptTests(unittest.TestCase):
         self.assertIn("comment_pr_once", triage)
         self.assertIn("review-not-approved", triage)
         self.assertIn("checks-not-passing", triage)
+        self.assertIn("test-evidence-missing", triage)
+        self.assertIn("pr_has_test_evidence", triage)
         self.assertIn("FIX_TASK_CREATED", triage)
         self.assertIn("release_clean_worktree_for_branch", triage)
         self.assertIn('worktree remove "$path"', triage)
@@ -68,15 +76,34 @@ class RuntimeScriptTests(unittest.TestCase):
         self.assertIn("dead-worker-lock", health)
         self.assertIn("launchd-last-exit-nonzero", health)
         self.assertIn("duplicate-hermes-cron", health)
+        self.assertIn("hermes-update-available", health)
+        self.assertIn("repo-agent-cleanup", health)
+        self.assertIn("repo-agent-hermes-update", health)
         for name in [
             "oss-repo-agent-intake.plist.template",
             "oss-repo-agent-dispatch.plist.template",
             "oss-repo-agent-pr-triage.plist.template",
+            "oss-repo-agent-cleanup.plist.template",
+            "oss-repo-agent-hermes-update.plist.template",
             "oss-repo-agent-health.plist.template",
         ]:
             template = self.read(f"templates/launchd/{name}")
             self.assertIn("LimitLoadToSessionType", template)
             self.assertIn("Background", template)
+
+    def test_cleanup_and_status_scripts_cover_autonomy_gaps(self):
+        cleanup = self.read("scripts/repo_agent_cleanup.sh")
+        status = self.read("scripts/repo_agent_status.sh")
+        updater = self.read("scripts/repo_agent_hermes_update.sh")
+        self.assertIn("WORKTREE_REMOVED", cleanup)
+        self.assertIn("LOCAL_BRANCH_REMOVED", cleanup)
+        self.assertIn("open_pr_for_branch", cleanup)
+        self.assertIn("Recent Decisions", status)
+        self.assertIn("repo-agent status", status)
+        self.assertIn("repo-agent-cleanup", status)
+        self.assertIn("repo-agent-hermes-update", status)
+        self.assertIn("hermes update --backup --yes", updater)
+        self.assertIn("active-worker-locks", updater)
 
     def test_runtime_scripts_include_added_public_repos(self):
         for relative in [
@@ -84,6 +111,8 @@ class RuntimeScriptTests(unittest.TestCase):
             "scripts/repo_issue_to_pr_dispatch.sh",
             "scripts/repo_pr_triage.sh",
             "scripts/repo_agent_health.sh",
+            "scripts/repo_agent_cleanup.sh",
+            "scripts/repo_agent_status.sh",
         ]:
             text = self.read(relative)
             self.assertIn("mikolaj92/splot", text)
