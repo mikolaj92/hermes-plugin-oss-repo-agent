@@ -173,9 +173,8 @@ PY
 ensure_clean_clone() {
   local clone_path="$1"
   GIT_MASTER=1 git -C "$clone_path" rev-parse --is-inside-work-tree >/dev/null
-  local status
-  status="$(GIT_MASTER=1 git -C "$clone_path" status --short)"
-  [[ -z "$status" ]]
+  GIT_MASTER=1 git -C "$clone_path" diff --quiet
+  GIT_MASTER=1 git -C "$clone_path" diff --cached --quiet
 }
 
 create_fix_task() {
@@ -314,7 +313,7 @@ active_claude_agents() {
 }
 
 run_claude_for_fix() {
-  local board="$1" clone_path="$2" task_id="$3" title="$4" repo="$5" issue="$6" task_branch="$7"
+  local board="$1" clone_path="$2" task_id="$3" title="$4" repo="$5" issue="$6" task_branch="$7" existing_worktree="${8:-}"
   local slug branch worktree prompt log_file lock pid_file
   if [[ -n "$task_branch" && "$task_branch" == ai/fix/* ]]; then
     branch="$task_branch"
@@ -322,7 +321,11 @@ run_claude_for_fix() {
     slug="$(slugify "$repo-$issue-$title")"
     branch="ai/fix/${issue}-${slug}"
   fi
-  worktree="${WORKTREE_ROOT}/${board}/${task_id}"
+  if [[ -n "$existing_worktree" && -d "$existing_worktree" ]]; then
+    worktree="$existing_worktree"
+  else
+    worktree="${WORKTREE_ROOT}/${board}/${task_id}"
+  fi
   log_file="$(dirname "$LOG_FILE")/claude-${task_id}.log"
   lock="$(board_lock_dir "$board")"
   pid_file="$lock/pid"
@@ -458,7 +461,14 @@ for mapping in "${REPOS[@]}"; do
     task_repo="${parsed_repo:-$repo}"
     [[ -n "$task_repo" ]] || task_repo="$repo"
     task_clone="$clone_path"
-    [[ -n "$workspace_path" && -d "$workspace_path" ]] && task_clone="$workspace_path"
+    task_existing_worktree=""
+    if [[ -n "$workspace_path" && -d "$workspace_path" ]]; then
+      if [[ "$title" == \[fix-pr\]* || "$title" == \[fix-pr-review\]* ]]; then
+        [[ "$workspace_path" != "$clone_path" ]] && task_existing_worktree="$workspace_path"
+      else
+        task_clone="$workspace_path"
+      fi
+    fi
 
     if [[ "$title" == \[issue\]* ]]; then
       if [[ "$frozen" == 1 ]]; then
@@ -549,7 +559,7 @@ for mapping in "${REPOS[@]}"; do
         continue
       fi
       if [[ "$DRY_RUN" == 0 && "$RUN_OPENCODE" == 1 ]]; then
-        if run_claude_for_fix "$board" "$task_clone" "$task_id" "$title" "$task_repo" "$issue" "$task_branch"; then
+        if run_claude_for_fix "$board" "$task_clone" "$task_id" "$title" "$task_repo" "$issue" "$task_branch" "$task_existing_worktree"; then
           claude_spawned=$((claude_spawned + 1))
           board_spawned=1
         else

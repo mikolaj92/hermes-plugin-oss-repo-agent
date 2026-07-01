@@ -37,6 +37,8 @@ class RuntimeScriptTests(unittest.TestCase):
         self.assertIn("blocked_task_retriable", dispatch)
         self.assertIn("recover-blocked-fix-task", dispatch)
         self.assertIn("reassign", dispatch)
+        self.assertIn("diff --quiet", dispatch)
+        self.assertIn("existing_worktree", dispatch)
         self.assertIn("repo-agent worker finished without an open PR", dispatch)
         self.assertIn("CLAUDE_FINALIZED", dispatch)
         self.assertIn("complete-blocked-with-existing-pr", dispatch)
