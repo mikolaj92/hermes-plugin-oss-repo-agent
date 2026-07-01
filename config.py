@@ -14,6 +14,7 @@ class ConfigError(ValueError):
 
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_PREFIX_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+ASSIGNEE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
 POLICIES = {"block", "report", "ignore"}
 
 
@@ -41,6 +42,7 @@ class Labels:
 class GitHubConfig:
     cli: str = "gh"
     default_limit: int = 10
+    assignee: str | None = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any] | None) -> "GitHubConfig":
@@ -51,7 +53,13 @@ class GitHubConfig:
         cli = str(data.get("cli", "gh"))
         if not cli or any(part in cli for part in ("/", "\\", " ")):
             raise ConfigError("github.cli must be a command name such as gh")
-        return cls(cli=cli, default_limit=limit)
+        assignee = data.get("assignee")
+        assignee_text = str(assignee).strip() if assignee is not None else None
+        if assignee_text == "":
+            assignee_text = None
+        if assignee_text is not None and not ASSIGNEE_RE.match(assignee_text):
+            raise ConfigError("github.assignee must be a GitHub username")
+        return cls(cli=cli, default_limit=limit, assignee=assignee_text)
 
 
 @dataclass(frozen=True)

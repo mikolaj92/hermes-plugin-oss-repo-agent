@@ -11,7 +11,10 @@ hermes oss-repo-agent --config config.yaml dispatch --max 2
 
 The first command writes a starter `config.yaml` with `mode: dry-run`, `automerge: false`, and `executor.enabled: false`.
 
-To use real repositories, edit `repos:` in the generated config and keep running dry-run commands until the planned work looks correct.
+To use real repositories, edit `github.assignee` and `repos:` in the generated
+config and keep running dry-run commands until the planned work looks correct.
+The assignee is the public GitHub claim account; Kanban idempotency is still the
+hard duplicate guard.
 
 Live mutation requires both `mode: live` in config and an explicit CLI live flag. Executor runs also require `--run-executor` and `executor.enabled: true`.
 

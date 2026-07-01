@@ -15,6 +15,7 @@ ALLOW_NO_CHECKS="${HERMES_PR_ALLOW_NO_CHECKS:-0}"
 LOG_FILE="${HERMES_PR_TRIAGE_LOG:-/Users/mini-m4-main/.hermes/logs/repo-pr-triage.log}"
 LOCK_DIR="${HERMES_PR_TRIAGE_LOCK_DIR:-/tmp/hermes-repo-pr-triage.lock}"
 STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
+CLAIM_ASSIGNEE="${HERMES_REPO_AGENT_ASSIGNEE:-mikolaj92}"
 
 usage() {
   cat <<'USAGE'
@@ -239,6 +240,12 @@ Policy:
     --skill repo-fix-issue-pr >/dev/null
 }
 
+claim_pr_once() {
+  local repo="$1" number="$2"
+  [[ -n "$CLAIM_ASSIGNEE" ]] || return 0
+  gh pr edit "$number" --repo "$repo" --add-assignee "$CLAIM_ASSIGNEE" >/dev/null 2>&1
+}
+
 comment_pr_once() {
   local repo="$1" number="$2" reason="$3" title="$4"
   local marker body comments
@@ -279,6 +286,18 @@ for repo in "${REPOS[@]}"; do
     processed=$((processed + 1))
     decision=""
     reason=""
+
+    if [[ -n "$CLAIM_ASSIGNEE" && -n "$author" && "$author" == "$repo_owner" && "$head" == ai/fix/* ]]; then
+      if [[ "$DRY_RUN" == 1 ]]; then
+        log "DRY_RUN repo=$repo pr=$number action=would-assign assignee=$CLAIM_ASSIGNEE"
+      elif ! claim_pr_once "$repo" "$number"; then
+        log "ASSIGN_FAILED repo=$repo pr=$number assignee=$CLAIM_ASSIGNEE"
+        failures=$((failures + 1))
+        continue
+      else
+        log "PR_ASSIGNED repo=$repo pr=$number assignee=$CLAIM_ASSIGNEE"
+      fi
+    fi
 
     if [[ "$draft" == 1 ]]; then
       decision="skip"

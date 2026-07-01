@@ -15,7 +15,8 @@
       "additionalProperties": false,
       "properties": {
         "cli": {"type": "string"},
-        "default_limit": {"type": "integer", "minimum": 1, "maximum": 100}
+        "default_limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        "assignee": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}$"}
       }
     },
     "executor": {

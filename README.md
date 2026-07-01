@@ -4,6 +4,19 @@ Safe dry-run-first OSS maintainer automation for Hermes.
 
 Use it to inspect open GitHub issues, draft guarded work, and keep agent work inside a no-merge/no-force-push policy before any human-approved execution.
 
+GitHub remains a source of truth for public issues, pull requests, discussion,
+labels, checks, and merge state. Hermes Kanban is the internal execution ledger:
+task decomposition, agent assignment, worktrees, retries, blockers, and repair
+tasks. This plugin only bridges the two where needed:
+
+- claim eligible GitHub issues for the configured maintainer account,
+- ensure one idempotent Kanban intake task per GitHub issue,
+- claim owner-authored `ai/fix/*` pull requests during PR triage,
+- let agents use `gh` for actual GitHub actions such as creating PRs,
+  commenting evidence, labeling, or merging through the guarded triage gate.
+
+It intentionally does not mirror every Kanban status back into GitHub.
+
 ## Install
 
 ```bash
@@ -60,14 +73,15 @@ flag. Executor runs require live mode, `--run-executor`, and
 
 The production `mini-m4-0` automation is tracked in `scripts/`:
 
-- `repo_issue_intake.sh` polls eligible GitHub issues and creates idempotent
-  Hermes Kanban `[issue]` tasks.
+- `repo_issue_intake.sh` polls eligible GitHub issues, assigns them to the
+  configured repo-agent account, and creates idempotent Hermes Kanban `[issue]`
+  tasks.
 - `repo_issue_to_pr_dispatch.sh` turns `[issue]` tasks into explicit
   `[fix-pr]` work, runs Claude workers with per-board locks and a hard timeout,
   and handles `[fix-pr-review]` repair tasks from PR triage.
-- `repo_pr_triage.sh` watches owner-authored `ai/fix/*` PRs, requires labels,
-  checks, mergeability, and optional review approval before merge, comments on
-  blocked PRs, and queues Kanban repair work for fixable failures.
+- `repo_pr_triage.sh` watches and claims owner-authored `ai/fix/*` PRs, requires
+  labels, checks, mergeability, and optional review approval before merge,
+  comments on blocked PRs, and queues Kanban repair work for fixable failures.
 - `repo_agent_health.sh` checks launchd, `gh auth`, disk space, logs, stale
   locks, active workers, GitHub queues, and Kanban board stats.
 - `repo_agent_smoke.sh` runs local runtime regressions.
@@ -78,6 +92,7 @@ The launchd templates live in `templates/launchd/` and include
 
 Runtime defaults:
 
+- `HERMES_REPO_AGENT_ASSIGNEE=mikolaj92`
 - `HERMES_CLAUDE_TIMEOUT_SECONDS=5400`
 - `HERMES_ISSUE_TO_PR_MAX_CLAUDE_AGENTS=3`
 - `HERMES_STALE_LOCK_MINUTES=180`

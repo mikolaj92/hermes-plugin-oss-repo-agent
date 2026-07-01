@@ -33,6 +33,7 @@ class RuntimeScriptTests(unittest.TestCase):
     def test_triage_uses_checks_comments_and_fix_tasks(self):
         triage = self.read("scripts/repo_pr_triage.sh")
         self.assertIn('checks_pass "$repo" "$number"', triage)
+        self.assertIn("--add-assignee", triage)
         self.assertIn("comment_pr_once", triage)
         self.assertIn("review-not-approved", triage)
         self.assertIn("checks-not-passing", triage)
@@ -45,6 +46,7 @@ class RuntimeScriptTests(unittest.TestCase):
         self.assertIn("gh auth status", health)
         self.assertIn("launchctl bootstrap", health)
         self.assertIn("stale-lock", health)
+        self.assertIn("launchd-last-exit-nonzero", health)
         for name in [
             "oss-repo-agent-intake.plist.template",
             "oss-repo-agent-dispatch.plist.template",
@@ -66,6 +68,14 @@ class RuntimeScriptTests(unittest.TestCase):
             self.assertIn("mikolaj92/splot", text)
             self.assertIn("mikolaj92/my-auth", text)
             self.assertIn("mikolaj92/my-usermanager", text)
+
+    def test_intake_claims_github_issue_before_kanban_task(self):
+        intake = self.read("scripts/repo_issue_intake.sh")
+        self.assertIn("HERMES_REPO_AGENT_ASSIGNEE", intake)
+        self.assertIn("--add-assignee", intake)
+        self.assertIn("ready_label_missing", intake)
+        self.assertIn("claim-and-kanban-without-label", intake)
+        self.assertLess(intake.index("--add-assignee"), intake.index("hermes kanban --board"))
 
 
 if __name__ == "__main__":

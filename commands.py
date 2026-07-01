@@ -5,7 +5,7 @@ from argparse import ArgumentParser, Namespace
 from pathlib import Path
 from typing import Any
 
-from . import github_cli
+from . import github_cli, kanban
 from .config import ConfigError, OssRepoAgentConfig, default_config_path, load_config
 from .executor import Runner, planned_command
 
@@ -19,6 +19,7 @@ def setup_parser(parser: ArgumentParser) -> None:
     init.add_argument("--board", default="owner-example-repo")
     init.add_argument("--clone-root", default="./repos")
     init.add_argument("--worktree-root", default="./worktrees")
+    init.add_argument("--assignee", default=None)
     init.add_argument("--force", action="store_true")
     subparsers.add_parser("validate")
     bootstrap = subparsers.add_parser("bootstrap")
@@ -56,6 +57,7 @@ def run_from_args(args: Namespace, runner: Runner | None = None) -> dict[str, An
             str(getattr(args, "board", "owner-example-repo")),
             str(getattr(args, "clone_root", "./repos")),
             str(getattr(args, "worktree_root", "./worktrees")),
+            getattr(args, "assignee", None),
             bool(getattr(args, "force", False)),
         )
     cfg = load_config(getattr(args, "config", None))
@@ -75,13 +77,13 @@ def run_from_args(args: Namespace, runner: Runner | None = None) -> dict[str, An
     raise ConfigError(f"unknown command: {command}")
 
 
-def init_project(config_path: str | None, repo: str, board: str, clone_root: str, worktree_root: str, force: bool) -> dict[str, Any]:
+def init_project(config_path: str | None, repo: str, board: str, clone_root: str, worktree_root: str, assignee: str | None, force: bool) -> dict[str, Any]:
     target = Path(config_path).expanduser() if config_path else default_config_path()
     if target.exists() and not force:
         raise ConfigError(f"config already exists: {target}; pass --force to overwrite")
     target.parent.mkdir(parents=True, exist_ok=True)
     leaf = repo.split("/")[-1] or "example-repo"
-    text = starter_config(repo, board, clone_root, worktree_root, leaf)
+    text = starter_config(repo, board, clone_root, worktree_root, leaf, assignee or repo.split("/", 1)[0])
     target.write_text(text, encoding="utf-8")
     config_arg = str(target)
     return {
@@ -97,7 +99,7 @@ def init_project(config_path: str | None, repo: str, board: str, clone_root: str
     }
 
 
-def starter_config(repo: str, board: str, clone_root: str, worktree_root: str, leaf: str) -> str:
+def starter_config(repo: str, board: str, clone_root: str, worktree_root: str, leaf: str, assignee: str) -> str:
     clone_path = f"{clone_root.rstrip('/')}/{leaf}"
     return "\n".join([
         "version: 1",
@@ -109,6 +111,7 @@ def starter_config(repo: str, board: str, clone_root: str, worktree_root: str, l
         "github:",
         "  cli: gh",
         "  default_limit: 10",
+        f"  assignee: {assignee}",
         "labels:",
         "  ready: ai:ready",
         "  in_progress: ai:in-progress",
@@ -135,6 +138,7 @@ def safety_guards() -> list[str]:
     return [
         "dry-run unless config mode is live and --live or --apply is passed",
         "GitHub operations use gh CLI wrappers only",
+        "GitHub issues are claimed before Kanban intake when github.assignee is configured",
         "GitHub content is treated as untrusted evidence",
         "no PR merge support in v0",
         "no force-push or branch deletion behavior",
@@ -147,6 +151,7 @@ def validate(cfg: OssRepoAgentConfig) -> dict[str, Any]:
         "mode": cfg.mode,
         "repos": [repo.repo for repo in cfg.repos],
         "automerge": cfg.automerge,
+        "github_assignee": cfg.github.assignee,
         "safe_defaults": {
             "dry_run": cfg.mode == "dry-run",
             "automerge": cfg.automerge,
@@ -171,20 +176,68 @@ def bootstrap(cfg: OssRepoAgentConfig, apply: bool) -> dict[str, Any]:
     }
 
 
+def _issue_labels(issue: dict[str, Any]) -> set[str]:
+    return {str(label.get("name", "")) for label in issue.get("labels", []) if isinstance(label, dict)}
+
+
+def _eligible_issue(issue: dict[str, Any], cfg: OssRepoAgentConfig) -> bool:
+    labels = _issue_labels(issue)
+    return not labels.intersection({cfg.labels.in_progress, cfg.labels.blocked, cfg.labels.pr_opened})
+
+
+def _issue_rows(result_stdout: str) -> list[dict[str, Any]]:
+    if not result_stdout.strip():
+        return []
+    data = json.loads(result_stdout)
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
 def intake(cfg: OssRepoAgentConfig, live_flag: bool, limit: int, runner: Runner) -> dict[str, Any]:
     live = cfg.effective_live(live_flag)
-    commands = [github_cli.issue_list(repo.repo, limit) for repo in cfg.repos]
-    results = [runner.run(command, live=live) for command in commands]
+    list_commands = [github_cli.issue_list(repo.repo, limit) for repo in cfg.repos]
+    list_results = [runner.run(command, live=live) for command in list_commands]
+    mutation_commands = []
+    mutation_results = []
+    ensured_tasks = []
+    if live:
+        for repo, result in zip(cfg.repos, list_results):
+            if result.returncode != 0:
+                continue
+            for issue in _issue_rows(result.stdout):
+                if not _eligible_issue(issue, cfg):
+                    continue
+                number = int(issue.get("number", 0))
+                if number <= 0:
+                    continue
+                title = str(issue.get("title") or "")
+                body = f"GitHub issue: {issue.get('url') or ''}"
+                if cfg.github.assignee:
+                    claim = github_cli.issue_claim(repo.repo, number, cfg.github.assignee)
+                    mutation_commands.append(claim)
+                    claim_result = runner.run(claim, live=True)
+                    mutation_results.append(claim_result)
+                    if claim_result.returncode != 0:
+                        continue
+                draft = kanban.issue_task(repo.repo, repo.board, number, title, body, repo.clone_path)
+                create = kanban.create_task_spec(draft, assignee="repo-orchestrator")
+                mutation_commands.append(create)
+                create_result = runner.run(create, live=True)
+                mutation_results.append(create_result)
+                if create_result.returncode == 0:
+                    ensured_tasks.append({"repo": repo.repo, "issue": number, "board": repo.board, "idempotency_key": draft.idempotency_key})
     return {
         "ok": True,
         "effective_live": live,
         "planned_work": [
-            {"repo": repo.repo, "action": "read open issues through gh issue list", "mutation": live}
+            {"repo": repo.repo, "action": "claim eligible GitHub issues and ensure idempotent Kanban intake tasks", "mutation": live}
             for repo in cfg.repos
         ],
         "safety_guards": safety_guards(),
-        "commands": [planned_command(command) for command in commands],
-        "executed": [result.executed for result in results],
+        "commands": [planned_command(command) for command in (*list_commands, *mutation_commands)],
+        "executed": [result.executed for result in (*list_results, *mutation_results)],
+        "ensured_tasks": ensured_tasks,
     }
 
 
@@ -210,17 +263,57 @@ def dispatch(cfg: OssRepoAgentConfig, live_flag: bool, run_executor: bool, max_t
     }
 
 
+def _pr_rows(result_stdout: str) -> list[dict[str, Any]]:
+    if not result_stdout.strip():
+        return []
+    data = json.loads(result_stdout)
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _claimable_pr(repo_name: str, pr: dict[str, Any], branch_prefix: str) -> bool:
+    author = pr.get("author") if isinstance(pr.get("author"), dict) else {}
+    owner = repo_name.split("/", 1)[0]
+    head = str(pr.get("headRefName") or "")
+    return str(author.get("login") or "").lower() == owner.lower() and head.startswith(f"{branch_prefix.rstrip('/')}/")
+
+
 def pr_triage(cfg: OssRepoAgentConfig, live_flag: bool, comment: bool, runner: Runner) -> dict[str, Any]:
     live = cfg.effective_live(live_flag)
-    commands = [github_cli.pr_list(repo.repo) for repo in cfg.repos]
-    results = [runner.run(command, live=live) for command in commands]
+    list_commands = [github_cli.pr_list(repo.repo) for repo in cfg.repos]
+    list_results = [runner.run(command, live=live) for command in list_commands]
+    mutation_commands = []
+    mutation_results = []
+    claimed_prs = []
+    if live and cfg.github.assignee:
+        for repo, result in zip(cfg.repos, list_results):
+            if result.returncode != 0:
+                continue
+            for pr in _pr_rows(result.stdout):
+                if not _claimable_pr(repo.repo, pr, cfg.branch_prefix):
+                    continue
+                number = int(pr.get("number", 0))
+                if number <= 0:
+                    continue
+                claim = github_cli.pr_claim(repo.repo, number, cfg.github.assignee)
+                mutation_commands.append(claim)
+                claim_result = runner.run(claim, live=True)
+                mutation_results.append(claim_result)
+                if claim_result.returncode == 0:
+                    claimed_prs.append({"repo": repo.repo, "pr": number, "assignee": cfg.github.assignee})
     return {
         "ok": True,
         "effective_live": live,
         "comment_enabled": bool(comment) and live,
         "merge_behavior": "not-supported-in-v0",
-        "commands": [planned_command(command) for command in commands],
-        "executed": [result.executed for result in results],
+        "planned_work": [
+            {"repo": repo.repo, "action": "claim owner-authored agent PRs for triage; merge remains outside the CLI facade", "mutation": live}
+            for repo in cfg.repos
+        ],
+        "commands": [planned_command(command) for command in (*list_commands, *mutation_commands)],
+        "executed": [result.executed for result in (*list_results, *mutation_results)],
+        "claimed_prs": claimed_prs,
     }
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .executor import CommandSpec
 from .schema import branch_for_issue, fix_key, issue_key, untrusted_github_block
 
 
@@ -21,6 +22,33 @@ class TaskDraft:
 
 def qualified_skill(name: str) -> str:
     return f"{PLUGIN_NAME}:{name}"
+
+
+def create_task_spec(draft: TaskDraft, assignee: str, priority: int = 1) -> CommandSpec:
+    args = [
+        "hermes",
+        "kanban",
+        "--board",
+        draft.board,
+        "create",
+        draft.title,
+        "--body",
+        draft.body,
+        "--assignee",
+        assignee,
+        "--priority",
+        str(priority),
+        "--idempotency-key",
+        draft.idempotency_key,
+    ]
+    if draft.workspace:
+        args.extend(("--workspace", draft.workspace))
+    if draft.branch:
+        args.extend(("--branch", draft.branch))
+    for skill in draft.skills:
+        args.extend(("--skill", skill))
+    args.append("--json")
+    return CommandSpec(tuple(args))
 
 
 def issue_task(repo: str, board: str, number: int, title: str, body: str | None, clone_path: str | None) -> TaskDraft:

@@ -12,12 +12,13 @@ LOG_FILE="${HERMES_INTAKE_LOG:-/Users/mini-m4-main/.hermes/logs/repo-issue-intak
 LOCK_DIR="${HERMES_INTAKE_LOCK_DIR:-/tmp/hermes-repo-issue-intake.lock}"
 LIMIT="${HERMES_INTAKE_LIMIT:-10}"
 DRY_RUN="${HERMES_INTAKE_DRY_RUN:-0}"
+CLAIM_ASSIGNEE="${HERMES_REPO_AGENT_ASSIGNEE:-mikolaj92}"
 
 usage() {
   printf '%s\n' \
     'Usage: repo_issue_intake.sh [--dry-run|--live] [--limit N]' \
     '' \
-    'Poll selected GitHub issues with gh only and create idempotent Hermes Kanban intake tasks.' \
+    'Poll selected GitHub issues with gh only, claim them, and create idempotent Hermes Kanban intake tasks.' \
     'No PRs, merges, branches, or fixer dispatch are created by this script.'
 }
 
@@ -134,11 +135,12 @@ for entry in "${repos[@]}"; do
     continue
   fi
 
+  ready_label_exists=0
   required_labels="$(gh label list --repo "$repo" --limit 200 --json name --jq '.[].name')"
-  if ! label_present "$READY_LABEL" "$required_labels"; then
-    log "ERROR repo=$repo required label missing: $READY_LABEL"
-    failures=$((failures + 1))
-    continue
+  if label_present "$READY_LABEL" "$required_labels"; then
+    ready_label_exists=1
+  else
+    log "WARN repo=$repo ready_label_missing=$READY_LABEL action=claim-and-kanban-without-label"
   fi
 
   if ! issue_rows="$(gh issue list --repo "$repo" --state open --limit "$LIMIT" --json number,title,url,labels --jq "$ISSUE_JQ")"; then
@@ -172,18 +174,33 @@ Intake-only instructions:
     if [ "$DRY_RUN" = "1" ] || [ "$DRY_RUN" = "true" ]; then
       if [ "$has_ready" = "true" ]; then
         log "DRY_RUN repo=$repo issue=$number ready_label=already-present key=$key"
-      else
+      elif [ "$ready_label_exists" = "1" ]; then
         log "DRY_RUN repo=$repo issue=$number would_add_label=$READY_LABEL key=$key"
+      else
+        log "DRY_RUN repo=$repo issue=$number label_skipped_missing=$READY_LABEL key=$key"
+      fi
+      if [ -n "$CLAIM_ASSIGNEE" ]; then
+        log "DRY_RUN repo=$repo issue=$number would_assign=$CLAIM_ASSIGNEE key=$key"
       fi
       log "DRY_RUN repo=$repo issue=$number would_create_kanban board=$board title=$(printf '%s' "$task_title" | json_escape_for_body)"
       continue
     fi
 
-    if [ "$has_ready" != "true" ]; then
+    if [ -n "$CLAIM_ASSIGNEE" ]; then
+      if gh issue edit "$number" --repo "$repo" --add-assignee "$CLAIM_ASSIGNEE" >/dev/null; then
+        log "ISSUE_ASSIGNED repo=$repo issue=$number assignee=$CLAIM_ASSIGNEE"
+      else
+        log "ERROR repo=$repo issue=$number assignee_failed=$CLAIM_ASSIGNEE"
+        failures=$((failures + 1))
+        continue
+      fi
+    fi
+
+    if [ "$has_ready" != "true" ] && [ "$ready_label_exists" = "1" ]; then
       gh issue edit "$number" --repo "$repo" --add-label "$READY_LABEL" >/dev/null
       log "LABEL_ADDED repo=$repo issue=$number label=$READY_LABEL"
     else
-      log "LABEL_PRESENT repo=$repo issue=$number label=$READY_LABEL"
+      log "LABEL_PRESENT_OR_SKIPPED repo=$repo issue=$number label=$READY_LABEL exists=$ready_label_exists"
     fi
 
     hermes kanban --board "$board" create "$task_title" \

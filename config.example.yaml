@@ -7,6 +7,7 @@ automerge: false
 github:
   cli: gh
   default_limit: 10
+  assignee: owner
 labels:
   ready: ai:ready
   in_progress: ai:in-progress

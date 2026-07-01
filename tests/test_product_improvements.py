@@ -38,7 +38,7 @@ def write_config(path):
                 "worktree_root": "./worktrees",
                 "branch_prefix": "ai/fix",
                 "automerge": False,
-                "github": {"cli": "gh", "default_limit": 10},
+                "github": {"cli": "gh", "default_limit": 10, "assignee": "owner"},
                 "labels": {
                     "ready": "ai:ready",
                     "in_progress": "ai:in-progress",
@@ -117,6 +117,7 @@ class OssInitAndDryRunTests(unittest.TestCase):
             self.assertFalse(loaded.executor.enabled)
             self.assertEqual(loaded.repos[0].repo, "owner/example-repo")
             self.assertEqual(loaded.repos[0].board, "example-board")
+            self.assertEqual(loaded.github.assignee, "owner")
             self.assertIn("validate", " ".join(result["next_commands"]))
 
     def test_init_refuses_to_overwrite_existing_config_without_force(self):
@@ -161,6 +162,7 @@ class OssInitAndDryRunTests(unittest.TestCase):
             self.assertEqual(result["executed"], [False])
             self.assertEqual(result["planned_work"][0]["repo"], "owner/example-repo")
             self.assertFalse(result["planned_work"][0]["mutation"])
+            self.assertIn("Kanban", result["planned_work"][0]["action"])
             self.assertTrue(result["safety_guards"])
 
     def test_dispatch_dry_run_reinforces_executor_and_merge_safety(self):
@@ -179,6 +181,27 @@ class OssInitAndDryRunTests(unittest.TestCase):
             self.assertEqual(result["planned_work"][0]["repo"], "owner/example-repo")
             self.assertFalse(result["planned_work"][0]["mutation"])
             self.assertIn("no PR merge support in v0", result["safety_guards"])
+
+    def test_pr_triage_dry_run_plans_claim_without_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(Path(tmp) / "config.json")
+            args = self.parser().parse_args([
+                "--config",
+                str(config_path),
+                "pr-triage",
+            ])
+            result = self.commands.run_from_args(args)
+            self.assertFalse(result["effective_live"])
+            self.assertEqual(result["merge_behavior"], "not-supported-in-v0")
+            self.assertIn("claim", result["planned_work"][0]["action"])
+
+    def test_pr_claim_filter_only_accepts_owner_ai_fix_branches(self):
+        pr = {"number": 1, "author": {"login": "owner"}, "headRefName": "ai/fix/one"}
+        external = {"number": 2, "author": {"login": "contributor"}, "headRefName": "ai/fix/two"}
+        non_agent = {"number": 3, "author": {"login": "owner"}, "headRefName": "feature/two"}
+        self.assertTrue(self.commands._claimable_pr("owner/repo", pr, "ai/fix"))
+        self.assertFalse(self.commands._claimable_pr("owner/repo", external, "ai/fix"))
+        self.assertFalse(self.commands._claimable_pr("owner/repo", non_agent, "ai/fix"))
 
 
 if __name__ == "__main__":

@@ -97,8 +97,14 @@ now="$(date +%s)"
 for item in "${jobs[@]}"; do
   IFS='|' read -r label plist runtime_log <<<"$item"
   if launchctl print "user/$uid/$label" >/dev/null 2>&1; then
-    summary="$(launchctl print "user/$uid/$label" | awk '/runs =|last exit code =|run interval =/ {gsub(/^[ \t]+/, ""); printf "%s; ", $0}')"
+    launch_info="$(launchctl print "user/$uid/$label")"
+    summary="$(printf '%s\n' "$launch_info" | awk '/runs =|last exit code =|run interval =/ {gsub(/^[ \t]+/, ""); printf "%s; ", $0}')"
     log OK "launchd label=$label ${summary:-loaded}"
+    last_exit="$(printf '%s\n' "$launch_info" | awk -F '= ' '/last exit code =/ {gsub(/[^0-9-].*/, "", $2); print $2; exit}')"
+    if [[ -n "$last_exit" && "$last_exit" != "0" ]]; then
+      log WARN "launchd-last-exit-nonzero label=$label exit_code=$last_exit"
+      warnings=$((warnings + 1))
+    fi
   else
     log ERROR "launchd-missing label=$label plist=$plist"
     failures=$((failures + 1))
