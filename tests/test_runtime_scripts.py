@@ -55,6 +55,18 @@ class RuntimeScriptTests(unittest.TestCase):
             self.assertIn("LimitLoadToSessionType", template)
             self.assertIn("Background", template)
 
+    def test_runtime_scripts_include_added_public_repos(self):
+        for relative in [
+            "scripts/repo_issue_intake.sh",
+            "scripts/repo_issue_to_pr_dispatch.sh",
+            "scripts/repo_pr_triage.sh",
+            "scripts/repo_agent_health.sh",
+        ]:
+            text = self.read(relative)
+            self.assertIn("mikolaj92/splot", text)
+            self.assertIn("mikolaj92/my-auth", text)
+            self.assertIn("mikolaj92/my-usermanager", text)
+
 
 if __name__ == "__main__":
     unittest.main()

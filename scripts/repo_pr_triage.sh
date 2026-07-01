@@ -79,6 +79,9 @@ REPOS=(
   "mikolaj92/reviewkit"
   "mikolaj92/anonimizator3000"
   "mikolaj92/datasource-kit"
+  "mikolaj92/splot"
+  "mikolaj92/my-auth"
+  "mikolaj92/my-usermanager"
   "mikolaj92/msds-portal"
   "mikolaj92/swift-openapi-dynamic"
   "mikolaj92/OpenAPITransportKit"
@@ -90,6 +93,9 @@ board_for_repo() {
     mikolaj92/reviewkit) printf '%s\n' "mikolaj92-reviewkit" ;;
     mikolaj92/anonimizator3000) printf '%s\n' "mikolaj92-anonimizator3000" ;;
     mikolaj92/datasource-kit) printf '%s\n' "mikolaj92-datasource-kit" ;;
+    mikolaj92/splot) printf '%s\n' "mikolaj92-splot" ;;
+    mikolaj92/my-auth) printf '%s\n' "mikolaj92-my-auth" ;;
+    mikolaj92/my-usermanager) printf '%s\n' "mikolaj92-my-usermanager" ;;
     mikolaj92/msds-portal) printf '%s\n' "mikolaj92-msds-portal" ;;
     mikolaj92/swift-openapi-dynamic) printf '%s\n' "mikolaj92-swift-openapi-dynamic" ;;
     mikolaj92/OpenAPITransportKit) printf '%s\n' "mikolaj92-openapi-transport-kit" ;;
@@ -103,6 +109,9 @@ clone_for_repo() {
     mikolaj92/reviewkit) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/reviewkit" ;;
     mikolaj92/anonimizator3000) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/anonimizator3000" ;;
     mikolaj92/datasource-kit) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/datasource-kit" ;;
+    mikolaj92/splot) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/splot" ;;
+    mikolaj92/my-auth) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/my-auth" ;;
+    mikolaj92/my-usermanager) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/my-usermanager" ;;
     mikolaj92/msds-portal) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/msds-portal" ;;
     mikolaj92/swift-openapi-dynamic) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/swift-openapi-dynamic" ;;
     mikolaj92/OpenAPITransportKit) printf '%s\n' "/Users/mini-m4-main/Developer/hermes-repos/OpenAPITransportKit" ;;
