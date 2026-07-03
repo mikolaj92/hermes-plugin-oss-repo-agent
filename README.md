@@ -71,6 +71,11 @@ Live mutation requires both `mode: live` in config and an explicit live/apply CL
 flag. Executor runs require live mode, `--run-executor`, and
 `executor.enabled: true`.
 
+The mini dispatcher keeps unsafe Claude execution disabled by default with
+`HERMES_ALLOW_UNSAFE_CLAUDE=0`. Passing `--run-opencode` does not start Claude unless
+an operator also sets `HERMES_ALLOW_UNSAFE_CLAUDE=1` after explicit human approval
+and sandboxing review.
+
 ## Mini runtime harness
 
 The production `mini-m4-0` automation is tracked in `scripts/`:

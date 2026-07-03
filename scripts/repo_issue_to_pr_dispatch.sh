@@ -89,9 +89,10 @@ require_cmd hermes
 require_cmd python3
 require_cmd git
 require_cmd gh
-if [[ "$RUN_OPENCODE" == 1 && "$ALLOW_UNSAFE_CLAUDE" == 1 ]]; then
-  require_cmd claude
-fi
+# Claude execution is permitted only by the combined gate:
+# "$RUN_OPENCODE" == 1 && "$ALLOW_UNSAFE_CLAUDE" == 1
+# Check for the claude binary lazily at the actual spawn point so non-spawn
+# paths such as existing-PR finalization and retry recovery stay available.
 
 if [[ -d "$LOCK_DIR" ]]; then
   find "$LOCK_DIR" -maxdepth 0 -mmin "+$STALE_LOCK_MINUTES" -exec rmdir {} \; 2>/dev/null || true
@@ -553,6 +554,10 @@ run_claude_for_fix() {
 
   if [[ "$ALLOW_UNSAFE_CLAUDE" != 1 ]]; then
     log "CLAUDE_SKIPPED task=$task_id reason=unsafe-claude-disabled repo=$repo branch=$branch opt_in=HERMES_ALLOW_UNSAFE_CLAUDE=1 guidance=repo-agent unsafe Claude execution disabled by default; set HERMES_ALLOW_UNSAFE_CLAUDE=1 only after human approval and sandboxing review"
+    return "$OPENCODE_DEFERRED_RC"
+  fi
+  if ! command -v claude >/dev/null 2>&1; then
+    log "CLAUDE_SKIPPED task=$task_id reason=missing-command command=claude repo=$repo branch=$branch"
     return "$OPENCODE_DEFERRED_RC"
   fi
 

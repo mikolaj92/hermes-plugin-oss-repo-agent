@@ -49,7 +49,6 @@ require_cmd() {
 require_cmd git
 require_cmd gh
 require_cmd python3
-require_cmd hermes
 
 if [[ -d "$LOCK_DIR" ]]; then
   find "$LOCK_DIR" -maxdepth 0 -mmin "+$STALE_LOCK_MINUTES" -exec rmdir {} \; 2>/dev/null || true
@@ -98,6 +97,10 @@ GitHub issue is closed, but cleanup could not remove this controlled worktree
 because it contains local changes. Inspect the worktree, preserve anything
 valuable, then clean or remove it so repo_agent_cleanup can finish."
 
+  if ! command -v hermes >/dev/null 2>&1; then
+    log "MAINTENANCE_TASK_SKIPPED repo=$repo issue=$issue branch=$branch reason=missing-command command=hermes"
+    return 0
+  fi
   hermes kanban --board "$board" create "$title" \
     --body "$body" \
     --assignee "$MAINTENANCE_ASSIGNEE" \
