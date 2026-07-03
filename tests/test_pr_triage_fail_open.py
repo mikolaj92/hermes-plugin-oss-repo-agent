@@ -103,6 +103,61 @@ class PrTriageFailOpenTests(unittest.TestCase):
             self.assertIn("DONE mode=live", combined_output)
             self.assertIn("failures=1", combined_output)
 
+    def test_skips_merge_when_live_label_repair_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_path:
+            # Given: a clean owner-authored ai/fix PR missing required AI labels.
+            root = Path(temporary_path)
+            calls_file = root / "calls.log"
+            log_file = root / "triage.log"
+            repos_file = root / "repos.txt"
+            lock_dir = root / "triage.lock"
+            repos_file.write_text("owner/good|board-good|/tmp/good|10\n")
+            pr_list_json = json.dumps(
+                [
+                    {
+                        "number": 7,
+                        "title": "[fix-pr] repair labels first",
+                        "url": "https://example.invalid/pr/7",
+                        "headRefName": "ai/fix/repair-labels",
+                        "baseRefName": "main",
+                        "isDraft": False,
+                        "mergeStateStatus": "CLEAN",
+                        "reviewDecision": "APPROVED",
+                        "labels": [],
+                        "author": {"login": "owner"},
+                    }
+                ]
+            )
+
+            # When: live label reconciliation fails through fake gh.
+            result = self._run_triage(
+                calls_file=calls_file,
+                log_file=log_file,
+                repos_file=repos_file,
+                lock_dir=lock_dir,
+                live=True,
+                pr_list_json=pr_list_json,
+                label_repair_fails=True,
+            )
+
+            # Then: the PR is skipped for this run and never merged unlabelled.
+            combined_output = result.stdout + result.stderr + self._read_text(log_file)
+            calls = self._read_text(calls_file)
+            self.assertEqual(1, result.returncode, combined_output + calls)
+            self.assertIn("LABEL_REPAIR_FAILED repo=owner/good pr=7", combined_output)
+            self.assertIn(
+                "DECISION repo=owner/good pr=7 decision=skip reason=label-repair-failed",
+                combined_output,
+            )
+            self.assertIn("DONE mode=live", combined_output)
+            self.assertIn("failures=1", combined_output)
+            self.assertIn(
+                "GH\tpr edit 7 --repo owner/good --add-label ai:generated --add-label ai:pr-opened",
+                calls,
+            )
+            self.assertNotIn("GH\tpr merge 7 --repo owner/good --merge", calls)
+            self.assertNotIn("decision=merge reason=own-pr-clean", combined_output)
+
     def _run_triage(
         self,
         *,
@@ -112,6 +167,7 @@ class PrTriageFailOpenTests(unittest.TestCase):
         lock_dir: Path,
         live: bool = False,
         pr_list_json: str = "",
+        label_repair_fails: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.update(
@@ -126,6 +182,8 @@ class PrTriageFailOpenTests(unittest.TestCase):
         mode_argument = "--live" if live else "--dry-run"
         if pr_list_json:
             env["GH_PR_LIST_JSON"] = pr_list_json
+        if label_repair_fails:
+            env["GH_PR_EDIT_FAIL"] = "1"
         if live:
             env.update(
                 {
@@ -180,6 +238,10 @@ def _fake_gh_function() -> str:
     printf '[]\n'
     return 0
   fi
+    if [[ "${1:-}" == "pr" && "${2:-}" == "edit" && "${3:-}" == "7" && "${GH_PR_EDIT_FAIL:-}" == "1" && " $* " == *" --add-label "* ]]; then
+      printf 'fake label repair failure\n' >&2
+      return 42
+    fi
   if [[ "${1:-}" == "pr" && "${2:-}" == "merge" && "${3:-}" == "7" ]]; then
     printf 'fake merge failure\n' >&2
     return 42

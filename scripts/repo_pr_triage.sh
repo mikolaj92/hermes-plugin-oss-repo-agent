@@ -327,13 +327,17 @@ for entry in "${REPOS[@]}"; do
     elif [[ ",$labels," != *",ai:generated,"* || ",$labels," != *",ai:pr-opened,"* ]]; then
       if [[ "$DRY_RUN" == 1 ]]; then
         log "DRY_RUN repo=$repo pr=$number action=repair-labels"
+        labels="${labels:+$labels,}ai:generated,ai:pr-opened"
       elif gh pr edit "$number" --repo "$repo" --add-label ai:generated --add-label ai:pr-opened >/dev/null; then
         log "LABELS_REPAIRED repo=$repo pr=$number"
+        labels="${labels:+$labels,}ai:generated,ai:pr-opened"
       else
         log "LABEL_REPAIR_FAILED repo=$repo pr=$number"
+        decision="skip"
+        reason="label-repair-failed"
+        skipped=$((skipped + 1))
         failures=$((failures + 1))
       fi
-      labels="${labels:+$labels,}ai:generated,ai:pr-opened"
     fi
 
     if [[ -n "$decision" ]]; then
