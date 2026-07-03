@@ -51,7 +51,7 @@ agent work. The adapter reconciles the two without inventing a second workflow.
 | --- | --- |
 | Owner-authored `ai/fix/*` PR | Assign to `mikolaj92` for triage. |
 | External-author PR | Skip; adapter must not take over contributor work. |
-| Missing `ai:generated` or `ai:pr-opened` | Skip; not an agent-owned PR. |
+| Missing `ai:generated` or `ai:pr-opened` | Owner-authored or empty-author `ai/fix/*` PRs attempt label repair first; if repair cannot establish the labels, skip/report failure. External or non-agent PRs remain skipped. |
 | Checks failing, merge conflicts, or missing test evidence | Create `[fix-pr-review]` with checks/review context. |
 | Review not approved and approval required | Block/comment only; no repair task is useful. |
 | Clean, checks passing, approval satisfied, automerge enabled | Merge through GitHub gate. |
