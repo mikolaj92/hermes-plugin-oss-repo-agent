@@ -13,6 +13,7 @@ AUTOMERGE="${HERMES_PR_AUTOMERGE:-0}"
 REQUIRE_APPROVED="${HERMES_PR_REQUIRE_APPROVED:-1}"
 ALLOW_NO_CHECKS="${HERMES_PR_ALLOW_NO_CHECKS:-0}"
 REQUIRE_TEST_EVIDENCE="${HERMES_PR_REQUIRE_TEST_EVIDENCE:-1}"
+PR_LIST_LIMIT="${HERMES_PR_TRIAGE_LIST_LIMIT:-100}"
 LOG_FILE="${HERMES_PR_TRIAGE_LOG:-/Users/mini-m4-main/.hermes/logs/repo-pr-triage.log}"
 LOCK_DIR="${HERMES_PR_TRIAGE_LOCK_DIR:-/tmp/hermes-repo-pr-triage.lock}"
 STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
@@ -278,12 +279,16 @@ skipped=0
 commented=0
 failures=0
 
-log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) comment=$COMMENT_ENABLED automerge=$AUTOMERGE require_approved=$REQUIRE_APPROVED allow_no_checks=$ALLOW_NO_CHECKS require_test_evidence=$REQUIRE_TEST_EVIDENCE"
+log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) comment=$COMMENT_ENABLED automerge=$AUTOMERGE require_approved=$REQUIRE_APPROVED allow_no_checks=$ALLOW_NO_CHECKS require_test_evidence=$REQUIRE_TEST_EVIDENCE pr_list_limit=$PR_LIST_LIMIT"
 
 for entry in "${REPOS[@]}"; do
   IFS='|' read -r repo board clone_path repo_priority <<<"$entry"
   repo_owner="${repo%%/*}"
-  prs_json="$(gh pr list --repo "$repo" --state open --json number,title,url,headRefName,baseRefName,isDraft,mergeStateStatus,reviewDecision,labels,author)"
+  if ! prs_json="$(gh pr list --repo "$repo" --state open --limit "$PR_LIST_LIMIT" --json number,title,url,headRefName,baseRefName,isDraft,mergeStateStatus,reviewDecision,labels,author)"; then
+    log "PR_LIST_FAILED repo=$repo"
+    failures=$((failures + 1))
+    continue
+  fi
   if [[ "$prs_json" == "[]" ]]; then
     log "NO_OPEN_PRS repo=$repo"
     continue
@@ -320,6 +325,20 @@ for entry in "${REPOS[@]}"; do
       reason="head-branch-not-ai-fix"
       skipped=$((skipped + 1))
     elif [[ ",$labels," != *",ai:generated,"* || ",$labels," != *",ai:pr-opened,"* ]]; then
+      if [[ "$DRY_RUN" == 1 ]]; then
+        log "DRY_RUN repo=$repo pr=$number action=repair-labels"
+      elif gh pr edit "$number" --repo "$repo" --add-label ai:generated --add-label ai:pr-opened >/dev/null; then
+        log "LABELS_REPAIRED repo=$repo pr=$number"
+      else
+        log "LABEL_REPAIR_FAILED repo=$repo pr=$number"
+        failures=$((failures + 1))
+      fi
+      labels="${labels:+$labels,}ai:generated,ai:pr-opened"
+    fi
+
+    if [[ -n "$decision" ]]; then
+      :
+    elif [[ ",$labels," != *",ai:generated,"* || ",$labels," != *",ai:pr-opened,"* ]]; then
       decision="skip"
       reason="missing-required-ai-labels"
       skipped=$((skipped + 1))
@@ -353,8 +372,13 @@ for entry in "${REPOS[@]}"; do
     log "DECISION repo=$repo pr=$number decision=$decision reason=$reason head=$head base=$base merge_state=${merge_state:-none} labels=$(printf '%q' "$labels")"
 
     if [[ "$DRY_RUN" == 0 && "$decision" == "merge" ]]; then
-      gh pr merge "$number" --repo "$repo" --merge >/dev/null
-      merged=$((merged + 1))
+      if gh pr merge "$number" --repo "$repo" --merge >/dev/null; then
+        merged=$((merged + 1))
+      else
+        log "MERGE_FAILED repo=$repo pr=$number"
+        failures=$((failures + 1))
+        continue
+      fi
     elif [[ "$DRY_RUN" == 0 && "$decision" == "fix" ]]; then
       if comment_pr_once "$repo" "$number" "$reason" "Queued Kanban follow-up for PR ${repo}#${number}."; then
         commented=$((commented + 1))

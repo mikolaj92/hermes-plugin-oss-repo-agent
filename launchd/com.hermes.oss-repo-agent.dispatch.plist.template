@@ -34,6 +34,9 @@
     <string>0</string>
     <key>HERMES_ISSUE_TO_PR_RUN_OPENCODE</key>
     <string>1</string>
+    <!-- Keep unsafe Claude execution disabled unless an operator has explicit human approval and has reviewed sandboxing. -->
+    <key>HERMES_ALLOW_UNSAFE_CLAUDE</key>
+    <string>0</string>
     <key>HERMES_ISSUE_TO_PR_BLOCK_INTAKE</key>
     <string>0</string>
     <!-- Max concurrent claude agents (default 3) -->

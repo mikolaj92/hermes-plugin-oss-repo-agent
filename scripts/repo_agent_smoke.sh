@@ -27,6 +27,16 @@ grep -Fq 'hermes update --backup --yes' "$ROOT/scripts/repo_agent_hermes_update.
 grep -Fq 'repo_issue_intake.sh' "$ROOT/scripts/repo_agent_backfill.sh"
 grep -Fq 'repo_pr_triage.sh' "$ROOT/scripts/repo_agent_webhook.sh"
 grep -Fq 'GitHub to Hermes Kanban Mapping' "$ROOT/docs/github-kanban-mapping.md"
+grep -Fq 'KANBAN_LIST_FAILED' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
+grep -Fq 'candidate_limit = max(limit * 5, limit + 5)' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
+grep -Fq 'PR_LIST_FAILED' "$ROOT/scripts/repo_pr_triage.sh"
+grep -Fq 'MERGE_FAILED' "$ROOT/scripts/repo_pr_triage.sh"
+grep -Fq 'HERMES_PR_TRIAGE_LIST_LIMIT' "$ROOT/scripts/repo_pr_triage.sh"
+grep -Fq -- '--limit "$PR_LIST_LIMIT"' "$ROOT/scripts/repo_pr_triage.sh"
+grep -Fq 'watchdog-worker-runtime-timeout' "$ROOT/scripts/repo_agent_health.sh"
+grep -Fq 'watchdog-worker-log-stale' "$ROOT/scripts/repo_agent_health.sh"
+grep -Fq 'ASSIGN_FAILED' "$ROOT/scripts/repo_agent_status.sh"
+grep -Fq 'PR_ASSIGNED' "$ROOT/scripts/repo_agent_status.sh"
 
 python3 -m unittest discover -s "$ROOT/tests"
 

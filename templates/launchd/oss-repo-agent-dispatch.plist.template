@@ -16,5 +16,11 @@
   <true/>
   <key>LimitLoadToSessionType</key>
   <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Keep unsafe Claude execution disabled unless explicit human approval and sandboxing review have happened. -->
+    <key>HERMES_ALLOW_UNSAFE_CLAUDE</key>
+    <string>0</string>
+  </dict>
 </dict>
 </plist>

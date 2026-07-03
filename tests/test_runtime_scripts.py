@@ -28,6 +28,59 @@ class RuntimeScriptTests(unittest.TestCase):
         self.assertIn("Hermes task", dispatch)
         self.assertIn("STALE_BOARD_LOCK", dispatch)
 
+    def test_dispatch_requires_explicit_unsafe_claude_opt_in(self):
+        dispatch = self.read("scripts/repo_issue_to_pr_dispatch.sh")
+        self.assertIn("HERMES_ALLOW_UNSAFE_CLAUDE", dispatch)
+        self.assertIn("ALLOW_UNSAFE_CLAUDE", dispatch)
+        self.assertIn('"$RUN_OPENCODE" == 1 && "$ALLOW_UNSAFE_CLAUDE" == 1', dispatch)
+        self.assertIn("unsafe-claude-disabled", dispatch)
+        self.assertIn("CLAUDE_SKIPPED", dispatch)
+        self.assertIn("repo-agent unsafe Claude execution disabled by default", dispatch)
+        self.assertIn("opt_in=HERMES_ALLOW_UNSAFE_CLAUDE=1", dispatch)
+        self.assertIn("unsafe_claude=$ALLOW_UNSAFE_CLAUDE", dispatch)
+
+    def test_dispatch_treats_opencode_deferrals_as_nonfatal(self):
+        dispatch = self.read("scripts/repo_issue_to_pr_dispatch.sh")
+        self.assertIn("OPENCODE_DEFERRED_RC=10", dispatch)
+        self.assertIn('return "$OPENCODE_DEFERRED_RC"', dispatch)
+        self.assertIn("opencode_rc=$?", dispatch)
+        self.assertIn('elif [[ "$opencode_rc" == "$OPENCODE_DEFERRED_RC" ]]', dispatch)
+        self.assertIn('log "OPENCODE_DEFERRED task=$task_id repo=$task_repo issue=$issue rc=$opencode_rc"', dispatch)
+        self.assertIn("deferred=$((deferred + 1))", dispatch)
+        self.assertIn("deferred=$deferred", dispatch)
+
+    def test_deployment_surfaces_keep_unsafe_claude_disabled_by_default(self):
+        cron = self.read("scripts/cron_repo_issue_to_pr_dispatch.sh")
+        self.assertIn("HERMES_ISSUE_TO_PR_RUN_OPENCODE=1", cron)
+        self.assertIn("HERMES_ALLOW_UNSAFE_CLAUDE=0", cron)
+        self.assertIn("explicit human approval", cron)
+
+        launchd = self.read("launchd/com.hermes.oss-repo-agent.dispatch.plist.template")
+        self.assertIn("<key>HERMES_ALLOW_UNSAFE_CLAUDE</key>", launchd)
+        self.assertRegex(
+            launchd,
+            r"<key>HERMES_ALLOW_UNSAFE_CLAUDE</key>\s*<string>0</string>",
+        )
+        self.assertIn("explicit human approval", launchd)
+
+        template = self.read("templates/launchd/oss-repo-agent-dispatch.plist.template")
+        self.assertIn("<key>EnvironmentVariables</key>", template)
+        self.assertIn("<key>HERMES_ALLOW_UNSAFE_CLAUDE</key>", template)
+        self.assertRegex(
+            template,
+            r"<key>HERMES_ALLOW_UNSAFE_CLAUDE</key>\s*<string>0</string>",
+        )
+
+        readme = self.read("README.md")
+        self.assertIn("HERMES_ALLOW_UNSAFE_CLAUDE=0", readme)
+        self.assertIn("HERMES_ALLOW_UNSAFE_CLAUDE=1", readme)
+        self.assertIn("--run-opencode` does not start Claude unless", readme)
+
+        after_install = self.read("after-install.md")
+        self.assertIn("HERMES_ALLOW_UNSAFE_CLAUDE=0", after_install)
+        self.assertIn("HERMES_ALLOW_UNSAFE_CLAUDE=1", after_install)
+        self.assertIn("--run-opencode` is not enough to start Claude", after_install)
+
     def test_dispatch_cleans_stale_issue_tasks(self):
         dispatch = self.read("scripts/repo_issue_to_pr_dispatch.sh")
         self.assertIn("issue_state", dispatch)
@@ -47,9 +100,11 @@ class RuntimeScriptTests(unittest.TestCase):
         self.assertIn("selection_reason", dispatch)
         self.assertIn("repo-agent worker finished without an open PR", dispatch)
         self.assertIn("CLAUDE_FINALIZED", dispatch)
-        self.assertIn("CLAUDE_RUNNING", dispatch)
-        self.assertIn("CLAUDE_FINISHED", dispatch)
-        self.assertNotIn('>>"$log_file" 2>&1 &', dispatch)
+        self.assertIn("CLAUDE_SPAWNED", dispatch)
+        self.assertIn("run_claude_for_fix_worker", dispatch)
+        self.assertIn("worktree-dirty-after-claude", dispatch)
+        self.assertIn("blocked_task_manual_only", dispatch)
+        self.assertIn('>>"$log_file" 2>&1 &', dispatch)
         self.assertIn("complete-blocked-with-existing-pr", dispatch)
         self.assertIn("repo-agent-fixer", dispatch)
         self.assertNotIn('kanban --board "$board" block "$task_id" "Hermes repo-agent started Claude worker', dispatch)
@@ -92,6 +147,55 @@ class RuntimeScriptTests(unittest.TestCase):
             template = self.read(f"templates/launchd/{name}")
             self.assertIn("LimitLoadToSessionType", template)
             self.assertIn("Background", template)
+
+    def test_runtime_visibility_contracts_cover_anti_stall_failures(self):
+        dispatch = self.read("scripts/repo_issue_to_pr_dispatch.sh")
+        triage = self.read("scripts/repo_pr_triage.sh")
+        health = self.read("scripts/repo_agent_health.sh")
+        status = self.read("scripts/repo_agent_status.sh")
+        smoke = self.read("scripts/repo_agent_smoke.sh")
+
+        self.assertIn("KANBAN_LIST_FAILED", dispatch)
+        self.assertIn("candidate_limit = max(limit * 5, limit + 5)", dispatch)
+        self.assertIn("PR_LIST_FAILED", triage)
+        self.assertIn("MERGE_FAILED", triage)
+        self.assertIn("HERMES_PR_TRIAGE_LIST_LIMIT", triage)
+        self.assertIn("PR_LIST_LIMIT", triage)
+        self.assertIn('--limit "$PR_LIST_LIMIT"', triage)
+        for signal in [
+            "watchdog-worker-runtime-ok",
+            "watchdog-worker-runtime-timeout",
+            "watchdog-worker-runtime-none",
+            "watchdog-worker-log-recent",
+            "watchdog-worker-log-stale",
+            "watchdog-worker-log-missing",
+        ]:
+            self.assertIn(signal, health)
+        for signal in [
+            "ASSIGN_FAILED",
+            "PR_ASSIGNED",
+            "FIX_TASK_CREATED",
+            "FIX_TASK_FAILED",
+            "LOCK_HELD",
+            "KANBAN_LIST_FAILED",
+            "PR_LIST_FAILED",
+            "MERGE_FAILED",
+            "watchdog-worker-",
+        ]:
+            self.assertIn(signal, status)
+        for signal in [
+            "KANBAN_LIST_FAILED",
+            "candidate_limit = max(limit * 5, limit + 5)",
+            "PR_LIST_FAILED",
+            "MERGE_FAILED",
+            "HERMES_PR_TRIAGE_LIST_LIMIT",
+            '--limit "$PR_LIST_LIMIT"',
+            "watchdog-worker-runtime-timeout",
+            "watchdog-worker-log-stale",
+            "ASSIGN_FAILED",
+            "PR_ASSIGNED",
+        ]:
+            self.assertIn(signal, smoke)
 
     def test_cleanup_and_status_scripts_cover_autonomy_gaps(self):
         cleanup = self.read("scripts/repo_agent_cleanup.sh")

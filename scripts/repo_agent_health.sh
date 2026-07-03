@@ -9,6 +9,7 @@ export PATH="/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local/bin:/us
 LOG_FILE="${HERMES_REPO_AGENT_HEALTH_LOG:-/Users/mini-m4-main/.hermes/logs/repo-agent-health.log}"
 STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
 MAX_LOG_AGE_SECONDS="${HERMES_REPO_AGENT_MAX_LOG_AGE_SECONDS:-1800}"
+WORKER_TIMEOUT_SECONDS="${HERMES_REPO_AGENT_WORKER_TIMEOUT_SECONDS:-7200}"
 MIN_FREE_GB="${HERMES_REPO_AGENT_MIN_FREE_GB:-5}"
 REPAIR=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,7 +70,7 @@ done < <(repo_agent_repos)
 failures=0
 warnings=0
 
-for cmd in gh hermes git python3 launchctl df find; do
+for cmd in gh hermes git python3 launchctl df find ps; do
   require_cmd "$cmd" || failures=$((failures + 1))
 done
 
@@ -151,12 +152,15 @@ for item in "${jobs[@]}"; do
     age=$((now - mtime))
     if [[ "$age" -gt "$MAX_LOG_AGE_SECONDS" ]]; then
       log WARN "stale-log label=$label age_seconds=$age path=$runtime_log"
+      log WARN "watchdog-worker-log-stale label=$label age_seconds=$age path=$runtime_log"
       warnings=$((warnings + 1))
     else
       log OK "recent-log label=$label age_seconds=$age"
+      log OK "watchdog-worker-log-recent label=$label age_seconds=$age"
     fi
   else
     log WARN "missing-log label=$label path=$runtime_log"
+    log WARN "watchdog-worker-log-missing label=$label path=$runtime_log"
     warnings=$((warnings + 1))
   fi
 done
@@ -175,6 +179,18 @@ active_workers="$(pgrep -fl 'claude.*Hermes task' 2>/dev/null || true)"
 if [[ -n "$active_workers" ]]; then
   while IFS= read -r line; do
     log OK "active-worker $line"
+    worker_pid="${line%% *}"
+    worker_age=0
+    if [[ "$worker_pid" =~ ^[0-9]+$ ]]; then
+      worker_age="$(ps -o etimes= -p "$worker_pid" 2>/dev/null | tr -d ' ' || true)"
+      [[ "$worker_age" =~ ^[0-9]+$ ]] || worker_age=0
+    fi
+    if [[ "$worker_age" -gt "$WORKER_TIMEOUT_SECONDS" ]]; then
+      log WARN "watchdog-worker-runtime-timeout pid=$worker_pid age_seconds=$worker_age timeout_seconds=$WORKER_TIMEOUT_SECONDS detail=$(printf '%q' "$line")"
+      warnings=$((warnings + 1))
+    else
+      log OK "watchdog-worker-runtime-ok pid=$worker_pid age_seconds=$worker_age timeout_seconds=$WORKER_TIMEOUT_SECONDS detail=$(printf '%q' "$line")"
+    fi
     active_worker_seen=1
   done <<<"$active_workers"
 fi
@@ -185,6 +201,14 @@ while IFS= read -r pid_file; do
   pid="$(cat "$pid_file" 2>/dev/null || true)"
   if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
     log OK "active-worker-lock pid=$pid path=$lock"
+    worker_age="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$worker_age" =~ ^[0-9]+$ ]] || worker_age=0
+    if [[ "$worker_age" -gt "$WORKER_TIMEOUT_SECONDS" ]]; then
+      log WARN "watchdog-worker-runtime-timeout pid=$pid age_seconds=$worker_age timeout_seconds=$WORKER_TIMEOUT_SECONDS path=$lock"
+      warnings=$((warnings + 1))
+    else
+      log OK "watchdog-worker-runtime-ok pid=$pid age_seconds=$worker_age timeout_seconds=$WORKER_TIMEOUT_SECONDS path=$lock"
+    fi
     active_worker_seen=1
   else
     log WARN "dead-worker-lock pid=${pid:-missing} path=$lock"
@@ -198,6 +222,7 @@ done < <(find "$HOME/.hermes/worktrees" -maxdepth 5 -type f -path '*/.agent.lock
 
 if [[ "$active_worker_seen" == 0 ]]; then
   log OK "active-worker none"
+  log OK "watchdog-worker-runtime-none"
 fi
 
 for entry in "${repos[@]}"; do

@@ -158,6 +158,11 @@ for entry in "${REPOS[@]}"; do
     fi
     state="$(issue_state "$repo" "$issue")"
     open_prs="$(open_pr_for_branch "$repo" "$branch")"
+    if [[ "$state" == "UNKNOWN" ]]; then
+      log "KEEP repo=$repo issue=$issue branch=$branch reason=issue-state-unknown path=$path open_prs=$open_prs"
+      skipped=$((skipped + 1))
+      continue
+    fi
     if [[ "$state" == "OPEN" || "$open_prs" != "0" ]]; then
       log "KEEP repo=$repo issue=$issue branch=$branch path=$path issue_state=$state open_prs=$open_prs"
       skipped=$((skipped + 1))
