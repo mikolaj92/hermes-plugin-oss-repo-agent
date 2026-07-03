@@ -90,10 +90,11 @@ for entry in "${repos[@]}"; do
 done
 
 printf '\nRecent Decisions\n'
-for log in "$LOG_DIR/repo-issue-to-pr-dispatch.log" "$LOG_DIR/repo-pr-triage.log" "$LOG_DIR/repo-agent-cleanup.log" "$LOG_DIR/repo-agent-hermes-update.log"; do
+RECENT_SIGNAL_PATTERN='DECISION|CLAUDE_|WORKTREE_|LOCAL_BRANCH_|DONE|WARN|ERROR|ASSIGN_FAILED|PR_ASSIGNED|FIX_TASK_CREATED|FIX_TASK_FAILED|LOCK_HELD|KANBAN_LIST_FAILED|PR_LIST_FAILED|MERGE_FAILED|watchdog-worker-'
+for log in "$LOG_DIR/repo-issue-to-pr-dispatch.log" "$LOG_DIR/repo-pr-triage.log" "$LOG_DIR/repo-agent-cleanup.log" "$LOG_DIR/repo-agent-hermes-update.log" "$LOG_DIR/repo-agent-health.log"; do
   [[ -f "$log" ]] || continue
   printf '  %s\n' "$(basename "$log")"
-  recent="$(tail -n 80 "$log" | grep -E 'DECISION|CLAUDE_|WORKTREE_|LOCAL_BRANCH_|DONE|WARN|ERROR' | tail -n 8 || true)"
+  recent="$(tail -n 80 "$log" | grep -E "$RECENT_SIGNAL_PATTERN" | tail -n 8 || true)"
   if [[ -n "$recent" ]]; then
     printf '%s\n' "$recent" | sed 's/^/    /'
   else

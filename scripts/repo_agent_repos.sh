@@ -15,6 +15,17 @@ mikolaj92/OpenAPITransportKit|mikolaj92-openapi-transport-kit|/Users/mini-m4-mai
 mikolaj92/swift-openapi-dynamic|mikolaj92-swift-openapi-dynamic|/Users/mini-m4-main/Developer/hermes-repos/swift-openapi-dynamic|40
 mikolaj92/my-auth|mikolaj92-my-auth|/Users/mini-m4-main/Developer/hermes-repos/my-auth|30
 mikolaj92/my-usermanager|mikolaj92-my-usermanager|/Users/mini-m4-main/Developer/hermes-repos/my-usermanager|30
+mikolaj92/Posejdon|mikolaj92-posejdon|/Users/mini-m4-main/Developer/hermes-repos/Posejdon|25
+mikolaj92/jaskiniowiec|mikolaj92-jaskiniowiec|/Users/mini-m4-main/Developer/hermes-repos/jaskiniowiec|25
+mikolaj92/hermes-plugin-oss-repo-agent|mikolaj92-hermes-plugin-oss-repo-agent|/Users/mini-m4-main/Developer/hermes-repos/hermes-plugin-oss-repo-agent|20
+mikolaj92/hermes-plugin-build-in-public|mikolaj92-hermes-plugin-build-in-public|/Users/mini-m4-main/Developer/hermes-repos/hermes-plugin-build-in-public|20
+mikolaj92/VibeFront|mikolaj92-vibe-front|/Users/mini-m4-main/Developer/hermes-repos/VibeFront|20
+mikolaj92/hermetic-alchemy|mikolaj92-hermetic-alchemy|/Users/mini-m4-main/Developer/hermes-repos/hermetic-alchemy|20
+mikolaj92/Temida|mikolaj92-temida|/Users/mini-m4-main/Developer/hermes-repos/Temida|15
+mikolaj92/rnkstr|mikolaj92-rnkstr|/Users/mini-m4-main/Developer/hermes-repos/rnkstr|15
+mikolaj92/emitype|mikolaj92-emitype|/Users/mini-m4-main/Developer/hermes-repos/emitype|15
+mikolaj92/MikoDukcja|mikolaj92-miko-dukcja|/Users/mini-m4-main/Developer/hermes-repos/MikoDukcja|15
+mikolaj92/dotfiles|mikolaj92-dotfiles|/Users/mini-m4-main/Developer/hermes-repos/dotfiles|5
 REPOS
 }
 

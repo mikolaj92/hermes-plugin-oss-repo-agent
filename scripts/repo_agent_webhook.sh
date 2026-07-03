@@ -67,8 +67,36 @@ run_step() {
   local name="$1"
   shift
   log "STEP_START name=$name event=$EVENT mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live)"
+  set +e
   "$@"
-  log "STEP_DONE name=$name"
+  local rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    log "STEP_FAILED name=$name rc=$rc"
+    failures=$((failures + 1))
+  else
+    log "STEP_DONE name=$name"
+  fi
+  return 0
+}
+
+payload_is_pr_comment() {
+  [[ -n "$PAYLOAD" ]] || return 1
+  python3 - "$PAYLOAD" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+except Exception:
+    sys.exit(1)
+
+issue = payload.get("issue")
+if isinstance(issue, dict) and isinstance(issue.get("pull_request"), dict):
+    sys.exit(0)
+sys.exit(1)
+PY
 }
 
 triage_args=("$mode_arg")
@@ -76,12 +104,23 @@ if [[ "$COMMENT_ENABLED" == 1 ]]; then
   triage_args+=("--comment")
 fi
 
+failures=0
+
 log "START event=$EVENT mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) payload=${PAYLOAD:-none}"
 
 case "$EVENT" in
   issues|issue_comment)
-    run_step intake "$SCRIPT_DIR/repo_issue_intake.sh" "$mode_arg"
-    run_step dispatch env HERMES_ISSUE_TO_PR_RUN_OPENCODE=0 "$SCRIPT_DIR/repo_issue_to_pr_dispatch.sh" "$mode_arg"
+    if [[ "$EVENT" == "issue_comment" ]] && payload_is_pr_comment; then
+      log "PAYLOAD_KIND kind=pr-comment"
+      run_step pr-triage env HERMES_PR_TRIAGE_COMMENT="$COMMENT_ENABLED" "$SCRIPT_DIR/repo_pr_triage.sh" "${triage_args[@]}"
+    else
+      run_step intake "$SCRIPT_DIR/repo_issue_intake.sh" "$mode_arg"
+      run_step dispatch env HERMES_ISSUE_TO_PR_RUN_OPENCODE=0 "$SCRIPT_DIR/repo_issue_to_pr_dispatch.sh" "$mode_arg"
+      if [[ "$EVENT" == "issue_comment" ]]; then
+        run_step pr-triage env HERMES_PR_TRIAGE_COMMENT="$COMMENT_ENABLED" "$SCRIPT_DIR/repo_pr_triage.sh" "${triage_args[@]}"
+        run_step cleanup "$SCRIPT_DIR/repo_agent_cleanup.sh" "$mode_arg"
+      fi
+    fi
     ;;
   pull_request|pull_request_review|pull_request_review_comment|check_run|check_suite|status|workflow_run)
     run_step pr-triage env HERMES_PR_TRIAGE_COMMENT="$COMMENT_ENABLED" "$SCRIPT_DIR/repo_pr_triage.sh" "${triage_args[@]}"
@@ -94,4 +133,5 @@ case "$EVENT" in
     ;;
 esac
 
-log "DONE event=$EVENT"
+log "DONE event=$EVENT failures=$failures"
+[[ "$failures" -eq 0 ]]
