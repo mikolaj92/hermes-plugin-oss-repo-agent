@@ -175,26 +175,6 @@ while IFS= read -r lock; do
 done < <(find /tmp "$HOME/.hermes/worktrees" -maxdepth 4 -type d \( -name 'hermes-repo-*.lock' -o -name '.agent.lock' \) -mmin "+$STALE_LOCK_MINUTES" 2>/dev/null)
 
 active_worker_seen=0
-active_workers="$(pgrep -fl 'claude.*Hermes task' 2>/dev/null || true)"
-if [[ -n "$active_workers" ]]; then
-  while IFS= read -r line; do
-    log OK "active-worker $line"
-    worker_pid="${line%% *}"
-    worker_age=0
-    if [[ "$worker_pid" =~ ^[0-9]+$ ]]; then
-      worker_age="$(ps -o etimes= -p "$worker_pid" 2>/dev/null | tr -d ' ' || true)"
-      [[ "$worker_age" =~ ^[0-9]+$ ]] || worker_age=0
-    fi
-    if [[ "$worker_age" -gt "$WORKER_TIMEOUT_SECONDS" ]]; then
-      log WARN "watchdog-worker-runtime-timeout pid=$worker_pid age_seconds=$worker_age timeout_seconds=$WORKER_TIMEOUT_SECONDS detail=$(printf '%q' "$line")"
-      warnings=$((warnings + 1))
-    else
-      log OK "watchdog-worker-runtime-ok pid=$worker_pid age_seconds=$worker_age timeout_seconds=$WORKER_TIMEOUT_SECONDS detail=$(printf '%q' "$line")"
-    fi
-    active_worker_seen=1
-  done <<<"$active_workers"
-fi
-
 while IFS= read -r pid_file; do
   [[ -n "$pid_file" ]] || continue
   lock="$(dirname "$pid_file")"

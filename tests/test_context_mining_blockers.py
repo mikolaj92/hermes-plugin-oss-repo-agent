@@ -32,6 +32,7 @@ class ContextMiningBlockersTest(unittest.TestCase):
                 "HERMES_REPO_AGENT_REPOS_FILE": str(repos_file),
                 "HERMES_ISSUE_TO_PR_LOG": str(log_file),
                 "HERMES_ISSUE_TO_PR_LOCK_DIR": str(lock_dir),
+                "HERMES_REPO_AGENT_SOURCE": "kanban",
                 "HERMES_WORKTREE_ROOT": str(worktree_root),
                 "BASH_FUNC_hermes%%": self._dispatcher_hermes(
                     {
@@ -158,6 +159,7 @@ class ContextMiningBlockersTest(unittest.TestCase):
                 "HERMES_REPO_AGENT_REPOS_FILE": str(repos_file),
                 "HERMES_ISSUE_TO_PR_LOG": str(log_file),
                 "HERMES_ISSUE_TO_PR_LOCK_DIR": str(root / "locks"),
+                "HERMES_REPO_AGENT_SOURCE": "kanban",
                 "HERMES_WORKTREE_ROOT": str(root / "worktrees"),
                 "HERMES_ISSUE_TO_PR_RUN_OPENCODE": "1",
                 "HERMES_ALLOW_UNSAFE_CLAUDE": "1",
@@ -475,6 +477,7 @@ PY
             "HERMES_REPO_AGENT_REPOS_FILE": str(repos_file),
             "HERMES_ISSUE_TO_PR_LOG": str(log_file),
             "HERMES_ISSUE_TO_PR_LOCK_DIR": str(root / "locks"),
+            "HERMES_REPO_AGENT_SOURCE": "kanban",
             "HERMES_WORKTREE_ROOT": str(root / "worktrees"),
             "HERMES_ISSUE_TO_PR_RUN_OPENCODE": "1",
             "HERMES_ALLOW_UNSAFE_CLAUDE": "1",
