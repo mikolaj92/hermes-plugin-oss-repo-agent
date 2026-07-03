@@ -82,7 +82,7 @@ class DispatcherWorkerBackgroundTest(unittest.TestCase):
 
             result = fixture.run_worker(
                 fake_open_pr="0",
-                task_id="task-unsafe-disabled",
+                task_id="fixture-unsafe-disabled",
             )
 
             calls = fixture.calls_text()

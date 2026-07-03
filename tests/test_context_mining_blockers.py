@@ -37,14 +37,14 @@ class ContextMiningBlockersTest(unittest.TestCase):
                     {
                         "board": [
                             {
-                                "id": "task-issue-unknown",
+                                "id": "fixture-issue-unknown",
                                 "status": "ready",
                                 "title": "[issue] owner/repo#123 Broken issue",
                                 "body": "Issue task should not stale-complete when gh is unavailable.",
                                 "priority": 1,
                             },
                             {
-                                "id": "task-review-unknown",
+                                "id": "fixture-review-unknown",
                                 "status": "ready",
                                 "title": "[fix-pr-review] owner/repo#55 Review task",
                                 "body": "PR review task should not stale-complete when gh is unavailable.",
