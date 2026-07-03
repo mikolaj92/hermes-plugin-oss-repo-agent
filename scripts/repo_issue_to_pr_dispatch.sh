@@ -14,15 +14,17 @@ RUN_OPENCODE="${HERMES_ISSUE_TO_PR_RUN_OPENCODE:-0}"
 ALLOW_UNSAFE_CLAUDE="${HERMES_ALLOW_UNSAFE_CLAUDE:-0}"
 BLOCK_INTAKE="${HERMES_ISSUE_TO_PR_BLOCK_INTAKE:-0}"
 MAX_CLAUDE_AGENTS="${HERMES_ISSUE_TO_PR_MAX_CLAUDE_AGENTS:-3}"
-CLAUDE_TIMEOUT_SECONDS="${HERMES_CLAUDE_TIMEOUT_SECONDS:-5400}"
+CLAUDE_TIMEOUT_SECONDS="${HERMES_CLAUDE_TIMEOUT_SECONDS:-1800}"
 STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
 LOG_FILE="${HERMES_ISSUE_TO_PR_LOG:-/Users/mini-m4-main/.hermes/logs/repo-issue-to-pr-dispatch.log}"
 LOCK_DIR="${HERMES_ISSUE_TO_PR_LOCK_DIR:-/tmp/hermes-repo-issue-to-pr-dispatch.lock}"
 WORKTREE_ROOT="${HERMES_WORKTREE_ROOT:-/Users/mini-m4-main/.hermes/worktrees/repo-fixer}"
 KANBAN_FIXER_ASSIGNEE="${HERMES_KANBAN_FIXER_ASSIGNEE:-repo-agent-fixer}"
+CLAIM_ASSIGNEE="${HERMES_REPO_AGENT_ASSIGNEE:-mikolaj92}"
 MAX_TASK_ATTEMPTS="${HERMES_REPO_AGENT_MAX_TASK_ATTEMPTS:-3}"
 RETRY_BACKOFF_SECONDS="${HERMES_REPO_AGENT_RETRY_BACKOFF_SECONDS:-1800}"
 OPENCODE_DEFERRED_RC=10
+QUEUE_SOURCE="${HERMES_REPO_AGENT_SOURCE:-github}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/repo_agent_repos.sh"
 
@@ -85,10 +87,12 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { log "MISSING_COMMAND name=$1"; exit 1; }
 }
 
-require_cmd hermes
 require_cmd python3
 require_cmd git
 require_cmd gh
+if [[ "$QUEUE_SOURCE" == "kanban" ]]; then
+  require_cmd hermes
+fi
 # Claude execution is permitted only by the combined gate:
 # "$RUN_OPENCODE" == 1 && "$ALLOW_UNSAFE_CLAUDE" == 1
 # Check for the claude binary lazily at the actual spawn point so non-spawn
@@ -212,6 +216,21 @@ ensure_clean_clone() {
   GIT_MASTER=1 git -C "$clone_path" diff --cached --quiet
 }
 
+refresh_clone_base() {
+  local clone_path="$1" current
+  [[ -d "$clone_path/.git" ]] || return 0
+  GIT_MASTER=1 git -C "$clone_path" fetch --prune origin >/dev/null 2>&1 || return 0
+  current="$(GIT_MASTER=1 git -C "$clone_path" branch --show-current 2>/dev/null || true)"
+  case "$current" in
+    main|master)
+      if [[ -z "$(GIT_MASTER=1 git -C "$clone_path" status --porcelain --untracked-files=no 2>/dev/null)" ]] &&
+        GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/remotes/origin/$current"; then
+        GIT_MASTER=1 git -C "$clone_path" merge --ff-only "origin/$current" >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
+}
+
 create_fix_task() {
   local board="$1" clone_path="$2" source_task_id="$3" repo="$4" issue="$5" title="$6"
   local slug branch key body fix_title
@@ -240,6 +259,7 @@ Required policy:
 - Add/keep ai:generated and ai:pr-opened labels when applicable.
 - Do not merge, delete branches, force-push, expose secrets, or bypass safeguards."
 
+  refresh_clone_base "$clone_path"
   hermes kanban --board "$board" create "$fix_title" \
     --body "$body" \
     --assignee "$KANBAN_FIXER_ASSIGNEE" \
@@ -317,13 +337,76 @@ board_agent_active() {
   return 1
 }
 
+board_repo_busy() {
+  local board="$1"
+  board_agent_active "$board" >/dev/null 2>&1
+}
+
+github_issue_rows() {
+  local repo="$1"
+  gh issue list --repo "$repo" --state open --limit "$MAX_PER_BOARD" --json number,title,url,labels \
+    --jq '.[] | select(([.labels[].name] | index("ai:in-progress") | not) and ([.labels[].name] | index("ai:blocked") | not) and ([.labels[].name] | index("ai:pr-opened") | not) and ([.labels[].name] | index("frozen") | not)) | [.number, (.title | gsub("[\t\r\n]"; " ")), .url, ([.labels[].name] | join(", "))] | @tsv'
+}
+
+github_agent_pr_rows() {
+  local repo="$1"
+  gh pr list --repo "$repo" --state open --json number,title,url,headRefName,mergeStateStatus,reviewDecision,isDraft,labels,author \
+    --jq '.[] | select((.isDraft | not) and (.headRefName | startswith("ai/fix/")) and (([.labels[].name] | index("ai:generated")) != null or ([.labels[].name] | index("ai:pr-opened")) != null)) | [.number, (.title | gsub("[\t\r\n]"; " ")), .url, .headRefName, (if ((.mergeStateStatus // "") == "") then "UNKNOWN" else .mergeStateStatus end), (if ((.reviewDecision // "") == "") then "NONE" else .reviewDecision end), (.author.login // "unknown")] | @tsv'
+}
+
+github_pr_checks_need_fix() {
+  local repo="$1" number="$2" checks_json
+  checks_json="$(gh pr checks "$number" --repo "$repo" --json name,state,bucket 2>/dev/null || true)"
+  CHECKS_JSON="$checks_json" python3 <<'PY'
+import json, os, sys
+raw = os.environ.get("CHECKS_JSON", "")
+if not raw.strip():
+    sys.exit(1)
+try:
+    checks = json.loads(raw)
+except Exception:
+    sys.exit(1)
+for check in checks if isinstance(checks, list) else []:
+    bucket = str(check.get("bucket") or "").lower()
+    state = str(check.get("state") or "").lower()
+    if bucket in {"fail", "failing", "cancel"} or state in {"failure", "error", "cancelled", "timed_out", "action_required"}:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+github_pr_needs_fix() {
+  local repo="$1" number="$2" merge_state="$3" review_decision="$4"
+  [[ "$review_decision" == "CHANGES_REQUESTED" ]] && return 0
+  [[ "$merge_state" == "DIRTY" || "$merge_state" == "BEHIND" ]] && return 0
+  github_pr_checks_need_fix "$repo" "$number"
+}
+
+fix_branch_for_title() {
+  local repo="$1" issue="$2" title="$3" slug
+  slug="$(slugify "$repo-$issue-$title")"
+  printf 'ai/fix/%s-%s\n' "$issue" "$slug"
+}
+
+mark_issue_started() {
+  local repo="$1" issue="$2"
+  [[ -n "$CLAIM_ASSIGNEE" ]] && gh issue edit "$issue" --repo "$repo" --add-assignee "$CLAIM_ASSIGNEE" >/dev/null 2>&1 || true
+  gh issue edit "$issue" --repo "$repo" --add-label ai:in-progress >/dev/null 2>&1 || true
+}
+
+mark_issue_finished() {
+  local repo="$1" issue="$2" branch="$3"
+  if open_pr_for_branch "$repo" "$branch" >/dev/null 2>&1; then
+    gh issue edit "$issue" --repo "$repo" --add-label ai:pr-opened --remove-label ai:in-progress >/dev/null 2>&1 || true
+  else
+    gh issue edit "$issue" --repo "$repo" --add-label ai:blocked --remove-label ai:in-progress >/dev/null 2>&1 || true
+  fi
+}
+
 blocked_task_retriable() {
   local board="$1" task_id="$2" show_text
   show_text="$(hermes kanban --board "$board" show "$task_id" 2>/dev/null || true)"
-  if grep -Fq "repo-agent worker finished without an open PR" <<<"$show_text"; then
-    return 0
-  fi
-  grep -Eq "Hermes repo-agent started Claude worker|protocol_violation|worker exited cleanly .* protocol violation" <<<"$show_text"
+  grep -Eq "Hermes repo-agent started Claude worker|repo-agent worker finished without an open PR|repo-agent worker exited with rc=|protocol_violation|worker exited cleanly .* protocol violation" <<<"$show_text"
 }
 
 blocked_task_manual_only() {
@@ -433,8 +516,17 @@ ensure_existing_worktree_ready() {
 
 ensure_worktree_ready() {
   local clone_path="$1" worktree="$2" branch="$3"
-  local existing_worktree
+  local existing_worktree base_ref="HEAD"
   ENSURE_WORKTREE_READY_PATH="$worktree"
+  refresh_clone_base "$clone_path"
+  if GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet refs/remotes/origin/main; then
+    base_ref="origin/main"
+  elif GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet refs/remotes/origin/master; then
+    base_ref="origin/master"
+  fi
+  if GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    GIT_MASTER=1 git -C "$clone_path" branch -f "$branch" "origin/$branch" >/dev/null 2>&1 || true
+  fi
   if [[ -d "$worktree" ]]; then
     ensure_existing_worktree_ready "$worktree" "$branch"
     return $?
@@ -461,7 +553,7 @@ ensure_worktree_ready() {
     ENSURE_WORKTREE_READY_PATH="$worktree"
     return 0
   fi
-  if ! GIT_MASTER=1 git -C "$clone_path" worktree add -b "$branch" "$worktree" HEAD >/dev/null; then
+  if ! GIT_MASTER=1 git -C "$clone_path" worktree add -b "$branch" "$worktree" "$base_ref" >/dev/null; then
     if existing_worktree="$(worktree_for_branch "$clone_path" "$branch")"; then
       if ensure_existing_worktree_ready "$existing_worktree" "$branch"; then
         log "WORKTREE_ADOPTED branch=$branch worktree=$existing_worktree requested=$worktree"
@@ -476,7 +568,15 @@ ensure_worktree_ready() {
 }
 
 active_claude_agents() {
-  pgrep -c -f "claude.*Hermes task" 2>/dev/null || echo 0
+  local count=0 pid_file pid
+  for pid_file in "$WORKTREE_ROOT"/*/.agent.lock/pid; do
+    [[ -e "$pid_file" ]] || continue
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      count=$((count + 1))
+    fi
+  done
+  echo "$count"
 }
 
 run_claude_for_fix_worker() {
@@ -511,25 +611,30 @@ run_claude_for_fix_worker() {
   if [[ "$rc" -ne 0 ]]; then
     retry_note="$(retry_failure_note "$board" "$task_id")"
     hermes kanban --board "$board" block "$task_id" "repo-agent worker exited with rc=${rc}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
+    [[ "$task_id" == gh-issue-* ]] && gh issue edit "$issue" --repo "$repo" --add-label ai:blocked --remove-label ai:in-progress >/dev/null 2>&1 || true
     printf '%s CLAUDE_FINALIZED task=%s outcome=failed rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
   elif ! worktree_status="$(GIT_MASTER=1 git -C "$worktree" status --short 2>&1)"; then
     retry_note="$(retry_failure_note "$board" "$task_id")"
     hermes kanban --board "$board" block "$task_id" "worktree-status-failed-after-claude for branch ${branch}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
+    [[ "$task_id" == gh-issue-* ]] && gh issue edit "$issue" --repo "$repo" --add-label ai:blocked --remove-label ai:in-progress >/dev/null 2>&1 || true
     printf '%s CLAUDE_FINALIZED task=%s outcome=worktree-status-failed rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
   elif [[ -n "$worktree_status" ]]; then
     retry_note="$(retry_failure_note "$board" "$task_id")"
     status_inline="${worktree_status//$'\n'/; }"
     hermes kanban --board "$board" block "$task_id" "worktree-dirty-after-claude for branch ${branch}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
+    [[ "$task_id" == gh-issue-* ]] && gh issue edit "$issue" --repo "$repo" --add-label ai:blocked --remove-label ai:in-progress >/dev/null 2>&1 || true
     printf '%s CLAUDE_FINALIZED task=%s outcome=worktree-dirty-after-claude rc=%s branch=%s status=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$status_inline" "$retry_note"
   elif pr_info="$(open_pr_for_branch "$repo" "$branch" 2>/dev/null)"; then
     pr_number="${pr_info%%$'\t'*}"
     pr_url="${pr_info#*$'\t'}"
     gh pr edit "$pr_number" --repo "$repo" --add-label ai:generated --add-label ai:pr-opened >/dev/null 2>&1 || true
     complete_task "$board" "$task_id" "Open PR for ${repo}#${issue}: ${pr_url}" || true
+    [[ "$task_id" == gh-issue-* ]] && gh issue edit "$issue" --repo "$repo" --add-label ai:pr-opened --remove-label ai:in-progress >/dev/null 2>&1 || true
     printf '%s CLAUDE_FINALIZED task=%s outcome=pr-open pr=%s url=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$pr_url"
   else
     retry_note="$(retry_failure_note "$board" "$task_id")"
     hermes kanban --board "$board" block "$task_id" "repo-agent worker finished without an open PR for branch ${branch}; ${retry_note}; manual inspection required if attempts are exhausted." >/dev/null 2>&1 || true
+    [[ "$task_id" == gh-issue-* ]] && gh issue edit "$issue" --repo "$repo" --add-label ai:blocked --remove-label ai:in-progress >/dev/null 2>&1 || true
     printf '%s CLAUDE_FINALIZED task=%s outcome=no-pr rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
   fi
 }
@@ -653,7 +758,86 @@ for mapping in "${REPOS[@]}"; do
     failures=$((failures + 1))
     continue
   fi
-  board_agent_active "$board" >/dev/null || true
+  if board_repo_busy "$board"; then
+    log "BOARD_BUSY repo=$repo board=$board action=skip-dispatch reason=active-task"
+    continue
+  fi
+
+  if [[ "$QUEUE_SOURCE" == "github" ]]; then
+    repo_owner="${repo%%/*}"
+    github_dispatched=0
+    if ! pr_rows="$(github_agent_pr_rows "$repo")"; then
+      log "ERROR repo=$repo gh_pr_list_failed"
+      failures=$((failures + 1))
+      continue
+    fi
+    while IFS=$'\t' read -r pr_number pr_title pr_url pr_head pr_merge pr_review pr_author; do
+      [[ -n "${pr_number:-}" ]] || continue
+      [[ "$pr_author" == "$repo_owner" ]] || continue
+      github_dispatched=1
+      if github_pr_needs_fix "$repo" "$pr_number" "$pr_merge" "$pr_review"; then
+        task_id="gh-pr-$pr_number"
+        title="[fix-pr-review] ${repo}#${pr_number}: address review feedback"
+        log "DECISION source=github board=$board task=$task_id action=run-claude-review repo=$repo pr=$pr_number branch=$pr_head merge_state=${pr_merge:-none} review=${pr_review:-none}"
+        if [[ "$DRY_RUN" == 1 || "$RUN_OPENCODE" != 1 ]]; then
+          log "DRY_RUN source=github repo=$repo pr=$pr_number action=would-run-claude-review branch=$pr_head"
+          break
+        fi
+        opencode_rc=0
+        run_claude_for_fix "$board" "$clone_path" "$task_id" "$title" "$repo" "$pr_number" "$pr_head" || opencode_rc=$?
+        if [[ "$opencode_rc" == 0 ]]; then
+          claude_spawned=$((claude_spawned + 1))
+        elif [[ "$opencode_rc" == "$OPENCODE_DEFERRED_RC" ]]; then
+          log "OPENCODE_DEFERRED source=github task=$task_id repo=$repo pr=$pr_number rc=$opencode_rc"
+          deferred=$((deferred + 1))
+        else
+          failures=$((failures + 1))
+        fi
+      else
+        log "GITHUB_PR_OPEN repo=$repo pr=$pr_number action=skip-new-issue reason=open-agent-pr branch=$pr_head merge_state=${pr_merge:-none} review=${pr_review:-none}"
+      fi
+      break
+    done <<< "$pr_rows"
+    [[ "$github_dispatched" == 1 ]] && continue
+
+    if [[ "$MAX_PER_BOARD" == 0 ]]; then
+      continue
+    fi
+    if ! issue_rows="$(github_issue_rows "$repo")"; then
+      log "ERROR repo=$repo gh_issue_list_failed"
+      failures=$((failures + 1))
+      continue
+    fi
+    if [[ -z "$issue_rows" ]]; then
+      log "NO_ELIGIBLE_ISSUES repo=$repo source=github"
+      continue
+    fi
+    while IFS=$'\t' read -r issue issue_title issue_url labels; do
+      [[ -n "${issue:-}" ]] || continue
+      processed=$((processed + 1))
+      task_id="gh-issue-$issue"
+      title="[fix-pr] ${repo}#${issue}: ${issue_title}"
+      task_branch="$(fix_branch_for_title "$repo" "$issue" "$title")"
+      log "DECISION source=github board=$board task=$task_id action=run-claude repo=$repo issue=$issue clone=$clone_path branch=$task_branch labels=$(printf '%q' "${labels:-}")"
+      if [[ "$DRY_RUN" == 1 || "$RUN_OPENCODE" != 1 ]]; then
+        log "DRY_RUN source=github repo=$repo issue=$issue action=would-run-claude branch=$task_branch"
+        break
+      fi
+      opencode_rc=0
+      run_claude_for_fix "$board" "$clone_path" "$task_id" "$title" "$repo" "$issue" "$task_branch" || opencode_rc=$?
+      if [[ "$opencode_rc" == 0 ]]; then
+        mark_issue_started "$repo" "$issue"
+        claude_spawned=$((claude_spawned + 1))
+      elif [[ "$opencode_rc" == "$OPENCODE_DEFERRED_RC" ]]; then
+        log "OPENCODE_DEFERRED source=github task=$task_id repo=$repo issue=$issue rc=$opencode_rc"
+        deferred=$((deferred + 1))
+      else
+        failures=$((failures + 1))
+      fi
+      break
+    done <<< "$issue_rows"
+    continue
+  fi
 
   if ! json="$(hermes kanban --board "$board" list --json --sort created-desc)"; then
     log "KANBAN_LIST_FAILED board=$board repo=$repo"

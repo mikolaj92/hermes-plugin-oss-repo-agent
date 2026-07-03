@@ -14,6 +14,7 @@ LIMIT="${HERMES_INTAKE_LIMIT:-10}"
 DRY_RUN="${HERMES_INTAKE_DRY_RUN:-0}"
 CLAIM_ASSIGNEE="${HERMES_REPO_AGENT_ASSIGNEE:-mikolaj92}"
 KANBAN_INTAKE_ASSIGNEE="${HERMES_KANBAN_INTAKE_ASSIGNEE:-repo-agent-intake}"
+QUEUE_SOURCE="${HERMES_REPO_AGENT_SOURCE:-github}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/repo_agent_repos.sh"
 
@@ -21,8 +22,8 @@ usage() {
   printf '%s\n' \
     'Usage: repo_issue_intake.sh [--dry-run|--live] [--limit N]' \
     '' \
-    'Poll selected GitHub issues with gh only, claim them, and create idempotent Hermes Kanban intake tasks.' \
-    'No PRs, merges, branches, or fixer dispatch are created by this script.'
+    'Poll selected GitHub issues with gh only and claim them for the repo-agent.' \
+    'In HERMES_REPO_AGENT_SOURCE=kanban mode it also creates idempotent Hermes Kanban intake tasks.'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -117,9 +118,11 @@ PY
 }
 
 require_command gh
-require_command hermes
 require_command git
 require_command python3
+if [ "$QUEUE_SOURCE" = "kanban" ]; then
+  require_command hermes
+fi
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   log "SKIP already running lock=$LOCK_DIR"
@@ -177,7 +180,7 @@ for entry in "${repos[@]}"; do
   fi
 
   board_tasks_json="[]"
-  if [ "$DRY_RUN" != "1" ] && [ "$DRY_RUN" != "true" ]; then
+  if [ "$QUEUE_SOURCE" = "kanban" ] && [ "$DRY_RUN" != "1" ] && [ "$DRY_RUN" != "true" ]; then
     board_tasks_json="$(hermes kanban --board "$board" list --json --sort created-desc 2>/dev/null || printf '[]')"
   fi
 
@@ -211,11 +214,15 @@ Intake-only instructions:
       if [ -n "$CLAIM_ASSIGNEE" ]; then
         log "DRY_RUN repo=$repo issue=$number would_assign=$CLAIM_ASSIGNEE key=$key"
       fi
-      log "DRY_RUN repo=$repo issue=$number would_create_kanban board=$board title=$(printf '%s' "$task_title" | json_escape_for_body)"
+      if [ "$QUEUE_SOURCE" = "kanban" ]; then
+        log "DRY_RUN repo=$repo issue=$number would_create_kanban board=$board title=$(printf '%s' "$task_title" | json_escape_for_body)"
+      else
+        log "DRY_RUN repo=$repo issue=$number source=github action=would-claim"
+      fi
       continue
     fi
 
-    if existing_issue_task "$board_tasks_json" "$repo" "$number"; then
+    if [ "$QUEUE_SOURCE" = "kanban" ] && existing_issue_task "$board_tasks_json" "$repo" "$number"; then
       skipped=$((skipped + 1))
       log "KANBAN_TASK_EXISTS repo=$repo issue=$number board=$board action=skip-create"
       continue
@@ -236,6 +243,12 @@ Intake-only instructions:
       log "LABEL_ADDED repo=$repo issue=$number label=$READY_LABEL"
     else
       log "LABEL_PRESENT_OR_SKIPPED repo=$repo issue=$number label=$READY_LABEL exists=$ready_label_exists"
+    fi
+
+    if [ "$QUEUE_SOURCE" != "kanban" ]; then
+      created_or_reused=$((created_or_reused + 1))
+      log "GITHUB_ISSUE_READY repo=$repo issue=$number source=github action=claimed"
+      continue
     fi
 
     hermes kanban --board "$board" create "$task_title" \

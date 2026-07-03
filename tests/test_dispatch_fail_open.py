@@ -157,6 +157,7 @@ class DispatcherFailOpenTests(unittest.TestCase):
                 "CALLS_FILE": str(calls_file),
                 "HERMES_ISSUE_TO_PR_LOCK_DIR": str(lock_dir),
                 "HERMES_ISSUE_TO_PR_LOG": str(log_file),
+                "HERMES_REPO_AGENT_SOURCE": "kanban",
                 "HERMES_REPO_AGENT_REPOS_FILE": str(repos_file),
                 "HERMES_WORKTREE_ROOT": str(worktree_root),
             }

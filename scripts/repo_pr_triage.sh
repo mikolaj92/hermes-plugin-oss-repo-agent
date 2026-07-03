@@ -18,6 +18,8 @@ LOG_FILE="${HERMES_PR_TRIAGE_LOG:-/Users/mini-m4-main/.hermes/logs/repo-pr-triag
 LOCK_DIR="${HERMES_PR_TRIAGE_LOCK_DIR:-/tmp/hermes-repo-pr-triage.lock}"
 STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
 CLAIM_ASSIGNEE="${HERMES_REPO_AGENT_ASSIGNEE:-mikolaj92}"
+WORKTREE_ROOT="${HERMES_WORKTREE_ROOT:-/Users/mini-m4-main/.hermes/worktrees/repo-fixer}"
+QUEUE_SOURCE="${HERMES_REPO_AGENT_SOURCE:-github}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/repo_agent_repos.sh"
 
@@ -90,6 +92,24 @@ board_for_repo() {
 
 clone_for_repo() {
   repo_agent_clone_for_repo "$1"
+}
+
+board_lock_dir() {
+  local board="$1"
+  printf '%s/%s/.agent.lock\n' "$WORKTREE_ROOT" "$board"
+}
+
+board_agent_active() {
+  local board="$1" pid_file pid
+  pid_file="$(board_lock_dir "$board")/pid"
+  [[ -f "$pid_file" ]] || return 1
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+board_repo_busy() {
+  local board="$1"
+  board_agent_active "$board"
 }
 
 extract_prs() {
@@ -169,7 +189,7 @@ release_clean_worktree_for_branch() {
         ;;
       branch\ refs/heads/*)
         wt_branch="${line#branch refs/heads/}"
-        if [[ "$wt_branch" == "$branch" && "$path" == "$clone_path/.worktrees/"* ]]; then
+        if [[ "$wt_branch" == "$branch" && ( "$path" == "$clone_path/.worktrees/"* || "$path" == "$WORKTREE_ROOT/"* ) ]]; then
           if [[ -z "$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" ]]; then
             GIT_MASTER=1 git -C "$clone_path" worktree remove "$path" >/dev/null 2>&1 || true
           fi
@@ -177,6 +197,29 @@ release_clean_worktree_for_branch() {
         ;;
     esac
   done < <(GIT_MASTER=1 git -C "$clone_path" worktree list --porcelain 2>/dev/null || true)
+}
+
+sync_local_branch_from_origin() {
+  local clone_path="$1" branch="$2"
+  [[ -d "$clone_path/.git" ]] || return 0
+  if GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    GIT_MASTER=1 git -C "$clone_path" branch -f "$branch" "origin/$branch" >/dev/null 2>&1 || true
+  fi
+}
+
+refresh_clone_base() {
+  local clone_path="$1" current
+  [[ -d "$clone_path/.git" ]] || return 0
+  GIT_MASTER=1 git -C "$clone_path" fetch --prune origin >/dev/null 2>&1 || return 0
+  current="$(GIT_MASTER=1 git -C "$clone_path" branch --show-current 2>/dev/null || true)"
+  case "$current" in
+    main|master)
+      if [[ -z "$(GIT_MASTER=1 git -C "$clone_path" status --porcelain --untracked-files=no 2>/dev/null)" ]] &&
+        GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/remotes/origin/$current"; then
+        GIT_MASTER=1 git -C "$clone_path" merge --ff-only "origin/$current" >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
 }
 
 pr_repair_context() {
@@ -213,8 +256,14 @@ create_review_fix_task() {
 
   board="$(board_for_repo "$repo")" || return 2
   clone_path="$(clone_for_repo "$repo")" || return 2
+  if [[ "$QUEUE_SOURCE" == "github" ]]; then
+    gh pr edit "$number" --repo "$repo" --add-label ai:needs-fix >/dev/null 2>&1 || true
+    return 0
+  fi
   command -v hermes >/dev/null 2>&1 || return 2
+  refresh_clone_base "$clone_path"
   release_clean_worktree_for_branch "$clone_path" "$head"
+  sync_local_branch_from_origin "$clone_path" "$head"
   context="$(pr_repair_context "$repo" "$number")"
 
   task_title="[fix-pr-review] ${repo}#${number}: address review feedback"
@@ -284,6 +333,10 @@ log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) comment=$C
 for entry in "${REPOS[@]}"; do
   IFS='|' read -r repo board clone_path repo_priority <<<"$entry"
   repo_owner="${repo%%/*}"
+  if board_repo_busy "$board"; then
+    log "BOARD_BUSY repo=$repo board=$board action=skip-pr-triage reason=active-task"
+    continue
+  fi
   if ! prs_json="$(gh pr list --repo "$repo" --state open --limit "$PR_LIST_LIMIT" --json number,title,url,headRefName,baseRefName,isDraft,mergeStateStatus,reviewDecision,labels,author)"; then
     log "PR_LIST_FAILED repo=$repo"
     failures=$((failures + 1))
