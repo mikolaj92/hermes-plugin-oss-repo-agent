@@ -209,6 +209,7 @@ class ContextMiningBlockersTest(unittest.TestCase):
             due_calls = due["calls"].read_text(encoding="utf-8")
             self.assertIn("action=recover-blocked-fix-task", due_log)
             self.assertIn("kanban\t--board\tboard\tunblock\ttask-no-pr-1", due_calls)
+            self.assertNotIn("action=run-claude", due_log)
 
             exhausted_log = exhausted["log"].read_text(encoding="utf-8")
             exhausted_calls = exhausted["calls"].read_text(encoding="utf-8")

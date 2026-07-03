@@ -958,6 +958,7 @@ for mapping in "${REPOS[@]}"; do
               hermes kanban --board "$board" reassign "$task_id" "$KANBAN_FIXER_ASSIGNEE" --reason "repo-agent recovery owns this fixer task" >/dev/null 2>&1 || true
               hermes kanban --board "$board" unblock "$task_id" --reason "repo-agent retrying stale worker/protocol-violation task" >/dev/null 2>&1 || true
             fi
+            continue
           else
             log "DECISION board=$board task=$task_id action=skip reason=blocked-fix-task repo=$task_repo issue=$issue"
             continue
