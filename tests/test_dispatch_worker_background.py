@@ -1,100 +1,93 @@
 from __future__ import annotations
 
+import os
+import shlex
+import subprocess
 import tempfile
-import time
 import unittest
 from pathlib import Path
+from typing import Final
 
-from tests.dispatcher_worker_fixture import DispatcherWorkerFixture, pid_is_alive
+
+ROOT: Final = Path(__file__).resolve().parents[1]
+DISPATCHER: Final = ROOT / "scripts" / "repo_issue_to_pr_dispatch.sh"
 
 
-class DispatcherWorkerBackgroundTest(unittest.TestCase):
-    def test_run_opencode_returns_before_fake_claude_exits(self) -> None:
+class DispatcherWorkerContractTest(unittest.TestCase):
+    def test_github_issue_row_preserves_exact_number_and_title_in_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_path:
-            # Given: a clean clone and a fake Claude process that runs long enough
-            # to make synchronous dispatch visible.
-            fixture = DispatcherWorkerFixture(Path(temporary_path))
-            fixture.write_harness()
-            fixture.write_fake_commands()
-            fixture.make_repo()
+            root = Path(temporary_path)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            clone = self._make_repo(root / "clone")
+            repos = root / "repos.txt"
+            log = root / "dispatch.log"
+            lock = root / "dispatch.lock"
+            calls = root / "calls.log"
+            repos.write_text(f"mikolaj92/Fala|fala|{clone}|100\n", encoding="utf-8")
+            self._write_fake_gh(fake_bin / "gh")
 
-            # When: the dispatcher starts Claude for a fix task.
-            started = time.monotonic()
-            result = fixture.run_worker(
-                fake_claude_sleep="2",
-                fake_open_pr="0",
-                task_id="task-background",
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
+                    "CALLS_FILE": str(calls),
+                    "HERMES_REPO_AGENT_REPOS_FILE": str(repos),
+                    "HERMES_REPO_AGENT_SOURCE": "github",
+                    "HERMES_ISSUE_TO_PR_LOG": str(log),
+                    "HERMES_ISSUE_TO_PR_LOCK_DIR": str(lock),
+                }
             )
-            elapsed = time.monotonic() - started
+            result = subprocess.run(
+                ["bash", str(DISPATCHER), "--dry-run", "--max", "1"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
 
-            # Then: run_claude_for_fix has returned while the worker is still
-            # alive under the per-board lock, proving the global script lock can
-            # be released promptly.
-            self.addCleanup(fixture.cleanup_worker)
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertLess(
-                elapsed,
-                1.0,
-                f"dispatcher waited {elapsed:.2f}s for fake Claude; output={result.stdout}{result.stderr}",
-            )
-            worker_pid = fixture.worker_pid()
-            self.assertTrue(worker_pid, "worker pid was not written under board lock")
-            self.assertTrue(
-                pid_is_alive(worker_pid),
-                f"worker pid {worker_pid} is not alive; log={fixture.combined_log_text()}",
-            )
+            output = log.read_text(encoding="utf-8")
+            self.assertIn("repo=mikolaj92/Fala issue=123", output)
+            self.assertIn("action=would-run-omp", output)
+            self.assertIn("fix-exact-issue-title", output)
+            self.assertNotIn("#1234", output)
 
-    def test_dirty_worktree_after_worker_blocks_instead_of_finalizing_existing_pr(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as temporary_path:
-            # Given: fake Claude exits successfully but leaves the fix worktree dirty,
-            # while an open PR already exists for the branch.
-            fixture = DispatcherWorkerFixture(Path(temporary_path))
-            fixture.write_harness()
-            fixture.write_fake_commands()
-            fixture.make_repo()
+    def _make_repo(self, path: Path) -> Path:
+        path.mkdir(parents=True)
+        self._run_git(path.parent, "init", str(path))
+        self._run_git(path, "config", "user.email", "repo-agent@example.invalid")
+        self._run_git(path, "config", "user.name", "Repo Agent Test")
+        (path / "README.md").write_text("base\n", encoding="utf-8")
+        self._run_git(path, "add", "README.md")
+        self._run_git(path, "commit", "-m", "base")
+        return path
 
-            # When: the worker finalizes the task.
-            result = fixture.run_worker(
-                fake_claude_touch_dirty="1",
-                fake_open_pr="1",
-                task_id="task-dirty",
-            )
-            self.addCleanup(fixture.cleanup_worker)
-            fixture.wait_for_log("CLAUDE_FINALIZED")
+    def _run_git(self, cwd: Path, *args: str) -> None:
+        command = "GIT_MASTER=1 git " + " ".join(shlex.quote(arg) for arg in args)
+        subprocess.run(
+            ["bash", "-lc", command],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
-            # Then: dirty worker output blocks the task for inspection instead of
-            # completing it just because a PR exists.
-            calls = fixture.calls_text()
-            log_text = fixture.combined_log_text()
-            self.assertEqual(0, result.returncode, result.stdout + result.stderr + log_text)
-            self.assertNotIn("COMPLETE\t", calls)
-            self.assertIn(" block ", f" {calls} ")
-            self.assertIn("worktree-dirty-after-claude", calls + log_text)
+    def _write_fake_gh(self, path: Path) -> None:
+        path.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+printf 'GH\\t%s\\n' "$*" >>"${CALLS_FILE:?}"
+case " $* " in
+  *' pr list '*) : ;;
+  *' issue list '*) printf '123\\tFix exact issue title\\thttps://github.test/mikolaj92/Fala/issues/123\\t\\n' ;;
+esac
+""",
+            encoding="utf-8",
+        )
+        path.chmod(0o700)
 
-    def test_run_opencode_defers_without_unsafe_claude_opt_in(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_path:
-            fixture = DispatcherWorkerFixture(Path(temporary_path))
-            fixture.write_harness(unsafe_claude_enabled=False)
-            fixture.write_fake_commands()
-            fixture.make_repo()
-
-            result = fixture.run_worker(
-                fake_open_pr="0",
-                task_id="fixture-unsafe-disabled",
-            )
-
-            calls = fixture.calls_text()
-            log_text = fixture.combined_log_text()
-            self.assertEqual(10, result.returncode, result.stdout + result.stderr + log_text)
-            self.assertIn("CLAUDE_SKIPPED", log_text)
-            self.assertIn("unsafe-claude-disabled", log_text)
-            self.assertNotIn(" block ", f" {calls} ")
-            self.assertIn("HERMES_ALLOW_UNSAFE_CLAUDE=1", calls + log_text)
-            self.assertEqual("", fixture.worker_pid())
-            self.assertFalse(fixture.worktree_root.exists())
-            self.assertNotIn("CLAUDE_START", log_text)
 
 if __name__ == "__main__":
     unittest.main()

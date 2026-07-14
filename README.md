@@ -71,10 +71,10 @@ Live mutation requires both `mode: live` in config and an explicit live/apply CL
 flag. Executor runs require live mode, `--run-executor`, and
 `executor.enabled: true`.
 
-The mini dispatcher keeps unsafe Claude execution disabled by default with
-`HERMES_ALLOW_UNSAFE_CLAUDE=0`. Passing `--run-opencode` does not start Claude unless
-an operator also sets `HERMES_ALLOW_UNSAFE_CLAUDE=1` after explicit human approval
-and sandboxing review.
+The mini dispatcher runs OMP workers only when live mode and `--run-opencode`
+are enabled. Configure the OMP model, thinking mode, timeout, and worker cap
+with `HERMES_ISSUE_TO_PR_OMP_MODEL`, `HERMES_ISSUE_TO_PR_OMP_THINKING`,
+`HERMES_OMP_TIMEOUT_SECONDS`, and `HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS`.
 
 ## Mini runtime harness
 
@@ -84,7 +84,7 @@ The production `mini-m4-0` automation is tracked in `scripts/`:
   configured repo-agent account, and creates idempotent Hermes Kanban `[issue]`
   tasks.
 - `repo_issue_to_pr_dispatch.sh` turns `[issue]` tasks into explicit
-  `[fix-pr]` work, runs Claude workers with per-board locks and a hard timeout,
+  `[fix-pr]` work, runs OMP workers with per-board locks and a hard timeout,
   finalizes Kanban tasks when an open PR appears, and handles `[fix-pr-review]`
   repair tasks from PR triage.
 - `repo_pr_triage.sh` watches and claims owner-authored `ai/fix/*` PRs, requires
@@ -118,8 +118,10 @@ Runtime defaults:
 - `HERMES_REPO_AGENT_ASSIGNEE=mikolaj92`
 - `HERMES_KANBAN_INTAKE_ASSIGNEE=repo-agent-intake`
 - `HERMES_KANBAN_FIXER_ASSIGNEE=repo-agent-fixer`
-- `HERMES_CLAUDE_TIMEOUT_SECONDS=5400`
-- `HERMES_ISSUE_TO_PR_MAX_CLAUDE_AGENTS=3`
+- `HERMES_OMP_TIMEOUT_SECONDS=1800`
+- `HERMES_ISSUE_TO_PR_OMP_MODEL=omniroute/omp/default`
+- `HERMES_ISSUE_TO_PR_OMP_THINKING=medium`
+- `HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS=3`
 - `HERMES_REPO_AGENT_MAX_TASK_ATTEMPTS=3`
 - `HERMES_REPO_AGENT_RETRY_BACKOFF_SECONDS=1800`
 - `HERMES_PR_REQUIRE_TEST_EVIDENCE=1`

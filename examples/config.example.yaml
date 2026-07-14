@@ -18,9 +18,9 @@ labels:
   generated: ai:generated
 executor:
   enabled: false
-  # Uses claude --dangerously-skip-permissions in background (nohup ... &).
-  # Max concurrent agents is controlled by HERMES_ISSUE_TO_PR_MAX_CLAUDE_AGENTS (default 3).
-  command: claude
+  # Uses the local omp command in a controlled worktree.
+  # Max concurrent workers is controlled by HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS (default 3).
+  command: omp
 repos:
   - repo: owner/example-repo
     board: owner-example-repo

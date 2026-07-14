@@ -18,10 +18,10 @@ hard duplicate guard.
 
 Live mutation requires both `mode: live` in config and an explicit CLI live flag. Executor runs also require `--run-executor` and `executor.enabled: true`.
 
-The mini dispatcher keeps unsafe Claude execution disabled by default with
-`HERMES_ALLOW_UNSAFE_CLAUDE=0`. Passing `--run-opencode` is not enough to start Claude
-unless an operator also sets `HERMES_ALLOW_UNSAFE_CLAUDE=1` after explicit human
-approval and sandboxing review.
+The mini dispatcher runs OMP workers only when live mode and `--run-opencode`
+are enabled. Configure the OMP model, thinking mode, timeout, and worker cap
+with `HERMES_ISSUE_TO_PR_OMP_MODEL`, `HERMES_ISSUE_TO_PR_OMP_THINKING`,
+`HERMES_OMP_TIMEOUT_SECONDS`, and `HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS`.
 
 CI-style checks:
 

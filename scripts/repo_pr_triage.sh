@@ -19,6 +19,7 @@ LOCK_DIR="${HERMES_PR_TRIAGE_LOCK_DIR:-/tmp/hermes-repo-pr-triage.lock}"
 STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
 CLAIM_ASSIGNEE="${HERMES_REPO_AGENT_ASSIGNEE:-mikolaj92}"
 WORKTREE_ROOT="${HERMES_WORKTREE_ROOT:-/Users/mini-m4-main/.hermes/worktrees/repo-fixer}"
+MERGE_RECEIPT_DIR="${HERMES_PR_TRIAGE_MERGE_RECEIPT_DIR:-/Users/mini-m4-main/.hermes/receipts/repo-pr-triage}"
 QUEUE_SOURCE="${HERMES_REPO_AGENT_SOURCE:-github}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/repo_agent_repos.sh"
@@ -56,6 +57,12 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# Live automation must retain the approval gate regardless of environment
+# overrides; dry-run remains useful for policy inspection.
+if [[ "$DRY_RUN" == 0 ]]; then
+  REQUIRE_APPROVED=1
+fi
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
@@ -125,6 +132,8 @@ for pr in prs:
         str(pr.get("url") or ""),
         str(pr.get("headRefName") or ""),
         str(pr.get("baseRefName") or ""),
+        str(pr.get("headRefOid") or ""),
+        str(pr.get("baseRefOid") or ""),
         "1" if pr.get("isDraft") else "0",
         str(pr.get("mergeStateStatus") or ""),
         str(pr.get("reviewDecision") or ""),
@@ -146,7 +155,7 @@ import json, os, sys
 allow_no_checks = sys.argv[1] == "1"
 gh_rc = int(sys.argv[2])
 raw = os.environ.get("CHECKS_JSON", "")
-if not raw.strip():
+if gh_rc != 0 or not raw.strip():
     sys.exit(1)
 try:
     checks = json.loads(raw)
@@ -163,10 +172,91 @@ for check in checks:
         sys.exit(1)
     if state and state not in {"completed", "success"}:
         sys.exit(1)
-if gh_rc != 0:
-    sys.exit(1)
 sys.exit(0)
 PY
+}
+
+issue_from_branch() {
+  local branch="$1" rest
+  [[ "$branch" == ai/fix/* ]] || return 1
+  rest="${branch#ai/fix/}"
+  [[ "$rest" =~ ^([0-9]+) ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+write_merge_receipt() {
+  local repo="$1" pr="$2" issue="$3" base_sha="$4" head_sha="$5" merge_sha="$6" merged_at="$7" base_ref="$8" path tmp
+  mkdir -p "$MERGE_RECEIPT_DIR" || return 1
+  path="$MERGE_RECEIPT_DIR/$(printf '%s' "$repo-$pr" | tr '/:' '__').json"
+  tmp="${path}.tmp.$$"
+  RECEIPT_TMP="$tmp" python3 - "$repo" "$pr" "$issue" "$base_sha" "$head_sha" "$merge_sha" "$merged_at" "$base_ref" <<'PY'
+import json, os, sys
+payload = {"repo": sys.argv[1], "pr": int(sys.argv[2]), "issue": int(sys.argv[3]), "baseSha": sys.argv[4], "headSha": sys.argv[5], "mergeSha": sys.argv[6], "mergedAt": sys.argv[7], "baseRef": sys.argv[8]}
+with open(os.environ["RECEIPT_TMP"], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True)
+    handle.write("\n")
+PY
+  mv -f "$tmp" "$path" || return 1
+  MERGE_RECEIPT_PATH="$path"
+}
+
+close_linked_issue() {
+  local repo="$1" issue="$2" state
+  state="$(gh issue view "$issue" --repo "$repo" --json state --jq .state 2>/dev/null)" || return 1
+  if [[ "$state" == CLOSED ]]; then return 0; fi
+  [[ "$state" == OPEN ]] || return 1
+  gh issue close "$issue" --repo "$repo" --reason completed >/dev/null 2>&1 || return 1
+  state="$(gh issue view "$issue" --repo "$repo" --json state --jq .state 2>/dev/null)" || return 1
+  [[ "$state" == CLOSED ]]
+}
+
+merge_and_finalize() {
+  local repo="$1" number="$2" clone_path="$3" head="$4"
+  local readback readback_rc=0 validated base_sha head_sha merge_sha merged_at base_ref issue
+  gh pr merge "$number" --repo "$repo" --merge >/dev/null || { log "MERGE_FAILED repo=$repo pr=$number"; return 10; }
+  readback="$(gh pr view "$number" --repo "$repo" --json state,mergedAt,mergeCommit,baseRefName,baseRefOid,headRefName,headRefOid,body,closingIssuesReferences 2>/dev/null)" || readback_rc=$?
+  [[ "$readback_rc" -eq 0 ]] || { log "MERGE_READBACK_FAILED repo=$repo pr=$number reason=api"; return 11; }
+  if ! validated="$(MERGE_READBACK="$readback" MERGE_HEAD="$head" python3 - <<'PY'
+import json, os, re, sys
+try:
+    row = json.loads(os.environ["MERGE_READBACK"])
+    commit = row.get("mergeCommit") or {}
+    if row.get("state") != "MERGED" or not row.get("mergedAt") or not commit.get("oid"):
+        raise ValueError("unverified-merge")
+    if row.get("baseRefName") != "main" or not row.get("baseRefOid") or not row.get("headRefOid"):
+        raise ValueError("invalid-base-or-head")
+    refs = row.get("closingIssuesReferences") or []
+    issue = str(refs[0].get("number")) if refs and refs[0].get("number") else ""
+    body = str(row.get("body") or "")
+    if not issue:
+        matches = re.findall(r"(?i)\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+#(\d+)\b", body)
+        issue = matches[0] if matches else ""
+    if not issue:
+        branch = str(row.get("headRefName") or os.environ.get("MERGE_HEAD") or "")
+        match = re.match(r"ai/fix/(\d+)", branch)
+        issue = match.group(1) if match else ""
+    if not issue:
+        raise ValueError("missing-linked-issue")
+    print("\t".join((row["baseRefOid"], row["headRefOid"], commit["oid"], row["mergedAt"], row["baseRefName"], issue)))
+except Exception:
+    sys.exit(1)
+PY
+)"; then
+    log "MERGE_READBACK_FAILED repo=$repo pr=$number reason=unverified"
+    return 12
+  fi
+  IFS=$'\t' read -r base_sha head_sha merge_sha merged_at base_ref issue <<<"$validated"
+  [[ -n "$base_sha" && -n "$head_sha" && -n "$merge_sha" && -n "$merged_at" && "$base_ref" == main && "$issue" =~ ^[0-9]+$ ]] || {
+    log "MERGE_READBACK_FAILED repo=$repo pr=$number reason=missing-required-fields"
+    return 12
+  }
+  [[ -d "$clone_path/.git" ]] || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=missing-clone"; return 13; }
+  GIT_MASTER=1 git -C "$clone_path" fetch --prune origin main >/dev/null 2>&1 || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=fetch"; return 13; }
+  GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet refs/remotes/origin/main || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=missing-origin-main"; return 13; }
+  GIT_MASTER=1 git -C "$clone_path" merge-base --is-ancestor "$merge_sha" refs/remotes/origin/main || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=not-ancestor sha=$merge_sha"; return 13; }
+  write_merge_receipt "$repo" "$number" "$issue" "$base_sha" "$head_sha" "$merge_sha" "$merged_at" "$base_ref" || { log "MERGE_RECEIPT_FAILED repo=$repo pr=$number"; return 14; }
+  close_linked_issue "$repo" "$issue" || { log "ISSUE_CLOSE_FAILED repo=$repo pr=$number issue=$issue receipt=$MERGE_RECEIPT_PATH"; return 15; }
+  log "MERGE_VERIFIED repo=$repo pr=$number merge_sha=$merge_sha receipt=$MERGE_RECEIPT_PATH issue=$issue"
 }
 
 pr_has_test_evidence() {
@@ -182,6 +272,7 @@ release_clean_worktree_for_branch() {
   [[ -d "$clone_path/.git" ]] || return 0
 
   while IFS= read -r line; do
+
     case "$line" in
       worktree\ *)
         path="${line#worktree }"
@@ -197,6 +288,25 @@ release_clean_worktree_for_branch() {
         ;;
     esac
   done < <(GIT_MASTER=1 git -C "$clone_path" worktree list --porcelain 2>/dev/null || true)
+}
+
+retry_receipt_closures() {
+  local repo="$1" path payload issue receipt_repo
+  [[ -d "$MERGE_RECEIPT_DIR" ]] || return 0
+  shopt -s nullglob
+  for path in "$MERGE_RECEIPT_DIR"/*.json; do
+    payload="$(cat "$path" 2>/dev/null || true)"
+    receipt_repo="$(RECEIPT_JSON="$payload" python3 -c 'import json,os; print(json.loads(os.environ["RECEIPT_JSON"]).get("repo", ""))' 2>/dev/null || true)"
+    [[ "$receipt_repo" == "$repo" ]] || continue
+    issue="$(RECEIPT_JSON="$payload" python3 -c 'import json,os; print(json.loads(os.environ["RECEIPT_JSON"]).get("issue", ""))' 2>/dev/null || true)"
+    [[ "$issue" =~ ^[0-9]+$ ]] || continue
+    if close_linked_issue "$repo" "$issue"; then
+      log "ISSUE_CLOSED repo=$repo issue=$issue action=retry receipt=$path"
+    else
+      log "ISSUE_CLOSE_RETRY_FAILED repo=$repo issue=$issue receipt=$path"
+    fi
+  done
+  shopt -u nullglob
 }
 
 sync_local_branch_from_origin() {
@@ -333,11 +443,12 @@ log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) comment=$C
 for entry in "${REPOS[@]}"; do
   IFS='|' read -r repo board clone_path repo_priority <<<"$entry"
   repo_owner="${repo%%/*}"
+  retry_receipt_closures "$repo" || true
   if board_repo_busy "$board"; then
     log "BOARD_BUSY repo=$repo board=$board action=skip-pr-triage reason=active-task"
     continue
   fi
-  if ! prs_json="$(gh pr list --repo "$repo" --state open --limit "$PR_LIST_LIMIT" --json number,title,url,headRefName,baseRefName,isDraft,mergeStateStatus,reviewDecision,labels,author)"; then
+  if ! prs_json="$(gh pr list --repo "$repo" --state open --limit "$PR_LIST_LIMIT" --json number,title,url,headRefName,baseRefName,headRefOid,baseRefOid,isDraft,mergeStateStatus,reviewDecision,labels,author)"; then
     log "PR_LIST_FAILED repo=$repo"
     failures=$((failures + 1))
     continue
@@ -347,7 +458,7 @@ for entry in "${REPOS[@]}"; do
     continue
   fi
 
-  while IFS=$'\x1f' read -r number title url head base draft merge_state review_decision labels author; do
+  while IFS=$'\x1f' read -r number title url head base head_oid base_oid draft merge_state review_decision labels author; do
     [[ -n "${number:-}" ]] || continue
     processed=$((processed + 1))
     decision=""
@@ -399,6 +510,10 @@ for entry in "${REPOS[@]}"; do
       decision="skip"
       reason="missing-required-ai-labels"
       skipped=$((skipped + 1))
+    elif [[ "$base" != "main" ]]; then
+      decision="merge-blocked"
+      reason="base-not-main"
+      blocked=$((blocked + 1))
     elif [[ "$merge_state" == "CLEAN" ]]; then
       if [[ "$REQUIRE_APPROVED" == 1 && "$review_decision" != "APPROVED" ]]; then
         decision="merge-blocked"
@@ -429,10 +544,11 @@ for entry in "${REPOS[@]}"; do
     log "DECISION repo=$repo pr=$number decision=$decision reason=$reason head=$head base=$base merge_state=${merge_state:-none} labels=$(printf '%q' "$labels")"
 
     if [[ "$DRY_RUN" == 0 && "$decision" == "merge" ]]; then
-      if gh pr merge "$number" --repo "$repo" --merge >/dev/null; then
+      if merge_and_finalize "$repo" "$number" "$clone_path" "$head"; then
         merged=$((merged + 1))
       else
-        log "MERGE_FAILED repo=$repo pr=$number"
+        merge_rc=$?
+        log "MERGE_FINALIZATION_FAILED repo=$repo pr=$number rc=$merge_rc"
         failures=$((failures + 1))
         continue
       fi

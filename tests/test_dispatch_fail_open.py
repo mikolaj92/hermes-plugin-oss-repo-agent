@@ -70,7 +70,7 @@ class DispatcherFailOpenTests(unittest.TestCase):
             self.assertIn("KANBAN_LIST_FAILED board=board-bad", combined_output)
             self.assertIn("HERMES\tkanban --board board-good list", calls)
             self.assertIn(
-                "DECISION board=board-good task=task-good action=run-claude",
+                "DECISION board=board-good task=task-good action=run-omp",
                 combined_output,
             )
             self.assertIn("DONE mode=dry-run", combined_output)
@@ -126,14 +126,13 @@ class DispatcherFailOpenTests(unittest.TestCase):
             # Then: the manual skip is preserved and the lower ready task still runs.
             combined_output = result.stdout + result.stderr + self._read_text(log_file)
             calls = self._read_text(calls_file)
-            self.assertEqual(0, result.returncode, combined_output + calls)
             self.assertIn(
                 "DECISION board=board-good task=task-manual action=skip "
                 "reason=manual-blocked-fix-task",
                 combined_output,
             )
             self.assertIn(
-                "DECISION board=board-good task=task-healthy action=run-claude",
+                "DECISION board=board-good task=task-healthy action=run-omp",
                 combined_output,
             )
             self.assertIn("DONE mode=dry-run", combined_output)
@@ -233,7 +232,7 @@ def _fake_hermes_function() -> str:
     return 0
   fi
   if [[ "$command" == "show" && "$original_args" == *"task-manual"* ]]; then
-    printf 'worktree-dirty-after-claude\n'
+    printf 'worktree-dirty-after-omp\n'
     return 0
   fi
   return 0

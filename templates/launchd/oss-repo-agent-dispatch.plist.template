@@ -16,11 +16,20 @@
   <true/>
   <key>LimitLoadToSessionType</key>
   <string>Background</string>
+  <key>AbandonProcessGroup</key>
+  <true/>
   <key>EnvironmentVariables</key>
   <dict>
-    <!-- Keep unsafe Claude execution disabled unless explicit human approval and sandboxing review have happened. -->
-    <key>HERMES_ALLOW_UNSAFE_CLAUDE</key>
-    <string>0</string>
-  </dict>
+    <key>HERMES_ISSUE_TO_PR_RUN_OPENCODE</key>
+    <string>1</string>
+    <key>HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS</key>
+    <string>3</string>
+    <key>HERMES_ISSUE_TO_PR_OMP_MODEL</key>
+    <string>omniroute/omp/default</string>
+    <key>HERMES_ISSUE_TO_PR_OMP_THINKING</key>
+    <string>medium</string>
+    <key>HERMES_OMP_TIMEOUT_SECONDS</key>
+    <string>1800</string>
+</dict>
 </dict>
 </plist>

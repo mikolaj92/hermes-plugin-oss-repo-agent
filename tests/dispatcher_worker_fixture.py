@@ -13,13 +13,24 @@ DISPATCHER = ROOT / "scripts" / "repo_issue_to_pr_dispatch.sh"
 FUNCTION_DECLARATION = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\(\) \{$")
 DISPATCHER_HELPERS = (
     "ensure_clean_clone",
+    "refresh_clone_base",
     "worktree_for_branch",
     "branch_exists",
     "ensure_existing_worktree_ready",
     "ensure_worktree_ready",
     "board_lock_dir",
-    "run_claude_for_fix_worker",
-    "run_claude_for_fix",
+    "active_omp_agents",
+    "slugify",
+    "receipt_file",
+    "receipt_write_claim",
+    "receipt_update",
+    "receipt_field",
+    "validate_expected_pr",
+    "validated_open_pr_for_branch",
+    "verify_remote_branch_changed",
+    "finalize_retry_failure",
+    "run_omp_for_fix_worker",
+    "run_omp_for_fix",
 )
 
 
@@ -38,7 +49,7 @@ class DispatcherWorkerFixture:
         self.issue = "123"
         self.title = "[fix-pr] owner/repo#123: background worker"
 
-    def write_harness(self, *, unsafe_claude_enabled: bool = True) -> None:
+    def write_harness(self, *, run_opencode_enabled: bool = True) -> None:
         self.harness.write_text(
             "\n".join(
                 (
@@ -48,15 +59,18 @@ class DispatcherWorkerFixture:
                     "CALLS_FILE=\"$2\"",
                     "WORKTREE_ROOT=\"$3\"",
                     "shift 3",
-                    "MAX_CLAUDE_AGENTS=9",
-                    f"ALLOW_UNSAFE_CLAUDE={1 if unsafe_claude_enabled else 0}",
-                    "CLAUDE_TIMEOUT_SECONDS=30",
+                    "MAX_OMP_AGENTS=9",
+                    f"RUN_OPENCODE={1 if run_opencode_enabled else 0}",
+                    "OMP_MODEL=omniroute/omp/default",
+                    "OMP_THINKING=medium",
+                    "OMP_MAX_TIME=",
+                    "OMP_TIMEOUT_SECONDS=30",
                     "MAX_TASK_ATTEMPTS=3",
                     "RETRY_BACKOFF_SECONDS=1",
                     "OPENCODE_DEFERRED_RC=10",
+                    "RECEIPT_DIR=$WORKTREE_ROOT/receipts",
                     "log() { printf '%s %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$1\" >>\"$LOG_FILE\"; }",
                     _dispatcher_function_block(),
-                    "active_claude_agents() { printf '0\\n'; }",
                     "open_pr_for_branch() {",
                     "  if [[ \"${FAKE_OPEN_PR:-0}\" == 1 ]]; then",
                     "    printf '17\\thttps://example.test/pr/17\\n'",
@@ -66,34 +80,40 @@ class DispatcherWorkerFixture:
                     "}",
                     "complete_task() { printf 'COMPLETE\\t%s\\t%s\\t%s\\n' \"$1\" \"$2\" \"$3\" >>\"$CALLS_FILE\"; }",
                     "retry_failure_note() { printf 'repo-agent retry attempt=1/3 next_retry_after=2099-01-01T00:00:00Z'; }",
-                    "run_claude_for_fix \"$@\"",
+                    "run_omp_for_fix \"$@\"",
                     "",
                 )
             )
         )
         self.harness.chmod(0o700)
 
-    def write_fake_commands(self) -> None:
+    def write_fake_commands(self, *, include_omp: bool = True) -> None:
         self.fake_bin.mkdir()
-        self._write_executable(
-            "claude",
-            (
-                "#!/usr/bin/env bash\n"
-                "set -euo pipefail\n"
-                "worktree=''\n"
-                "while [[ $# -gt 0 ]]; do\n"
-                "  case \"$1\" in\n"
-                "    --add-dir) shift; worktree=\"$1\" ;;\n"
-                "  esac\n"
-                "  shift || true\n"
-                "done\n"
-                "if [[ \"${FAKE_CLAUDE_TOUCH_DIRTY:-0}\" == 1 && -n \"$worktree\" ]]; then\n"
-                "  printf 'dirty\\n' >\"$worktree/dirty-after-claude.txt\"\n"
-                "fi\n"
-                "sleep \"${FAKE_CLAUDE_SLEEP:-0}\"\n"
-                "exit \"${FAKE_CLAUDE_RC:-0}\"\n"
-            ),
-        )
+        if include_omp:
+            self._write_executable(
+                "omp",
+                (
+                    "#!/usr/bin/env bash\n"
+                    "set -euo pipefail\n"
+                    "worktree=''\n"
+                    "printf 'OMP_ARGV' >>\"${CALLS_FILE:?}\"\n"
+                    "for arg in \"$@\"; do printf '\\t%s' \"$arg\" | tr '\\n' ' ' >>\"${CALLS_FILE:?}\"; done\n"
+                    "printf '\\n' >>\"${CALLS_FILE:?}\"\n"
+                    "while [[ $# -gt 0 ]]; do\n"
+                    "  case \"$1\" in\n"
+                    "    --cwd) shift; worktree=\"$1\" ;;\n"
+                    "    --approval-mode) shift ;;\n"
+                    "    -p) shift; prompt=\"$1\" ;;\n"
+                    "  esac\n"
+                    "  shift || true\n"
+                    "done\n"
+                    "if [[ \"${FAKE_OMP_TOUCH_DIRTY:-0}\" == 1 && -n \"$worktree\" ]]; then\n"
+                    "  printf 'dirty\\n' >\"$worktree/dirty-after-omp.txt\"\n"
+                    "fi\n"
+                    "sleep \"${FAKE_OMP_SLEEP:-0}\"\n"
+                    "exit \"${FAKE_OMP_RC:-0}\"\n"
+                ),
+            )
         self._write_executable(
             "gh",
             (
@@ -119,11 +139,12 @@ class DispatcherWorkerFixture:
         self._run_git(self.clone, "add", "README.md")
         self._run_git(self.clone, "commit", "-m", "base")
 
+
     def run_worker(
         self,
         *,
-        fake_claude_sleep: str = "0",
-        fake_claude_touch_dirty: str = "0",
+        fake_omp_sleep: str = "0",
+        fake_omp_touch_dirty: str = "0",
         fake_open_pr: str,
         task_id: str,
     ) -> subprocess.CompletedProcess[str]:
@@ -131,10 +152,10 @@ class DispatcherWorkerFixture:
         env.update(
             {
                 "CALLS_FILE": str(self.calls_file),
-                "FAKE_CLAUDE_SLEEP": fake_claude_sleep,
-                "FAKE_CLAUDE_TOUCH_DIRTY": fake_claude_touch_dirty,
+                "FAKE_OMP_SLEEP": fake_omp_sleep,
+                "FAKE_OMP_TOUCH_DIRTY": fake_omp_touch_dirty,
                 "FAKE_OPEN_PR": fake_open_pr,
-                "PATH": f"{self.fake_bin}{os.pathsep}{env['PATH']}",
+                "PATH": f"{self.fake_bin}{os.pathsep}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             }
         )
         return subprocess.run(
@@ -158,6 +179,46 @@ class DispatcherWorkerFixture:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+        )
+
+    def start_worker(
+        self,
+        *,
+        fake_omp_sleep: str = "0",
+        fake_omp_touch_dirty: str = "0",
+        fake_open_pr: str,
+        task_id: str,
+    ) -> subprocess.Popen[str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "CALLS_FILE": str(self.calls_file),
+                "FAKE_OMP_SLEEP": fake_omp_sleep,
+                "FAKE_OMP_TOUCH_DIRTY": fake_omp_touch_dirty,
+                "FAKE_OPEN_PR": fake_open_pr,
+                "PATH": f"{self.fake_bin}{os.pathsep}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            }
+        )
+        return subprocess.Popen(
+            [
+                "bash",
+                str(self.harness),
+                str(self.log_file),
+                str(self.calls_file),
+                str(self.worktree_root),
+                self.board,
+                str(self.clone),
+                task_id,
+                self.title,
+                self.repo,
+                self.issue,
+                self.branch,
+                "",
+            ],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
 
     def wait_for_log(self, needle: str, timeout_seconds: float = 5.0) -> None:
@@ -197,9 +258,24 @@ class DispatcherWorkerFixture:
 
     def combined_log_text(self) -> str:
         logs = [self.log_text()]
-        for path in sorted(self.root.glob("claude-*.log")):
+        for path in sorted(self.root.glob("omp-*.log")):
             logs.append(path.read_text())
         return "\n".join(logs)
+
+    def wait_for_omp_argv(self, timeout_seconds: float = 5.0) -> list[str]:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            argv = self.omp_argv()
+            if len(argv) >= 10:
+                return argv
+            time.sleep(0.05)
+        raise AssertionError(f"timed out waiting for OMP argv; calls={self.calls_text()}")
+
+    def omp_argv(self) -> list[str]:
+        for line in self.calls_text().splitlines():
+            if line.startswith("OMP_ARGV\t"):
+                return line.split("\t")[1:]
+        return []
 
     def _write_executable(self, name: str, content: str) -> None:
         path = self.fake_bin / name

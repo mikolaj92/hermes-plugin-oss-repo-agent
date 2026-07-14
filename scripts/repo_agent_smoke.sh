@@ -2,6 +2,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ACTIVE_SCRIPTS="${HERMES_REPO_AGENT_ACTIVE_SCRIPTS:-${HOME:-/Users/mini-m4-main}/.hermes/scripts}"
+[[ -f "$ROOT/tests/test_runtime_scripts.py" ]]
+[[ -f "$ROOT/docs/github-kanban-mapping.md" ]]
+[[ -d "$ROOT/templates/launchd" ]]
+[[ -d "$ROOT/launchd" ]]
+python3 "$ROOT/tools/deployment_parity.py" \
+  --source-root "$ROOT/scripts" \
+  --active-root "$ACTIVE_SCRIPTS" \
+  --template-root "$ROOT/templates/launchd" \
+  --template-root "$ROOT/launchd" \
+  ${HERMES_REPO_AGENT_DEPLOYMENT_MANIFEST:+--manifest "$HERMES_REPO_AGENT_DEPLOYMENT_MANIFEST"} \
+  >/dev/null
 
 bash -n "$ROOT/scripts/repo_issue_intake.sh"
 bash -n "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
@@ -16,7 +28,6 @@ bash -n "$ROOT/scripts/repo_agent_webhook.sh"
 
 grep -Fq '[fix-pr-review]' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
 grep -Fq 'complete-stale-review' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
-grep -Fq 'HERMES_CLAUDE_TIMEOUT_SECONDS' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
 grep -Fq 'HERMES_REPO_AGENT_SOURCE:-github' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
 grep -Fq 'github_issue_rows' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
 grep -Fq 'board-agent-active' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"

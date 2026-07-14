@@ -16,7 +16,7 @@ labels:
   generated: ai:generated
 executor:
   enabled: false
-  command: opencode
+  command: omp
   timeout_seconds: 1800
 repos:
   - repo: owner/example-repo

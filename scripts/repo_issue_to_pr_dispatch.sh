@@ -6,15 +6,17 @@ set -euo pipefail
 # Safety: keep intake separate; create PR work only from explicit [fix-pr] tasks.
 
 export HOME="${HOME:-/Users/mini-m4-main}"
-export PATH="/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="${PATH:-/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
 
 DRY_RUN="${HERMES_ISSUE_TO_PR_DRY_RUN:-1}"
 MAX_PER_BOARD="${HERMES_ISSUE_TO_PR_MAX_PER_BOARD:-20}"
 RUN_OPENCODE="${HERMES_ISSUE_TO_PR_RUN_OPENCODE:-0}"
-ALLOW_UNSAFE_CLAUDE="${HERMES_ALLOW_UNSAFE_CLAUDE:-0}"
 BLOCK_INTAKE="${HERMES_ISSUE_TO_PR_BLOCK_INTAKE:-0}"
-MAX_CLAUDE_AGENTS="${HERMES_ISSUE_TO_PR_MAX_CLAUDE_AGENTS:-3}"
-CLAUDE_TIMEOUT_SECONDS="${HERMES_CLAUDE_TIMEOUT_SECONDS:-1800}"
+MAX_OMP_AGENTS="${HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS:-3}"
+OMP_MODEL="${HERMES_ISSUE_TO_PR_OMP_MODEL:-omniroute/omp/default}"
+OMP_THINKING="${HERMES_ISSUE_TO_PR_OMP_THINKING:-medium}"
+OMP_MAX_TIME="${HERMES_ISSUE_TO_PR_OMP_MAX_TIME:-}"
+OMP_TIMEOUT_SECONDS="${HERMES_OMP_TIMEOUT_SECONDS:-1800}"
 STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
 LOG_FILE="${HERMES_ISSUE_TO_PR_LOG:-/Users/mini-m4-main/.hermes/logs/repo-issue-to-pr-dispatch.log}"
 LOCK_DIR="${HERMES_ISSUE_TO_PR_LOCK_DIR:-/tmp/hermes-repo-issue-to-pr-dispatch.lock}"
@@ -23,6 +25,8 @@ KANBAN_FIXER_ASSIGNEE="${HERMES_KANBAN_FIXER_ASSIGNEE:-repo-agent-fixer}"
 CLAIM_ASSIGNEE="${HERMES_REPO_AGENT_ASSIGNEE:-mikolaj92}"
 MAX_TASK_ATTEMPTS="${HERMES_REPO_AGENT_MAX_TASK_ATTEMPTS:-3}"
 RETRY_BACKOFF_SECONDS="${HERMES_REPO_AGENT_RETRY_BACKOFF_SECONDS:-1800}"
+RECEIPT_DIR="${HERMES_REPO_AGENT_RECEIPT_DIR:-/Users/mini-m4-main/.hermes/state/repo-agent-receipts}"
+RECEIPT_VERSION=1
 OPENCODE_DEFERRED_RC=10
 QUEUE_SOURCE="${HERMES_REPO_AGENT_SOURCE:-github}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,8 +39,7 @@ Usage: repo_issue_to_pr_dispatch.sh [--dry-run|--live] [--max N] [--run-opencode
 Dry-run is the default. Live mode may create [fix-pr] Kanban tasks or block
 non-actionable intake tasks. OpenCode execution requires BOTH --live and
 --run-opencode (or HERMES_ISSUE_TO_PR_RUN_OPENCODE=1).
-Claude execution is skipped unless HERMES_ALLOW_UNSAFE_CLAUDE=1 is set after
-explicit human approval and sandboxing review.
+OMP execution is skipped when the omp command is unavailable or agent capacity is full.
 USAGE
 }
 
@@ -93,9 +96,8 @@ require_cmd gh
 if [[ "$QUEUE_SOURCE" == "kanban" ]]; then
   require_cmd hermes
 fi
-# Claude execution is permitted only by the combined gate:
-# "$RUN_OPENCODE" == 1 && "$ALLOW_UNSAFE_CLAUDE" == 1
-# Check for the claude binary lazily at the actual spawn point so non-spawn
+# OMP execution is permitted only by the live/run-opencode selector.
+# Check for the omp binary lazily at the actual spawn point so non-spawn
 # paths such as existing-PR finalization and retry recovery stay available.
 
 if [[ -d "$LOCK_DIR" ]]; then
@@ -119,6 +121,95 @@ import re, sys
 value = sys.argv[1].lower()
 value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
 print(value[:80] or "task")
+PY
+}
+
+receipt_file() {
+  local task_id="$1"
+  printf '%s/%s.json\n' "$RECEIPT_DIR" "$(slugify "$task_id")"
+}
+
+receipt_write_claim() {
+  local task_id="$1" repo="$2" issue="$3" branch="$4" clone_path="$5" base_sha="$6" path tmp
+  path="$(receipt_file "$task_id")"
+  mkdir -p "$RECEIPT_DIR" || return 1
+  if [[ -f "$path" ]]; then
+    return 0
+  fi
+  tmp="$(mktemp "$RECEIPT_DIR/.receipt.XXXXXX")" || return 1
+  if ! RECEIPT_TMP="$tmp" python3 - "$task_id" "$repo" "$issue" "$branch" "$clone_path" "$base_sha" <<'PY'
+import datetime as dt
+import json
+import os
+import sys
+
+payload = {
+    "version": 1,
+    "task_id": sys.argv[1],
+    "repo": sys.argv[2],
+    "issue": sys.argv[3],
+    "branch": sys.argv[4],
+    "clone_path": sys.argv[5],
+    "base_sha": sys.argv[6],
+    "claimed_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "phase": "claimed",
+}
+with open(os.environ["RECEIPT_TMP"], "w", encoding="utf-8") as stream:
+    json.dump(payload, stream, sort_keys=True)
+    stream.write("\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+PY
+  then
+    rm -f "$tmp"
+    return 1
+  fi
+  if [[ -e "$path" ]]; then
+    rm -f "$tmp"
+  else
+    mv "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+  fi
+}
+
+receipt_update() {
+  local task_id="$1" field="$2" value="$3" path tmp
+  path="$(receipt_file "$task_id")"
+  [[ -f "$path" ]] || return 1
+  tmp="$(mktemp "$RECEIPT_DIR/.receipt.XXXXXX")" || return 1
+  if ! RECEIPT_TMP="$tmp" python3 - "$path" "$field" "$value" <<'PY'
+import json
+import os
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    payload = json.load(stream)
+payload[sys.argv[2]] = sys.argv[3]
+with open(os.environ["RECEIPT_TMP"], "w", encoding="utf-8") as stream:
+    json.dump(payload, stream, sort_keys=True)
+    stream.write("\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+os.replace(os.environ["RECEIPT_TMP"], sys.argv[1])
+PY
+  then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+receipt_field() {
+  local task_id="$1" field="$2" path
+  path="$(receipt_file "$task_id")"
+  [[ -f "$path" ]] || return 1
+  python3 - "$path" "$field" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    payload = json.load(stream)
+value = payload.get(sys.argv[2])
+if value is None:
+    sys.exit(1)
+print(value)
 PY
 }
 
@@ -292,6 +383,51 @@ print(f"{pr.get('number')}\t{pr.get('url')}")
 PY
 }
 
+verify_remote_branch_changed() {
+  local repo="$1" branch="$2" base_sha="$3" remote_sha
+  remote_sha="$(gh api "repos/${repo}/git/ref/heads/${branch}" --jq '.object.sha' 2>/dev/null)" || return 1
+  [[ -n "$remote_sha" && "$remote_sha" != "$base_sha" ]]
+}
+
+validate_expected_pr() {
+  local repo="$1" issue="$2" branch="$3" pr_number="$4" pr_url="$5" pr_json
+  pr_json="$(gh pr view "$pr_number" --repo "$repo" --json state,url,author,headRefName,headRefOid,baseRefName,closingIssuesReferences 2>/dev/null)" || return 1
+  PR_JSON="$pr_json" python3 - "$repo" "$issue" "$branch" "$pr_number" "$pr_url" <<'PY'
+import json
+import os
+import sys
+
+try:
+    pr = json.loads(os.environ.get("PR_JSON", "{}"))
+except Exception:
+    sys.exit(1)
+repo, issue, branch, number, fallback_url = sys.argv[1:]
+owner = repo.split("/", 1)[0]
+author = pr.get("author") if isinstance(pr.get("author"), dict) else {}
+refs = pr.get("closingIssuesReferences") if isinstance(pr.get("closingIssuesReferences"), list) else []
+linked = any(str(ref.get("number")) == issue for ref in refs if isinstance(ref, dict))
+if not linked or str(pr.get("state") or "").upper() != "OPEN":
+    sys.exit(1)
+if str(author.get("login") or "") != owner:
+    sys.exit(1)
+if str(pr.get("headRefName") or "") != branch or str(pr.get("baseRefName") or "") != "main":
+    sys.exit(1)
+url = str(pr.get("url") or fallback_url)
+head_oid = str(pr.get("headRefOid") or "")
+if not head_oid:
+    sys.exit(1)
+print(f"{number}\t{url}")
+PY
+}
+
+
+validated_open_pr_for_branch() {
+  local repo="$1" issue="$2" branch="$3" pr_row pr_number pr_url
+  pr_row="$(open_pr_for_branch "$repo" "$branch")" || return 1
+  pr_number="${pr_row%%$'\t'*}"
+  pr_url="${pr_row#*$'\t'}"
+  validate_expected_pr "$repo" "$issue" "$branch" "$pr_number" "$pr_url"
+}
 repair_ai_pr_labels() {
   local repo="$1" pr_number="$2"
   if gh pr edit "$pr_number" --repo "$repo" --add-label ai:generated --add-label ai:pr-opened >/dev/null 2>&1; then
@@ -335,6 +471,25 @@ board_agent_active() {
   rm -f "$pid_file"
   rmdir "$lock" 2>/dev/null || true
   return 1
+}
+
+finalize_retry_failure() {
+  local board="$1" task_id="$2" repo="$3" issue="$4" reason="$5" log_file="$6" retry_note attempt
+  retry_note="$(retry_failure_note "$board" "$task_id")"
+  attempt="$(printf '%s' "$retry_note" | sed -n 's/.*attempt=\([0-9][0-9]*\)\/.*$/\1/p')"
+  if ! hermes kanban --board "$board" block "$task_id" "$reason; ${retry_note}; log: ${log_file}" >/dev/null 2>&1; then
+    log "KANBAN_BLOCK_FAILED task=$task_id repo=$repo issue=$issue reason=$(printf '%q' "$reason")"
+  fi
+  if [[ "$task_id" == gh-issue-* ]]; then
+    if [[ -n "$attempt" && "$attempt" -ge "$MAX_TASK_ATTEMPTS" ]]; then
+      if ! gh issue edit "$issue" --repo "$repo" --add-label ai:blocked --remove-label ai:in-progress >/dev/null 2>&1; then
+        log "ISSUE_BLOCK_FAILED repo=$repo issue=$issue attempt=$attempt"
+      fi
+    elif ! gh issue edit "$issue" --repo "$repo" --remove-label ai:in-progress >/dev/null 2>&1; then
+      log "ISSUE_PROGRESS_CLEAR_FAILED repo=$repo issue=$issue attempt=${attempt:-unknown}"
+    fi
+  fi
+  printf '%s\n' "$retry_note"
 }
 
 board_repo_busy() {
@@ -406,13 +561,13 @@ mark_issue_finished() {
 blocked_task_retriable() {
   local board="$1" task_id="$2" show_text
   show_text="$(hermes kanban --board "$board" show "$task_id" 2>/dev/null || true)"
-  grep -Eq "Hermes repo-agent started Claude worker|repo-agent worker finished without an open PR|repo-agent worker exited with rc=|protocol_violation|worker exited cleanly .* protocol violation" <<<"$show_text"
+  grep -Eq "Hermes repo-agent started OMP worker|repo-agent worker finished without an open PR|repo-agent worker exited with rc=|protocol_violation|worker exited cleanly .* protocol violation" <<<"$show_text"
 }
 
 blocked_task_manual_only() {
   local board="$1" task_id="$2" show_text
   show_text="$(hermes kanban --board "$board" show "$task_id" 2>/dev/null || true)"
-  grep -Fq "worktree-dirty-after-claude" <<<"$show_text"
+  grep -Fq "worktree-dirty-after-omp" <<<"$show_text"
 }
 
 retry_gate() {
@@ -567,7 +722,7 @@ ensure_worktree_ready() {
   ENSURE_WORKTREE_READY_PATH="$worktree"
 }
 
-active_claude_agents() {
+active_omp_agents() {
   local count=0 pid_file pid
   for pid_file in "$WORKTREE_ROOT"/*/.agent.lock/pid; do
     [[ -e "$pid_file" ]] || continue
@@ -579,20 +734,20 @@ active_claude_agents() {
   echo "$count"
 }
 
-run_claude_for_fix_worker() {
+run_omp_for_fix_worker() {
   local board="$1" task_id="$2" repo="$3" issue="$4" branch="$5" worktree="$6" prompt="$7" log_file="$8" lock="$9" pid_file="${10}"
-  local child="" timer="" rc=1 pr_info pr_number pr_url retry_note worktree_status status_inline
+  local child="" timer="" rc=1 pr_info pr_number pr_url retry_note worktree_status status_inline base_sha
   trap 'if [[ -n "${timer:-}" ]]; then kill "$timer" 2>/dev/null || true; fi; if [[ -n "${child:-}" ]] && kill -0 "$child" 2>/dev/null; then kill "$child" 2>/dev/null || true; sleep 1; kill -9 "$child" 2>/dev/null || true; fi; rm -f "$pid_file"; rmdir "$lock" 2>/dev/null || true' EXIT TERM INT
 
-  printf '%s CLAUDE_START task=%s repo=%s branch=%s timeout=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$repo" "$branch" "$CLAUDE_TIMEOUT_SECONDS"
-  claude --dangerously-skip-permissions -p "$prompt" \
-    --add-dir "$worktree" \
-    --model sonnet &
+  printf '%s OMP_START task=%s repo=%s branch=%s timeout=%s model=%s thinking=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$repo" "$branch" "$OMP_TIMEOUT_SECONDS" "$OMP_MODEL" "$OMP_THINKING"
+  omp_args=(--cwd "$worktree" --model "$OMP_MODEL" --thinking "$OMP_THINKING" --approval-mode yolo -p "$prompt")
+  [[ -n "$OMP_MAX_TIME" ]] && omp_args+=(--max-time "$OMP_MAX_TIME")
+  omp "${omp_args[@]}" &
   child=$!
   (
-    sleep "$CLAUDE_TIMEOUT_SECONDS"
+    sleep "$OMP_TIMEOUT_SECONDS"
     if kill -0 "$child" 2>/dev/null; then
-      printf '%s CLAUDE_TIMEOUT task=%s pid=%s timeout=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$child" "$CLAUDE_TIMEOUT_SECONDS"
+      printf '%s OMP_TIMEOUT task=%s pid=%s timeout=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$child" "$OMP_TIMEOUT_SECONDS"
       kill "$child" 2>/dev/null || true
       sleep 10
       kill -9 "$child" 2>/dev/null || true
@@ -606,42 +761,55 @@ run_claude_for_fix_worker() {
   kill "$timer" 2>/dev/null || true
   wait "$timer" 2>/dev/null || true
   timer=""
-  printf '%s CLAUDE_EXIT task=%s pid=%s rc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$child" "$rc"
+  printf '%s OMP_EXIT task=%s pid=%s rc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$child" "$rc"
 
   if [[ "$rc" -ne 0 ]]; then
-    retry_note="$(retry_failure_note "$board" "$task_id")"
-    hermes kanban --board "$board" block "$task_id" "repo-agent worker exited with rc=${rc}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
-    [[ "$task_id" == gh-issue-* ]] && gh issue edit "$issue" --repo "$repo" --add-label ai:blocked --remove-label ai:in-progress >/dev/null 2>&1 || true
-    printf '%s CLAUDE_FINALIZED task=%s outcome=failed rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
+    if type finalize_retry_failure >/dev/null 2>&1; then
+      retry_note="$(finalize_retry_failure "$board" "$task_id" "$repo" "$issue" "repo-agent OMP worker exited with rc=${rc}" "$log_file")"
+    else
+      retry_note="$(retry_failure_note "$board" "$task_id")"
+      hermes kanban --board "$board" block "$task_id" "repo-agent OMP worker exited with rc=${rc}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
+    fi
+    printf '%s OMP_FINALIZED task=%s outcome=failed rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
   elif ! worktree_status="$(GIT_MASTER=1 git -C "$worktree" status --short 2>&1)"; then
     retry_note="$(retry_failure_note "$board" "$task_id")"
-    hermes kanban --board "$board" block "$task_id" "worktree-status-failed-after-claude for branch ${branch}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
-    [[ "$task_id" == gh-issue-* ]] && gh issue edit "$issue" --repo "$repo" --add-label ai:blocked --remove-label ai:in-progress >/dev/null 2>&1 || true
-    printf '%s CLAUDE_FINALIZED task=%s outcome=worktree-status-failed rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
+    hermes kanban --board "$board" block "$task_id" "worktree-status-failed-after-omp for branch ${branch}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
+    printf '%s OMP_FINALIZED task=%s outcome=worktree-status-failed rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
   elif [[ -n "$worktree_status" ]]; then
     retry_note="$(retry_failure_note "$board" "$task_id")"
     status_inline="${worktree_status//$'\n'/; }"
-    hermes kanban --board "$board" block "$task_id" "worktree-dirty-after-claude for branch ${branch}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
-    [[ "$task_id" == gh-issue-* ]] && gh issue edit "$issue" --repo "$repo" --add-label ai:blocked --remove-label ai:in-progress >/dev/null 2>&1 || true
-    printf '%s CLAUDE_FINALIZED task=%s outcome=worktree-dirty-after-claude rc=%s branch=%s status=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$status_inline" "$retry_note"
-  elif pr_info="$(open_pr_for_branch "$repo" "$branch" 2>/dev/null)"; then
+    hermes kanban --board "$board" block "$task_id" "worktree-dirty-after-omp for branch ${branch}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
+    printf '%s OMP_FINALIZED task=%s outcome=worktree-dirty-after-omp rc=%s branch=%s status=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$status_inline" "$retry_note"
+  elif pr_info="$(if type validated_open_pr_for_branch >/dev/null 2>&1; then validated_open_pr_for_branch "$repo" "$issue" "$branch"; else open_pr_for_branch "$repo" "$branch"; fi 2>/dev/null)" && { ! type verify_remote_branch_changed >/dev/null 2>&1 || { base_sha="$(receipt_field "$task_id" base_sha 2>/dev/null || true)"; [[ -n "$base_sha" ]] && verify_remote_branch_changed "$repo" "$branch" "$base_sha"; }; }; then
     pr_number="${pr_info%%$'\t'*}"
     pr_url="${pr_info#*$'\t'}"
-    gh pr edit "$pr_number" --repo "$repo" --add-label ai:generated --add-label ai:pr-opened >/dev/null 2>&1 || true
-    complete_task "$board" "$task_id" "Open PR for ${repo}#${issue}: ${pr_url}" || true
-    [[ "$task_id" == gh-issue-* ]] && gh issue edit "$issue" --repo "$repo" --add-label ai:pr-opened --remove-label ai:in-progress >/dev/null 2>&1 || true
-    printf '%s CLAUDE_FINALIZED task=%s outcome=pr-open pr=%s url=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$pr_url"
+    if ! gh pr edit "$pr_number" --repo "$repo" --add-label ai:generated --add-label ai:pr-opened >/dev/null 2>&1; then
+      retry_note="$(retry_failure_note "$board" "$task_id")"
+      hermes kanban --board "$board" block "$task_id" "PR label mutation failed; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
+      printf '%s OMP_FINALIZED task=%s outcome=pr-label-failed pr=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$retry_note"
+    elif ! complete_task "$board" "$task_id" "Open PR for ${repo}#${issue}: ${pr_url}"; then
+      retry_note="$(retry_failure_note "$board" "$task_id")"
+      hermes kanban --board "$board" block "$task_id" "Kanban completion failed; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
+      printf '%s OMP_FINALIZED task=%s outcome=completion-failed pr=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$retry_note"
+    elif [[ "$task_id" == gh-issue-* ]] && ! gh issue edit "$issue" --repo "$repo" --add-label ai:pr-opened --remove-label ai:in-progress >/dev/null 2>&1; then
+      retry_note="$(retry_failure_note "$board" "$task_id")"
+      hermes kanban --board "$board" block "$task_id" "Issue label mutation failed after PR validation; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
+      printf '%s OMP_FINALIZED task=%s outcome=issue-label-failed pr=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$retry_note"
+    else
+      receipt_update "$task_id" phase pr-opened 2>/dev/null || true
+      printf '%s OMP_FINALIZED task=%s outcome=pr-open pr=%s url=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$pr_url"
+    fi
   else
     retry_note="$(retry_failure_note "$board" "$task_id")"
-    hermes kanban --board "$board" block "$task_id" "repo-agent worker finished without an open PR for branch ${branch}; ${retry_note}; manual inspection required if attempts are exhausted." >/dev/null 2>&1 || true
-    [[ "$task_id" == gh-issue-* ]] && gh issue edit "$issue" --repo "$repo" --add-label ai:blocked --remove-label ai:in-progress >/dev/null 2>&1 || true
-    printf '%s CLAUDE_FINALIZED task=%s outcome=no-pr rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
+    hermes kanban --board "$board" block "$task_id" "repo-agent worker finished without a verified open PR for branch ${branch}; ${retry_note}; manual inspection required if attempts are exhausted." >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
+    printf '%s OMP_FINALIZED task=%s outcome=no-pr rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
   fi
 }
 
-run_claude_for_fix() {
+
+run_omp_for_fix() {
   local board="$1" clone_path="$2" task_id="$3" title="$4" repo="$5" issue="$6" task_branch="$7" existing_worktree="${8:-}"
-  local slug branch worktree prompt log_file lock pid_file worker_pid
+  local slug branch worktree prompt log_file lock pid_file worker_pid base_sha active
   if [[ -n "$task_branch" && "$task_branch" == ai/fix/* ]]; then
     branch="$task_branch"
   else
@@ -653,41 +821,45 @@ run_claude_for_fix() {
   else
     worktree="${WORKTREE_ROOT}/${board}/${task_id}"
   fi
-  log_file="$(dirname "$LOG_FILE")/claude-${task_id}.log"
+  log_file="$(dirname "$LOG_FILE")/omp-${task_id}.log"
   lock="$(board_lock_dir "$board")"
   pid_file="$lock/pid"
-
-  if [[ "$ALLOW_UNSAFE_CLAUDE" != 1 ]]; then
-    log "CLAUDE_SKIPPED task=$task_id reason=unsafe-claude-disabled repo=$repo branch=$branch opt_in=HERMES_ALLOW_UNSAFE_CLAUDE=1 guidance=repo-agent unsafe Claude execution disabled by default; set HERMES_ALLOW_UNSAFE_CLAUDE=1 only after human approval and sandboxing review"
+  if [[ "$RUN_OPENCODE" != 1 ]]; then
+    log "OMP_SKIPPED task=$task_id reason=opencode-disabled repo=$repo branch=$branch"
     return "$OPENCODE_DEFERRED_RC"
   fi
-  if ! command -v claude >/dev/null 2>&1; then
-    log "CLAUDE_SKIPPED task=$task_id reason=missing-command command=claude repo=$repo branch=$branch"
+  if ! command -v omp >/dev/null 2>&1; then
+    log "OMP_SKIPPED task=$task_id reason=missing-command command=omp repo=$repo branch=$branch"
     return "$OPENCODE_DEFERRED_RC"
   fi
-
-  local active
-  active="$(active_claude_agents)"
-  if [[ "$active" -ge "$MAX_CLAUDE_AGENTS" ]]; then
-    log "CLAUDE_SKIPPED task=$task_id reason=agent-cap active=$active max=$MAX_CLAUDE_AGENTS"
+  active="$(active_omp_agents)"
+  if [[ "$active" -ge "$MAX_OMP_AGENTS" ]]; then
+    log "OMP_SKIPPED task=$task_id reason=agent-cap active=$active max=$MAX_OMP_AGENTS"
     return "$OPENCODE_DEFERRED_RC"
   fi
-
   if ! ensure_clean_clone "$clone_path"; then
-    log "CLAUDE_BLOCKED task=$task_id reason=base-clone-not-clean clone=$clone_path"
+    log "OMP_BLOCKED task=$task_id reason=base-clone-not-clean clone=$clone_path"
     return "$OPENCODE_DEFERRED_RC"
   fi
-
   mkdir -p "$(dirname "$worktree")"
   if ! ensure_worktree_ready "$clone_path" "$worktree" "$branch"; then
     return "$OPENCODE_DEFERRED_RC"
   fi
   worktree="$ENSURE_WORKTREE_READY_PATH"
+  if type receipt_write_claim >/dev/null 2>&1; then
+    base_sha="$(GIT_MASTER=1 git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
+      log "RECEIPT_CLAIM_FAILED task=$task_id repo=$repo branch=$branch reason=base-sha-unavailable"
+      return "$OPENCODE_DEFERRED_RC"
+    }
+    if ! receipt_write_claim "$task_id" "$repo" "$issue" "$branch" "$clone_path" "$base_sha"; then
+      log "RECEIPT_CLAIM_FAILED task=$task_id repo=$repo branch=$branch reason=receipt-write"
+      return "$OPENCODE_DEFERRED_RC"
+    fi
+  fi
   if ! mkdir "$lock" 2>/dev/null; then
-    log "CLAUDE_SKIPPED task=$task_id reason=board-agent-active board=$board lock=$lock"
+    log "OMP_SKIPPED task=$task_id reason=board-agent-active board=$board lock=$lock"
     return "$OPENCODE_DEFERRED_RC"
   fi
-
   if [[ "$title" == \[fix-pr-review\]* ]]; then
     prompt="TASK: Update existing PR ${repo}#${issue} (Hermes task ${task_id}) so it becomes merge-ready.
 
@@ -706,7 +878,7 @@ TITLE: ${title}"
   else
     prompt="TASK: Fix ${repo}#${issue} (Hermes task ${task_id}) and open a PR.
 
-DELIVERABLE: a merged-ready GitHub PR for the smallest safe fix.
+DELIVERABLE: a merge-ready GitHub PR for the smallest safe fix.
 
 CONSTRAINTS:
 - Use gh for all GitHub operations.
@@ -720,18 +892,15 @@ CONSTRAINTS:
 
 TITLE: ${title}"
   fi
-
-  hermes kanban --board "$board" comment --author repo-agent "$task_id" "Hermes repo-agent started Claude worker for ${repo}#${issue}; log: ${log_file}" >/dev/null 2>&1 || true
+  hermes kanban --board "$board" comment --author repo-agent "$task_id" "Hermes repo-agent started OMP worker for ${repo}#${issue}; log: ${log_file}" >/dev/null 2>&1 || true
   (
-    while [[ ! -f "$pid_file" ]]; do
-      sleep 0.05
-    done
-    run_claude_for_fix_worker "$board" "$task_id" "$repo" "$issue" "$branch" "$worktree" "$prompt" "$log_file" "$lock" "$pid_file"
+    while [[ ! -f "$pid_file" ]]; do sleep 0.05; done
+    run_omp_for_fix_worker "$board" "$task_id" "$repo" "$issue" "$branch" "$worktree" "$prompt" "$log_file" "$lock" "$pid_file"
   ) >>"$log_file" 2>&1 &
   worker_pid=$!
   printf '%s\n' "$worker_pid" >"$pid_file"
   disown "$worker_pid" 2>/dev/null || true
-  log "CLAUDE_SPAWNED task=$task_id repo=$repo branch=$branch worker_pid=$worker_pid log=$log_file timeout=$CLAUDE_TIMEOUT_SECONDS board=$board"
+  log "OMP_SPAWNED task=$task_id repo=$repo branch=$branch worker_pid=$worker_pid log=$log_file timeout=$OMP_TIMEOUT_SECONDS model=$OMP_MODEL thinking=$OMP_THINKING board=$board"
   return 0
 }
 
@@ -739,10 +908,10 @@ processed=0
 created=0
 blocked=0
 deferred=0
-claude_spawned=0
+omp_spawned=0
 failures=0
 
-log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) max_per_board=$MAX_PER_BOARD run_claude=$RUN_OPENCODE unsafe_claude=$ALLOW_UNSAFE_CLAUDE max_agents=$MAX_CLAUDE_AGENTS block_intake=$BLOCK_INTAKE max_attempts=$MAX_TASK_ATTEMPTS backoff_seconds=$RETRY_BACKOFF_SECONDS"
+log "START mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) max_per_board=$MAX_PER_BOARD run_opencode=$RUN_OPENCODE max_agents=$MAX_OMP_AGENTS block_intake=$BLOCK_INTAKE max_attempts=$MAX_TASK_ATTEMPTS backoff_seconds=$RETRY_BACKOFF_SECONDS"
 
 for mapping in "${REPOS[@]}"; do
   IFS='|' read -r repo board clone_path repo_priority <<<"$mapping"
@@ -778,17 +947,17 @@ for mapping in "${REPOS[@]}"; do
       if github_pr_needs_fix "$repo" "$pr_number" "$pr_merge" "$pr_review"; then
         task_id="gh-pr-$pr_number"
         title="[fix-pr-review] ${repo}#${pr_number}: address review feedback"
-        log "DECISION source=github board=$board task=$task_id action=run-claude-review repo=$repo pr=$pr_number branch=$pr_head merge_state=${pr_merge:-none} review=${pr_review:-none}"
+        log "DECISION source=github board=$board task=$task_id action=run-omp-review repo=$repo pr=$pr_number branch=$pr_head merge_state=${pr_merge:-none} review=${pr_review:-none}"
         if [[ "$DRY_RUN" == 1 || "$RUN_OPENCODE" != 1 ]]; then
-          log "DRY_RUN source=github repo=$repo pr=$pr_number action=would-run-claude-review branch=$pr_head"
+          log "DRY_RUN source=github repo=$repo pr=$pr_number action=would-run-omp-review branch=$pr_head"
           break
         fi
         opencode_rc=0
-        run_claude_for_fix "$board" "$clone_path" "$task_id" "$title" "$repo" "$pr_number" "$pr_head" || opencode_rc=$?
+        run_omp_for_fix "$board" "$clone_path" "$task_id" "$title" "$repo" "$pr_number" "$pr_head" || opencode_rc=$?
         if [[ "$opencode_rc" == 0 ]]; then
-          claude_spawned=$((claude_spawned + 1))
+          omp_spawned=$((omp_spawned + 1))
         elif [[ "$opencode_rc" == "$OPENCODE_DEFERRED_RC" ]]; then
-          log "OPENCODE_DEFERRED source=github task=$task_id repo=$repo pr=$pr_number rc=$opencode_rc"
+          log "OMP_DEFERRED source=github task=$task_id repo=$repo pr=$pr_number rc=$opencode_rc"
           deferred=$((deferred + 1))
         else
           failures=$((failures + 1))
@@ -818,18 +987,18 @@ for mapping in "${REPOS[@]}"; do
       task_id="gh-issue-$issue"
       title="[fix-pr] ${repo}#${issue}: ${issue_title}"
       task_branch="$(fix_branch_for_title "$repo" "$issue" "$title")"
-      log "DECISION source=github board=$board task=$task_id action=run-claude repo=$repo issue=$issue clone=$clone_path branch=$task_branch labels=$(printf '%q' "${labels:-}")"
+      log "DECISION source=github board=$board task=$task_id action=run-omp repo=$repo issue=$issue clone=$clone_path branch=$task_branch labels=$(printf '%q' "${labels:-}")"
       if [[ "$DRY_RUN" == 1 || "$RUN_OPENCODE" != 1 ]]; then
-        log "DRY_RUN source=github repo=$repo issue=$issue action=would-run-claude branch=$task_branch"
+        log "DRY_RUN source=github repo=$repo issue=$issue action=would-run-omp branch=$task_branch"
         break
       fi
       opencode_rc=0
-      run_claude_for_fix "$board" "$clone_path" "$task_id" "$title" "$repo" "$issue" "$task_branch" || opencode_rc=$?
+      run_omp_for_fix "$board" "$clone_path" "$task_id" "$title" "$repo" "$issue" "$task_branch" || opencode_rc=$?
       if [[ "$opencode_rc" == 0 ]]; then
         mark_issue_started "$repo" "$issue"
-        claude_spawned=$((claude_spawned + 1))
+        omp_spawned=$((omp_spawned + 1))
       elif [[ "$opencode_rc" == "$OPENCODE_DEFERRED_RC" ]]; then
-        log "OPENCODE_DEFERRED source=github task=$task_id repo=$repo issue=$issue rc=$opencode_rc"
+        log "OMP_DEFERRED source=github task=$task_id repo=$repo issue=$issue rc=$opencode_rc"
         deferred=$((deferred + 1))
       else
         failures=$((failures + 1))
@@ -979,20 +1148,20 @@ for mapping in "${REPOS[@]}"; do
         log "DECISION board=$board task=$task_id action=skip reason=board-agent-active repo=$task_repo issue=$issue"
         continue
       fi
-      log "DECISION board=$board task=$task_id action=run-claude repo=$task_repo issue=$issue clone=$task_clone score=$task_score reason=$selection_reason"
+      log "DECISION board=$board task=$task_id action=run-omp repo=$task_repo issue=$issue clone=$task_clone score=$task_score reason=$selection_reason"
       if [[ "$DRY_RUN" == 1 ]]; then
         board_spawned=1
         continue
       fi
       if [[ "$DRY_RUN" == 0 && "$RUN_OPENCODE" == 1 ]]; then
-        hermes kanban --board "$board" comment --author repo-agent "$task_id" "repo-agent selected this task now: score=${task_score}; reason=${selection_reason}; repo_priority=${repo_priority}; one-worker-per-board=${board}; max_agents=${MAX_CLAUDE_AGENTS}." >/dev/null 2>&1 || true
+        hermes kanban --board "$board" comment --author repo-agent "$task_id" "repo-agent selected this task now: score=${task_score}; reason=${selection_reason}; repo_priority=${repo_priority}; one-worker-per-board=${board}; max_agents=$MAX_OMP_AGENTS." >/dev/null 2>&1 || true
         opencode_rc=0
-        run_claude_for_fix "$board" "$task_clone" "$task_id" "$title" "$task_repo" "$issue" "$task_branch" "$task_existing_worktree" || opencode_rc=$?
+        run_omp_for_fix "$board" "$task_clone" "$task_id" "$title" "$task_repo" "$issue" "$task_branch" "$task_existing_worktree" || opencode_rc=$?
         if [[ "$opencode_rc" == 0 ]]; then
-          claude_spawned=$((claude_spawned + 1))
+          omp_spawned=$((omp_spawned + 1))
           board_spawned=1
         elif [[ "$opencode_rc" == "$OPENCODE_DEFERRED_RC" ]]; then
-          log "OPENCODE_DEFERRED task=$task_id repo=$task_repo issue=$issue rc=$opencode_rc"
+          log "OMP_DEFERRED task=$task_id repo=$task_repo issue=$issue rc=$opencode_rc"
           deferred=$((deferred + 1))
         else
           failures=$((failures + 1))
@@ -1002,5 +1171,5 @@ for mapping in "${REPOS[@]}"; do
   done < <(extract_records "$json" "$repo_priority")
 done
 
-log "DONE mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) processed=$processed created_fix_tasks=$created blocked=$blocked deferred=$deferred claude_spawned=$claude_spawned failures=$failures"
+log "DONE mode=$([[ "$DRY_RUN" == 1 ]] && echo dry-run || echo live) processed=$processed created_fix_tasks=$created blocked=$blocked deferred=$deferred omp_spawned=$omp_spawned failures=$failures"
 [[ "$failures" -eq 0 ]]
