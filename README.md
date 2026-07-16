@@ -30,6 +30,14 @@ live at the repository root.
 
 After install, Hermes may show [`after-install.md`](after-install.md). The short version is: create a starter config, validate it, then run dry-run intake and dispatch.
 
+## Immutable deployment
+
+Production deployment is TOML-only. The `--deploy` flag publishes the immutable bundle and LaunchAgents:
+
+```bash
+hermes oss-repo-agent --config ~/.hermes/oss-repo-agent/config.toml render-launchd --output ~/.hermes/oss-repo-agent/deployment --deploy
+```
+
 ## 3-minute happy path
 
 ```bash
