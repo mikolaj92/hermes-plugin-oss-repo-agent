@@ -2,7 +2,7 @@
 
 Safe dry-run-first OSS maintainer automation for Hermes.
 
-Use it to inspect open GitHub issues, draft guarded work, and keep agent work inside a no-merge/no-force-push policy before any human-approved execution.
+Use it to inspect open GitHub issues, draft guarded work, and run the configured issue-to-main automation with explicit live-mode safeguards.
 
 GitHub remains a source of truth for public issues, pull requests, discussion,
 labels, checks, and merge state. Hermes Kanban is the internal execution ledger:
@@ -28,7 +28,7 @@ hermes plugins install mikolaj92/hermes-plugin-oss-repo-agent --enable
 This repository is a standalone Hermes plugin: `plugin.yaml` and `__init__.py`
 live at the repository root.
 
-After install, Hermes may show [`after-install.md`](after-install.md). The short version is: create a starter config, validate it, then run dry-run intake and dispatch.
+After install, Hermes may show [`after-install.md`](after-install.md). The short version is: create a starter TOML config, validate it, then run dry-run intake and dispatch.
 
 ## Immutable deployment
 
@@ -41,10 +41,10 @@ hermes oss-repo-agent --config ~/.hermes/oss-repo-agent/config.toml render-launc
 ## 3-minute happy path
 
 ```bash
-hermes oss-repo-agent --config config.yaml init
-hermes oss-repo-agent --config config.yaml validate
-hermes oss-repo-agent --config config.yaml intake --limit 3
-hermes oss-repo-agent --config config.yaml dispatch --max 2
+hermes oss-repo-agent --config config.toml init
+hermes oss-repo-agent --config config.toml validate
+hermes oss-repo-agent --config config.toml intake --limit 3
+hermes oss-repo-agent --config config.toml dispatch --max 2
 ```
 
 Expected dry-run signals:
@@ -66,23 +66,30 @@ The plugin registers:
 ## Commands
 
 ```bash
-hermes oss-repo-agent --config <config.json-or-yaml> init
-hermes oss-repo-agent --config <config.json-or-yaml> validate
-hermes oss-repo-agent --config <config> bootstrap --apply
-hermes oss-repo-agent --config <config> intake --live
-hermes oss-repo-agent --config <config> dispatch --live --run-executor
-hermes oss-repo-agent --config <config> pr-triage --live --comment
-hermes oss-repo-agent --config <config> render-launchd --output <dir>
+hermes oss-repo-agent --config <config.toml> init
+hermes oss-repo-agent --config <config.toml> validate
+hermes oss-repo-agent --config <config.toml> bootstrap --apply
+hermes oss-repo-agent --config <config.toml> intake --live
+hermes oss-repo-agent --config <config.toml> dispatch --live --run-executor
+hermes oss-repo-agent --config <config.toml> pr-triage --live --comment
+hermes oss-repo-agent --config <config.toml> render-launchd --output <dir>
 ```
 
-Live mutation requires both `mode: live` in config and an explicit live/apply CLI
-flag. Executor runs require live mode, `--run-executor`, and
-`executor.enabled: true`.
+Live mutation requires both `mode = "live"` in the TOML config and an explicit
+live/apply CLI flag. Executor runs require live mode, `--run-executor`, and
+`executor.enabled = true`.
 
 The mini dispatcher runs OMP workers only when live mode and `--run-opencode`
-are enabled. Configure the OMP model, thinking mode, timeout, and worker cap
-with `HERMES_ISSUE_TO_PR_OMP_MODEL`, `HERMES_ISSUE_TO_PR_OMP_THINKING`,
-`HERMES_OMP_TIMEOUT_SECONDS`, and `HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS`.
+are enabled. Configure the OMP model, thinking mode, worker timeout, optional
+OMP process timeout, and worker cap with `HERMES_ISSUE_TO_PR_OMP_MODEL`,
+`HERMES_ISSUE_TO_PR_OMP_THINKING`, `HERMES_OMP_TIMEOUT_SECONDS`,
+`HERMES_ISSUE_TO_PR_OMP_MAX_TIME`, and `HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS`.
+The worker timeout defaults to 14400 seconds. Precedence is
+`HERMES_OMP_TIMEOUT_SECONDS`, then the legacy
+`HERMES_ISSUE_TO_PR_WORKER_TIMEOUT_SECONDS`, then the 14400-second default;
+set the worker timeout to `0` only to explicitly disable the supervisor
+timeout. `HERMES_ISSUE_TO_PR_OMP_MAX_TIME` remains an independent optional
+`omp --max-time` argument.
 
 ## Mini runtime harness
 
@@ -91,14 +98,13 @@ The production `mini-m4-0` automation is tracked in `scripts/`:
 - `repo_issue_intake.sh` polls eligible GitHub issues, assigns them to the
   configured repo-agent account, and creates idempotent Hermes Kanban `[issue]`
   tasks.
-- `repo_issue_to_pr_dispatch.sh` turns `[issue]` tasks into explicit
-  `[fix-pr]` work, runs OMP workers with per-board locks and a hard timeout,
-  finalizes Kanban tasks when an open PR appears, and handles `[fix-pr-review]`
-  repair tasks from PR triage.
-- `repo_pr_triage.sh` watches and claims owner-authored `ai/fix/*` PRs, requires
-  labels, checks, mergeability, test evidence, and optional review approval
-  before merge, comments on blocked PRs, and queues Kanban repair work for
-  fixable failures.
+- `repo_issue_to_pr_dispatch.sh` turns explicit `[issue]` tasks into
+  `[fix-pr]` work, runs OMP workers with per-board locks, finalizes Kanban
+  tasks when an open PR appears, and handles `[fix-pr-review]` repair tasks
+  from PR triage. Worker timeout defaults to 14400 seconds; the
+  `HERMES_OMP_TIMEOUT_SECONDS` override takes precedence over the legacy
+  `HERMES_ISSUE_TO_PR_WORKER_TIMEOUT_SECONDS` variable.
+- `repo_pr_triage.sh` watches and claims owner-authored `ai/fix/*` PRs, requires the configured labels, a non-draft PR, a clean merge state, and matching branch/base/issue metadata before the guarded automerge gate.
 - `repo_agent_cleanup.sh` removes clean controlled `ai/fix` worktrees, and local
   branches, after their GitHub issue is closed and no open PR remains.
 - `repo_agent_health.sh` checks launchd, `gh auth`, disk space, logs, stale
@@ -111,22 +117,25 @@ The production `mini-m4-0` automation is tracked in `scripts/`:
 - `repo_agent_backfill.sh` runs intake, dispatch, PR triage, and cleanup
   reconciliation without starting code workers.
 - `repo_agent_webhook.sh` is an optional trusted event entrypoint that maps
-  GitHub events to the same reconciliation scripts; it is not an HTTP listener
-  and does not validate webhook signatures.
+  GitHub events to the same reconciliation scripts; it is not an HTTP listener,
+  does not validate webhook signatures, and is not a second scheduler.
 - `repo_agent_repos.sh` is the single runtime repo registry used by intake,
   dispatch, PR triage, cleanup, health, and status.
 - `repo_agent_smoke.sh` runs local runtime regressions.
 
 The launchd templates live in `templates/launchd/` and include
 `LimitLoadToSessionType=Background`; without that macOS can reject SSH-driven
-`launchctl bootstrap` with an opaque input/output error.
+`launchctl bootstrap` with an opaque input/output error. Launchd is the sole
+production scheduler; backfill and webhook entrypoints only wake or reconcile
+the same runtime state machine.
 
 Runtime defaults:
 
 - `HERMES_REPO_AGENT_ASSIGNEE=mikolaj92`
 - `HERMES_KANBAN_INTAKE_ASSIGNEE=repo-agent-intake`
+- `HERMES_OMP_TIMEOUT_SECONDS=14400` (legacy fallback: `HERMES_ISSUE_TO_PR_WORKER_TIMEOUT_SECONDS`)
+- `HERMES_ISSUE_TO_PR_OMP_MAX_TIME` is optional and forwards to `omp --max-time`
 - `HERMES_KANBAN_FIXER_ASSIGNEE=repo-agent-fixer`
-- `HERMES_OMP_TIMEOUT_SECONDS=1800`
 - `HERMES_ISSUE_TO_PR_OMP_MODEL=omniroute/omp/default`
 - `HERMES_ISSUE_TO_PR_OMP_THINKING=medium`
 - `HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS=3`
@@ -142,18 +151,19 @@ Runtime defaults:
 
 ## Configuration
 
-Default path: `~/.hermes/oss-repo-agent/config.yaml`
+Default path: `~/.hermes/oss-repo-agent/config.toml`
 
 Override with `HERMES_OSS_REPO_AGENT_CONFIG` or `--config`.
 
-Start from [`config.example.yaml`](config.example.yaml), or let `init` create a local starter config.
+Start from [`config.example.toml`](config.example.toml), or let `init` create a
+local starter TOML config.
 
 ## v0 limitations
 
 - The CLI facade is dry-run first; live mini runtime scripts include a guarded
-  PR merge gate.
+  PR automerge gate.
 - No force-push or branch deletion behavior.
-- Launchd output is template-only and macOS-specific.
+- Launchd deployment is macOS-specific and is the sole production scheduler.
 - GitHub access goes through the `gh` CLI wrappers only.
 - Local git commands are rendered with `GIT_MASTER=1` and executed with that
   environment variable set.
