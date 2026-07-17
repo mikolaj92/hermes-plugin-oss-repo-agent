@@ -15,7 +15,10 @@ jobs:
       - name: Install YAML support
         run: python -m pip install --upgrade pip PyYAML
       - name: Install project and Fala runtime dependencies
-        run: python -m pip install -e . jsonschema pydantic PyYAML
+        run: |
+          git clone --depth 1 https://github.com/mikolaj92/Fala.git ../Fala
+          python -m pip install -e ../Fala
+          python -m pip install -e . --no-deps
       - name: Add source paths
         run: echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/../Fala/src" >> "$GITHUB_ENV"
       - name: Run tests
