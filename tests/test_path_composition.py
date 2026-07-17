@@ -270,6 +270,26 @@ class ConductionAwareEffectorTests(unittest.TestCase):
         ).output
         self.assertEqual(out["issue"], 99)
 
+    def test_empty_cleanup_branch_is_noop(self) -> None:
+        out = parse_issue_from_branch(req({"branch": ""})).output
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "no_branch")
+
+    def test_no_ready_task_stops_dispatch_effectors(self) -> None:
+        request = req(
+            {
+                "conduction": {
+                    "load_kanban_task": {"status": "noop", "reason": "no_ready_task"}
+                }
+            }
+        )
+        self.assertEqual(
+            issue_to_pr.parse_issue_ref_from_task(request).output["reason"], "no_ready_task"
+        )
+        self.assertEqual(
+            issue_to_pr.complete_kanban_task(request).output["reason"], "no_ready_task"
+        )
+
     def test_write_dispatch_receipt_payload_from_conduction(self) -> None:
         out = issue_to_pr.write_dispatch_receipt(
             req(

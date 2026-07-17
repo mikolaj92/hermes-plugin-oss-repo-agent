@@ -18,6 +18,7 @@ from repo_agent.envelope import (
     noop,
     ok,
     planned,
+    upstream_noop,
 )
 
 
@@ -25,6 +26,8 @@ def parse_issue_from_branch(request: EffectorRunRequest) -> EffectorRunResult:
     """Pure: extract issue number from ai/fix/<n>-... branch name."""
     data = input_of(request)
     branch = str(data.get("branch") or cfg_of(request).get("branch") or "")
+    if not branch:
+        return noop("no_branch", branch=branch)
     m = re.search(r"(?:^|/)ai/fix/(\d+)", branch)
     if not m:
         m = re.search(r"/(\d+)(?:-|$)", branch)
@@ -40,6 +43,9 @@ def check_issue_closed(request: EffectorRunRequest) -> EffectorRunResult:
     data = input_of(request)
     cfg = cfg_of(request)
     parsed = cond_blob(request, "parse_issue_from_branch", "parse")
+    upstream = upstream_noop(request, "parse_issue_from_branch")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_branch"), **{k: v for k, v in upstream.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}})
     repo = str(data.get("repo") or cfg.get("repo") or "")
     issue = int(data.get("issue") or parsed.get("issue") or 0)
     gh = str(cfg.get("gh_cli") or "gh")
@@ -62,6 +68,9 @@ def check_no_open_pr_for_branch(request: EffectorRunRequest) -> EffectorRunResul
 
     data = input_of(request)
     cfg = cfg_of(request)
+    upstream = upstream_noop(request, "parse_issue_from_branch")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_branch"), **{k: v for k, v in upstream.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}})
     parsed = cond_blob(request, "parse_issue_from_branch", "parse")
     repo = str(data.get("repo") or cfg.get("repo") or "")
     branch = str(data.get("branch") or parsed.get("branch") or cfg.get("branch") or "")
@@ -104,6 +113,11 @@ def remove_worktree(request: EffectorRunRequest) -> EffectorRunResult:
     closed_blob = cond_blob(request, "check_issue_closed")
     open_pr_blob = cond_blob(request, "check_no_open_pr", "check_no_open_pr_for_branch")
     require_safe = bool(data.get("require_safe", cfg.get("require_safe", True)))
+    upstream = upstream_noop(
+        request, "check_issue_closed", "check_no_open_pr", "parse_issue_from_branch"
+    )
+    if upstream:
+        return noop(str(upstream.get("reason") or "cleanup_not_ready"))
     if require_safe and (closed_blob or open_pr_blob):
         if closed_blob and closed_blob.get("closed") is False:
             return noop(
@@ -142,10 +156,7 @@ def delete_local_fix_branch(request: EffectorRunRequest) -> EffectorRunResult:
     cfg = cfg_of(request)
     parsed = cond_blob(request, "parse_issue_from_branch", "parse")
     removed = cond_blob(request, "remove_worktree")
-    if removed.get("status") == "noop" or removed.get("reason") in (
-        "issue_still_open",
-        "open_pr_exists",
-    ):
+    if removed.get("status") == "noop":
         return noop(
             "skipped_after_remove_guard",
             upstream_reason=removed.get("reason"),
@@ -177,10 +188,7 @@ def release_active_issue_claim(request: EffectorRunRequest) -> EffectorRunResult
     parsed = cond_blob(request, "parse_issue_from_branch", "parse")
     closed = cond_blob(request, "check_issue_closed")
     removed = cond_blob(request, "remove_worktree")
-    if removed.get("status") == "noop" or removed.get("reason") in (
-        "issue_still_open",
-        "open_pr_exists",
-    ):
+    if removed.get("status") == "noop":
         return noop(
             "skipped_after_remove_guard",
             upstream_reason=removed.get("reason"),

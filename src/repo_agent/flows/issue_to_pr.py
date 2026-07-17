@@ -111,7 +111,7 @@ async def run_issue_to_pr_flow(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rid = run_id or f"issue-to-pr-{stamp}-{uuid.uuid4().hex[:8]}"
 
-    # Prefer explicit board, else first repo board
+    # No explicit task means the path will poll Kanban; keep its no-op result.
     resolved_board = board or (cfg.repos[0].board if cfg.repos else "")
     resolved_clone = clone_path or (cfg.repos[0].clone_path if cfg.repos else "")
     wt_root = worktree_root or str(

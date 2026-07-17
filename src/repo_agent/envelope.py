@@ -106,3 +106,10 @@ def cond_blob(request: Any, *effector_ids: str) -> dict[str, Any]:
         if isinstance(blob, dict) and blob:
             return dict(blob)
     return {}
+def upstream_noop(request: Any, *effector_ids: str) -> dict[str, Any]:
+    """Return the first upstream no-op output, if any."""
+    for effector_id in effector_ids:
+        blob = cond_blob(request, effector_id)
+        if blob.get("status") == "noop":
+            return blob
+    return {}

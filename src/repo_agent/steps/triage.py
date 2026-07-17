@@ -18,6 +18,7 @@ from repo_agent.envelope import (
     noop,
     ok,
     planned,
+    upstream_noop,
 )
 
 
@@ -56,6 +57,8 @@ def list_ai_fix_prs(request: EffectorRunRequest) -> EffectorRunResult:
         for p in prs
         if str(p.get("headRefName") or "").startswith(prefix)
     ]
+    if not selected:
+        return noop("no_open_prs", repo=repo, count=0, prs=[], all_open_count=len(prs))
     return ok(
         status="listed",
         repo=repo,
@@ -70,6 +73,9 @@ def load_pr_fields(request: EffectorRunRequest) -> EffectorRunResult:
     data = input_of(request)
     cfg = cfg_of(request)
     listed = cond_blob(request, "list_ai_fix_prs", "list")
+    upstream = upstream_noop(request, "list_ai_fix_prs")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_open_prs"))
     repo = str(data.get("repo") or listed.get("repo") or cfg.get("repo") or "")
     number = int(data.get("number") or data.get("pr_number") or 0)
     if not number:
@@ -105,6 +111,9 @@ def evaluate_checks(request: EffectorRunRequest) -> EffectorRunResult:
     """Pure decision: do status checks pass? (from pr.statusCheckRollup)."""
     data = input_of(request)
     pr = data.get("pr") or cond_get(request, "pr", "load_pr_fields") or {}
+    upstream = upstream_noop(request, "load_pr_fields")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_open_prs"))
     allow_no_checks = bool(data.get("allow_no_checks", True))
     rollup = pr.get("statusCheckRollup") or []
     if not rollup:
@@ -138,6 +147,9 @@ def evaluate_test_evidence(request: EffectorRunRequest) -> EffectorRunResult:
     """Pure: does PR body contain test evidence markers?"""
     data = input_of(request)
     pr = data.get("pr") or cond_get(request, "pr", "load_pr_fields") or {}
+    upstream = upstream_noop(request, "load_pr_fields")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_open_prs"))
     require = bool(
         data.get("require_test_evidence", cfg_of(request).get("require_test_evidence", False))
     )
@@ -172,6 +184,9 @@ def decide_triage_action(request: EffectorRunRequest) -> EffectorRunResult:
             data.get("pass_", checks.get("pass_", checks.get("pass"))),
         )
     )
+    upstream = upstream_noop(request, "list_ai_fix_prs", "load_pr_fields", "evaluate_checks", "evaluate_test_evidence")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_open_prs"))
     evidence_pass = bool(
         data.get(
             "evidence_pass",

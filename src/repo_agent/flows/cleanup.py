@@ -78,6 +78,17 @@ async def run_cleanup_flow(
     resolved_repo = repo or (cfg.repos[0].repo if cfg.repos else "")
     resolved_clone = clone_path or (cfg.repos[0].clone_path if cfg.repos else "")
     resolved_branch = branch or ""
+    if not resolved_branch:
+        rid = run_id or f"cleanup-idle-{uuid.uuid4().hex[:8]}"
+        return PathRunResult(
+            run_id=rid,
+            path_id=CLEANUP_PATH.id,
+            dry_run=is_dry,
+            ticks=0,
+            stopped_reason="no_branch",
+            summary={"repo": resolved_repo, "branch": "", "run_status": "noop"},
+            status="noop",
+        )
     import os
 
     claim = claim_path or os.environ.get(

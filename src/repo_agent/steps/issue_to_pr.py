@@ -31,6 +31,7 @@ from repo_agent.envelope import (
     noop,
     ok,
     planned,
+    upstream_noop,
 )
 
 
@@ -113,6 +114,9 @@ def load_kanban_task(request: EffectorRunRequest) -> EffectorRunResult:
 def parse_issue_ref_from_task(request: EffectorRunRequest) -> EffectorRunResult:
     """Pure: extract owner/repo#N and preferred branch from task title/body."""
     data = input_of(request)
+    upstream = upstream_noop(request, "load_kanban_task")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_ready_task"))
     task = data.get("task") or cond_get(request, "task", "load_kanban_task")
     if not task:
         return fail("missing_task")
@@ -239,6 +243,9 @@ def complete_kanban_task(request: EffectorRunRequest) -> EffectorRunResult:
         task_id = str(task.get("id") or task.get("task_id") or "")
         if not board:
             board = str(loaded.get("board") or board)
+    upstream = upstream_noop(request, "load_kanban_task", "parse_issue_ref", "write_dispatch_receipt")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_ready_task"))
     result_text = str(data.get("result") or "completed")
     if not board or not task_id:
         return fail("missing_board_or_task_id")
@@ -301,6 +308,9 @@ def prepare_worktree(request: EffectorRunRequest) -> EffectorRunResult:
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
+    upstream = upstream_noop(request, "parse_issue_ref")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_ready_task"))
     clone_path = str(
         data.get("clone_path")
         or cond_get(
@@ -378,6 +388,9 @@ def run_omp_worker(request: EffectorRunRequest) -> EffectorRunResult:
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
+    upstream = upstream_noop(request, "prepare_worktree", "parse_issue_ref")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_ready_task"))
     worktree_path = str(
         data.get("worktree_path")
         or cond_get(request, "worktree_path", "prepare_worktree")
@@ -430,6 +443,9 @@ def run_omp_worker(request: EffectorRunRequest) -> EffectorRunResult:
 
 def verify_branch_has_commits(request: EffectorRunRequest) -> EffectorRunResult:
     """Pure-ish: check worktree HEAD differs from base_branch tip."""
+    upstream = upstream_noop(request, "prepare_worktree", "run_omp")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_ready_task"))
     data = input_of(request)
     worktree_path = str(
         data.get("worktree_path")
@@ -463,6 +479,9 @@ def open_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
     parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
+    upstream = upstream_noop(request, "prepare_worktree", "verify_branch", "parse_issue_ref")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_ready_task"))
     prep = cond_blob(request, "prepare_worktree")
     repo = str(data.get("repo") or parsed.get("repo") or "")
     branch = str(data.get("branch") or prep.get("branch") or parsed.get("branch") or "")
@@ -590,6 +609,9 @@ def apply_pr_labels(request: EffectorRunRequest) -> EffectorRunResult:
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
+    upstream = upstream_noop(request, "open_pull_request", "parse_issue_ref")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_ready_task"))
     opened = cond_blob(request, "open_pull_request", "open_pr")
     parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
     repo = str(data.get("repo") or opened.get("repo") or parsed.get("repo") or "")
@@ -636,6 +658,11 @@ def write_dispatch_receipt(request: EffectorRunRequest) -> EffectorRunResult:
 
     data = input_of(request)
     dry = dry_run_flag(request)
+    upstream = upstream_noop(
+        request, "parse_issue_ref", "prepare_worktree", "open_pull_request", "apply_pr_labels"
+    )
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_ready_task"))
     path = str(data.get("receipt_path") or cfg_of(request).get("receipt_path") or "")
     payload = data.get("payload")
     if not isinstance(payload, dict) or not payload:
@@ -718,6 +745,9 @@ def push_branch(request: EffectorRunRequest) -> EffectorRunResult:
     worktree_path = str(
         data.get("worktree_path") or prep.get("worktree_path") or ""
     )
+    upstream = upstream_noop(request, "prepare_worktree", "verify_branch", "parse_issue_ref")
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_ready_task"))
     branch = str(
         data.get("branch") or prep.get("branch") or parsed.get("branch") or ""
     )

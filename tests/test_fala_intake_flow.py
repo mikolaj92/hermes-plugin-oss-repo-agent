@@ -129,6 +129,32 @@ class ClaimKanbanDryRunTests(unittest.TestCase):
         self.assertIn("planned", result.output)
 
 
+class EmptyTickAllTests(unittest.TestCase):
+    def test_empty_tick_all_is_controlled_noop(self) -> None:
+        from repo_agent.tick_all import run_all
+
+        cfg = AgentConfig(
+            mode="dry-run",
+            repos=(RepoEntry(repo="o/r", board="board-r", clone_path="/tmp/o-r"),),
+        )
+        with mock.patch("repo_agent.steps.poll.gh_json", return_value=[]), mock.patch(
+            "repo_agent.steps.issue_to_pr.hermes_kanban_json", return_value=[]
+        ), mock.patch(
+            "repo_agent.steps.triage.run_cmd",
+            return_value=mock.Mock(stdout="[]", stderr="", returncode=0),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                result = asyncio.run(
+                    run_all(db_path=Path(tmp) / "state.sqlite", config=cfg, dry_run=True)
+                )
+
+        self.assertFalse(result["any_failed"])
+        self.assertEqual(result["dispatch"]["summary"]["load_status"], "noop")
+        self.assertEqual(result["triage"]["summary"]["reason"], "no_open_prs")
+        self.assertEqual(result["cleanup"]["status"], "noop")
+        self.assertEqual(result["cleanup"]["stopped_reason"], "no_branch")
+
+
 class IntakeFlowE2ETests(unittest.TestCase):
     def test_flow_runs_three_effectors_dry(self) -> None:
         issues = [
