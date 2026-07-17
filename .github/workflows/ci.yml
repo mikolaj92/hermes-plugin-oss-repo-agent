@@ -21,6 +21,11 @@ jobs:
           python -m pip install -e . --no-deps
       - name: Add source paths
         run: echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/../Fala/src" >> "$GITHUB_ENV"
+      - name: Add Hermes CLI shim for script tests
+        run: |
+          printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > /tmp/hermes
+          chmod +x /tmp/hermes
+          echo "/tmp" >> "$GITHUB_PATH"
       - name: Run tests
         run: python -m unittest discover -s tests
       - name: Run hygiene checks
