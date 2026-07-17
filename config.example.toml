@@ -1,0 +1,43 @@
+version = 1
+mode = "dry-run"
+branch_prefix = "ai/fix"
+base_branch = "main"
+
+[github]
+cli = "gh"
+assignee = "owner"
+
+[labels]
+ready = "ai:ready"
+in_progress = "ai:in-progress"
+blocked = "ai:blocked"
+pr_opened = "ai:pr-opened"
+generated = "ai:generated"
+
+[automation]
+max_active_issues = 1
+automerge = true
+require_human_approval = false
+require_checks = false
+require_test_evidence = false
+
+[executor]
+enabled = false
+command = "omp"
+model = "omniroute/omp/default"
+thinking = "medium"
+timeout_seconds = 7200
+max_attempts = 3
+retry_backoff_seconds = 60
+
+[paths]
+worktree_root = "~/.hermes/worktrees/repo-agent"
+dispatch_receipts = "~/.hermes/state/repo-agent-dispatch"
+merge_receipts = "~/.hermes/state/repo-agent-merge"
+active_issue = "~/.hermes/state/repo-agent-active"
+
+[[repos]]
+repo = "owner/example-repo"
+board = "owner-example-repo"
+clone_path = "~/.hermes/repos/example-repo"
+priority = 100

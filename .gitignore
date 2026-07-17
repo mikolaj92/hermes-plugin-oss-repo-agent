@@ -12,9 +12,9 @@ build/
 .coverage
 htmlcov/
 
-# Local-only Hermes/plugin config. Publish the TOML example instead.
-config.toml
-*.local.toml
+# Local-only Hermes/plugin config. Publish examples instead.
+config.yaml
+*.local.yaml
 *.local.json
 output/
 cards/

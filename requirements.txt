@@ -1,0 +1,2 @@
+# Python 3.10 and earlier do not provide tomllib.
+tomli>=2.0.1; python_version < "3.11"
