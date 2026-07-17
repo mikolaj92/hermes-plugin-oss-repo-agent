@@ -50,6 +50,9 @@ PR_TRIAGE_PATH = CorrelationPathSpec(
     ],
 )
 
+# Public name used by the generic path-composition API.
+TRIAGE_PATH = PR_TRIAGE_PATH
+
 PR_MERGE_PATH = CorrelationPathSpec(
     id="pr_merge",
     title="PR merge (claim → merge → receipt → close issue)",

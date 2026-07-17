@@ -58,6 +58,10 @@ class PathRunResult:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+def path_result_to_dict(result: PathRunResult) -> dict[str, Any]:
+    """Serialize a completed path result for tick JSON output."""
+    return result.to_dict()
+
 
 def path_ids(spec: CorrelationPathSpec) -> list[str]:
     return [e.id for e in spec.effectors]
