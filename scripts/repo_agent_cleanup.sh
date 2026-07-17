@@ -131,6 +131,16 @@ if path and branch:
 '
 }
 
+worktree_has_active_board_lock() {
+  local path="$1" board_root lock pid
+  board_root="$(dirname "$path")"
+  lock="$board_root/.agent.lock"
+  [[ -d "$lock" ]] || return 1
+  pid="$(cat "$lock/pid" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || return 0
+  kill -0 "$pid" 2>/dev/null
+}
+
 processed=0
 removed=0
 skipped=0
@@ -177,6 +187,11 @@ for entry in "${REPOS[@]}"; do
         create_dirty_worktree_task "$repo" "$board" "$path" "$branch" "$issue"
         log "MAINTENANCE_TASK_ENSURED repo=$repo issue=$issue branch=$branch path=$path"
       fi
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if worktree_has_active_board_lock "$path"; then
+      log "KEEP repo=$repo issue=$issue branch=$branch path=$path reason=active-board-lock"
       skipped=$((skipped + 1))
       continue
     fi
