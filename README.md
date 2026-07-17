@@ -1,4 +1,5 @@
 # oss-repo-agent
+<!-- hermes-repo-agent: issue-5 closed-loop test 20260717 -->
 
 Safe dry-run-first OSS maintainer automation for Hermes.
 
