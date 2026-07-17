@@ -199,7 +199,7 @@ EFFECTORS: tuple[EffectorEntry, ...] = (
         "merge_pull_request",
         "triage",
         "repo_agent.steps.triage.merge_pull_request",
-        "gh pr merge with optional head OID match.",
+        "Merge a pull request after guarded head validation.",
         True,
     ),
     EffectorEntry(
