@@ -171,3 +171,5 @@ python3 -m unittest discover -s tests
 python3 tools/hygiene_check.py .
 scripts/repo_agent_smoke.sh
 ```
+
+<!-- hermes e2e closed-loop test 20260717 -->
