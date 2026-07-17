@@ -26,20 +26,20 @@ class PathCompositionTests(unittest.TestCase):
     def test_issue_to_pr_covers_core_stages(self) -> None:
         ids = [e.id for e in ISSUE_TO_PR_PATH.effectors]
         for needed in (
-            "load_task",
-            "parse_ref",
-            "prepare_wt",
+            "load_kanban_task",
+            "parse_issue_ref",
+            "prepare_worktree",
             "run_omp",
-            "push",
-            "open_pr",
-            "complete_task",
+            "push_branch",
+            "open_pull_request",
+            "complete_kanban_task",
         ):
             self.assertIn(needed, ids)
 
-    def test_triage_ends_with_apply(self) -> None:
+    def test_triage_ends_with_decision_router(self) -> None:
         ids = [e.id for e in TRIAGE_PATH.effectors]
-        self.assertEqual(ids[-1], "apply")
-        self.assertIn("decide", ids)
+        self.assertEqual(ids[-1], "decide_triage_action")
+        self.assertIn("decide_triage_action", ids)
 
     def test_refs_are_python_functions(self) -> None:
         for path in (INTAKE_PATH, ISSUE_TO_PR_PATH, TRIAGE_PATH, CLEANUP_PATH):

@@ -236,6 +236,30 @@ async def run_pr_triage_decide(
         action=str(action) if action else None,
     )
 
+async def run_triage_flow(
+    *,
+    db_path: Path,
+    config: AgentConfig | None = None,
+    dry_run: bool | None = None,
+    repo: str | None = None,
+    pr_number: int | None = None,
+    limit: int = 30,
+    run_id: str | None = None,
+    worker_id: str = "repo-agent:tick-triage",
+    max_ticks: int = 20,
+) -> PathRunResult:
+    """Run the decide-only triage path for a full worker cycle."""
+    return await run_pr_triage_decide(
+        db_path=db_path,
+        config=config,
+        dry_run=dry_run,
+        repo=repo,
+        pr_number=pr_number,
+        run_id=run_id,
+        worker_id=worker_id,
+        max_ticks=max_ticks,
+    )
+
 
 async def run_follow_up_path(
     *,

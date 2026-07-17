@@ -9,8 +9,10 @@ from repo_agent.flows.triage import (
     PR_MERGE_PATH,
     PR_REPAIR_PATH,
     PR_TRIAGE_PATH,
+    TRIAGE_PATH,
     run_follow_up_path,
     run_pr_triage_decide,
+    run_triage_flow,
     run_triage_with_router,
 )
 
@@ -34,6 +36,7 @@ __all__ = [
     "PR_MERGE_PATH",
     "PR_REPAIR_PATH",
     "PR_TRIAGE_PATH",
+    "TRIAGE_PATH",
     "PathRunResult",
     "path_conduction_graph",
     "path_ids",
@@ -42,5 +45,6 @@ __all__ = [
     "run_intake_flow",
     "run_issue_to_pr_flow",
     "run_pr_triage_decide",
+    "run_triage_flow",
     "run_triage_with_router",
 ]

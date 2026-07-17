@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Fala auto-worker full cycle. Install after dry-run validation.
-     Default: --dry-run until you switch ProgramArguments to --live. -->
+<!-- Fala auto-worker full cycle; install after dry-run validation. -->
+<!-- Keep the default mode dry-run until ProgramArguments is changed to live. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
