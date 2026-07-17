@@ -30,21 +30,19 @@ live at the repository root.
 
 After install, Hermes may show [`after-install.md`](after-install.md). The short version is: create a starter config, validate it, then run dry-run intake and dispatch.
 
-## Immutable deployment
+## Deployment
 
-Production deployment is TOML-only. The `--deploy` flag publishes the immutable bundle and LaunchAgents:
-
-```bash
-hermes oss-repo-agent --config ~/.hermes/oss-repo-agent/config.toml render-launchd --output ~/.hermes/oss-repo-agent/deployment --deploy
-```
-
-## Immutable deployment
-
-Production deployment is TOML-only. The `--deploy` flag publishes the immutable bundle and LaunchAgents:
+The legacy `render-launchd` command currently reports deployment metadata; it does not write files or install LaunchAgents. Do not pass `--deploy`.
 
 ```bash
-hermes oss-repo-agent --config ~/.hermes/oss-repo-agent/config.toml render-launchd --output ~/.hermes/oss-repo-agent/deployment --deploy
+hermes oss-repo-agent --config ~/.hermes/oss-repo-agent/config.toml render-launchd --output <metadata-path>
 ```
+
+The Fala scheduler is currently a source template only:
+`templates/launchd/oss-repo-agent-fala-tick-all.plist.template`. Render its
+`UV_BIN`, `REPO_ROOT`, and `HOME` placeholders explicitly, validate with
+`plutil -lint`, and keep the existing shell jobs until dry-run and controlled
+live validation authorize cutover.
 
 ## 3-minute happy path
 
