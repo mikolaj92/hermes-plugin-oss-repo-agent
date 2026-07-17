@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Fala auto-worker full cycle. Install after dry-run validation.
+     Default: --dry-run until you switch ProgramArguments to --live. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mikolaj92.hermes.repo-agent-fala-tick-all</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{UV_BIN}}</string>
+    <string>run</string>
+    <string>--project</string>
+    <string>{{REPO_ROOT}}</string>
+    <string>repo-agent-tick-all</string>
+    <string>--dry-run</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>{{REPO_ROOT}}</string>
+  <key>StartInterval</key>
+  <integer>600</integer>
+  <key>StandardOutPath</key>
+  <string>{{HOME}}/.hermes/logs/repo-agent-fala-tick-all.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{HOME}}/.hermes/logs/repo-agent-fala-tick-all.err.log</string>
+  <key>LimitLoadToSessionType</key>
+  <string>Background</string>
+</dict>
+</plist>
