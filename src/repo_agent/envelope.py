@@ -41,7 +41,8 @@ def noop(reason: str, **extra: Any) -> EffectorRunResult:
 
 
 def fail(reason: str, **extra: Any) -> EffectorRunResult:
-    return result(status="failed", ok=False, mutated=False, reason=reason, **extra)
+    mutated = bool(extra.pop("mutated", False))
+    return result(status="failed", ok=False, mutated=mutated, reason=reason, **extra)
 
 
 def cfg_of(request: Any) -> dict[str, Any]:

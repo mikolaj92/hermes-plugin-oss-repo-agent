@@ -232,6 +232,13 @@ for entry in "${REPOS[@]}"; do
     fi
     if [[ "$state" == "OPEN" || "$open_prs" != "0" ]]; then
       log "KEEP repo=$repo issue=$issue branch=$branch path=$path issue_state=$state open_prs=$open_prs"
+      if [[ -n "$RECEIPT_DIR" && "$state" == "OPEN" ]]; then
+        while IFS=$'\t' read -r receipt_path receipt_payload; do
+          [[ -n "${receipt_path:-}" ]] || continue
+          log "KEEP repo=$repo issue=$issue branch=$branch path=$path reason=issue-not-closed receipt=$receipt_path"
+          quarantine_receipt "$receipt_path"
+        done < <(receipt_rows_for_worktree "$clone_path" "$path" "$branch" "$RECEIPT_DIR")
+      fi
       skipped=$((skipped + 1))
       continue
     fi

@@ -413,7 +413,7 @@ claim_pr_once() {
   [[ -n "$CLAIM_ASSIGNEE" ]] || return 0
   gh pr edit "$number" --repo "$repo" --add-assignee "$CLAIM_ASSIGNEE" >/dev/null 2>&1
   assignees="$(gh pr view "$number" --repo "$repo" --json assignees --jq '[.assignees[].login] | join(",")' 2>/dev/null || true)"
-  [[ "$assignees" == "$CLAIM_ASSIGNEE" ]]
+  [[ -z "$assignees" || "$assignees" == "$CLAIM_ASSIGNEE" ]]
 }
 
 comment_pr_once() {

@@ -131,7 +131,7 @@ fi
 trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 readonly READY_LABEL='ai:ready'
-readonly ISSUE_JQ='.[] | select(([.labels[].name] | index("ai:in-progress") | not) and ([.labels[].name] | index("ai:blocked") | not) and ([.labels[].name] | index("ai:pr-opened") | not)) | [.number, (.title | gsub("[\t\r\n]"; " ")), .url, ([.labels[].name] | join(", ")), (([.labels[].name] | index("ai:ready")) != null)] | @tsv'
+readonly ISSUE_JQ='.[] | select(([.labels[].name] | index("ai:in-progress") | not) and ([.labels[].name] | index("ai:blocked") | not) and ([.labels[].name] | index("ai:pr-opened") | not)) | [.number, (.title | gsub("[\t\r\n]"; " ")), .url, ([.labels[].name] | join(", ")), (([.labels[].name] | index("ai:ready")) != null), (([.assignees[].login] | join(",")) // "")] | @tsv'
 
 repos=()
 while IFS= read -r repo_entry; do
@@ -184,9 +184,14 @@ for entry in "${repos[@]}"; do
     board_tasks_json="$(hermes kanban --board "$board" list --json --sort created-desc 2>/dev/null || printf '[]')"
   fi
 
-  while IFS=$'\t' read -r number title url labels has_ready; do
+  while IFS=$'\t' read -r number title url labels has_ready existing_assignees; do
     [ -n "${number:-}" ] || continue
     processed=$((processed + 1))
+    if [ -n "${existing_assignees:-}" ] && [ "$existing_assignees" != "$CLAIM_ASSIGNEE" ]; then
+      skipped=$((skipped + 1))
+      log "ISSUE_SKIPPED_NOT_READY repo=$repo issue=$number assignee=$existing_assignees expected=$CLAIM_ASSIGNEE"
+      continue
+    fi
 
     key="github-issue:${repo}:${number}"
     task_title="[issue] ${repo}#${number}: ${title}"

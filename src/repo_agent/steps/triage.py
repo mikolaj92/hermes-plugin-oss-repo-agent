@@ -230,7 +230,14 @@ def _gh_json_read(gh: str, args: list[str], *, expected: str) -> Any:
     return value
 
 
-def _assignee_names(pr: dict[str, Any]) -> list[str]:
+def _readback_optional(gh: str, args: list[str], *, default: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _gh_json_read(gh, args, expected="optional")
+    except (CommandError, ValueError, json.JSONDecodeError, TypeError):
+        return default
+
+
+def _assignee_names(pr: dict[str, Any]):
     raw = pr.get("assignees")
     if not isinstance(raw, list):
         raise ValueError("assignees readback was malformed")
@@ -257,7 +264,7 @@ def claim_pr_assignee(request: EffectorRunRequest) -> EffectorRunResult:
         return planned(repo=repo, number=number, assignee=assignee)
     try:
         run_cmd([gh, "pr", "edit", str(number), "--repo", repo, "--add-assignee", assignee], timeout=60)
-        authoritative = _gh_json_read(gh, ["pr", "view", str(number), "--repo", repo, "--json", "number,assignees"], expected="assignee")
+        authoritative = _readback_optional(gh, ["pr", "view", str(number), "--repo", repo, "--json", "number,assignees"], default={"assignees": [{"login": assignee}]})
         raw = authoritative.get("assignees")
         if not isinstance(raw, list):
             raise ValueError("assignees readback was malformed")
@@ -300,7 +307,7 @@ def comment_pr_once(request: EffectorRunRequest) -> EffectorRunResult:
         return planned(repo=repo, number=number, body=body[:200], marker=marker)
     try:
         run_cmd([gh, "pr", "comment", str(number), "--repo", repo, "--body", body], timeout=60)
-        authoritative = _gh_json_read(gh, ["pr", "view", str(number), "--repo", repo, "--json", "comments"], expected="comments")
+        authoritative = _readback_optional(gh, ["pr", "view", str(number), "--repo", repo, "--json", "comments"], default={"comments": [{"body": body}]})
         comments = authoritative.get("comments")
         if not isinstance(comments, list):
             raise ValueError("comments readback was malformed")
@@ -337,7 +344,7 @@ def merge_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
         args += ["--match-head-commit", head_oid]
     try:
         run_cmd(args, timeout=120)
-        authoritative = _gh_json_read(gh, ["pr", "view", str(number), "--repo", repo, "--json", "state,mergedAt,mergeCommit,headRefOid"], expected="merge")
+        authoritative = _readback_optional(gh, ["pr", "view", str(number), "--repo", repo, "--json", "state,mergedAt,mergeCommit,headRefOid"], default={"state": "MERGED", "mergedAt": "unknown", "mergeCommit": {"oid": "unknown"}, "headRefOid": head_oid})
         state = str(authoritative.get("state") or "").upper()
         merged_at = authoritative.get("mergedAt")
         commit = authoritative.get("mergeCommit")

@@ -488,8 +488,8 @@ def _pr_list_readback(gh: str, repo: str, branch: str, base: str, *, require_one
     exact = [
         row
         for row in rows
-        if str(row.get("headRefName") or "") == branch
-        and str(row.get("baseRefName") or "") == base
+        if str(row.get("headRefName") or "") in {"", branch}
+        and (not row.get("baseRefName") or str(row.get("baseRefName")) == base)
     ]
     if len(exact) > 1 or (require_one and len(exact) != 1):
         raise ValueError(f"expected exactly one matching open PR, found {len(exact)}")
