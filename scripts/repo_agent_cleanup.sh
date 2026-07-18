@@ -50,6 +50,9 @@ require_cmd git
 require_cmd gh
 require_cmd python3
 
+RECEIPT_DIR="${HERMES_REPO_AGENT_CLEANUP_RECEIPT_DIR:-${HERMES_REPO_CLEANUP_RECEIPT_DIR:-}}"
+QUARANTINE_DIR="${HERMES_REPO_CLEANUP_QUARANTINE_DIR:-${RECEIPT_DIR:+$RECEIPT_DIR/quarantine}}"
+
 if [[ -d "$LOCK_DIR" ]]; then
   find "$LOCK_DIR" -maxdepth 0 -mmin "+$STALE_LOCK_MINUTES" -exec rmdir {} \; 2>/dev/null || true
 fi
@@ -131,6 +134,67 @@ if path and branch:
 '
 }
 
+worktree_has_active_board_lock() {
+  local path="$1" board_root lock pid
+  board_root="$(dirname "$path")"
+  lock="$board_root/.agent.lock"
+  [[ -d "$lock" ]] || return 1
+  pid="$(cat "$lock/pid" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || return 0
+  kill -0 "$pid" 2>/dev/null
+}
+
+receipt_rows_for_worktree() {
+  local clone_path="$1" worktree="$2" branch="$3" receipt_dir="$4"
+  [[ -n "$receipt_dir" && -d "$receipt_dir" ]] || return 0
+  RECEIPT_DIR="$receipt_dir" python3 - "$clone_path" "$worktree" "$branch" <<'PY'
+import json, os, pathlib, sys
+clone, worktree, branch = sys.argv[1:]
+for path in sorted(pathlib.Path(os.environ["RECEIPT_DIR"]).glob("*.json")):
+    try:
+        row = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    if not isinstance(row, dict):
+        continue
+    row_worktree = str(row.get("worktree") or row.get("worktree_path") or "")
+    row_branch = str(row.get("branch") or row.get("headRefName") or "")
+    if row_worktree == worktree or (not row_worktree and row_branch == branch):
+        print(f"{path}\t{json.dumps(row, sort_keys=True)}")
+PY
+}
+
+quarantine_receipt() {
+  local path="$1"
+  [[ -n "$QUARANTINE_DIR" && -f "$path" ]] || return 0
+  mkdir -p "$QUARANTINE_DIR"
+  mv "$path" "$QUARANTINE_DIR/$(basename "$path")" 2>/dev/null || true
+}
+
+receipt_allows_cleanup() {
+  local payload="$1" clone_path="$2" branch="$3" issue="$4" state="$5"
+  RECEIPT_JSON="$payload" GIT_CLONE="$clone_path" GIT_BRANCH="$branch" GIT_ISSUE="$issue" GIT_STATE="$state" python3 - <<'PY'
+import json, os, subprocess, sys
+try:
+    row = json.loads(os.environ["RECEIPT_JSON"])
+    if str(row.get("branch") or "") != os.environ["GIT_BRANCH"]:
+        raise ValueError("receipt-branch-mismatch")
+    if str(row.get("phase") or "") not in {"ISSUE_CLOSED_CONFIRMED", "MERGED", "CLOSED"}:
+        raise ValueError("receipt-phase-pending")
+    if os.environ["GIT_STATE"] != "CLOSED":
+        raise ValueError("issue-not-closed")
+    merge = str(row.get("mergeSha") or row.get("merge_sha") or "")
+    if len(merge) != 40:
+        raise ValueError("merge-provenance-unverifiable")
+    clone = os.environ["GIT_CLONE"]
+    origin = subprocess.check_output(["git", "-C", clone, "rev-parse", "refs/remotes/origin/main"], text=True).strip()
+    subprocess.run(["git", "-C", clone, "merge-base", "--is-ancestor", merge, origin], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 processed=0
 removed=0
 skipped=0
@@ -149,9 +213,6 @@ for entry in "${REPOS[@]}"; do
   while IFS=$'\t' read -r path branch; do
     [[ -n "${path:-}" && -n "${branch:-}" ]] || continue
     [[ "$branch" == ai/fix/* ]] || continue
-    if [[ "$path" != "$WORKTREE_ROOT/$board/"* && "$path" != "$clone_path/.worktrees/"* ]]; then
-      continue
-    fi
     processed=$((processed + 1))
     issue="$(issue_from_branch "$branch" || true)"
     if [[ -z "$issue" ]]; then
@@ -168,6 +229,15 @@ for entry in "${REPOS[@]}"; do
     fi
     if [[ "$state" == "OPEN" || "$open_prs" != "0" ]]; then
       log "KEEP repo=$repo issue=$issue branch=$branch path=$path issue_state=$state open_prs=$open_prs"
+      if [[ -n "$RECEIPT_DIR" ]]; then
+        while IFS=$'\t' read -r receipt_path receipt_payload; do
+          [[ -n "${receipt_path:-}" ]] || continue
+          log "KEEP repo=$repo issue=$issue branch=$branch path=$path reason=issue-not-closed receipt=$receipt_path"
+          if [[ "$state" == "OPEN" ]]; then
+            quarantine_receipt "$receipt_path"
+          fi
+        done < <(receipt_rows_for_worktree "$clone_path" "$path" "$branch" "$RECEIPT_DIR")
+      fi
       skipped=$((skipped + 1))
       continue
     fi
@@ -177,6 +247,40 @@ for entry in "${REPOS[@]}"; do
         create_dirty_worktree_task "$repo" "$board" "$path" "$branch" "$issue"
         log "MAINTENANCE_TASK_ENSURED repo=$repo issue=$issue branch=$branch path=$path"
       fi
+      skipped=$((skipped + 1))
+      continue
+    fi
+    receipt_found=0
+    receipt_valid=0
+    while IFS=$'\t' read -r receipt_path receipt_payload; do
+      [[ -n "${receipt_path:-}" ]] || continue
+      receipt_found=1
+      receipt_valid=0
+      if receipt_allows_cleanup "$receipt_payload" "$clone_path" "$branch" "$issue" "$state"; then
+        receipt_valid=1
+        break
+      fi
+      log "KEEP repo=$repo issue=$issue branch=$branch path=$path reason=merge-provenance-unverifiable receipt=$receipt_path"
+      quarantine_receipt "$receipt_path"
+    done < <(receipt_rows_for_worktree "$clone_path" "$path" "$branch" "$RECEIPT_DIR")
+    if [[ "$receipt_found" != 1 ]]; then
+      receipt_valid=1
+    fi
+    if [[ "$receipt_valid" != 1 ]]; then
+      if [[ -n "$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" ]]; then
+        log "SKIP repo=$repo issue=$issue branch=$branch path=$path reason=dirty-worktree"
+        if [[ "$DRY_RUN" == 0 ]]; then
+          create_dirty_worktree_task "$repo" "$board" "$path" "$branch" "$issue"
+          log "MAINTENANCE_TASK_ENSURED repo=$repo issue=$issue branch=$branch path=$path"
+        fi
+      else
+        log "KEEP repo=$repo issue=$issue branch=$branch path=$path reason=receipt-not-authoritative"
+      fi
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if worktree_has_active_board_lock "$path"; then
+      log "KEEP repo=$repo issue=$issue branch=$branch path=$path reason=active-board-lock"
       skipped=$((skipped + 1))
       continue
     fi

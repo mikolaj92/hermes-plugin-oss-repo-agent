@@ -11,10 +11,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - name: Install YAML support
-        run: python -m pip install --upgrade pip PyYAML
+        run: python -m pip install --upgrade pip PyYAML jsonschema pydantic
+      - name: Install project and Fala runtime dependencies
+        run: |
+          git clone --depth 1 https://github.com/mikolaj92/Fala.git ../Fala
+          python -m pip install -e ../Fala
+          python -m pip install -e . --no-deps
+      - name: Add source paths
+        run: echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/../Fala/src" >> "$GITHUB_ENV"
+      - name: Add Hermes CLI shim for script tests
+        run: |
+          printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > /tmp/hermes
+          chmod +x /tmp/hermes
+          echo "/tmp" >> "$GITHUB_PATH"
       - name: Run tests
         run: python -m unittest discover -s tests
       - name: Run hygiene checks
-        run: python tools/hygiene_check.py .
+        run: python tools/hygiene_check.py . --exclude .venv

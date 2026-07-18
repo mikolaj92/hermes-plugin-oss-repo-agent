@@ -55,12 +55,14 @@ require_cmd() {
 }
 
 uid="$(id -u)"
+LAUNCH_DOMAIN="user/$uid"
+# launchd uses the generated short plist names installed by this deployment.
 jobs=(
-  "com.mikolaj92.hermes.repo-issue-intake|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-issue-intake.plist|$HOME/.hermes/logs/repo-issue-intake.log"
-  "com.mikolaj92.hermes.repo-issue-to-pr-dispatch|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-issue-to-pr-dispatch.plist|$HOME/.hermes/logs/repo-issue-to-pr-dispatch.log"
-  "com.mikolaj92.hermes.repo-pr-triage|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-pr-triage.plist|$HOME/.hermes/logs/repo-pr-triage.log"
-  "com.mikolaj92.hermes.repo-agent-cleanup|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-cleanup.plist|$HOME/.hermes/logs/repo-agent-cleanup.log"
-  "com.mikolaj92.hermes.repo-agent-hermes-update|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-hermes-update.plist|$HOME/.hermes/logs/repo-agent-hermes-update.log"
+  "com.mikolaj92.hermes.repo-issue-intake|$HOME/Library/LaunchAgents/oss-repo-agent-intake.plist|$HOME/.hermes/logs/repo-issue-intake.log"
+  "com.mikolaj92.hermes.repo-issue-to-pr-dispatch|$HOME/Library/LaunchAgents/oss-repo-agent-dispatch.plist|$HOME/.hermes/logs/repo-issue-to-pr-dispatch.log"
+  "com.mikolaj92.hermes.repo-pr-triage|$HOME/Library/LaunchAgents/oss-repo-agent-pr-triage.plist|$HOME/.hermes/logs/repo-pr-triage.log"
+  "com.mikolaj92.hermes.repo-agent-cleanup|$HOME/Library/LaunchAgents/oss-repo-agent-cleanup.plist|$HOME/.hermes/logs/repo-agent-cleanup.log"
+  "com.mikolaj92.hermes.repo-agent-hermes-update|$HOME/Library/LaunchAgents/oss-repo-agent-hermes-update.plist|$HOME/.hermes/logs/repo-agent-hermes-update.log"
 )
 repos=()
 while IFS= read -r repo_entry; do
@@ -125,8 +127,8 @@ fi
 now="$(date +%s)"
 for item in "${jobs[@]}"; do
   IFS='|' read -r label plist runtime_log <<<"$item"
-  if launchctl print "user/$uid/$label" >/dev/null 2>&1; then
-    launch_info="$(launchctl print "user/$uid/$label")"
+  if launchctl print "$LAUNCH_DOMAIN/$label" >/dev/null 2>&1; then
+    launch_info="$(launchctl print "$LAUNCH_DOMAIN/$label")"
     summary="$(printf '%s\n' "$launch_info" | awk '/runs =|last exit code =|run interval =/ {gsub(/^[ \t]+/, ""); printf "%s; ", $0}')"
     log OK "launchd label=$label ${summary:-loaded}"
     last_exit="$(printf '%s\n' "$launch_info" | awk -F '= ' '/last exit code =/ {gsub(/[^0-9-].*/, "", $2); print $2; exit}')"
@@ -138,8 +140,8 @@ for item in "${jobs[@]}"; do
     log ERROR "launchd-missing label=$label plist=$plist"
     failures=$((failures + 1))
     if [[ "$REPAIR" == 1 && -f "$plist" ]]; then
-      launchctl enable "user/$uid/$label" >/dev/null 2>&1 || true
-      if launchctl bootstrap "user/$uid" "$plist" >/dev/null 2>&1; then
+      launchctl enable "$LAUNCH_DOMAIN/$label" >/dev/null 2>&1 || true
+      if launchctl bootstrap "$LAUNCH_DOMAIN" "$plist" >/dev/null 2>&1; then
         log OK "launchd-repaired label=$label"
       else
         log ERROR "launchd-repair-failed label=$label"
