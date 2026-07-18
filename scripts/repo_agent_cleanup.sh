@@ -213,7 +213,7 @@ for entry in "${REPOS[@]}"; do
   while IFS=$'\t' read -r path branch; do
     [[ -n "${path:-}" && -n "${branch:-}" ]] || continue
     [[ "$branch" == ai/fix/* ]] || continue
-    if [[ "$path" != "$WORKTREE_ROOT/$board/"* && "$path" != "$clone_path/.worktrees/"* ]]; then
+    if [[ "$path" != "$WORKTREE_ROOT/"* && "$path" != "$clone_path/.worktrees/"* ]]; then
       continue
     fi
     processed=$((processed + 1))

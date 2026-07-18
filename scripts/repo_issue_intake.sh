@@ -117,6 +117,49 @@ sys.exit(1)
 PY
 }
 
+claim_path() {
+  printf '%s/claim.json\n' "${HERMES_REPO_AGENT_ACTIVE_ISSUE_DIR:-${HOME}/.hermes/oss-repo-agent/active-issue}"
+}
+
+claim_matches() {
+  local repo="$1" issue="$2" path
+  path="$(claim_path)"
+  [[ -f "$path" ]] || return 0
+  CLAIM_JSON="$(cat "$path" 2>/dev/null || true)" python3 - "$repo" "$issue" <<'PY'
+import json, os, sys
+try:
+    row = json.loads(os.environ.get("CLAIM_JSON", ""))
+    if str(row.get("repo")) != sys.argv[1] or str(row.get("issue")) != sys.argv[2]:
+        raise SystemExit(1)
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+run_claim_guard_hook() {
+  local hook="${HERMES_INTAKE_CLAIM_GUARD_HOOK:-}"
+  [[ -n "$hook" ]] || return 0
+  bash -c "$hook"
+}
+
+write_claim() {
+  local repo="$1" issue="$2" board="$3" path tmp
+  path="$(claim_path)"
+  mkdir -p "$(dirname "$path")"
+  tmp="${path}.tmp.$$"
+  printf '{"version":1,"repo":"%s","issue":%s,"board":"%s","claimedAt":"%s"}\n' "$repo" "$issue" "$board" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$tmp"
+  mv "$tmp" "$path"
+}
+
+verify_claim_or_fail() {
+  local repo="$1" issue="$2"
+  claim_matches "$repo" "$issue" || {
+    log "ERROR claim_mismatch repo=$repo issue=$issue"
+    return 1
+  }
+}
+
 require_command gh
 require_command git
 require_command python3
@@ -187,7 +230,7 @@ for entry in "${repos[@]}"; do
   while IFS=$'\t' read -r number title url labels has_ready existing_assignees; do
     [ -n "${number:-}" ] || continue
     processed=$((processed + 1))
-    if [ "$existing_assignees" = "other-user" ]; then
+    if [ "$existing_assignees" = "other-user" ] || [ "$existing_assignees" = "false" ]; then
       skipped=$((skipped + 1))
       log "ISSUE_SKIPPED_NOT_READY repo=$repo issue=$number assignee=$existing_assignees expected=$CLAIM_ASSIGNEE"
       continue
@@ -226,6 +269,15 @@ Intake-only instructions:
       fi
       continue
     fi
+
+    if ! claim_matches "$repo" "$number"; then
+      log "ISSUE_SKIPPED_CLAIM_MISMATCH repo=$repo issue=$number"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    write_claim "$repo" "$number" "$board"
+    run_claim_guard_hook
+    verify_claim_or_fail "$repo" "$number" || { failures=$((failures + 1)); continue; }
 
     if [ "$QUEUE_SOURCE" = "kanban" ] && existing_issue_task "$board_tasks_json" "$repo" "$number"; then
       skipped=$((skipped + 1))
