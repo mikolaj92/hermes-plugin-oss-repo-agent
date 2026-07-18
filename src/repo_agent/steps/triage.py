@@ -219,48 +219,64 @@ def decide_triage_action(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="decided", action="skip", reason="not_mergeable", mergeable=mergeable)
 
 
+def _gh_json_read(gh: str, args: list[str], *, expected: str) -> Any:
+    proc = run_cmd([gh, *args], timeout=90)
+    text = (proc.stdout or "").strip()
+    if not text:
+        raise ValueError(f"{expected} readback was blank")
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise ValueError(f"{expected} readback was malformed")
+    return value
+
+
+def _assignee_names(pr: dict[str, Any]) -> list[str]:
+    raw = pr.get("assignees")
+    if not isinstance(raw, list):
+        raise ValueError("assignees readback was malformed")
+    names: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict) or not str(item.get("login") or "").strip():
+            raise ValueError("assignees readback was malformed")
+        names.append(str(item["login"]))
+    return names
 def claim_pr_assignee(request: EffectorRunRequest) -> EffectorRunResult:
-    """Assign PR to configured maintainer once."""
+    """Assign PR to configured maintainer and verify authoritative assignees."""
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
     loaded = cond_blob(request, "load_pr_fields", "list_ai_fix_prs")
     pr = data.get("pr") or loaded.get("pr") or {}
     repo = str(data.get("repo") or loaded.get("repo") or cfg.get("repo") or "")
-    number = int(
-        data.get("number")
-        or data.get("pr_number")
-        or loaded.get("number")
-        or (pr.get("number") if isinstance(pr, dict) else 0)
-        or 0
-    )
+    number = int(data.get("number") or data.get("pr_number") or loaded.get("number") or (pr.get("number") if isinstance(pr, dict) else 0) or 0)
     assignee = str(data.get("assignee") or cfg.get("assignee") or "mikolaj92")
     gh = str(cfg.get("gh_cli") or "gh")
-    if not repo or not number:
-        return fail("missing_repo_or_number")
+    if not repo or not number or not assignee.strip():
+        return fail("missing_repo_or_number", failure_class="terminal", retry_safe=False)
     if dry:
         return planned(repo=repo, number=number, assignee=assignee)
     try:
-        run_cmd(
-            [
-                gh,
-                "pr",
-                "edit",
-                str(number),
-                "--repo",
-                repo,
-                "--add-assignee",
-                assignee,
-            ],
-            timeout=60,
-        )
+        run_cmd([gh, "pr", "edit", str(number), "--repo", repo, "--add-assignee", assignee], timeout=60)
+        authoritative = _gh_json_read(gh, ["pr", "view", str(number), "--repo", repo, "--json", "number,assignees"], expected="assignee")
+        raw = authoritative.get("assignees")
+        if not isinstance(raw, list):
+            raise ValueError("assignees readback was malformed")
+        names = []
+        for item in raw:
+            if not isinstance(item, dict) or not str(item.get("login") or "").strip():
+                raise ValueError("assignees readback was malformed")
+            names.append(str(item["login"]))
+        if assignee not in names or any(name != assignee for name in names):
+            return fail("assignee_conflict", repo=repo, number=number, assignee=assignee, observed_assignees=names, mutated=True, failure_class="terminal", retry_safe=False)
     except CommandError as exc:
-        return fail("claim_failed", error=str(exc))
+        return fail("claim_failed", error=str(exc), failure_class="terminal", retry_safe=False)
+    except (ValueError, json.JSONDecodeError, TypeError) as exc:
+        return fail("assignee_readback_ambiguous", error=str(exc), repo=repo, number=number, assignee=assignee, mutated=True, failure_class="terminal", retry_safe=False)
     return ok(status="claimed", repo=repo, number=number, assignee=assignee, mutated=True)
 
 
 def comment_pr_once(request: EffectorRunRequest) -> EffectorRunResult:
-    """Post one PR comment body (caller ensures once-semantics via receipt/key)."""
+    """Post one stable-marker PR comment and require exactly one marker readback."""
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
@@ -268,58 +284,52 @@ def comment_pr_once(request: EffectorRunRequest) -> EffectorRunResult:
     decide = cond_blob(request, "decide_triage_action", "decide")
     pr = data.get("pr") or loaded.get("pr") or {}
     repo = str(data.get("repo") or loaded.get("repo") or cfg.get("repo") or "")
-    number = int(
-        data.get("number")
-        or loaded.get("number")
-        or (pr.get("number") if isinstance(pr, dict) else 0)
-        or 0
-    )
+    number = int(data.get("number") or loaded.get("number") or (pr.get("number") if isinstance(pr, dict) else 0) or 0)
     body = str(data.get("body") or "")
     if not body:
         reason = decide.get("reason") or "needs human review"
-        body = (
-            f"repo-agent triage: action=comment_block reason={reason}. "
-            f"Please add test evidence or address blockers."
-        )
+        body = f"repo-agent triage: action=comment_block reason={reason}. Please add test evidence or address blockers."
+    marker = str(data.get("marker") or f"repo-agent:triage-comment:{repo}:{number}")
+    marker_text = f"<!-- {marker} -->"
+    if marker_text not in body:
+        body = f"{body}\n\n{marker_text}"
     gh = str(cfg.get("gh_cli") or "gh")
     if not repo or not number or not body:
-        return fail("missing_repo_number_or_body")
+        return fail("missing_repo_number_or_body", failure_class="terminal", retry_safe=False)
     if dry:
-        return planned(repo=repo, number=number, body=body[:200])
+        return planned(repo=repo, number=number, body=body[:200], marker=marker)
     try:
-        run_cmd(
-            [gh, "pr", "comment", str(number), "--repo", repo, "--body", body],
-            timeout=60,
-        )
+        run_cmd([gh, "pr", "comment", str(number), "--repo", repo, "--body", body], timeout=60)
+        authoritative = _gh_json_read(gh, ["pr", "view", str(number), "--repo", repo, "--json", "comments"], expected="comments")
+        comments = authoritative.get("comments")
+        if not isinstance(comments, list):
+            raise ValueError("comments readback was malformed")
+        matches = [item for item in comments if isinstance(item, dict) and marker_text in str(item.get("body") or "")]
+        if len(matches) == 0:
+            return fail("comment_readback_absent", repo=repo, number=number, marker=marker, mutated=True, failure_class="reconcile_then_retry", retry_safe=False)
+        if len(matches) != 1:
+            return fail("comment_marker_duplicate", repo=repo, number=number, marker=marker, count=len(matches), mutated=True, failure_class="terminal", retry_safe=False)
     except CommandError as exc:
-        return fail("comment_failed", error=str(exc))
-    return ok(status="commented", repo=repo, number=number, mutated=True)
+        return fail("comment_failed", error=str(exc), failure_class="reconcile_then_retry", retry_safe=False)
+    except (ValueError, json.JSONDecodeError, TypeError) as exc:
+        return fail("comment_readback_ambiguous", error=str(exc), repo=repo, number=number, marker=marker, mutated=True, failure_class="terminal", retry_safe=False)
+    return ok(status="commented", repo=repo, number=number, marker=marker, mutated=True)
 
 
 def merge_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
-    """Merge PR with optional --match-head-commit."""
+    """Merge PR with head matching and verify authoritative merged state."""
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
     loaded = cond_blob(request, "load_pr_fields", "claim_pr", "claim_pr_assignee")
     pr = data.get("pr") or loaded.get("pr") or {}
     repo = str(data.get("repo") or loaded.get("repo") or cfg.get("repo") or "")
-    number = int(
-        data.get("number")
-        or loaded.get("number")
-        or (pr.get("number") if isinstance(pr, dict) else 0)
-        or 0
-    )
-    head_oid = str(
-        data.get("head_oid")
-        or data.get("headRefOid")
-        or (pr.get("headRefOid") if isinstance(pr, dict) else "")
-        or ""
-    )
+    number = int(data.get("number") or loaded.get("number") or (pr.get("number") if isinstance(pr, dict) else 0) or 0)
+    head_oid = str(data.get("head_oid") or data.get("headRefOid") or (pr.get("headRefOid") if isinstance(pr, dict) else "") or "")
     method = str(data.get("merge_method") or cfg.get("merge_method") or "merge")
     gh = str(cfg.get("gh_cli") or "gh")
     if not repo or not number:
-        return fail("missing_repo_or_number")
+        return fail("missing_repo_or_number", failure_class="terminal", retry_safe=False)
     if dry:
         return planned(repo=repo, number=number, head_oid=head_oid, method=method)
     args = [gh, "pr", "merge", str(number), "--repo", repo, f"--{method}"]
@@ -327,9 +337,19 @@ def merge_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
         args += ["--match-head-commit", head_oid]
     try:
         run_cmd(args, timeout=120)
+        authoritative = _gh_json_read(gh, ["pr", "view", str(number), "--repo", repo, "--json", "state,mergedAt,mergeCommit,headRefOid"], expected="merge")
+        state = str(authoritative.get("state") or "").upper()
+        merged_at = authoritative.get("mergedAt")
+        commit = authoritative.get("mergeCommit")
+        observed_head = str(authoritative.get("headRefOid") or "")
+        merge_oid = str(commit.get("oid") or "") if isinstance(commit, dict) else ""
+        if state != "MERGED" or not str(merged_at or "").strip() or not merge_oid or (head_oid and observed_head != head_oid):
+            return fail("merge_readback_conflict", repo=repo, number=number, expected_head_oid=head_oid, observed_head_oid=observed_head, observed_state=state, merged_at=merged_at, merge_commit_oid=merge_oid, mutated=True, failure_class="terminal", retry_safe=False)
     except CommandError as exc:
-        return fail("merge_failed", error=str(exc), stderr=exc.stderr[-400:])
-    return ok(status="merged", repo=repo, number=number, mutated=True)
+        return fail("merge_failed", error=str(exc), stderr=exc.stderr[-400:], failure_class="reconcile_then_retry", retry_safe=False)
+    except (ValueError, json.JSONDecodeError, TypeError) as exc:
+        return fail("merge_readback_ambiguous", error=str(exc), repo=repo, number=number, expected_head_oid=head_oid, mutated=True, failure_class="terminal", retry_safe=False)
+    return ok(status="merged", repo=repo, number=number, head_oid=head_oid, merge_commit_oid=merge_oid, mutated=True)
 
 
 def close_linked_issue(request: EffectorRunRequest) -> EffectorRunResult:
@@ -371,13 +391,10 @@ def close_linked_issue(request: EffectorRunRequest) -> EffectorRunResult:
     except CommandError as exc:
         return fail("close_failed", error=str(exc))
     return ok(status="closed", repo=repo, issue=issue, mutated=True)
-
-
 def write_merge_receipt(request: EffectorRunRequest) -> EffectorRunResult:
-    """Write merge receipt JSON atomically."""
+    """Create a merge receipt exclusively; preserve conflicting payloads."""
     import os
     from pathlib import Path
-
     data = input_of(request)
     dry = dry_run_flag(request)
     path = str(data.get("receipt_path") or cfg_of(request).get("receipt_path") or "")
@@ -385,26 +402,26 @@ def write_merge_receipt(request: EffectorRunRequest) -> EffectorRunResult:
     if not isinstance(payload, dict) or not payload:
         merge = cond_blob(request, "merge", "merge_pull_request")
         claim = cond_blob(request, "claim_pr", "claim_pr_assignee")
-        payload = {
-            "phase": "MERGED",
-            "repo": merge.get("repo") or claim.get("repo"),
-            "number": merge.get("number") or claim.get("number"),
-            "dry_run": dry,
-            "merge_status": merge.get("status"),
-        }
+        payload = {"phase": "MERGED", "repo": merge.get("repo") or claim.get("repo"), "number": merge.get("number") or claim.get("number"), "dry_run": dry, "merge_status": merge.get("status")}
     if not path:
-        return fail("missing_receipt_path")
+        return fail("missing_receipt_path", failure_class="terminal", retry_safe=False)
     if dry:
         return planned(receipt_path=path, payload=payload)
+    text = json.dumps(payload, indent=2, sort_keys=True)
     try:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        with tmp.open("r+b") as fh:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            existing = p.read_text(encoding="utf-8")
+            if existing != text and existing != text + "\n":
+                return fail("receipt_conflict", receipt_path=path, mutated=False, failure_class="terminal", retry_safe=False)
+            return ok(status="exists", receipt_path=path, mutated=False)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        tmp.replace(p)
-    except OSError as exc:
-        return fail("receipt_write_failed", error=str(exc))
+    except (OSError, UnicodeError) as exc:
+        return fail("receipt_write_failed", error=str(exc), receipt_path=path, failure_class="terminal", retry_safe=False)
     return ok(status="written", receipt_path=path, mutated=True)

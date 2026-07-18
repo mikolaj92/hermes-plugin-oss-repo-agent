@@ -13,7 +13,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install YAML support
-        run: python -m pip install --upgrade pip PyYAML
+        run: python -m pip install --upgrade pip PyYAML jsonschema pydantic
       - name: Install project and Fala runtime dependencies
         run: |
           git clone --depth 1 https://github.com/mikolaj92/Fala.git ../Fala
@@ -29,4 +29,4 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests
       - name: Run hygiene checks
-        run: python tools/hygiene_check.py .
+        run: python tools/hygiene_check.py . --exclude .venv

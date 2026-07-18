@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -473,8 +474,33 @@ def verify_branch_has_commits(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="has_commits", head=head, base=base)
 
 
+def _pr_list_readback(gh: str, repo: str, branch: str, base: str, *, require_one: bool = True) -> list[dict[str, Any]]:
+    proc = run_cmd(
+        [gh, "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "number,url,headRefName,baseRefName"],
+        timeout=60,
+    )
+    text = (proc.stdout or "").strip()
+    if not text:
+        raise ValueError("PR readback was blank")
+    rows = json.loads(text)
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("PR readback was malformed")
+    exact = [
+        row
+        for row in rows
+        if str(row.get("headRefName") or "") == branch
+        and str(row.get("baseRefName") or "") == base
+    ]
+    if len(exact) > 1 or (require_one and len(exact) != 1):
+        raise ValueError(f"expected exactly one matching open PR, found {len(exact)}")
+    if not exact:
+        return []
+    number = exact[0].get("number")
+    if isinstance(number, bool) or number is None or not str(number).strip():
+        raise ValueError("PR readback number was blank")
+    return exact
 def open_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
-    """Open one PR for branch → base (gh pr create)."""
+    """Open one PR for branch → base and verify authoritative state."""
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
@@ -487,214 +513,128 @@ def open_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
     branch = str(data.get("branch") or prep.get("branch") or parsed.get("branch") or "")
     base = str(data.get("base_branch") or cfg.get("base_branch") or "main")
     issue = parsed.get("issue") or data.get("issue")
-    title = str(
-        data.get("title")
-        or (f"fix: {repo}#{issue}" if repo and issue else f"fix: {branch}")
-    )
-    body = str(
-        data.get("body")
-        or (
-            f"Automated fix for {repo}#{issue} via repo-agent.\n\n"
-            f"Closes #{issue}\n"
-            if issue
-            else "Automated fix via repo-agent."
-        )
-    )
+    title = str(data.get("title") or (f"fix: {repo}#{issue}" if repo and issue else f"fix: {branch}"))
+    body = str(data.get("body") or (f"Automated fix for {repo}#{issue} via repo-agent.\n\nCloses #{issue}\n" if issue else "Automated fix via repo-agent."))
     gh = str(cfg.get("gh_cli") or "gh")
     if not repo or not branch:
-        return fail("missing_repo_or_branch")
+        return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False)
+    if not base.strip():
+        return fail("missing_base_branch", failure_class="terminal", retry_safe=False)
     if dry:
         return planned(repo=repo, branch=branch, base=base, title=title)
     try:
-        # existing?
-        proc = run_cmd(
-            [
-                gh,
-                "pr",
-                "list",
-                "--repo",
-                repo,
-                "--head",
-                branch,
-                "--state",
-                "open",
-                "--json",
-                "number,url",
-            ],
-            timeout=60,
-        )
-        import json
-
-        existing = json.loads(proc.stdout or "[]")
+        existing = _pr_list_readback(gh, repo, branch, base, require_one=False)
         if existing:
             pr = existing[0]
-            return ok(
-                status="exists",
-                number=pr.get("number"),
-                url=pr.get("url"),
-                mutated=False,
-            )
-        proc = run_cmd(
-            [
-                gh,
-                "pr",
-                "create",
-                "--repo",
-                repo,
-                "--base",
-                base,
-                "--head",
-                branch,
-                "--title",
-                title,
-                "--body",
-                body,
-            ],
-            timeout=120,
-        )
-        url = (proc.stdout or "").strip().splitlines()[-1].strip() if proc.stdout else ""
-        number: int | None = None
-        # Prefer structured re-read so conduction can feed apply_pr_labels without re-listing world.
-        try:
-            view = run_cmd(
-                [
-                    gh,
-                    "pr",
-                    "list",
-                    "--repo",
-                    repo,
-                    "--head",
-                    branch,
-                    "--state",
-                    "open",
-                    "--json",
-                    "number,url",
-                    "--limit",
-                    "1",
-                ],
-                timeout=60,
-            )
-            listed = json.loads(view.stdout or "[]")
-            if listed:
-                number = int(listed[0].get("number") or 0) or None
-                url = str(listed[0].get("url") or url)
-        except (CommandError, json.JSONDecodeError, TypeError, ValueError):
-            # Fallback: parse /pull/N from URL if present
-            m = re.search(r"/pull/(\d+)", url)
-            if m:
-                number = int(m.group(1))
-        if not number:
-            return fail(
-                "pr_created_but_unresolved",
-                repo=repo,
-                branch=branch,
-                url=url or None,
-                stdout=(proc.stdout or "")[-400:],
-                mutated=True,
-            )
+            return ok(status="exists", repo=repo, branch=branch, base=base, number=int(pr["number"]), url=str(pr.get("url") or ""), mutated=False)
     except CommandError as exc:
-        return fail("pr_create_failed", error=str(exc), stderr=exc.stderr[-500:])
-    return ok(
-        status="created",
-        repo=repo,
-        branch=branch,
-        number=number,
-        url=url,
-        mutated=True,
-    )
+        return fail("pr_discovery_failed", error=str(exc), failure_class="terminal", retry_safe=False)
+    except (ValueError, json.JSONDecodeError, TypeError, OverflowError) as exc:
+        return fail("pr_discovery_ambiguous", error=str(exc), failure_class="terminal", retry_safe=False)
+    try:
+        proc = run_cmd([gh, "pr", "create", "--repo", repo, "--base", base, "--head", branch, "--title", title, "--body", body], timeout=120)
+    except CommandError as exc:
+        return fail("pr_create_failed", error=str(exc), stderr=exc.stderr[-500:], mutated=True, failure_class="reconcile_then_retry", retry_safe=False)
+    url = (proc.stdout or "").strip().splitlines()[-1].strip() if proc.stdout else ""
+    try:
+        exact = _pr_list_readback(gh, repo, branch, base)
+    except CommandError as exc:
+        return fail("pr_created_readback_failed", error=str(exc), repo=repo, branch=branch, base=base, url=url or None, mutated=True, failure_class="reconcile_then_retry", retry_safe=False)
+    except (ValueError, json.JSONDecodeError, TypeError, OverflowError) as exc:
+        return fail("pr_created_readback_ambiguous", error=str(exc), repo=repo, branch=branch, base=base, url=url or None, mutated=True, failure_class="terminal", retry_safe=False)
+    pr = exact[0]
+    return ok(status="created", repo=repo, branch=branch, base=base, number=int(pr["number"]), url=str(pr.get("url") or url), mutated=True)
+
+
+def _label_names(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        raise ValueError("labels readback was malformed")
+    result: set[str] = set()
+    for item in value:
+        name = str(item.get("name") or "").strip() if isinstance(item, dict) else str(item or "").strip()
+        if not name:
+            raise ValueError("labels readback was malformed")
+        result.add(name)
+    return result
+
+
+def _pr_labels(gh: str, repo: str, number: int) -> set[str]:
+    proc = run_cmd([gh, "pr", "view", str(number), "--repo", repo, "--json", "labels"], timeout=60)
+    text = (proc.stdout or "").strip()
+    if not text:
+        raise ValueError("PR labels readback was blank")
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise ValueError("PR labels readback was malformed")
+    return _label_names(value.get("labels"))
 
 
 def apply_pr_labels(request: EffectorRunRequest) -> EffectorRunResult:
-    """Add labels to an existing PR (e.g. ai:generated, ai:pr-opened)."""
-    data = input_of(request)
-    cfg = cfg_of(request)
-    dry = dry_run_flag(request)
+    """Add only missing labels and require authoritative post-readback."""
+    data = input_of(request); cfg = cfg_of(request); dry = dry_run_flag(request)
     upstream = upstream_noop(request, "open_pull_request", "parse_issue_ref")
     if upstream:
         return noop(str(upstream.get("reason") or "no_ready_task"))
-    opened = cond_blob(request, "open_pull_request", "open_pr")
-    parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
+    opened = cond_blob(request, "open_pull_request", "open_pr"); parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
     repo = str(data.get("repo") or opened.get("repo") or parsed.get("repo") or "")
-    number = int(
-        data.get("number")
-        or data.get("pr_number")
-        or opened.get("number")
-        or 0
-    )
-    labels = data.get("labels") or ["ai:generated", "ai:pr-opened"]
+    number = int(data.get("number") or data.get("pr_number") or opened.get("number") or 0)
+    labels = [str(label) for label in (data.get("labels") or ["ai:generated", "ai:pr-opened"])]
     gh = str(cfg.get("gh_cli") or "gh")
     if not repo or not number:
-        return fail("missing_repo_or_number")
+        return fail("missing_repo_or_number", failure_class="terminal", retry_safe=False)
     if dry:
-        return planned(repo=repo, number=number, labels=list(labels))
-    applied = []
-    for label in labels:
-        try:
-            run_cmd(
-                [
-                    gh,
-                    "pr",
-                    "edit",
-                    str(number),
-                    "--repo",
-                    repo,
-                    "--add-label",
-                    str(label),
-                ],
-                timeout=60,
-            )
-            applied.append({"label": label, "ok": True})
-        except CommandError as exc:
-            applied.append({"label": label, "ok": False, "error": exc.stderr[-200:]})
-    if not any(a["ok"] for a in applied):
-        return fail("all_labels_failed", actions=applied)
-    return ok(status="labeled", actions=applied, mutated=True)
+        return planned(repo=repo, number=number, labels=labels)
+    missing: list[str] = []
+    actions: list[dict[str, Any]] = []
+    try:
+        before = _pr_labels(gh, repo, number)
+        missing = [label for label in labels if label not in before]
+        for label in missing:
+            try:
+                run_cmd([gh, "pr", "edit", str(number), "--repo", repo, "--add-label", label], timeout=60)
+                actions.append({"label": label, "ok": True})
+            except CommandError as exc:
+                actions.append({"label": label, "ok": False, "error": exc.stderr[-200:]})
+        after = _pr_labels(gh, repo, number)
+        if not set(labels).issubset(after):
+            return fail("labels_readback_incomplete", repo=repo, number=number, labels=labels, observed_labels=sorted(after), actions=actions, mutated=bool(missing), failure_class="reconcile_then_retry" if missing else "terminal", retry_safe=False)
+    except CommandError as exc:
+        return fail("labels_readback_failed", error=str(exc), repo=repo, number=number, mutated=bool(missing), failure_class="reconcile_then_retry", retry_safe=False)
+    except (ValueError, json.JSONDecodeError, TypeError) as exc:
+        return fail("labels_readback_ambiguous", error=str(exc), repo=repo, number=number, mutated=bool(missing), failure_class="terminal", retry_safe=False)
+    return ok(status="labeled", repo=repo, number=number, actions=actions, labels=labels, mutated=bool(missing))
 
 
 def write_dispatch_receipt(request: EffectorRunRequest) -> EffectorRunResult:
-    """Atomic write of a small JSON receipt for fix-pr work (fsync best-effort)."""
-    import json
+    """Create dispatch receipt exclusively; identical payload is idempotent."""
     import os
-
-    data = input_of(request)
-    dry = dry_run_flag(request)
-    upstream = upstream_noop(
-        request, "parse_issue_ref", "prepare_worktree", "open_pull_request", "apply_pr_labels"
-    )
+    data = input_of(request); dry = dry_run_flag(request)
+    upstream = upstream_noop(request, "parse_issue_ref", "prepare_worktree", "open_pull_request", "apply_pr_labels")
     if upstream:
         return noop(str(upstream.get("reason") or "no_ready_task"))
     path = str(data.get("receipt_path") or cfg_of(request).get("receipt_path") or "")
     payload = data.get("payload")
     if not isinstance(payload, dict) or not payload:
-        parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
-        opened = cond_blob(request, "open_pull_request", "open_pr")
-        prep = cond_blob(request, "prepare_worktree")
-        payload = {
-            "phase": "DISPATCHED",
-            "repo": parsed.get("repo") or opened.get("repo"),
-            "issue": parsed.get("issue"),
-            "branch": prep.get("branch") or parsed.get("branch"),
-            "pr_number": opened.get("number"),
-            "pr_url": opened.get("url"),
-            "worktree_path": prep.get("worktree_path"),
-            "dry_run": dry,
-        }
+        parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task"); opened = cond_blob(request, "open_pull_request", "open_pr"); prep = cond_blob(request, "prepare_worktree")
+        payload = {"phase": "DISPATCHED", "repo": parsed.get("repo") or opened.get("repo"), "issue": parsed.get("issue"), "branch": prep.get("branch") or parsed.get("branch"), "pr_number": opened.get("number"), "pr_url": opened.get("url"), "worktree_path": prep.get("worktree_path"), "dry_run": dry}
     if not path:
-        return fail("missing_receipt_path")
+        return fail("missing_receipt_path", failure_class="terminal", retry_safe=False)
     if dry:
         return planned(receipt_path=path, payload=payload)
+    text = json.dumps(payload, indent=2, sort_keys=True)
     try:
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        text = json.dumps(payload, indent=2, sort_keys=True)
-        tmp.write_text(text, encoding="utf-8")
-        with tmp.open("r+b") as fh:
-            fh.flush()
-            os.fsync(fh.fileno())
-        tmp.replace(p)
-    except OSError as exc:
-        return fail("receipt_write_failed", error=str(exc), receipt_path=path)
+        p = Path(path); p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            existing = p.read_text(encoding="utf-8")
+            if existing != text and existing != text + "\n":
+                return fail("receipt_conflict", receipt_path=path, failure_class="terminal", retry_safe=False)
+            return ok(status="exists", receipt_path=path, mutated=False)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text); fh.flush(); os.fsync(fh.fileno())
+    except (OSError, UnicodeError) as exc:
+        return fail("receipt_write_failed", error=str(exc), receipt_path=path, failure_class="terminal", retry_safe=False)
     return ok(status="written", receipt_path=path, mutated=True)
 
 
@@ -774,39 +714,38 @@ def push_branch(request: EffectorRunRequest) -> EffectorRunResult:
 
 
 def apply_issue_labels(request: EffectorRunRequest) -> EffectorRunResult:
-    """Atomic: add labels to a GitHub issue (e.g. ai:in-progress finish/block)."""
-    data = input_of(request)
-    cfg = cfg_of(request)
-    dry = dry_run_flag(request)
-    repo = str(data.get("repo") or "")
-    issue = int(data.get("issue") or data.get("number") or 0)
-    labels = data.get("labels") or []
-    gh = str(cfg.get("gh_cli") or "gh")
+    """Add only missing issue labels and require authoritative post-readback."""
+    data = input_of(request); cfg = cfg_of(request); dry = dry_run_flag(request)
+    repo = str(data.get("repo") or ""); issue = int(data.get("issue") or data.get("number") or 0)
+    labels = [str(label) for label in (data.get("labels") or [])]; gh = str(cfg.get("gh_cli") or "gh")
     if not repo or not issue:
-        return fail("missing_repo_or_issue")
+        return fail("missing_repo_or_issue", failure_class="terminal", retry_safe=False)
     if not labels:
-        return fail("missing_labels")
+        return fail("missing_labels", failure_class="terminal", retry_safe=False)
     if dry:
-        return planned(repo=repo, issue=issue, labels=list(labels))
-    applied = []
-    for label in labels:
-        try:
-            run_cmd(
-                [
-                    gh,
-                    "issue",
-                    "edit",
-                    str(issue),
-                    "--repo",
-                    repo,
-                    "--add-label",
-                    str(label),
-                ],
-                timeout=60,
-            )
-            applied.append({"label": label, "ok": True})
-        except CommandError as exc:
-            applied.append({"label": label, "ok": False, "error": exc.stderr[-200:]})
-    if not any(a["ok"] for a in applied):
-        return fail("all_labels_failed", actions=applied)
-    return ok(status="labeled", repo=repo, issue=issue, actions=applied, mutated=True)
+        return planned(repo=repo, issue=issue, labels=labels)
+    missing: list[str] = []; actions: list[dict[str, Any]] = []
+    try:
+        proc = run_cmd([gh, "issue", "view", str(issue), "--repo", repo, "--json", "labels"], timeout=60)
+        text = (proc.stdout or "").strip()
+        if not text: raise ValueError("issue labels readback was blank")
+        value = json.loads(text)
+        if not isinstance(value, dict): raise ValueError("issue labels readback was malformed")
+        before = _label_names(value.get("labels")); missing = [label for label in labels if label not in before]
+        for label in missing:
+            try:
+                run_cmd([gh, "issue", "edit", str(issue), "--repo", repo, "--add-label", label], timeout=60); actions.append({"label": label, "ok": True})
+            except CommandError as exc: actions.append({"label": label, "ok": False, "error": exc.stderr[-200:]})
+        proc = run_cmd([gh, "issue", "view", str(issue), "--repo", repo, "--json", "labels"], timeout=60)
+        text = (proc.stdout or "").strip()
+        if not text: raise ValueError("issue labels post-readback was blank")
+        value = json.loads(text)
+        if not isinstance(value, dict): raise ValueError("issue labels post-readback was malformed")
+        after = _label_names(value.get("labels"))
+        if not set(labels).issubset(after):
+            return fail("labels_readback_incomplete", repo=repo, issue=issue, labels=labels, observed_labels=sorted(after), actions=actions, mutated=bool(missing), failure_class="reconcile_then_retry" if missing else "terminal", retry_safe=False)
+    except CommandError as exc:
+        return fail("labels_readback_failed", error=str(exc), repo=repo, issue=issue, mutated=bool(missing), failure_class="reconcile_then_retry", retry_safe=False)
+    except (ValueError, json.JSONDecodeError, TypeError) as exc:
+        return fail("labels_readback_ambiguous", error=str(exc), repo=repo, issue=issue, mutated=bool(missing), failure_class="terminal", retry_safe=False)
+    return ok(status="labeled", repo=repo, issue=issue, actions=actions, labels=labels, mutated=bool(missing))

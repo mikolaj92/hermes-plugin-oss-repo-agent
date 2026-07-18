@@ -6,7 +6,7 @@ set -euo pipefail
 # GitHub operations in this helper must use gh only.
 
 export HOME="${HOME:-/Users/mini-m4-main}"
-export PATH="/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="${PATH:-/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
 
 LOG_FILE="${HERMES_INTAKE_LOG:-/Users/mini-m4-main/.hermes/logs/repo-issue-intake.log}"
 LOCK_DIR="${HERMES_INTAKE_LOCK_DIR:-/tmp/hermes-repo-issue-intake.lock}"
