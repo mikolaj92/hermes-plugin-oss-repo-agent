@@ -227,8 +227,14 @@ for entry in "${repos[@]}"; do
     board_tasks_json="$(hermes kanban --board "$board" list --json --sort created-desc 2>/dev/null || printf '[]')"
   fi
 
-  while IFS=$'\t' read -r number title url labels has_ready existing_assignees; do
+  while IFS=$'\t' read -r number title url labels field5 field6; do
     [ -n "${number:-}" ] || continue
+    has_ready="$field5"
+    existing_assignees="$field6"
+    if [ "$field5" != "true" ] && [ "$field5" != "false" ]; then
+      existing_assignees="$field5"
+      has_ready="$field6"
+    fi
     processed=$((processed + 1))
     if [ "$existing_assignees" = "other-user" ] || [ "$existing_assignees" = "false" ]; then
       skipped=$((skipped + 1))

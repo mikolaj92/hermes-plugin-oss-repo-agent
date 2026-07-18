@@ -213,9 +213,6 @@ for entry in "${REPOS[@]}"; do
   while IFS=$'\t' read -r path branch; do
     [[ -n "${path:-}" && -n "${branch:-}" ]] || continue
     [[ "$branch" == ai/fix/* ]] || continue
-    if [[ "$path" != "$WORKTREE_ROOT/"* && "$path" != "$clone_path/.worktrees/"* ]]; then
-      continue
-    fi
     processed=$((processed + 1))
     issue="$(issue_from_branch "$branch" || true)"
     if [[ -z "$issue" ]]; then
@@ -232,11 +229,13 @@ for entry in "${REPOS[@]}"; do
     fi
     if [[ "$state" == "OPEN" || "$open_prs" != "0" ]]; then
       log "KEEP repo=$repo issue=$issue branch=$branch path=$path issue_state=$state open_prs=$open_prs"
-      if [[ -n "$RECEIPT_DIR" && "$state" == "OPEN" ]]; then
+      if [[ -n "$RECEIPT_DIR" ]]; then
         while IFS=$'\t' read -r receipt_path receipt_payload; do
           [[ -n "${receipt_path:-}" ]] || continue
           log "KEEP repo=$repo issue=$issue branch=$branch path=$path reason=issue-not-closed receipt=$receipt_path"
-          quarantine_receipt "$receipt_path"
+          if [[ "$state" == "OPEN" ]]; then
+            quarantine_receipt "$receipt_path"
+          fi
         done < <(receipt_rows_for_worktree "$clone_path" "$path" "$branch" "$RECEIPT_DIR")
       fi
       skipped=$((skipped + 1))
@@ -256,6 +255,7 @@ for entry in "${REPOS[@]}"; do
     while IFS=$'\t' read -r receipt_path receipt_payload; do
       [[ -n "${receipt_path:-}" ]] || continue
       receipt_found=1
+      receipt_valid=0
       if receipt_allows_cleanup "$receipt_payload" "$clone_path" "$branch" "$issue" "$state"; then
         receipt_valid=1
         break
