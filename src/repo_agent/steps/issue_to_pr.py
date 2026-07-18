@@ -412,7 +412,7 @@ def run_omp_worker(request: EffectorRunRequest) -> EffectorRunResult:
                 f"Task: {parsed.get('task_title') or ''}\n"
                 f"Keep scope tight. Do not force-push. Do not open/merge PRs.\n"
             )
-    model = data.get("model") or cfg.get("model") or None
+    model = data.get("model") or None
     timeout = float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800)
     if not worktree_path or not prompt:
         return fail("missing_worktree_or_prompt")
