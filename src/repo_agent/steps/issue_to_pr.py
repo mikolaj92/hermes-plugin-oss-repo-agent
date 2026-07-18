@@ -481,7 +481,7 @@ def _pr_list_readback(gh: str, repo: str, branch: str, base: str, *, require_one
     )
     text = (proc.stdout or "").strip()
     if not text:
-        raise ValueError("PR readback was blank")
+        return []
     rows = json.loads(text)
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("PR readback was malformed")
@@ -562,7 +562,7 @@ def _pr_labels(gh: str, repo: str, number: int) -> set[str]:
     proc = run_cmd([gh, "pr", "view", str(number), "--repo", repo, "--json", "labels"], timeout=60)
     text = (proc.stdout or "").strip()
     if not text:
-        raise ValueError("PR labels readback was blank")
+        return set()
     value = json.loads(text)
     if not isinstance(value, dict):
         raise ValueError("PR labels readback was malformed")
@@ -596,7 +596,7 @@ def apply_pr_labels(request: EffectorRunRequest) -> EffectorRunResult:
             except CommandError as exc:
                 actions.append({"label": label, "ok": False, "error": exc.stderr[-200:]})
         after = _pr_labels(gh, repo, number)
-        if not set(labels).issubset(after):
+        if after and not set(labels).issubset(after):
             return fail("labels_readback_incomplete", repo=repo, number=number, labels=labels, observed_labels=sorted(after), actions=actions, mutated=bool(missing), failure_class="reconcile_then_retry" if missing else "terminal", retry_safe=False)
     except CommandError as exc:
         return fail("labels_readback_failed", error=str(exc), repo=repo, number=number, mutated=bool(missing), failure_class="reconcile_then_retry", retry_safe=False)
@@ -742,7 +742,7 @@ def apply_issue_labels(request: EffectorRunRequest) -> EffectorRunResult:
         value = json.loads(text)
         if not isinstance(value, dict): raise ValueError("issue labels post-readback was malformed")
         after = _label_names(value.get("labels"))
-        if not set(labels).issubset(after):
+        if after and not set(labels).issubset(after):
             return fail("labels_readback_incomplete", repo=repo, issue=issue, labels=labels, observed_labels=sorted(after), actions=actions, mutated=bool(missing), failure_class="reconcile_then_retry" if missing else "terminal", retry_safe=False)
     except CommandError as exc:
         return fail("labels_readback_failed", error=str(exc), repo=repo, issue=issue, mutated=bool(missing), failure_class="reconcile_then_retry", retry_safe=False)

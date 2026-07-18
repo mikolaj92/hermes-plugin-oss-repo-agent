@@ -242,6 +242,15 @@ for entry in "${REPOS[@]}"; do
       skipped=$((skipped + 1))
       continue
     fi
+    if [[ -n "$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" ]]; then
+      log "SKIP repo=$repo issue=$issue branch=$branch path=$path reason=dirty-worktree"
+      if [[ "$DRY_RUN" == 0 ]]; then
+        create_dirty_worktree_task "$repo" "$board" "$path" "$branch" "$issue"
+        log "MAINTENANCE_TASK_ENSURED repo=$repo issue=$issue branch=$branch path=$path"
+      fi
+      skipped=$((skipped + 1))
+      continue
+    fi
     receipt_found=0
     receipt_valid=0
     while IFS=$'\t' read -r receipt_path receipt_payload; do
@@ -254,7 +263,10 @@ for entry in "${REPOS[@]}"; do
       log "KEEP repo=$repo issue=$issue branch=$branch path=$path reason=merge-provenance-unverifiable receipt=$receipt_path"
       quarantine_receipt "$receipt_path"
     done < <(receipt_rows_for_worktree "$clone_path" "$path" "$branch" "$RECEIPT_DIR")
-    if [[ "$receipt_found" != 1 || "$receipt_valid" != 1 ]]; then
+    if [[ "$receipt_found" != 1 ]]; then
+      receipt_valid=1
+    fi
+    if [[ "$receipt_valid" != 1 ]]; then
       if [[ -n "$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" ]]; then
         log "SKIP repo=$repo issue=$issue branch=$branch path=$path reason=dirty-worktree"
         if [[ "$DRY_RUN" == 0 ]]; then

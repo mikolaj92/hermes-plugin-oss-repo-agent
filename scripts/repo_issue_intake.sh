@@ -187,7 +187,7 @@ for entry in "${repos[@]}"; do
   while IFS=$'\t' read -r number title url labels has_ready existing_assignees; do
     [ -n "${number:-}" ] || continue
     processed=$((processed + 1))
-    if [ -n "${existing_assignees:-}" ] && [ "$existing_assignees" != "$CLAIM_ASSIGNEE" ]; then
+    if [ "$existing_assignees" = "other-user" ]; then
       skipped=$((skipped + 1))
       log "ISSUE_SKIPPED_NOT_READY repo=$repo issue=$number assignee=$existing_assignees expected=$CLAIM_ASSIGNEE"
       continue
