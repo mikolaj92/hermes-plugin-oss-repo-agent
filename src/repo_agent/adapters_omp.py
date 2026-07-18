@@ -22,7 +22,7 @@ def run_omp(
             "prompt_len": len(prompt),
         }
     proc = run_cmd(
-        ["omp", "run", "--model", model, "--prompt", prompt],
+        ["omp", "-p", prompt, "--model", model, "--cwd", str(cwd), "--approval-mode", "yolo"],
         timeout=timeout,
         env=None,
         check=True,
