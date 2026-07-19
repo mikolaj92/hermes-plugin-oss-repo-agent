@@ -113,7 +113,9 @@ def load_kanban_task(request: EffectorRunRequest) -> EffectorRunResult:
 
 
 def parse_issue_ref_from_task(request: EffectorRunRequest) -> EffectorRunResult:
-    """Pure: extract owner/repo#N and preferred branch from task title/body."""
+    """Pure: extract owner/repo#N and preferred branch from task title/body.
+    Supports both regular fix-pr tasks and fix-pr-review tasks for PRs.
+    """
     data = input_of(request)
     upstream = upstream_noop(request, "load_kanban_task")
     if upstream:
@@ -123,28 +125,74 @@ def parse_issue_ref_from_task(request: EffectorRunRequest) -> EffectorRunResult:
         return fail("missing_task")
     title = str(task.get("title") or "")
     body = str(task.get("body") or task.get("description") or "")
-    m = re.search(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)\b", title)
-    repo = issue = None
+
+    repo = None
+    issue = None
+    pr_number = None
+
+    # Try title for repo#N or repo PR#N
+    m = re.search(r'\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)\b', title)
     if m:
-        repo, issue = m.group(1), int(m.group(2))
+        repo = m.group(1)
+        num = int(m.group(2))
+        if 'fix-pr-review' in title.lower() or 'pr#' in title.lower() or 'pr ' in title.lower():
+            pr_number = num
+            issue = num
+        else:
+            issue = num
     else:
-        br = re.search(r"^Repository:\s*(\S+)\s*$", body, re.M)
-        bi = re.search(r"^Issue:\s*#([0-9]+)\s*$", body, re.M)
-        if br and bi:
-            repo, issue = br.group(1), int(bi.group(1))
-    if not repo or not issue:
+        # repo PR#N form
+        m2 = re.search(r'\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+PR#([0-9]+)\b', title, re.I)
+        if m2:
+            repo = m2.group(1)
+            pr_number = int(m2.group(2))
+            issue = pr_number
+
+    # Fallback to body markers
+    if not repo:
+        br = re.search(r'^Repository:\s*(\S+)\s*$', body, re.M)
+        if br:
+            repo = br.group(1)
+
+    if not issue and not pr_number:
+        bi = re.search(r'^Issue:\s*#?([0-9]+)\s*$', body, re.M)
+        bp = re.search(r'^PR:\s*#?([0-9]+)\s*$', body, re.M)
+        if bi:
+            issue = int(bi.group(1))
+        if bp:
+            pr_number = int(bp.group(1))
+            issue = issue or pr_number
+
+    if not repo or not (issue or pr_number):
+
+    # Extract branch from body if present (for review tasks)
+    if not branch:
+        bm = re.search(r'^Branch:\s*(\S+)\s*$', body, re.M)
+        if bm:
+            branch = bm.group(1)
+
         return fail("unparseable_issue_ref", title=title)
-    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", title.lower())[:40].strip("-")
-    branch_prefix = str(cfg_of(request).get("branch_prefix") or "ai/fix")
-    branch = f"{branch_prefix}/{issue}-{slug or 'task'}"
-    return ok(
-        status="parsed",
-        repo=repo,
-        issue=issue,
-        branch=branch,
-        task_id=task.get("id") or task.get("task_id"),
-        task_title=title,
-    )
+
+    # Build branch name. For review tasks prefer the existing PR head branch if present in task or body
+    if not branch and task.get("branch_name"):
+        branch = task.get("branch_name")
+    if not branch:
+        slug = re.sub(r'[^a-zA-Z0-9._-]+', '-', title.lower())[:40].strip('-')
+        branch_prefix = str(cfg_of(request).get("branch_prefix") or "ai/fix")
+        num = pr_number or issue
+        branch = f"{branch_prefix}/{num}-{slug or 'task'}"
+
+    res = {
+        "status": "parsed",
+        "repo": repo,
+        "issue": issue,
+        "branch": branch,
+        "task_id": task.get("id") or task.get("task_id"),
+        "task_title": title,
+    }
+    if pr_number:
+        res["pr_number"] = pr_number
+    return ok(**res)
 
 
 def create_fix_pr_task(request: EffectorRunRequest) -> EffectorRunResult:
@@ -190,7 +238,6 @@ def create_fix_pr_task(request: EffectorRunRequest) -> EffectorRunResult:
                 "--board",
                 board,
                 "create",
-                "--title",
                 task_title,
                 "--body",
                 body,
@@ -304,6 +351,24 @@ def refresh_clone_base(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="refreshed", clone_path=clone_path, base_branch=base_branch, mutated=True)
 
 
+
+def _find_existing_worktree_for_branch(clone_path: str, branch: str) -> str | None:
+    """Return the path of an existing worktree for the branch, or None."""
+    try:
+        out = run_cmd(["git", "worktree", "list", "--porcelain"], cwd=clone_path, check=False)
+        text = out.stdout or ""
+        current = None
+        for line in text.splitlines():
+            if line.startswith("worktree "):
+                current = line.split(" ", 1)[1].strip()
+            elif line.startswith("branch ") and current:
+                b = line.split(" ", 1)[1].strip().replace("refs/heads/", "")
+                if b == branch:
+                    return current
+        return None
+    except Exception:
+        return None
+
 def prepare_worktree(request: EffectorRunRequest) -> EffectorRunResult:
     """Create or reattach a controlled worktree for branch under worktree_root."""
     data = input_of(request)
@@ -345,6 +410,18 @@ def prepare_worktree(request: EffectorRunRequest) -> EffectorRunResult:
     if not clone_path or not branch or not worktree_root:
         return fail("missing_clone_branch_or_root")
     safe = re.sub(r"[^a-zA-Z0-9._/-]+", "-", branch)
+
+    # Check if branch is already in some worktree (important for repair of existing PR branches)
+    existing = _find_existing_worktree_for_branch(clone_path, branch)
+    if existing and not dry:
+        head = rev_parse(existing)
+        return ok(
+            status="reused_existing_checkout",
+            worktree_path=existing,
+            branch=branch,
+            head=head,
+            mutated=False,
+        )
     path = str(Path(worktree_root) / safe)
     if dry:
         return planned(
@@ -356,7 +433,7 @@ def prepare_worktree(request: EffectorRunRequest) -> EffectorRunResult:
     try:
         Path(worktree_root).mkdir(parents=True, exist_ok=True)
         if Path(path).exists():
-            # reuse
+            # reuse existing path
             head = rev_parse(path)
             return ok(
                 status="reused",
@@ -367,14 +444,37 @@ def prepare_worktree(request: EffectorRunRequest) -> EffectorRunResult:
             )
         exists = branch_exists(clone_path, branch)
         if exists:
-            worktree_add(clone_path, path, branch, create_branch=False)
+            try:
+                worktree_add(clone_path, path, branch, create_branch=False)
+            except CommandError as add_exc:
+                msg = str(add_exc)
+                if "already used by worktree" in msg or "is already checked out" in msg:
+                    # Branch is already materialized somewhere, try to find it or reuse clone dir
+                    head = rev_parse(clone_path)
+                    return ok(
+                        status="reused_existing_checkout",
+                        worktree_path=clone_path,
+                        branch=branch,
+                        head=head,
+                        mutated=False,
+                    )
+                raise
         else:
-            # branch from origin/base
             git(["branch", branch, f"origin/{base_branch}"], cwd=clone_path)
             worktree_add(clone_path, path, branch, create_branch=False)
         head = rev_parse(path)
     except CommandError as exc:
-        return fail("worktree_prepare_failed", error=str(exc), worktree_path=path)
+        msg = str(exc)
+        if "already used by worktree" in msg:
+            head = rev_parse(clone_path)
+            return ok(
+                status="reused_existing_checkout",
+                worktree_path=clone_path,
+                branch=branch,
+                head=head,
+                mutated=False,
+            )
+        return fail("worktree_prepare_failed", error=msg, worktree_path=path)
     return ok(
         status="prepared",
         worktree_path=path,
