@@ -68,8 +68,12 @@ def create_review_fix_task(request: EffectorRunRequest) -> EffectorRunResult:
     if not board or not repo or not number:
         return fail("missing_board_repo_or_number")
     title = f"[fix-pr-review] {repo} PR#{number}: {reason}"
+    branch = pr.get("headRefName") or ""
     body = (
-        f"Repository: {repo}\nPR: #{number}\nReason: {reason}\n"
+        f"Repository: {repo}\n"
+        f"PR: #{number}\n"
+        f"Reason: {reason}\n"
+        f"Branch: {branch}\n"
         f"Idempotency-Key: fix-pr-review:{repo}:{number}:{reason}\n"
     )
     if dry:
@@ -96,9 +100,7 @@ def create_review_fix_task(request: EffectorRunRequest) -> EffectorRunResult:
                 "kanban",
                 "--board",
                 board,
-                "create",
-                "--title",
-                title,
+                "create", title,
                 "--body",
                 body,
                 "--assignee",
