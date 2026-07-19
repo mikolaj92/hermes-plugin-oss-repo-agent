@@ -132,7 +132,7 @@ def parse_issue_ref_from_task(request: EffectorRunRequest) -> EffectorRunResult:
     pr_number = None
     branch = None
 
-    # 1. Prefer body markers (used by review tasks)
+    # 1. Prefer body markers (used by review tasks) — single backslash raw strings
     br = re.search(r'^Repository:\s*(\S+)\s*$', body, re.M)
     if br:
         repo = br.group(1)
