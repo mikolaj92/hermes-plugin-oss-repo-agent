@@ -7,11 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fala.driver import run_correlation_path
+from repo_agent.flows.runtime import FailurePolicy, run_repo_agent_path
 from fala.models import CorrelationPathSpec
 from fala.runtime_backend import Run, RuntimeBackendService
 
-from repo_agent.config import AgentConfig, load_config
+from repo_agent.config import AgentConfig, ConfigError, load_config
 from repo_agent.flows.common import PathRunResult, effector, process_summary
 
 CLEANUP_PATH = CorrelationPathSpec(
@@ -54,6 +54,20 @@ CLEANUP_PATH = CorrelationPathSpec(
     ],
 )
 
+CLEANUP_FAILURE_POLICIES = {
+    "parse_issue_from_branch": FailurePolicy.terminal,
+    "check_issue_closed": FailurePolicy.retryable_read,
+    "check_no_open_pr": FailurePolicy.retryable_read,
+    "remove_worktree": FailurePolicy.terminal,
+    "delete_local_fix_branch": FailurePolicy.terminal,
+    "release_active_issue_claim": FailurePolicy.terminal,
+}
+CLEANUP_MAX_ATTEMPTS = {
+    "parse_issue_from_branch": 1, "check_issue_closed": 3,
+    "check_no_open_pr": 3, "remove_worktree": 1,
+    "delete_local_fix_branch": 1, "release_active_issue_claim": 1,
+}
+
 
 async def run_cleanup_flow(
     *,
@@ -72,40 +86,20 @@ async def run_cleanup_flow(
     """Run cleanup path on Fala 0.2.x."""
     cfg = config or load_config()
     is_dry = True if dry_run is None else dry_run
+    if dry_run is False and not cfg.live:
+        raise ConfigError("live execution requires config mode='live'")
     if dry_run is None and cfg.live:
         is_dry = False
 
     resolved_repo = repo or (cfg.repos[0].repo if cfg.repos else "")
     resolved_clone = clone_path or (cfg.repos[0].clone_path if cfg.repos else "")
     resolved_branch = branch or ""
-    if not resolved_branch:
-        rid = run_id or f"cleanup-idle-{uuid.uuid4().hex[:8]}"
-        return PathRunResult(
-            run_id=rid,
-            path_id=CLEANUP_PATH.id,
-            dry_run=is_dry,
-            ticks=0,
-            stopped_reason="no_branch",
-            summary={"repo": resolved_repo, "branch": "", "run_status": "noop"},
-            status="noop",
-        )
-    import os
-
-    claim = claim_path or os.environ.get(
-        "HERMES_ACTIVE_ISSUE_PATH",
-        str(Path.home() / ".hermes" / "oss-repo-agent" / "active-issue.json"),
-    )
+    claim = claim_path or cfg.paths.active_issue
     wt = worktree_path or ""
     if not wt and resolved_branch:
         import re
-
-        wt_root = os.environ.get(
-            "HERMES_WORKTREE_ROOT",
-            str(Path.home() / ".hermes" / "worktrees" / "repo-fixer"),
-        )
-        # Matches prepare_worktree path layout under worktree_root
         safe = re.sub(r"[^a-zA-Z0-9._/-]+", "-", resolved_branch)
-        wt = str(Path(wt_root) / safe)
+        wt = str(Path(cfg.paths.worktree_root) / safe)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rid = run_id or f"cleanup-{stamp}-{uuid.uuid4().hex[:8]}"
@@ -118,10 +112,15 @@ async def run_cleanup_flow(
         "gh_cli": cfg.gh_cli,
         "dry_run": is_dry,
         "require_safe": True,
+        "blocked_label": cfg.labels.blocked,
+        "executor_command": cfg.executor.command,
+        "executor_model": cfg.executor.model,
+        "executor_thinking": cfg.executor.thinking,
+        "executor_timeout_seconds": cfg.executor.timeout_seconds,
     }
 
     service = RuntimeBackendService.sqlite(db_path)
-    result = await run_correlation_path(
+    result = await run_repo_agent_path(
         service,
         run=Run(
             id=rid,
@@ -138,37 +137,17 @@ async def run_cleanup_flow(
         worker_id=worker_id,
         correlation_path_id=f"{rid}:{CLEANUP_PATH.id}",
         effector_inputs={
-            "parse_issue_from_branch": {
-                "branch": resolved_branch,
-                "dry_run": is_dry,
-            },
-            "check_issue_closed": {
-                "repo": resolved_repo,
-                "dry_run": is_dry,
-            },
-            "check_no_open_pr": {
-                "repo": resolved_repo,
-                "branch": resolved_branch,
-                "dry_run": is_dry,
-            },
-            "remove_worktree": {
-                "clone_path": resolved_clone,
-                "worktree_path": wt,
-                "dry_run": is_dry,
-                "require_safe": True,
-            },
-            "delete_local_fix_branch": {
-                "clone_path": resolved_clone,
-                "branch": resolved_branch,
-                "dry_run": is_dry,
-            },
-            "release_active_issue_claim": {
-                "claim_path": claim,
-                "repo": resolved_repo,
-                "dry_run": is_dry,
-            },
+            "parse_issue_from_branch": {"branch": resolved_branch, "dry_run": is_dry},
+            "check_issue_closed": {"repo": resolved_repo, "dry_run": is_dry},
+            "check_no_open_pr": {"repo": resolved_repo, "branch": resolved_branch, "dry_run": is_dry},
+            "remove_worktree": {"clone_path": resolved_clone, "worktree_path": wt, "dry_run": is_dry, "require_safe": True},
+            "delete_local_fix_branch": {"clone_path": resolved_clone, "branch": resolved_branch, "dry_run": is_dry},
+            "release_active_issue_claim": {"claim_path": claim, "repo": resolved_repo, "dry_run": is_dry},
         },
         effector_configs={e.id: step_config for e in CLEANUP_PATH.effectors},
+        failure_policy_by_effector=CLEANUP_FAILURE_POLICIES,
+        max_attempts_by_effector=CLEANUP_MAX_ATTEMPTS,
+        retry_backoff_seconds=cfg.executor.retry_backoff_seconds,
         max_ticks=max_ticks,
         lease_seconds=300.0,
         actor=worker_id,
@@ -180,6 +159,12 @@ async def run_cleanup_flow(
     status = (
         result.status.value if hasattr(result.status, "value") else str(result.status)
     )
+    parse_out = (by_step.get("parse_issue_from_branch") or {}).get("output", {})
+    all_succeeded = bool(summaries) and all(s.get("status") == "succeeded" for s in summaries)
+    has_terminal_failure = status in {"failed", "cancelled", "timed_out"} or bool(result.outcome.failed)
+    is_noop = parse_out.get("status") == "noop" and all_succeeded and not has_terminal_failure
+    path_status = "noop" if is_noop else status
+    path_stopped_reason = str(parse_out.get("reason") or "no_branch") if is_noop else result.outcome.stopped_reason
     summary = {
         "repo": resolved_repo,
         "branch": resolved_branch,
@@ -192,7 +177,7 @@ async def run_cleanup_flow(
         "remove_status": (by_step.get("remove_worktree") or {}).get("output", {}).get(
             "status"
         ),
-        "failed_steps": [s["step_id"] for s in summaries if s.get("status") == "failed"],
+        "failed_steps": [s["step_id"] for s in summaries if s.get("status") in {"failed", "cancelled", "timed_out"}],
         "run_status": status,
     }
 
@@ -201,10 +186,10 @@ async def run_cleanup_flow(
         path_id=CLEANUP_PATH.id,
         dry_run=is_dry,
         ticks=result.outcome.ticks,
-        stopped_reason=result.outcome.stopped_reason,
+        stopped_reason=path_stopped_reason,
         completed=[process_summary(p) for p in result.outcome.completed],
         failed=[process_summary(p) for p in result.outcome.failed],
         processes=summaries,
         summary=summary,
-        status=status,
+        status=path_status,
     )

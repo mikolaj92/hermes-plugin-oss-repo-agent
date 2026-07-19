@@ -1,17 +1,18 @@
 """PR triage correlation paths + action router (merge | comment_block | repair)."""
 
 from __future__ import annotations
+import hashlib
 
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fala.driver import run_correlation_path
+from repo_agent.flows.runtime import FailurePolicy, run_repo_agent_path
 from fala.models import CorrelationPathSpec
 from fala.runtime_backend import Run, RuntimeBackendService
 
-from repo_agent.config import AgentConfig, load_config
+from repo_agent.config import AgentConfig, ConfigError, load_config
 from repo_agent.flows.common import PathRunResult, effector, process_summary
 
 # Decide path only — tick routes follow-up paths based on action.
@@ -121,19 +122,65 @@ PR_REPAIR_PATH = CorrelationPathSpec(
     ],
 )
 
+TRIAGE_FAILURE_POLICIES = {
+    "list_ai_fix_prs": FailurePolicy.retryable_read,
+    "load_pr_fields": FailurePolicy.retryable_read,
+    "evaluate_checks": FailurePolicy.terminal,
+    "evaluate_test_evidence": FailurePolicy.terminal,
+    "decide_triage_action": FailurePolicy.terminal,
+}
+TRIAGE_MAX_ATTEMPTS = {
+    "list_ai_fix_prs": 3, "load_pr_fields": 3,
+    "evaluate_checks": 1, "evaluate_test_evidence": 1,
+    "decide_triage_action": 1,
+}
+MERGE_FAILURE_POLICIES = {
+    "claim_pr": FailurePolicy.reconcile_then_retry,
+    "merge": FailurePolicy.terminal,
+    "write_merge_receipt": FailurePolicy.terminal,
+    "close_linked_issue": FailurePolicy.reconcile_then_retry,
+}
+MERGE_MAX_ATTEMPTS = {"claim_pr": 3, "merge": 1, "write_merge_receipt": 1, "close_linked_issue": 3}
+COMMENT_FAILURE_POLICIES = {"comment_pr": FailurePolicy.reconcile_then_retry}
+COMMENT_MAX_ATTEMPTS = {"comment_pr": 3}
+REPAIR_FAILURE_POLICIES = {
+    "create_review_fix_task": FailurePolicy.reconcile_then_retry,
+    "build_repair_prompt": FailurePolicy.terminal,
+    "prepare_worktree": FailurePolicy.terminal,
+    "run_omp": FailurePolicy.terminal,
+    "push_branch": FailurePolicy.reconcile_then_retry,
+}
+REPAIR_MAX_ATTEMPTS = {
+    "create_review_fix_task": 3,
+    "build_repair_prompt": 1,
+    "prepare_worktree": 1,
+    "run_omp": 1,
+    "push_branch": 3,
+}
+
 
 def _step_config(cfg: AgentConfig, *, is_dry: bool, **extra: Any) -> dict[str, Any]:
-    raw = cfg.raw if isinstance(cfg.raw, dict) else {}
-    automation = raw.get("automation") if isinstance(raw.get("automation"), dict) else {}
     return {
         "assignee": cfg.assignee,
         "gh_cli": cfg.gh_cli,
         "branch_prefix": cfg.branch_prefix,
         "base_branch": cfg.base_branch,
-        "automerge": bool(automation.get("automerge", False)),
-        "require_test_evidence": bool(automation.get("require_test_evidence", False)),
-        "fixer_assignee": str(automation.get("fixer_assignee") or "repo-agent-fixer"),
-        "merge_method": str(automation.get("merge_method") or "merge"),
+        "automerge": cfg.automation.automerge,
+        "require_human_approval": cfg.automation.require_human_approval,
+        "require_checks": cfg.automation.require_checks,
+        "require_test_evidence": cfg.automation.require_test_evidence,
+        "fixer_assignee": cfg.automation.fixer_assignee,
+        "merge_method": cfg.automation.merge_method,
+        "executor_enabled": cfg.executor.enabled,
+        "executor_command": cfg.executor.command,
+        "executor_model": cfg.executor.model,
+        "model": cfg.executor.model,
+        "thinking": cfg.executor.thinking,
+        "timeout_seconds": cfg.executor.timeout_seconds,
+        "worktree_root": cfg.paths.worktree_root,
+        "dispatch_receipts": cfg.paths.dispatch_receipts,
+        "merge_receipts": cfg.paths.merge_receipts,
+        "active_issue": cfg.paths.active_issue,
         "dry_run": is_dry,
         **extra,
     }
@@ -147,12 +194,15 @@ async def run_pr_triage_decide(
     repo: str | None = None,
     pr_number: int | None = None,
     run_id: str | None = None,
+    limit: int = 30,
     worker_id: str = "repo-agent:tick-triage",
     max_ticks: int = 20,
 ) -> PathRunResult:
     """Run pr_triage decide path only (no mutations beyond dry_run flags)."""
     cfg = config or load_config()
     is_dry = True if dry_run is None else dry_run
+    if dry_run is False and not cfg.live:
+        raise ConfigError("live execution requires config mode='live'")
     if dry_run is None and cfg.live:
         is_dry = False
 
@@ -162,7 +212,7 @@ async def run_pr_triage_decide(
     step_config = _step_config(cfg, is_dry=is_dry, repo=resolved_repo)
 
     service = RuntimeBackendService.sqlite(db_path)
-    result = await run_correlation_path(
+    result = await run_repo_agent_path(
         service,
         run=Run(
             id=rid,
@@ -181,14 +231,17 @@ async def run_pr_triage_decide(
             "list_ai_fix_prs": {
                 "repo": resolved_repo,
                 "dry_run": is_dry,
-                "limit": 30,
+                "limit": limit,
             },
             "load_pr_fields": {
                 "repo": resolved_repo,
                 "dry_run": is_dry,
                 **({"number": pr_number} if pr_number else {}),
             },
-            "evaluate_checks": {"dry_run": is_dry},
+            "evaluate_checks": {
+                "dry_run": is_dry,
+                "require_checks": step_config["require_checks"],
+            },
             "evaluate_test_evidence": {"dry_run": is_dry},
             "decide_triage_action": {
                 "dry_run": is_dry,
@@ -199,6 +252,9 @@ async def run_pr_triage_decide(
         max_ticks=max_ticks,
         lease_seconds=300.0,
         actor=worker_id,
+        failure_policy_by_effector=TRIAGE_FAILURE_POLICIES,
+        max_attempts_by_effector=TRIAGE_MAX_ATTEMPTS,
+        retry_backoff_seconds=cfg.executor.retry_backoff_seconds,
     )
 
     processes = list(result.processes or [])
@@ -218,7 +274,7 @@ async def run_pr_triage_decide(
         "reason": decide_out.get("reason"),
         "pr_number": pr_number,
         "pr": load_out.get("pr"),
-        "failed_steps": [s["step_id"] for s in summaries if s.get("status") == "failed"],
+        "failed_steps": [s["step_id"] for s in summaries if s.get("status") in {"failed", "cancelled", "timed_out"}],
         "run_status": status,
     }
 
@@ -255,6 +311,7 @@ async def run_triage_flow(
         dry_run=dry_run,
         repo=repo,
         pr_number=pr_number,
+        limit=limit,
         run_id=run_id,
         worker_id=worker_id,
         max_ticks=max_ticks,
@@ -283,7 +340,6 @@ async def run_follow_up_path(
         return None
 
     cfg = config or load_config()
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     pr = pr or {}
     number = int(number or pr.get("number") or 0)
     board = board or (cfg.repos[0].board if cfg.repos else "")
@@ -294,12 +350,20 @@ async def run_follow_up_path(
         "HERMES_WORKTREE_ROOT",
         str(Path.home() / ".hermes" / "worktrees" / "repo-fixer"),
     )
+    # The decide run is transient; the PR domain key must survive later ticks.
+    identity_parts = [action, repo, str(number)]
+    if action in {"merge", "repair"}:
+        head_oid = str(pr.get("headRefOid") or "").strip()
+        if head_oid:
+            identity_parts.append(head_oid)
+    stable_key = "|".join(identity_parts)
+    rid = f"pr-{action}-{hashlib.sha256(stable_key.encode()).hexdigest()[:20]}"
     receipt = receipt_path or str(
         Path.home()
         / ".hermes"
         / "oss-repo-agent"
         / "receipts"
-        / f"merge-{repo.replace('/', '_')}-{number}-{stamp}.json"
+        / f"merge-{repo.replace('/', '_')}-{number}-{rid}.json"
     )
     step_config = _step_config(
         cfg,
@@ -315,7 +379,6 @@ async def run_follow_up_path(
 
     if action == "merge":
         path = PR_MERGE_PATH
-        rid = f"pr-merge-{stamp}-{uuid.uuid4().hex[:8]}"
         effector_inputs = {
             "claim_pr": {
                 "dry_run": dry_run,
@@ -342,7 +405,6 @@ async def run_follow_up_path(
         }
     elif action == "comment_block":
         path = PR_COMMENT_PATH
-        rid = f"pr-comment-{stamp}-{uuid.uuid4().hex[:8]}"
         effector_inputs = {
             "comment_pr": {
                 "dry_run": dry_run,
@@ -357,7 +419,6 @@ async def run_follow_up_path(
         }
     elif action == "repair":
         path = PR_REPAIR_PATH
-        rid = f"pr-repair-{stamp}-{uuid.uuid4().hex[:8]}"
         effector_inputs = {
             "create_review_fix_task": {
                 "dry_run": dry_run,
@@ -388,7 +449,7 @@ async def run_follow_up_path(
     else:
         return None
 
-    result = await run_correlation_path(
+    result = await run_repo_agent_path(
         service,
         run=Run(
             id=rid,
@@ -407,6 +468,17 @@ async def run_follow_up_path(
         correlation_path_id=f"{rid}:{path.id}",
         effector_inputs=effector_inputs,
         effector_configs={e.id: step_config for e in path.effectors},
+        failure_policy_by_effector=(
+            MERGE_FAILURE_POLICIES if action == "merge"
+            else COMMENT_FAILURE_POLICIES if action == "comment_block"
+            else REPAIR_FAILURE_POLICIES
+        ),
+        max_attempts_by_effector=(
+            MERGE_MAX_ATTEMPTS if action == "merge"
+            else COMMENT_MAX_ATTEMPTS if action == "comment_block"
+            else REPAIR_MAX_ATTEMPTS
+        ),
+        retry_backoff_seconds=cfg.executor.retry_backoff_seconds,
         max_ticks=max_ticks,
         lease_seconds=600.0,
         actor=worker_id,
@@ -432,14 +504,12 @@ async def run_follow_up_path(
             "number": number,
             "run_status": status,
             "failed_steps": [
-                s["step_id"] for s in summaries if s.get("status") == "failed"
+                s["step_id"] for s in summaries if s.get("status") in {"failed", "cancelled", "timed_out"}
             ],
         },
         status=status,
         action=action,
     )
-
-
 async def run_triage_with_router(
     *,
     db_path: Path,
@@ -447,16 +517,30 @@ async def run_triage_with_router(
     dry_run: bool | None = None,
     repo: str | None = None,
     pr_number: int | None = None,
+    limit: int = 30,
     execute_follow_up: bool = True,
     worker_id: str = "repo-agent:tick-triage",
 ) -> PathRunResult:
     """Decide then optionally run merge/comment/repair follow-up path."""
+    cfg = config or load_config()
+    if not cfg.repos and not repo and not pr_number:
+        return PathRunResult(
+            run_id=f"pr-triage-empty-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+            path_id=TRIAGE_PATH.id,
+            dry_run=True if dry_run is None else dry_run,
+            ticks=0,
+            stopped_reason="no_repositories",
+            summary={"run_status": "completed", "repo": "", "pr_number": None, "action": "skip", "reason": "no_repositories", "failed_steps": []},
+            status="completed",
+            action="skip",
+        )
     decide = await run_pr_triage_decide(
         db_path=db_path,
-        config=config,
+        config=cfg,
         dry_run=dry_run,
         repo=repo,
         pr_number=pr_number,
+        limit=limit,
         worker_id=worker_id,
     )
     action = decide.action or "skip"
@@ -494,10 +578,26 @@ async def run_triage_with_router(
     if follow is None:
         return decide
 
+    if follow.status in {"waiting", "retry_wait", "failed", "cancelled", "timed_out"}:
+        decide.status = follow.status
+        decide.summary["run_status"] = follow.status
+        decide.summary["follow_up_incomplete"] = follow.status in {"waiting", "retry_wait"}
+    # Keep the follow-up visible to flow/tick callers.  In particular, a follow-up
+    # can be waiting or timed out even when the decide path itself completed.
     decide.follow_up = follow.to_dict()
-    decide.summary["follow_up_path"] = follow.path_id
+    decide.processes = list(decide.processes) + list(follow.processes)
+    decide.completed = list(decide.completed) + list(follow.completed)
+    decide.failed = list(decide.failed) + list(follow.failed)
     decide.summary["follow_up_status"] = follow.status
-    decide.summary["follow_up_failed"] = follow.summary.get("failed_steps")
-    if follow.failed:
-        decide.failed = list(decide.failed) + list(follow.failed)
+    decide.summary["failed_steps"] = list(dict.fromkeys(
+        [
+            *[str(step) for step in decide.summary.get("failed_steps", [])],
+            *[
+                str(process.get("step_id"))
+                for process in decide.processes
+                if process.get("status") in {"failed", "cancelled", "timed_out"}
+            ],
+        ]
+    ))
+    decide.summary["follow_up_path_id"] = follow.path_id
     return decide

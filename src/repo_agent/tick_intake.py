@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="repo-agent-tick-intake",
         description=(
-            "Fala-orchestrated intake tick: poll → claim → kanban. "
+            "Fala-orchestrated intake tick: poll → direction → comment → claim → kanban. "
             "Default is dry-run (no GitHub/Kanban mutations)."
         ),
     )
@@ -100,10 +100,10 @@ def main(argv: list[str] | None = None) -> int:
                 if k in out
             }
             print(f"  step={step} status={status} {json.dumps(brief, default=str)}")
-        if result.failed:
+        if result.failed or result.status in {"failed", "cancelled", "timed_out"}:
             print(f"FAILED_STEPS={len(result.failed)}", file=sys.stderr)
             return 1
-    return 1 if result.failed else 0
+    return 1 if result.failed or result.status in {"failed", "cancelled", "timed_out"} else 0
 
 
 if __name__ == "__main__":

@@ -4,12 +4,20 @@ set -euo pipefail
 # Controlled Hermes updater. Skips updates while repo-agent workers are active.
 
 export HOME="${HOME:-/Users/mini-m4-main}"
-export PATH="/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Keep a caller-provided PATH intact (launchd supplies the fallback when absent).
+export PATH="${PATH:-/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
 
 DRY_RUN="${HERMES_REPO_AGENT_UPDATE_DRY_RUN:-1}"
 LOG_FILE="${HERMES_REPO_AGENT_UPDATE_LOG:-/Users/mini-m4-main/.hermes/logs/repo-agent-hermes-update.log}"
 LOCK_DIR="${HERMES_REPO_AGENT_UPDATE_LOCK_DIR:-/tmp/hermes-repo-agent-update.lock}"
 WORKTREE_ROOT="${HERMES_WORKTREE_ROOT:-/Users/mini-m4-main/.hermes/worktrees/repo-fixer}"
+
+validate_dry_run() {
+  case "$DRY_RUN" in
+    0|1) ;;
+    *) echo "invalid DRY_RUN: expected 0 or 1" >&2; exit 2 ;;
+  esac
+}
 
 usage() {
   cat <<'USAGE'
@@ -31,7 +39,12 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-mkdir -p "$(dirname "$LOG_FILE")"
+validate_dry_run
+
+if ! mkdir -p "$(dirname "$LOG_FILE")"; then
+  printf 'unable to create log directory for %s\n' "$LOG_FILE" >&2
+  exit 1
+fi
 
 log() {
   printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" | tee -a "$LOG_FILE"
@@ -44,20 +57,49 @@ require_cmd() {
 require_cmd hermes
 require_cmd find
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+if mkdir "$LOCK_DIR" 2>/dev/null; then
+  :
+elif [[ -d "$LOCK_DIR" ]]; then
   log "LOCK_HELD path=$LOCK_DIR"
   exit 0
+else
+  log "LOCK_ACQUIRE_FAILED path=$LOCK_DIR"
+  exit 1
 fi
 cleanup_lock() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
 trap cleanup_lock EXIT
 
-active_locks="$(find "$WORKTREE_ROOT" -maxdepth 5 -type f -path '*/.agent.lock/pid' 2>/dev/null || true)"
+lock_scan_file="$(mktemp "${TMPDIR:-/tmp}/repo-agent-lock-scan.XXXXXX")" || {
+  log "LOCK_DISCOVERY_FAILED reason=tempfile"
+  exit 1
+}
+lock_scan_error="${lock_scan_file}.err"
+cleanup_scan() { rm -f "$lock_scan_file" "$lock_scan_error"; }
+trap 'cleanup_scan; cleanup_lock' EXIT
+if ! find "$WORKTREE_ROOT" -maxdepth 5 -type f -path '*/.agent.lock/pid' >"$lock_scan_file" 2>"$lock_scan_error"; then
+  details="$(tr '\n' ' ' <"$lock_scan_error" | sed 's/  */ /g')"
+  log "LOCK_DISCOVERY_FAILED root=$WORKTREE_ROOT details=$(printf '%q' "$details")"
+  exit 1
+fi
+active_locks="$(cat "$lock_scan_file")"
 if [[ -n "$active_locks" ]]; then
   log "SKIP reason=active-worker-locks"
   exit 0
 fi
 
-check_output="$(hermes update --check 2>&1 || true)"
+check_output=''
+check_status=0
+if check_output="$(hermes update --check 2>&1)"; then
+  :
+else
+  check_status=$?
+  log "CHECK_FAILED status=$check_status details=$(printf '%q' "$(printf '%s' "$check_output" | tr '\n' ' ' | sed 's/  */ /g')")"
+  exit "$check_status"
+fi
+if grep -Eiq '(error|failed|unauthori[sz]ed|authentication|network|timed out|timeout|connection|forbidden|rate[ -]?limit)' <<<"$check_output"; then
+  log "CHECK_FAILED status=0 details=$(printf '%q' "$(printf '%s' "$check_output" | tr '\n' ' ' | sed 's/  */ /g')")"
+  exit 1
+fi
 if grep -Eiq 'up.to.date|latest|no update|already' <<<"$check_output"; then
   log "NO_UPDATE details=$(printf '%q' "$(printf '%s' "$check_output" | tr '\n' ' ' | sed 's/  */ /g')")"
   exit 0

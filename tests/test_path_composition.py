@@ -114,8 +114,16 @@ class PathSpecTests(unittest.TestCase):
             ],
         )
 
-    def test_intake_still_three(self) -> None:
-        self.assertEqual(path_ids(INTAKE_PATH), ["poll", "claim", "kanban"])
+    def test_intake_direction_claim_kanban(self) -> None:
+        self.assertEqual(
+            path_ids(INTAKE_PATH),
+            ["poll", "decide_issue_action", "comment_issue", "claim", "kanban"],
+        )
+        graph = path_conduction_graph(INTAKE_PATH)
+        self.assertEqual(graph["decide_issue_action"], ["poll"])
+        self.assertIn("decide_issue_action", graph["comment_issue"])
+        self.assertIn("decide_issue_action", graph["claim"])
+        self.assertIn("claim", graph["kanban"])
 
     def test_paths_are_acyclic_and_refs_known(self) -> None:
         # CorrelationPathSpec validates on construction; re-assert unique ids

@@ -12,16 +12,19 @@ def result(
     status: str,
     ok: bool = True,
     mutated: bool = False,
-    dry_run: bool = False,
+    dry_run: bool | None = None,
     reason: str | None = None,
     **extra: Any,
 ) -> EffectorRunResult:
+    # Omit dry_run unless explicit so runtime can inject request dry_run metadata.
+    # Explicit False still fails closed against expected True (contract tests).
     out: dict[str, Any] = {
         "status": status,
         "ok": ok,
         "mutated": mutated,
-        "dry_run": dry_run,
     }
+    if dry_run is not None:
+        out["dry_run"] = dry_run
     if reason is not None:
         out["reason"] = reason
     out.update(extra)
@@ -40,9 +43,23 @@ def noop(reason: str, **extra: Any) -> EffectorRunResult:
     return result(status="noop", ok=True, mutated=False, reason=reason, **extra)
 
 
-def fail(reason: str, **extra: Any) -> EffectorRunResult:
-    mutated = bool(extra.pop("mutated", False))
-    return result(status="failed", ok=False, mutated=mutated, reason=reason, **extra)
+def fail(
+    reason: str,
+    *,
+    failure_class: str = "terminal",
+    retry_safe: bool = False,
+    mutated: bool = False,
+    **extra: Any,
+) -> EffectorRunResult:
+    return result(
+        status="failed",
+        ok=False,
+        mutated=mutated,
+        reason=reason,
+        failure_class=failure_class,
+        retry_safe=retry_safe,
+        **extra,
+    )
 
 
 def cfg_of(request: Any) -> dict[str, Any]:

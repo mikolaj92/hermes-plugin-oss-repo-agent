@@ -7,11 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fala.driver import run_correlation_path
+from repo_agent.flows.runtime import FailurePolicy, run_repo_agent_path
 from fala.models import CorrelationPathSpec
 from fala.runtime_backend import Run, RuntimeBackendService
 
-from repo_agent.config import AgentConfig, load_config
+from repo_agent.config import AgentConfig, ConfigError, load_config
 from repo_agent.flows.common import PathRunResult, effector, process_summary
 
 ISSUE_TO_PR_PATH = CorrelationPathSpec(
@@ -102,23 +102,30 @@ async def run_issue_to_pr_flow(
     worker_id: str = "repo-agent:tick-dispatch",
     max_ticks: int = 40,
 ) -> PathRunResult:
-    """Run issue_to_pr on Fala 0.2.x via ``run_correlation_path``."""
+    """Run issue_to_pr with outcome-aware Fala lifecycle."""
     cfg = config or load_config()
+    if dry_run is False and not cfg.live:
+        raise ConfigError("live execution requires config mode='live'")
     is_dry = True if dry_run is None else dry_run
     if dry_run is None and cfg.live:
         is_dry = False
-
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rid = run_id or f"issue-to-pr-{stamp}-{uuid.uuid4().hex[:8]}"
+    if not cfg.repos and not board and not task_id:
+        return PathRunResult(
+            run_id=rid,
+            path_id=ISSUE_TO_PR_PATH.id,
+            dry_run=is_dry,
+            ticks=0,
+            stopped_reason="no_repositories",
+            summary={"run_status": "completed", "repos": [], "board": "", "task_id": None, "failed_steps": []},
+            status="completed",
+        )
 
     # No explicit task means the path will poll Kanban; keep its no-op result.
     resolved_board = board or (cfg.repos[0].board if cfg.repos else "")
     resolved_clone = clone_path or (cfg.repos[0].clone_path if cfg.repos else "")
-    wt_root = worktree_root or str(
-        Path(cfg.raw.get("worktree_root") or "")
-        if isinstance(cfg.raw, dict)
-        else ""
-    )
+    wt_root = worktree_root or cfg.paths.worktree_root
     if not wt_root:
         import os
 
@@ -126,16 +133,8 @@ async def run_issue_to_pr_flow(
             "HERMES_WORKTREE_ROOT",
             str(Path.home() / ".hermes" / "worktrees" / "repo-fixer"),
         )
-    receipt = receipt_path or str(
-        Path.home()
-        / ".hermes"
-        / "oss-repo-agent"
-        / "receipts"
-        / f"dispatch-{rid}.json"
-    )
+    receipt = receipt_path or str(Path(cfg.paths.dispatch_receipts) / f"dispatch-{rid}.json")
 
-    raw = cfg.raw if isinstance(cfg.raw, dict) else {}
-    automation = raw.get("automation") if isinstance(raw.get("automation"), dict) else {}
     step_config: dict[str, Any] = {
         "board": resolved_board,
         "clone_path": resolved_clone,
@@ -144,15 +143,21 @@ async def run_issue_to_pr_flow(
         "branch_prefix": cfg.branch_prefix,
         "gh_cli": cfg.gh_cli,
         "assignee": cfg.assignee,
-        "fixer_assignee": str(automation.get("fixer_assignee") or "repo-agent-fixer"),
-        "model": "omniroute/omp/default",
+        "fixer_assignee": cfg.automation.fixer_assignee,
+        "model": cfg.executor.model,
+        "thinking": cfg.executor.thinking,
+        "command": cfg.executor.command,
+        "timeout_seconds": cfg.executor.timeout_seconds,
+        "executor_enabled": cfg.executor.enabled,
         "dry_run": is_dry,
         "receipt_path": receipt,
+        "pr_opened_label": cfg.labels.pr_opened,
+        "generated_label": cfg.labels.generated,
     }
 
     dry_input = {"dry_run": is_dry}
     service = RuntimeBackendService.sqlite(db_path)
-    result = await run_correlation_path(
+    result = await run_repo_agent_path(
         service,
         run=Run(
             id=rid,
@@ -204,6 +209,25 @@ async def run_issue_to_pr_flow(
             },
         },
         effector_configs={eid: step_config for eid in path_effector_ids()},
+        failure_policy_by_effector={
+            "load_kanban_task": FailurePolicy.retryable_read,
+            "parse_issue_ref": FailurePolicy.terminal,
+            "prepare_worktree": FailurePolicy.terminal,
+            "run_omp": FailurePolicy.terminal,
+            "verify_branch": FailurePolicy.retryable_read,
+            "push_branch": FailurePolicy.terminal,
+            "open_pull_request": FailurePolicy.terminal,
+            "apply_pr_labels": FailurePolicy.terminal,
+            "write_dispatch_receipt": FailurePolicy.terminal,
+            "complete_kanban_task": FailurePolicy.terminal,
+        },
+        max_attempts_by_effector={
+            "load_kanban_task": 3, "parse_issue_ref": 1, "prepare_worktree": 1,
+            "run_omp": 1, "verify_branch": 3, "push_branch": 1,
+            "open_pull_request": 1, "apply_pr_labels": 1,
+            "write_dispatch_receipt": 1, "complete_kanban_task": 1,
+        },
+        retry_backoff_seconds=cfg.executor.retry_backoff_seconds,
         max_ticks=max_ticks,
         lease_seconds=600.0,
         actor=worker_id,
@@ -227,7 +251,7 @@ async def run_issue_to_pr_flow(
         "pr_status": (by_step.get("open_pull_request") or {}).get("output", {}).get(
             "status"
         ),
-        "failed_steps": [s["step_id"] for s in summaries if s.get("status") == "failed"],
+        "failed_steps": [s["step_id"] for s in summaries if s.get("status") in {"failed", "cancelled", "timed_out"}],
         "run_status": status,
         "repos": list(_repo_map(cfg)),
     }

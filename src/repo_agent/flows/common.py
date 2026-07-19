@@ -27,11 +27,16 @@ def effector(
 def process_summary(process: Process) -> dict[str, Any]:
     marker = (process.metadata or {}).get("correlation_path") or {}
     status = process.status.value if hasattr(process.status, "value") else str(process.status)
+    available_at = getattr(process, "available_at", None)
+    if hasattr(available_at, "isoformat"):
+        available_at = available_at.isoformat()
     return {
         "id": process.id,
         "step_id": marker.get("effector_id"),
         "status": status,
         "attempt": process.attempt,
+        "max_attempts": process.max_attempts,
+        "available_at": available_at,
         "output": process.output or {},
         "error": process.error or {},
     }

@@ -88,6 +88,6 @@ def print_path_result(result: PathRunResult, *, as_json: bool) -> int:
                 f"follow_up path={fu.get('path_id')} status={fu.get('status')} "
                 f"ticks={fu.get('ticks')}"
             )
-        if result.failed:
+        if result.failed or result.status in {"failed", "cancelled", "timed_out"}:
             print(f"FAILED_STEPS={len(result.failed)}", file=sys.stderr)
-    return 1 if result.failed else 0
+    return 1 if result.failed or result.status in {"failed", "cancelled", "timed_out"} else 0
