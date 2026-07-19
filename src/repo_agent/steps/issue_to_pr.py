@@ -164,14 +164,13 @@ def parse_issue_ref_from_task(request: EffectorRunRequest) -> EffectorRunResult:
             issue = issue or pr_number
 
     if not repo or not (issue or pr_number):
+        return fail("unparseable_issue_ref", title=title)
 
     # Extract branch from body if present (for review tasks)
     if not branch:
         bm = re.search(r'^Branch:\s*(\S+)\s*$', body, re.M)
         if bm:
             branch = bm.group(1)
-
-        return fail("unparseable_issue_ref", title=title)
 
     # Build branch name. For review tasks prefer the existing PR head branch if present in task or body
     if not branch and task.get("branch_name"):
