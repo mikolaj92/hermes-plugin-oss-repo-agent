@@ -115,6 +115,7 @@ def load_kanban_task(request: EffectorRunRequest) -> EffectorRunResult:
 def parse_issue_ref_from_task(request: EffectorRunRequest) -> EffectorRunResult:
     """Pure: extract owner/repo#N and preferred branch from task title/body.
     Supports both regular fix-pr tasks and fix-pr-review tasks for PRs.
+    Prefers explicit body markers (Repository:, PR:, Branch:) when present.
     """
     data = input_of(request)
     upstream = upstream_noop(request, "load_kanban_task")
@@ -129,52 +130,51 @@ def parse_issue_ref_from_task(request: EffectorRunRequest) -> EffectorRunResult:
     repo = None
     issue = None
     pr_number = None
+    branch = None
 
-    # Try title for repo#N or repo PR#N
-    m = re.search(r'\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)\b', title)
-    if m:
-        repo = m.group(1)
-        num = int(m.group(2))
-        if 'fix-pr-review' in title.lower() or 'pr#' in title.lower() or 'pr ' in title.lower():
-            pr_number = num
-            issue = num
-        else:
-            issue = num
-    else:
-        # repo PR#N form
-        m2 = re.search(r'\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+PR#([0-9]+)\b', title, re.I)
-        if m2:
-            repo = m2.group(1)
-            pr_number = int(m2.group(2))
-            issue = pr_number
+    # 1. Prefer body markers (used by review tasks) — single backslash raw strings
+    br = re.search(r'^Repository:\s*(\S+)\s*$', body, re.M)
+    if br:
+        repo = br.group(1)
 
-    # Fallback to body markers
+    bp = re.search(r'^PR:\s*#?([0-9]+)\s*$', body, re.M)
+    if bp:
+        pr_number = int(bp.group(1))
+        issue = issue or pr_number
+
+    bi = re.search(r'^Issue:\s*#?([0-9]+)\s*$', body, re.M)
+    if bi:
+        issue = int(bi.group(1)) or issue
+
+    bb = re.search(r'^Branch:\s*(\S+)\s*$', body, re.M)
+    if bb:
+        branch = bb.group(1)
+
+    # 2. Fallback to title patterns if body didn't give repo
     if not repo:
-        br = re.search(r'^Repository:\s*(\S+)\s*$', body, re.M)
-        if br:
-            repo = br.group(1)
-
-    if not issue and not pr_number:
-        bi = re.search(r'^Issue:\s*#?([0-9]+)\s*$', body, re.M)
-        bp = re.search(r'^PR:\s*#?([0-9]+)\s*$', body, re.M)
-        if bi:
-            issue = int(bi.group(1))
-        if bp:
-            pr_number = int(bp.group(1))
-            issue = issue or pr_number
+        m = re.search(r'\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)\b', title)
+        if m:
+            repo = m.group(1)
+            num = int(m.group(2))
+            if 'fix-pr-review' in title.lower() or 'pr#' in title.lower() or 'pr ' in title.lower():
+                pr_number = num
+                issue = issue or num
+            else:
+                issue = issue or num
+        else:
+            m2 = re.search(r'\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+PR#([0-9]+)\b', title, re.I)
+            if m2:
+                repo = m2.group(1)
+                pr_number = int(m2.group(2))
+                issue = issue or pr_number
 
     if not repo or not (issue or pr_number):
         return fail("unparseable_issue_ref", title=title)
 
-    # Extract branch from body if present (for review tasks)
+    # 3. Branch: prefer explicit, then task field, then synthetic
     if not branch:
-        bm = re.search(r'^Branch:\s*(\S+)\s*$', body, re.M)
-        if bm:
-            branch = bm.group(1)
-
-    # Build branch name. For review tasks prefer the existing PR head branch if present in task or body
-    if not branch and task.get("branch_name"):
-        branch = task.get("branch_name")
+        if task.get("branch_name"):
+            branch = task.get("branch_name")
     if not branch:
         slug = re.sub(r'[^a-zA-Z0-9._-]+', '-', title.lower())[:40].strip('-')
         branch_prefix = str(cfg_of(request).get("branch_prefix") or "ai/fix")
