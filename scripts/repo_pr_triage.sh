@@ -2,17 +2,17 @@
 set -euo pipefail
 
 # Managed by the Hermes repo-agent harness.
-# Purpose: dry-run-first PR triage with disabled-by-default merge gates.
+# Purpose: live PR triage with explicit dry-run and fail-closed policy overrides.
 
 export HOME="${HOME:-/Users/mini-m4-main}"
 export PATH="/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-DRY_RUN="${HERMES_PR_TRIAGE_DRY_RUN:-1}"
+DRY_RUN="${HERMES_PR_TRIAGE_DRY_RUN:-0}"
 COMMENT_ENABLED="${HERMES_PR_TRIAGE_COMMENT:-0}"
-AUTOMERGE="${HERMES_PR_AUTOMERGE:-0}"
-REQUIRE_APPROVED="${HERMES_PR_REQUIRE_APPROVED:-1}"
-ALLOW_NO_CHECKS="${HERMES_PR_ALLOW_NO_CHECKS:-0}"
-REQUIRE_TEST_EVIDENCE="${HERMES_PR_REQUIRE_TEST_EVIDENCE:-1}"
+AUTOMERGE="${HERMES_PR_AUTOMERGE:-1}"
+REQUIRE_APPROVED="${HERMES_PR_REQUIRE_APPROVED:-0}"
+ALLOW_NO_CHECKS="${HERMES_PR_ALLOW_NO_CHECKS:-1}"
+REQUIRE_TEST_EVIDENCE="${HERMES_PR_REQUIRE_TEST_EVIDENCE:-0}"
 PR_LIST_LIMIT="${HERMES_PR_TRIAGE_LIST_LIMIT:-100}"
 LOG_FILE="${HERMES_PR_TRIAGE_LOG:-/Users/mini-m4-main/.hermes/logs/repo-pr-triage.log}"
 LOCK_DIR="${HERMES_PR_TRIAGE_LOCK_DIR:-/tmp/hermes-repo-pr-triage.lock}"
@@ -28,9 +28,10 @@ usage() {
   cat <<'USAGE'
 Usage: repo_pr_triage.sh [--dry-run|--live] [--comment]
 
-Dry-run is the default and never comments or merges. Live comments require
---comment or HERMES_PR_TRIAGE_COMMENT=1. Merge requires live mode plus
-HERMES_PR_AUTOMERGE=1 and all strict gates to pass.
+Live mode is the default; --dry-run is an explicit no-op override. Live
+comments require --comment or HERMES_PR_TRIAGE_COMMENT=1. Automerge is enabled
+by default, with checks, test evidence, and human approval not mandatory;
+corresponding HERMES_PR_* values remain explicit 0/1 overrides.
 USAGE
 }
 
@@ -58,11 +59,24 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# Live automation must retain the approval gate regardless of environment
-# overrides; dry-run remains useful for policy inspection.
-if [[ "$DRY_RUN" == 0 ]]; then
-  REQUIRE_APPROVED=1
-fi
+validate_binary_policy() {
+  local name="$1" value="$2"
+  case "$value" in
+    0|1) ;;
+    *)
+      printf '%s must be 0 or 1 (got %q)\n' "$name" "$value" >&2
+      exit 2
+      ;;
+  esac
+}
+
+validate_binary_policy HERMES_PR_TRIAGE_DRY_RUN "$DRY_RUN"
+validate_binary_policy HERMES_PR_TRIAGE_COMMENT "$COMMENT_ENABLED"
+validate_binary_policy HERMES_PR_AUTOMERGE "$AUTOMERGE"
+validate_binary_policy HERMES_PR_REQUIRE_APPROVED "$REQUIRE_APPROVED"
+validate_binary_policy HERMES_PR_ALLOW_NO_CHECKS "$ALLOW_NO_CHECKS"
+validate_binary_policy HERMES_PR_REQUIRE_TEST_EVIDENCE "$REQUIRE_TEST_EVIDENCE"
+
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
@@ -185,19 +199,32 @@ issue_from_branch() {
 }
 
 write_merge_receipt() {
-  local repo="$1" pr="$2" issue="$3" base_sha="$4" head_sha="$5" merge_sha="$6" merged_at="$7" base_ref="$8" path tmp
+  local repo="$1" pr="$2" issue="$3" base_sha="$4" head_sha="$5" merge_sha="$6" merged_at="$7" base_ref="$8" origin_main_sha="$9" branch="${10}" path tmp
   mkdir -p "$MERGE_RECEIPT_DIR" || return 1
   path="$MERGE_RECEIPT_DIR/$(printf '%s' "$repo-$pr" | tr '/:' '__').json"
   tmp="${path}.tmp.$$"
-  RECEIPT_TMP="$tmp" python3 - "$repo" "$pr" "$issue" "$base_sha" "$head_sha" "$merge_sha" "$merged_at" "$base_ref" <<'PY'
+  RECEIPT_TMP="$tmp" python3 - "$repo" "$pr" "$issue" "$base_sha" "$head_sha" "$merge_sha" "$merged_at" "$base_ref" "$origin_main_sha" "$branch" <<'PY'
 import json, os, sys
-payload = {"repo": sys.argv[1], "pr": int(sys.argv[2]), "issue": int(sys.argv[3]), "baseSha": sys.argv[4], "headSha": sys.argv[5], "mergeSha": sys.argv[6], "mergedAt": sys.argv[7], "baseRef": sys.argv[8]}
+payload = {"repo": sys.argv[1], "pr": int(sys.argv[2]), "issue": int(sys.argv[3]), "baseSha": sys.argv[4], "headSha": sys.argv[5], "mergeSha": sys.argv[6], "mergedAt": sys.argv[7], "baseRef": sys.argv[8], "originMainSha": sys.argv[9], "branch": sys.argv[10], "phase": "MERGE_VERIFIED"}
 with open(os.environ["RECEIPT_TMP"], "w", encoding="utf-8") as handle:
     json.dump(payload, handle, sort_keys=True)
     handle.write("\n")
 PY
   mv -f "$tmp" "$path" || return 1
   MERGE_RECEIPT_PATH="$path"
+}
+
+release_active_claim() {
+  local repo="$1" issue="$2" payload claim_repo claim_issue
+  local active_dir="${HERMES_REPO_AGENT_ACTIVE_ISSUE_DIR:-${HOME}/.hermes/state/repo-agent-active}"
+  local claim_path="$active_dir/claim.json"
+  [[ -f "$claim_path" ]] || return 0
+  payload="$(cat "$claim_path" 2>/dev/null || true)"
+  claim_repo="$(CLAIM_JSON="$payload" python3 -c 'import json,os; print(json.loads(os.environ["CLAIM_JSON"]).get("repo", ""))' 2>/dev/null || true)"
+  claim_issue="$(CLAIM_JSON="$payload" python3 -c 'import json,os; print(json.loads(os.environ["CLAIM_JSON"]).get("issue", ""))' 2>/dev/null || true)"
+  [[ "$claim_repo" == "$repo" && "$claim_issue" == "$issue" ]] || return 0
+  rm -f "$claim_path"
+  rmdir "$active_dir" 2>/dev/null || true
 }
 
 close_linked_issue() {
@@ -211,12 +238,29 @@ close_linked_issue() {
 }
 
 merge_and_finalize() {
-  local repo="$1" number="$2" clone_path="$3" head="$4"
-  local readback readback_rc=0 validated base_sha head_sha merge_sha merged_at base_ref issue
-  gh pr merge "$number" --repo "$repo" --merge >/dev/null || { log "MERGE_FAILED repo=$repo pr=$number"; return 10; }
+  local repo="$1" number="$2" clone_path="$3" branch="$4" head_oid="$5"
+  local merge_rc=0 ambiguous_merge=0 readback readback_rc=0 validated base_sha head_sha merge_sha merged_at base_ref issue origin_main_sha
+  gh pr merge "$number" --repo "$repo" --merge --match-head-commit "$head_oid" >/dev/null || merge_rc=$?
+  if [[ "$merge_rc" -ne 0 ]]; then
+    readback="$(gh pr view "$number" --repo "$repo" --json state 2>/dev/null || true)"
+    if MERGE_READBACK="$readback" python3 - <<'PY'
+import json, os, sys
+try:
+    sys.exit(0 if json.loads(os.environ["MERGE_READBACK"]).get("state") == "MERGED" else 1)
+except Exception:
+    sys.exit(1)
+PY
+    then
+      ambiguous_merge=1
+      log "MERGE_RECONCILED repo=$repo pr=$number rc=$merge_rc"
+    else
+      log "MERGE_FAILED repo=$repo pr=$number"
+      return "$merge_rc"
+    fi
+  fi
   readback="$(gh pr view "$number" --repo "$repo" --json state,mergedAt,mergeCommit,baseRefName,baseRefOid,headRefName,headRefOid,body,closingIssuesReferences 2>/dev/null)" || readback_rc=$?
   [[ "$readback_rc" -eq 0 ]] || { log "MERGE_READBACK_FAILED repo=$repo pr=$number reason=api"; return 11; }
-  if ! validated="$(MERGE_READBACK="$readback" MERGE_HEAD="$head" python3 - <<'PY'
+  if ! validated="$(MERGE_READBACK="$readback" MERGE_HEAD="$branch" MERGE_EXPECTED_HEAD="$head_oid" python3 - <<'PY'
 import json, os, re, sys
 try:
     row = json.loads(os.environ["MERGE_READBACK"])
@@ -225,6 +269,8 @@ try:
         raise ValueError("unverified-merge")
     if row.get("baseRefName") != "main" or not row.get("baseRefOid") or not row.get("headRefOid"):
         raise ValueError("invalid-base-or-head")
+    if row.get("headRefOid") != os.environ.get("MERGE_EXPECTED_HEAD"):
+        raise ValueError("head-mismatch")
     refs = row.get("closingIssuesReferences") or []
     issue = str(refs[0].get("number")) if refs and refs[0].get("number") else ""
     body = str(row.get("body") or "")
@@ -254,9 +300,47 @@ PY
   GIT_MASTER=1 git -C "$clone_path" fetch --prune origin main >/dev/null 2>&1 || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=fetch"; return 13; }
   GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet refs/remotes/origin/main || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=missing-origin-main"; return 13; }
   GIT_MASTER=1 git -C "$clone_path" merge-base --is-ancestor "$merge_sha" refs/remotes/origin/main || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=not-ancestor sha=$merge_sha"; return 13; }
-  write_merge_receipt "$repo" "$number" "$issue" "$base_sha" "$head_sha" "$merge_sha" "$merged_at" "$base_ref" || { log "MERGE_RECEIPT_FAILED repo=$repo pr=$number"; return 14; }
+  origin_main_sha="$(GIT_MASTER=1 git -C "$clone_path" rev-parse refs/remotes/origin/main 2>/dev/null)" || { log "MERGE_RECEIPT_FAILED repo=$repo pr=$number reason=origin-main-sha"; return 14; }
+  [[ -n "$origin_main_sha" ]] || { log "MERGE_RECEIPT_FAILED repo=$repo pr=$number reason=origin-main-sha"; return 14; }
+  write_merge_receipt "$repo" "$number" "$issue" "$base_sha" "$head_sha" "$merge_sha" "$merged_at" "$base_ref" "$origin_main_sha" "$branch" || { log "MERGE_RECEIPT_FAILED repo=$repo pr=$number"; return 14; }
+  if [[ "$ambiguous_merge" -eq 1 ]]; then
+    log "MERGE_RECEIPT_WRITTEN repo=$repo pr=$number phase=MERGE_VERIFIED receipt=$MERGE_RECEIPT_PATH"
+    merge_rc=0
+  fi
+  if [[ "$ambiguous_merge" -eq 1 ]]; then
+    # The merge is durably verified and receipt-backed, but the command outcome
+    # was ambiguous. Leave closure and claim release to receipt recovery.
+    log "MERGE_VERIFIED_PENDING_RECOVERY repo=$repo pr=$number receipt=$MERGE_RECEIPT_PATH"
+    return 16
+  fi
   close_linked_issue "$repo" "$issue" || { log "ISSUE_CLOSE_FAILED repo=$repo pr=$number issue=$issue receipt=$MERGE_RECEIPT_PATH"; return 15; }
+  if [[ "$ambiguous_merge" -eq 0 && "${HERMES_PR_TRIAGE_TEST_FAULT:-}" == "after-merge" ]]; then
+    log "TEST_FAULT repo=$repo pr=$number phase=after-merge"
+    return 91
+  fi
+  RECEIPT_PATH="$MERGE_RECEIPT_PATH" python3 - <<'PY'
+import json, os, tempfile
+path = os.environ["RECEIPT_PATH"]
+with open(path, encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["phase"] = "ISSUE_CLOSED_CONFIRMED"
+directory = os.path.dirname(path)
+fd, tmp = tempfile.mkstemp(prefix=".receipt.", dir=directory, text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+    os.replace(tmp, path)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+  release_clean_worktree_for_branch "$clone_path" "$branch"
   log "MERGE_VERIFIED repo=$repo pr=$number merge_sha=$merge_sha receipt=$MERGE_RECEIPT_PATH issue=$issue"
+  release_active_claim "$repo" "$issue"
 }
 
 pr_has_test_evidence() {
@@ -265,24 +349,31 @@ pr_has_test_evidence() {
   grep -Eiq 'test evidence|tests?|pytest|unittest|xcodebuild|swift test|uv run|npm test|cargo test|go test' <<<"$body"
 }
 
-
 release_clean_worktree_for_branch() {
   local clone_path="$1" branch="$2"
-  local path="" wt_branch="" line
+  local path="" path_real="" root_real="" clone_worktrees_real="" wt_branch="" line
   [[ -d "$clone_path/.git" ]] || return 0
+  root_real="$(cd "$WORKTREE_ROOT" 2>/dev/null && pwd -P || true)"
+  clone_worktrees_real="$(cd "$clone_path/.worktrees" 2>/dev/null && pwd -P || true)"
 
   while IFS= read -r line; do
-
     case "$line" in
-      worktree\ *)
-        path="${line#worktree }"
-        wt_branch=""
-        ;;
+      worktree\ *) path="${line#worktree }"; wt_branch="" ;;
       branch\ refs/heads/*)
         wt_branch="${line#branch refs/heads/}"
-        if [[ "$wt_branch" == "$branch" && ( "$path" == "$clone_path/.worktrees/"* || "$path" == "$WORKTREE_ROOT/"* ) ]]; then
+        path_real="$(cd "$path" 2>/dev/null && pwd -P || true)"
+        if [[ "$wt_branch" == "$branch" && -n "$path_real" &&
+          ( ( -n "$clone_worktrees_real" && "$path_real" == "$clone_worktrees_real/"* ) ||
+            ( -n "$root_real" && "$path_real" == "$root_real/"* ) ) ]]; then
           if [[ -z "$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" ]]; then
-            GIT_MASTER=1 git -C "$clone_path" worktree remove "$path" >/dev/null 2>&1 || true
+            if GIT_MASTER=1 git -C "$clone_path" worktree remove "$path" >/dev/null 2>&1 ||
+              GIT_MASTER=1 git -C "$clone_path" worktree remove --force "$path" >/dev/null 2>&1; then
+              log "WORKTREE_RELEASED branch=$branch path=$path"
+            else
+              log "WORKTREE_RELEASE_FAILED branch=$branch path=$path"
+            fi
+          else
+            log "WORKTREE_RELEASE_SKIPPED branch=$branch path=$path reason=dirty"
           fi
         fi
         ;;
@@ -291,7 +382,7 @@ release_clean_worktree_for_branch() {
 }
 
 retry_receipt_closures() {
-  local repo="$1" path payload issue receipt_repo
+  local repo="$1" path payload issue receipt_repo clone_path branch pr
   [[ -d "$MERGE_RECEIPT_DIR" ]] || return 0
   shopt -s nullglob
   for path in "$MERGE_RECEIPT_DIR"/*.json; do
@@ -300,8 +391,36 @@ retry_receipt_closures() {
     [[ "$receipt_repo" == "$repo" ]] || continue
     issue="$(RECEIPT_JSON="$payload" python3 -c 'import json,os; print(json.loads(os.environ["RECEIPT_JSON"]).get("issue", ""))' 2>/dev/null || true)"
     [[ "$issue" =~ ^[0-9]+$ ]] || continue
+    clone_path="$(clone_for_repo "$repo")"
+    branch="$(RECEIPT_JSON="$payload" python3 -c 'import json,os; print(json.loads(os.environ["RECEIPT_JSON"]).get("branch", ""))' 2>/dev/null || true)"
+    pr="$(RECEIPT_JSON="$payload" python3 -c 'import json,os; print(json.loads(os.environ["RECEIPT_JSON"]).get("pr", ""))' 2>/dev/null || true)"
     if close_linked_issue "$repo" "$issue"; then
+      RECEIPT_PATH="$path" python3 - <<'PY'
+import json, os, tempfile
+path = os.environ["RECEIPT_PATH"]
+with open(path, encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["phase"] = "ISSUE_CLOSED_CONFIRMED"
+directory = os.path.dirname(path)
+fd, tmp = tempfile.mkstemp(prefix=".receipt.", dir=directory, text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+    os.replace(tmp, path)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+      if [[ -z "$branch" && "$pr" =~ ^[0-9]+$ ]]; then
+        branch="$(gh pr view "$pr" --repo "$repo" --json headRefName --jq .headRefName 2>/dev/null || true)"
+      fi
+      [[ -n "$branch" ]] && release_clean_worktree_for_branch "$clone_path" "$branch" || true
       log "ISSUE_CLOSED repo=$repo issue=$issue action=retry receipt=$path"
+      release_active_claim "$repo" "$issue"
     else
       log "ISSUE_CLOSE_RETRY_FAILED repo=$repo issue=$issue receipt=$path"
     fi
@@ -409,11 +528,8 @@ Policy:
 
 claim_pr_once() {
   local repo="$1" number="$2"
-  local assignees
   [[ -n "$CLAIM_ASSIGNEE" ]] || return 0
   gh pr edit "$number" --repo "$repo" --add-assignee "$CLAIM_ASSIGNEE" >/dev/null 2>&1
-  assignees="$(gh pr view "$number" --repo "$repo" --json assignees --jq '[.assignees[].login] | join(",")' 2>/dev/null || true)"
-  [[ -z "$assignees" || "$assignees" == "$CLAIM_ASSIGNEE" ]]
 }
 
 comment_pr_once() {
@@ -547,7 +663,7 @@ for entry in "${REPOS[@]}"; do
     log "DECISION repo=$repo pr=$number decision=$decision reason=$reason head=$head base=$base merge_state=${merge_state:-none} labels=$(printf '%q' "$labels")"
 
     if [[ "$DRY_RUN" == 0 && "$decision" == "merge" ]]; then
-      if merge_and_finalize "$repo" "$number" "$clone_path" "$head"; then
+      if merge_and_finalize "$repo" "$number" "$clone_path" "$head" "$head_oid"; then
         merged=$((merged + 1))
       else
         merge_rc=$?

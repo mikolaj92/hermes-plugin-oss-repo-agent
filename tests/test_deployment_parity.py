@@ -25,25 +25,20 @@ class DeploymentParityTests(unittest.TestCase):
             source_file = ROOT / "scripts" / name
             shutil.copy2(source_file, source / name)
             shutil.copy2(source_file, active / name)
-        # Keep the production templates intact while making their active path
-        # explicit for this isolated deployment.
-        for source_template_root, destination_name in (
-            (ROOT / "templates" / "launchd", "launchd"),
-            (ROOT / "launchd", "legacy"),
-        ):
-            destination = templates / destination_name
-            destination.mkdir()
-            for template in source_template_root.glob("*.plist.template"):
-                text = template.read_text(encoding="utf-8").replace(
-                    "/" + "Users/mini-m4-main/.hermes/scripts", str(active)
-                )
-                destination.joinpath(template.name).write_text(text, encoding="utf-8")
+        # Keep the canonical production templates intact while making their active path explicit for this isolated deployment.
+        destination = templates / "launchd"
+        destination.mkdir()
+        for template in (ROOT / "templates" / "launchd").glob("*.plist.template"):
+            text = template.read_text(encoding="utf-8").replace(
+                "/" + "Users/mini-m4-main/.hermes/scripts", str(active)
+            )
+            destination.joinpath(template.name).write_text(text, encoding="utf-8")
         return holder, source, active, templates
 
     def test_source_and_active_scripts_and_launchd_arguments_match(self):
         holder, source, active, templates = self.make_deployment()
         self.addCleanup(holder.cleanup)
-        result = validate(source, active, [templates / "launchd", templates / "legacy"])
+        result = validate(source, active, [templates / "launchd"])
         self.assertTrue(result["ok"])
         self.assertEqual(set(result["scripts"]), set(DEPLOYED_SCRIPTS))
 
@@ -53,7 +48,7 @@ class DeploymentParityTests(unittest.TestCase):
         drifted = active / "repo_agent_smoke.sh"
         drifted.write_text(drifted.read_text(encoding="utf-8") + "\n# drift\n", encoding="utf-8")
         with self.assertRaises(DeploymentParityError) as raised:
-            validate(source, active, [templates / "launchd", templates / "legacy"])
+            validate(source, active, [templates / "launchd"])
         self.assertTrue(any("hash mismatch" in error for error in raised.exception.result["errors"]))
 
     def test_launchd_argument_drift_fails_closed(self):
@@ -65,8 +60,39 @@ class DeploymentParityTests(unittest.TestCase):
         )
         template.write_text(text, encoding="utf-8")
         with self.assertRaises(DeploymentParityError) as raised:
-            validate(source, active, [templates / "launchd", templates / "legacy"])
+            validate(source, active, [templates / "launchd"])
         self.assertTrue(any("entrypoint mismatch" in error for error in raised.exception.result["errors"]))
+    def test_fala_template_requires_absolute_uv_and_canonical_arguments(self):
+        holder, source, active, templates = self.make_deployment()
+        self.addCleanup(holder.cleanup)
+        template = templates / "launchd" / "oss-repo-agent-fala-tick-all.plist.template"
+        template.write_text(template.read_text(encoding="utf-8").replace("{{UV_BIN}}", "uv"), encoding="utf-8")
+        with self.assertRaises(DeploymentParityError) as raised:
+            validate(source, active, [templates / "launchd"])
+        self.assertTrue(any("uv executable must be absolute" in error for error in raised.exception.result["errors"]))
+
+    def test_fala_template_rejects_mutable_candidate_paths(self):
+        holder, source, active, templates = self.make_deployment()
+        self.addCleanup(holder.cleanup)
+        template = templates / "launchd" / "oss-repo-agent-fala-tick-all.plist.template"
+        text = template.read_text(encoding="utf-8").replace("{{PROJECT_ROOT}}", str(active.parent / "candidates" / "candidate" / "source" / "project"))
+        template.write_text(text, encoding="utf-8")
+        with self.assertRaises(DeploymentParityError) as raised:
+            validate(source, active, [templates / "launchd"])
+        self.assertTrue(any("mutable candidates" in error for error in raised.exception.result["errors"]))
+
+    def test_fala_template_requires_exactly_one_mode_flag(self):
+        holder, source, active, templates = self.make_deployment()
+        self.addCleanup(holder.cleanup)
+        template = templates / "launchd" / "oss-repo-agent-fala-tick-all.plist.template"
+        text = template.read_text(encoding="utf-8").replace(
+            "    <string>{{MODE_ARG}}</string>",
+            "    <string>--dry-run</string>\n    <string>--live</string>",
+        )
+        template.write_text(text, encoding="utf-8")
+        with self.assertRaises(DeploymentParityError) as raised:
+            validate(source, active, [templates / "launchd"])
+        self.assertTrue(any("mode flags are not exactly once" in error for error in raised.exception.result["errors"]))
 
 
 if __name__ == "__main__":

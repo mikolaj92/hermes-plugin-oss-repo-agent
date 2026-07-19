@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
-  "fala-runtime",
+  "fala-runtime==0.2.1",
   "tomli>=2.0.1; python_version < '3.12'",
 ]
 

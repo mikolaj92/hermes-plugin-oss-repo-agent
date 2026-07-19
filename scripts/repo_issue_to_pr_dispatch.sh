@@ -244,9 +244,26 @@ for task in tasks:
     elif not workspace_path:
         workspace_path = str(workspace or "")
     workspace_path = workspace_path or "-"
+    # Accept both shell style "owner/repo#N" and Fala style "owner/repo PR#N".
     issue_match = re.search(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)", title)
     repo = issue_match.group(1) if issue_match else ""
     issue = issue_match.group(2) if issue_match else ""
+    if not repo:
+        repo_only = re.search(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", title)
+        repo = repo_only.group(1) if repo_only else ""
+    if not repo:
+        body_repo = re.search(r"(?m)^Repository:\s*(\S+)\s*$", body)
+        repo = body_repo.group(1) if body_repo else ""
+    if is_review_fix:
+        pr_match = re.search(r"\bPR[#\s]*(\d+)\b", title, re.I)
+        if not pr_match:
+            pr_match = re.search(r"(?m)^PR:\s*#?(\d+)\s*$", body)
+        if pr_match:
+            issue = pr_match.group(1)
+    if not issue:
+        body_issue = re.search(r"(?m)^Issue:\s*#?(\d+)\s*$", body)
+        if body_issue:
+            issue = body_issue.group(1)
     body_lower = body.lower()
     branch = str(task.get("branch_name") or task.get("branch") or "")
     labels_line = ""
@@ -722,6 +739,29 @@ ensure_worktree_ready() {
   ENSURE_WORKTREE_READY_PATH="$worktree"
 }
 
+release_clean_worktree_for_branch() {
+  local clone_path="$1" branch="$2" path="" path_real="" root_real="" clone_worktrees_real="" wt_branch="" line
+  [[ -d "$clone_path/.git" ]] || return 0
+  root_real="$(cd "$WORKTREE_ROOT" 2>/dev/null && pwd -P || true)"
+  clone_worktrees_real="$(cd "$clone_path/.worktrees" 2>/dev/null && pwd -P || true)"
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *) path="${line#worktree }"; wt_branch="" ;;
+      branch\ refs/heads/*)
+        wt_branch="${line#branch refs/heads/}"
+        path_real="$(cd "$path" 2>/dev/null && pwd -P || true)"
+        if [[ "$wt_branch" == "$branch" && -n "$path_real" &&
+          ( ( -n "$clone_worktrees_real" && "$path_real" == "$clone_worktrees_real/"* ) ||
+            ( -n "$root_real" && "$path_real" == "$root_real/"* ) ) ]] &&
+          [[ -z "$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" ]]; then
+          GIT_MASTER=1 git -C "$clone_path" worktree remove "$path" >/dev/null 2>&1 ||
+            GIT_MASTER=1 git -C "$clone_path" worktree remove --force "$path" >/dev/null 2>&1 || true
+        fi
+        ;;
+    esac
+  done < <(GIT_MASTER=1 git -C "$clone_path" worktree list --porcelain 2>/dev/null || true)
+}
+
 active_omp_agents() {
   local count=0 pid_file pid
   for pid_file in "$WORKTREE_ROOT"/*/.agent.lock/pid; do
@@ -779,8 +819,6 @@ run_omp_for_fix_worker() {
     retry_note="$(retry_failure_note "$board" "$task_id")"
     status_inline="${worktree_status//$'\n'/; }"
     hermes kanban --board "$board" block "$task_id" "worktree-dirty-after-omp for branch ${branch}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
-    printf '%s OMP_FINALIZED task=%s outcome=worktree-dirty-after-omp rc=%s branch=%s status=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$status_inline" "$retry_note"
-  elif pr_info="$(if type validated_open_pr_for_branch >/dev/null 2>&1; then validated_open_pr_for_branch "$repo" "$issue" "$branch"; else open_pr_for_branch "$repo" "$branch"; fi 2>/dev/null)" && { ! type verify_remote_branch_changed >/dev/null 2>&1 || { base_sha="$(receipt_field "$task_id" base_sha 2>/dev/null || true)"; [[ -n "$base_sha" ]] && verify_remote_branch_changed "$repo" "$branch" "$base_sha"; }; }; then
     pr_number="${pr_info%%$'\t'*}"
     pr_url="${pr_info#*$'\t'}"
     if ! gh pr edit "$pr_number" --repo "$repo" --add-label ai:generated --add-label ai:pr-opened >/dev/null 2>&1; then
@@ -798,6 +836,7 @@ run_omp_for_fix_worker() {
     else
       receipt_update "$task_id" phase pr-opened 2>/dev/null || true
       printf '%s OMP_FINALIZED task=%s outcome=pr-open pr=%s url=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$pr_url"
+      release_clean_worktree_for_branch "$clone_path" "$branch"
     fi
   else
     retry_note="$(retry_failure_note "$board" "$task_id")"
@@ -917,6 +956,7 @@ for mapping in "${REPOS[@]}"; do
   IFS='|' read -r repo board clone_path repo_priority <<<"$mapping"
   repo_priority="${repo_priority:-0}"
   board_spawned=0
+  board_selected=0
   if [[ ! -d "$clone_path" ]]; then
     log "CLONE_MISSING repo=$repo clone=$clone_path"
     failures=$((failures + 1))
@@ -1054,17 +1094,27 @@ for mapping in "${REPOS[@]}"; do
         continue
       fi
 
-        log "DECISION board=$board task=$task_id action=create-fix-pr-task repo=$task_repo issue=$issue clone=$task_clone status=$status score=$task_score reason=$selection_reason"
+      if [[ "$board_selected" -ge "$MAX_PER_BOARD" ]]; then
+        break
+      fi
+      log "DECISION board=$board task=$task_id action=create-fix-pr-task repo=$task_repo issue=$issue clone=$task_clone status=$status score=$task_score reason=$selection_reason"
       if [[ "$DRY_RUN" == 0 ]]; then
         if create_fix_task "$board" "$task_clone" "$task_id" "$task_repo" "$issue" "$title"; then
           complete_task "$board" "$task_id" "Created or confirmed idempotent explicit [fix-pr] task for ${task_repo}#${issue}."
           created=$((created + 1))
+          board_selected=$((board_selected + 1))
         else
           log "CREATE_FIX_TASK_FAILED board=$board task=$task_id repo=$task_repo issue=$issue"
           failures=$((failures + 1))
         fi
       fi
+      if [[ "$board_selected" -ge "$MAX_PER_BOARD" ]]; then
+        break
+      fi
       continue
+    fi
+    if [[ "$board_selected" -ge "$MAX_PER_BOARD" ]]; then
+      break
     fi
 
     if [[ "$title" == \[fix-pr\]* || "$title" == \[fix-pr-review\]* ]]; then

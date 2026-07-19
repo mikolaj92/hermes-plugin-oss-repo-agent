@@ -90,6 +90,45 @@ class IssueToPrToMergeContractTests(unittest.TestCase):
             self.assertEqual(1, fx.state["merge_count"])
             self.assertEqual(1, fx.state["close_count"])
 
+    def test_failing_checks_queue_repair_not_merge_then_retriage_merges(self) -> None:
+        """Bad gates → fix path (no merge); after repair, re-triage merges once; rerun no-op."""
+        with self._fixture() as fx:
+            fx.state["checks"] = [{"name": "ci", "state": "failure", "bucket": "fail"}]
+            fx._save()
+            fx.env["HERMES_PR_ALLOW_NO_CHECKS"] = "0"
+            fx.env["HERMES_PR_TRIAGE_COMMENT"] = "1"
+            self._intake(fx)
+            self._dispatch(fx)
+            self._dispatch(fx, run_omp=True)
+            first = self._triage(fx)
+            self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+            self.assertEqual(0, fx.state["merge_count"])
+            self.assertEqual(0, fx.state["close_count"])
+            self.assertEqual("OPEN", fx.state["issues"]["42"]["state"])
+            self.assertEqual("OPEN", fx.state["prs"]["17"]["state"])
+            # durable comment + review-fix task instead of merge
+            self.assertGreaterEqual(fx.state.get("comment_count", 0), 1)
+            review_tasks = [
+                t
+                for t in fx.state["tasks"]
+                if str(t.get("title") or "").startswith("[fix-pr-review]")
+            ]
+            self.assertTrue(review_tasks, "expected repair task when checks fail")
+
+            # Simulate worker repair: checks go green, re-enter triage.
+            fx.state["checks"] = [{"name": "ci", "state": "success", "bucket": "pass"}]
+            fx._save()
+            second = self._triage(fx)
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self._assert_completed(fx, 42)
+            self.assertEqual(1, fx.state["merge_count"])
+            self.assertEqual(1, fx.state["close_count"])
+
+            third = self._triage(fx)
+            self.assertEqual(0, third.returncode, third.stdout + third.stderr)
+            self.assertEqual(1, fx.state["merge_count"])
+            self.assertEqual(1, fx.state["close_count"])
+
     def _fixture(self, fault: str = "") -> "Fixture":
         return Fixture(fault)
 
@@ -174,6 +213,8 @@ class Fixture:
             },
             "tasks": [],
             "prs": {},
+            "checks": [],
+            "comment_count": 0,
             "merge_count": 0,
             "close_count": 0,
         }
@@ -337,7 +378,11 @@ if a[:2]==["pr","view"]:
     n=positional("view"); v=dict(pr_obj(n));
     if v.get("state")=="MERGED": v.update({"mergeCommit":{"oid":v["merge_sha"]},"mergedAt":v["merged_at"]})
     emit(v,arg("--jq")); raise SystemExit
-if a[:2]==["pr","checks"]: print("[]"); raise SystemExit
+if a[:2]==["pr","checks"]:
+    checks=s.get("checks") if isinstance(s.get("checks"), list) else []
+    print(json.dumps(checks)); raise SystemExit
+if a[:2]==["pr","comment"]:
+    s["comment_count"]=int(s.get("comment_count") or 0)+1; save(); raise SystemExit
 if a[:2]==["pr","edit"]: raise SystemExit
 if a[:2]==["pr","merge"]:
     n=positional("merge"); v=pr_obj(n); expected=arg("--match-head-commit");

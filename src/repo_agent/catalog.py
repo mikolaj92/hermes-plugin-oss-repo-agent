@@ -26,6 +26,20 @@ EFFECTORS: tuple[EffectorEntry, ...] = (
         False,
     ),
     EffectorEntry(
+        "decide_issue_action",
+        "intake",
+        "repo_agent.steps.issue_direction.decide_issue_action",
+        "Pure sense/direction gate: accept | reject_comment | skip.",
+        False,
+    ),
+    EffectorEntry(
+        "comment_issue_once",
+        "intake",
+        "repo_agent.steps.issue_direction.comment_issue_once",
+        "Durable issue comment when direction rejects (never silent drop).",
+        True,
+    ),
+    EffectorEntry(
         "claim_github_issue",
         "intake",
         "repo_agent.steps.claim.claim_github_issue",
@@ -199,7 +213,7 @@ EFFECTORS: tuple[EffectorEntry, ...] = (
         "merge_pull_request",
         "triage",
         "repo_agent.steps.triage.merge_pull_request",
-        "Merge a pull request after guarded head validation.",
+        "Merge open PR with optional head OID match (guarded).",
         True,
     ),
     EffectorEntry(

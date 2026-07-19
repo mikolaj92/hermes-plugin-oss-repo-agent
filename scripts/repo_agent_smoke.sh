@@ -6,12 +6,10 @@ ACTIVE_SCRIPTS="${HERMES_REPO_AGENT_ACTIVE_SCRIPTS:-${HOME:-/Users/mini-m4-main}
 [[ -f "$ROOT/tests/test_runtime_scripts.py" ]]
 [[ -f "$ROOT/docs/github-kanban-mapping.md" ]]
 [[ -d "$ROOT/templates/launchd" ]]
-[[ -d "$ROOT/launchd" ]]
 python3 "$ROOT/tools/deployment_parity.py" \
   --source-root "$ROOT/scripts" \
   --active-root "$ACTIVE_SCRIPTS" \
   --template-root "$ROOT/templates/launchd" \
-  --template-root "$ROOT/launchd" \
   ${HERMES_REPO_AGENT_DEPLOYMENT_MANIFEST:+--manifest "$HERMES_REPO_AGENT_DEPLOYMENT_MANIFEST"} \
   >/dev/null
 

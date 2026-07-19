@@ -30,40 +30,55 @@ REPOS
 }
 
 repo_agent_repos() {
-  if [[ -n "${HERMES_REPO_AGENT_REPOS_FILE:-}" && -f "$HERMES_REPO_AGENT_REPOS_FILE" ]]; then
-    grep -Ev '^[[:space:]]*(#|$)' "$HERMES_REPO_AGENT_REPOS_FILE"
+  local source="${HERMES_REPO_AGENT_REPOS_FILE:-}"
+  local content
+  if [[ -n "$source" ]]; then
+    [[ -f "$source" && -r "$source" ]] || { printf 'registry-error path=%s\n' "$source" >&2; return 1; }
+    content="$(grep -Ev '^[[:space:]]*(#|$)' "$source")" || { printf 'registry-error path=%s\n' "$source" >&2; return 1; }
   else
-    repo_agent_default_repos
+    content="$(repo_agent_default_repos)" || return 1
   fi
+  local line repo board clone priority extra
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    IFS='|' read -r repo board clone priority extra <<<"$line"
+    [[ -n "$repo" && -n "$board" && -n "$clone" && "$priority" =~ ^[0-9]+$ && -z "${extra:-}" ]] || {
+      printf 'registry-error malformed-entry=%s\n' "$line" >&2; return 1;
+    }
+  done <<<"$content"
+  printf '%s\n' "$content"
 }
 
 repo_agent_board_for_repo() {
-  local wanted="$1" repo board clone priority
+  local wanted="$1" repo board clone priority entries
+  entries="$(repo_agent_repos)" || return 1
   while IFS='|' read -r repo board clone priority; do
     [[ "$repo" == "$wanted" ]] || continue
     printf '%s\n' "$board"
     return 0
-  done < <(repo_agent_repos)
+  done <<<"$entries"
   return 1
 }
 
 repo_agent_clone_for_repo() {
-  local wanted="$1" repo board clone priority
+  local wanted="$1" repo board clone priority entries
+  entries="$(repo_agent_repos)" || return 1
   while IFS='|' read -r repo board clone priority; do
     [[ "$repo" == "$wanted" ]] || continue
     printf '%s\n' "$clone"
     return 0
-  done < <(repo_agent_repos)
+  done <<<"$entries"
   return 1
 }
 
 repo_agent_priority_for_repo() {
-  local wanted="$1" repo board clone priority
+  local wanted="$1" repo board clone priority entries
+  entries="$(repo_agent_repos)" || return 1
   while IFS='|' read -r repo board clone priority; do
     [[ "$repo" == "$wanted" ]] || continue
-    printf '%s\n' "${priority:-0}"
+    printf '%s\n' "$priority"
     return 0
-  done < <(repo_agent_repos)
+  done <<<"$entries"
   return 1
 }
 

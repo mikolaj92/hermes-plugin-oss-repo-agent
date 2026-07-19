@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fala.adapters import EffectorRunRequest, EffectorRunResult
@@ -66,43 +67,61 @@ def poll_eligible_issues(request: EffectorRunRequest) -> EffectorRunResult:
                     "--limit",
                     str(limit),
                     "--json",
-                    "number,title,url,labels,assignees",
+                    "number,title,body,url,labels,assignees",
                 ],
                 gh=gh,
             )
         except CommandError as exc:
-            errors.append({"repo": repo, "error": str(exc), "stderr": exc.stderr[-500:]})
+            errors.append({"repo": repo, "error": str(exc), "stderr": exc.stderr[-500:], "failure_class": "retryable_read", "retry_safe": True, "mutated": False})
             continue
-        if not isinstance(issues, list):
-            errors.append({"repo": repo, "error": "invalid_gh_json"})
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            errors.append({"repo": repo, "error": "malformed_gh_json", "detail": str(exc), "failure_class": "terminal", "retry_safe": False, "mutated": False})
+            continue
+        if not isinstance(issues, list) or any(not isinstance(issue, dict) for issue in issues):
+            errors.append({"repo": repo, "error": "malformed_gh_json", "failure_class": "terminal", "retry_safe": False, "mutated": False})
             continue
         for issue in issues:
-            ok_flag, reason = _issue_eligible(
-                issue, ready_label=ready_label, assignee=assignee
-            )
-            row = {
-                "repo": repo,
-                "board": board,
-                "number": int(issue.get("number") or 0),
-                "title": str(issue.get("title") or ""),
-                "url": str(issue.get("url") or ""),
-                "labels": sorted(
-                    str(x.get("name") or "")
-                    for x in (issue.get("labels") or [])
-                    if isinstance(x, dict)
-                ),
-                "assignees": [
-                    str(x.get("login") or "")
-                    for x in (issue.get("assignees") or [])
-                    if isinstance(x, dict) and x.get("login")
-                ],
-            }
+            ok_flag, reason = _issue_eligible(issue, ready_label=ready_label, assignee=assignee)
+            try:
+                row = {
+                    "repo": repo,
+                    "board": board,
+                    "number": int(issue.get("number") or 0),
+                    "title": str(issue.get("title") or ""),
+                    "body": str(issue.get("body") or ""),
+                    "url": str(issue.get("url") or ""),
+                    "labels": sorted(str(x.get("name") or "") for x in (issue.get("labels") or []) if isinstance(x, dict)),
+                    "assignees": [str(x.get("login") or "") for x in (issue.get("assignees") or []) if isinstance(x, dict) and x.get("login")],
+                }
+            except (TypeError, ValueError, AttributeError) as exc:
+                errors.append({"repo": repo, "error": "malformed_issue", "detail": str(exc), "failure_class": "terminal", "retry_safe": False, "mutated": False})
+                continue
             if ok_flag:
                 eligible.append(row)
             else:
                 skipped.append({**row, "reason": reason})
 
     selected = eligible[0] if eligible else None
+    # An empty configured repository set is a controlled no-op. If every
+    # configured repository was attempted and failed to read, surface the
+    # outage as retryable instead of masquerading it as an empty queue.
+    attempted = [entry for entry in repos if str(entry.get("repo") or "")]
+    if repos and errors and len(errors) == len(attempted):
+        malformed = any(error.get("failure_class") == "terminal" for error in errors)
+        return fail(
+            "poll_failed",
+            failure_class="terminal" if malformed else "retryable_read",
+            retry_safe=not malformed,
+            dry_run=dry_run,
+            error_count=len(errors),
+            eligible_count=0,
+            skipped_count=len(skipped),
+            eligible=[],
+            skipped=skipped[:50],
+            errors=errors,
+            selected=None,
+            config={"ready_label": ready_label, "assignee": assignee, "limit": limit},
+        )
     return ok(
         status="polled",
         dry_run=dry_run,

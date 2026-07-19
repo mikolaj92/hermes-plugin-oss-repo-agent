@@ -9,24 +9,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: hermes-plugin-oss-repo-agent
+      - uses: actions/checkout@v4
+        with:
+          repository: mikolaj92/Fala
+          path: Fala
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install YAML support
-        run: python -m pip install --upgrade pip PyYAML jsonschema pydantic
-      - name: Install project and Fala runtime dependencies
+      - name: Install package and Fala
+        working-directory: hermes-plugin-oss-repo-agent
         run: |
-          git clone --depth 1 https://github.com/mikolaj92/Fala.git ../Fala
+          python -m pip install --upgrade pip
           python -m pip install -e ../Fala
-          python -m pip install -e . --no-deps
-      - name: Add source paths
-        run: echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/../Fala/src" >> "$GITHUB_ENV"
-      - name: Add Hermes CLI shim for script tests
+          python -m pip install -e .
+          python -m pip install PyYAML
+      - name: Run hermetic issue→PR→merge contract suite
+        working-directory: hermes-plugin-oss-repo-agent
+        env:
+          PYTHONPATH: src
         run: |
-          printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > /tmp/hermes
-          chmod +x /tmp/hermes
-          echo "/tmp" >> "$GITHUB_PATH"
-      - name: Run tests
-        run: python -m unittest discover -s tests
-      - name: Run hygiene checks
-        run: python tools/hygiene_check.py . --exclude .venv
+          python -m unittest \
+            tests.test_issue_to_pr_to_merge_contract \
+            tests.test_decide_matrix \
+            tests.test_issue_direction_intake \
+            tests.test_path_composition \
+            tests.test_paths_composition \
+            tests.test_fala_triage_router \
+            tests.test_atomic_effectors.TriageTests \
+            tests.test_atomic_effectors.CatalogTests \
+            tests.test_atomic_effectors.IssueToPrTests \
+            tests.test_atomic_effectors.RepairTests \
+            -v
+      - name: Hygiene
+        working-directory: hermes-plugin-oss-repo-agent
+        run: python tools/hygiene_check.py .

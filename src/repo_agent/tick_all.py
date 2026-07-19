@@ -13,7 +13,7 @@ from repo_agent.flows.cleanup import run_cleanup_flow
 from repo_agent.flows.common import path_result_to_dict
 from repo_agent.flows.intake import intake_result_to_dict, run_intake_flow
 from repo_agent.flows.issue_to_pr import run_issue_to_pr_flow
-from repo_agent.flows.triage import run_triage_flow
+from repo_agent.flows.triage import run_triage_with_router
 from repo_agent.runtime import ensure_fala_paths
 from repo_agent.tick_cli import add_common_args, resolve_dry_run
 
@@ -25,7 +25,7 @@ async def run_all(*, db_path: Path, config, dry_run: bool, limit: int = 10) -> d
     dispatch = await run_issue_to_pr_flow(
         db_path=db_path, config=config, dry_run=dry_run
     )
-    triage = await run_triage_flow(
+    triage = await run_triage_with_router(
         db_path=db_path, config=config, dry_run=dry_run, limit=limit
     )
     cleanup = await run_cleanup_flow(
@@ -37,8 +37,15 @@ async def run_all(*, db_path: Path, config, dry_run: bool, limit: int = 10) -> d
         "dispatch": path_result_to_dict(dispatch),
         "triage": path_result_to_dict(triage),
         "cleanup": path_result_to_dict(cleanup),
-        "any_failed": bool(
-            intake.failed or dispatch.failed or triage.failed or cleanup.failed
+        "any_failed": any(
+            block.get("status") in {"failed", "cancelled", "timed_out", "waiting", "retry_wait"}
+            or bool(block.get("failed"))
+            for block in (
+                intake_result_to_dict(intake),
+                path_result_to_dict(dispatch),
+                path_result_to_dict(triage),
+                path_result_to_dict(cleanup),
+            )
         ),
     }
 

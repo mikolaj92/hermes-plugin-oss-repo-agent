@@ -15,6 +15,8 @@ DRY_RUN="${HERMES_INTAKE_DRY_RUN:-0}"
 CLAIM_ASSIGNEE="${HERMES_REPO_AGENT_ASSIGNEE:-mikolaj92}"
 KANBAN_INTAKE_ASSIGNEE="${HERMES_KANBAN_INTAKE_ASSIGNEE:-repo-agent-intake}"
 QUEUE_SOURCE="${HERMES_REPO_AGENT_SOURCE:-github}"
+ACTIVE_ISSUE_DIR="${HERMES_REPO_AGENT_ACTIVE_ISSUE_DIR:-${HOME}/.hermes/state/repo-agent-active}"
+ACTIVE_CLAIM_PATH="$ACTIVE_ISSUE_DIR/claim.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/repo_agent_repos.sh"
 
@@ -86,6 +88,97 @@ label_present() {
   return 1
 }
 
+run_claim_guard_hook() {
+  local hook="${HERMES_INTAKE_CLAIM_GUARD_HOOK:-}"
+  [[ -n "$hook" ]] || return 0
+  bash -c "$hook"
+}
+
+ensure_active_claim() {
+  local repo="$1" issue="$2" board="$3" existing_repo existing_issue tmp
+  mkdir -p "$ACTIVE_ISSUE_DIR" || return 1
+  if [[ -f "$ACTIVE_CLAIM_PATH" ]]; then
+    existing_repo="$(python3 - "$ACTIVE_CLAIM_PATH" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        payload = json.load(stream)
+except Exception:
+    raise SystemExit(2)
+print(str(payload.get("repo") or ""))
+PY
+)" || return 1
+    existing_issue="$(python3 - "$ACTIVE_CLAIM_PATH" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        payload = json.load(stream)
+except Exception:
+    raise SystemExit(2)
+print(str(payload.get("issue") or payload.get("number") or ""))
+PY
+)" || return 1
+    if [[ "$existing_repo" != "$repo" || "$existing_issue" != "$issue" ]]; then
+      log "ERROR repo=$repo issue=$issue claim_mismatch active_repo=$existing_repo active_issue=$existing_issue"
+      return 2
+    fi
+    return 0
+  fi
+  tmp="$(mktemp "$ACTIVE_ISSUE_DIR/.claim.XXXXXX")" || return 1
+  if ! ACTIVE_CLAIM_TMP="$tmp" python3 - "$repo" "$issue" "$board" <<'PY'
+import datetime as dt
+import json
+import os
+import sys
+payload = {"version": 1, "repo": sys.argv[1], "issue": int(sys.argv[2]), "board": sys.argv[3], "claimedAt": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+with open(os.environ["ACTIVE_CLAIM_TMP"], "w", encoding="utf-8") as stream:
+    json.dump(payload, stream, separators=(",", ":"))
+    stream.write("\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+PY
+  then
+    rm -f "$tmp"
+    return 1
+  fi
+  if [[ -e "$ACTIVE_CLAIM_PATH" ]]; then
+    rm -f "$tmp"
+  else
+    mv "$tmp" "$ACTIVE_CLAIM_PATH" || { rm -f "$tmp"; return 1; }
+  fi
+}
+
+check_active_claim() {
+  local repo="$1" issue="$2" existing_repo existing_issue
+  run_claim_guard_hook
+  [[ -f "$ACTIVE_CLAIM_PATH" ]] || return 0
+  existing_repo="$(python3 - "$ACTIVE_CLAIM_PATH" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        payload = json.load(stream)
+except Exception:
+    raise SystemExit(2)
+print(str(payload.get("repo") or ""))
+PY
+)" || return 1
+  existing_issue="$(python3 - "$ACTIVE_CLAIM_PATH" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        payload = json.load(stream)
+except Exception:
+    raise SystemExit(2)
+print(str(payload.get("issue") or payload.get("number") or ""))
+PY
+)" || return 1
+  if [[ "$existing_repo" != "$repo" || "$existing_issue" != "$issue" ]]; then
+    log "ERROR repo=$repo issue=$issue claim_mismatch active_repo=$existing_repo active_issue=$existing_issue"
+    return 2
+  fi
+  return 0
+}
+
 json_escape_for_body() {
   python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])'
 }
@@ -117,49 +210,6 @@ sys.exit(1)
 PY
 }
 
-claim_path() {
-  printf '%s/claim.json\n' "${HERMES_REPO_AGENT_ACTIVE_ISSUE_DIR:-${HOME}/.hermes/oss-repo-agent/active-issue}"
-}
-
-claim_matches() {
-  local repo="$1" issue="$2" path
-  path="$(claim_path)"
-  [[ -f "$path" ]] || return 0
-  CLAIM_JSON="$(cat "$path" 2>/dev/null || true)" python3 - "$repo" "$issue" <<'PY'
-import json, os, sys
-try:
-    row = json.loads(os.environ.get("CLAIM_JSON", ""))
-    if str(row.get("repo")) != sys.argv[1] or str(row.get("issue")) != sys.argv[2]:
-        raise SystemExit(1)
-except Exception:
-    raise SystemExit(1)
-raise SystemExit(0)
-PY
-}
-
-run_claim_guard_hook() {
-  local hook="${HERMES_INTAKE_CLAIM_GUARD_HOOK:-}"
-  [[ -n "$hook" ]] || return 0
-  bash -c "$hook"
-}
-
-write_claim() {
-  local repo="$1" issue="$2" board="$3" path tmp
-  path="$(claim_path)"
-  mkdir -p "$(dirname "$path")"
-  tmp="${path}.tmp.$$"
-  printf '{"version":1,"repo":"%s","issue":%s,"board":"%s","claimedAt":"%s"}\n' "$repo" "$issue" "$board" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$tmp"
-  mv "$tmp" "$path"
-}
-
-verify_claim_or_fail() {
-  local repo="$1" issue="$2"
-  claim_matches "$repo" "$issue" || {
-    log "ERROR claim_mismatch repo=$repo issue=$issue"
-    return 1
-  }
-}
-
 require_command gh
 require_command git
 require_command python3
@@ -174,7 +224,7 @@ fi
 trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 readonly READY_LABEL='ai:ready'
-readonly ISSUE_JQ='.[] | select(([.labels[].name] | index("ai:in-progress") | not) and ([.labels[].name] | index("ai:blocked") | not) and ([.labels[].name] | index("ai:pr-opened") | not)) | [.number, (.title | gsub("[\t\r\n]"; " ")), .url, ([.labels[].name] | join(", ")), (([.labels[].name] | index("ai:ready")) != null), (([.assignees[].login] | join(",")) // "")] | @tsv'
+readonly ISSUE_JQ='.[] | select(([.labels[].name] | index("ai:in-progress") | not) and ([.labels[].name] | index("ai:blocked") | not) and ([.labels[].name] | index("ai:pr-opened") | not)) | [.number, (.title | gsub("[\t\r\n]"; " ")), .url, ([.labels[].name] | join(", ")), ([.assignees[].login] | join(",")), (([.labels[].name] | index("ai:ready")) != null)] | @tsv'
 
 repos=()
 while IFS= read -r repo_entry; do
@@ -211,7 +261,7 @@ for entry in "${repos[@]}"; do
     log "WARN repo=$repo ready_label_missing=$READY_LABEL action=claim-and-kanban-without-label"
   fi
 
-  if ! issue_rows="$(gh issue list --repo "$repo" --state open --limit "$LIMIT" --json number,title,url,labels --jq "$ISSUE_JQ")"; then
+  if ! issue_rows="$(gh issue list --repo "$repo" --state open --limit "$LIMIT" --json number,title,url,labels,assignees --jq "$ISSUE_JQ")"; then
     log "ERROR repo=$repo gh issue list failed"
     failures=$((failures + 1))
     continue
@@ -227,22 +277,34 @@ for entry in "${repos[@]}"; do
     board_tasks_json="$(hermes kanban --board "$board" list --json --sort created-desc 2>/dev/null || printf '[]')"
   fi
 
-  while IFS=$'\t' read -r number title url labels field5 field6; do
+  while IFS=$'\t' read -r number title url labels assignees has_ready; do
     [ -n "${number:-}" ] || continue
-    has_ready="$field5"
-    existing_assignees="$field6"
-    if [ "$field5" != "true" ] && [ "$field5" != "false" ]; then
-      existing_assignees="$field5"
-      has_ready="$field6"
-    fi
     processed=$((processed + 1))
-    if [ "$existing_assignees" = "other-user" ] || [ "$existing_assignees" = "false" ]; then
+
+    if [[ -n "${assignees:-}" && "$assignees" != "-" && "$assignees" != "$CLAIM_ASSIGNEE" ]]; then
       skipped=$((skipped + 1))
-      log "ISSUE_SKIPPED_NOT_READY repo=$repo issue=$number assignee=$existing_assignees expected=$CLAIM_ASSIGNEE"
+      log "ISSUE_SKIPPED_NOT_READY repo=$repo issue=$number assignee=$assignees"
       continue
     fi
 
+    if ! check_active_claim "$repo" "$number"; then
+      if [[ -n "${HERMES_INTAKE_CLAIM_GUARD_HOOK:-}" ]]; then
+        failures=$((failures + 1))
+      else
+        skipped=$((skipped + 1))
+        log "ACTIVE_CLAIM_BUSY repo=$repo issue=$number"
+      fi
+      continue
+    fi
+    if [ "$DRY_RUN" != "1" ] && [ "$DRY_RUN" != "true" ]; then
+      if ! ensure_active_claim "$repo" "$number" "$board"; then
+        failures=$((failures + 1))
+        continue
+      fi
+    fi
+
     key="github-issue:${repo}:${number}"
+
     task_title="[issue] ${repo}#${number}: ${title}"
     kanban_priority="$(repo_agent_kanban_priority_for_text "$title $labels")"
     body="GitHub issue: ${url}
@@ -275,15 +337,6 @@ Intake-only instructions:
       fi
       continue
     fi
-
-    if ! claim_matches "$repo" "$number"; then
-      log "ISSUE_SKIPPED_CLAIM_MISMATCH repo=$repo issue=$number"
-      skipped=$((skipped + 1))
-      continue
-    fi
-    write_claim "$repo" "$number" "$board"
-    run_claim_guard_hook
-    verify_claim_or_fail "$repo" "$number" || { failures=$((failures + 1)); continue; }
 
     if [ "$QUEUE_SOURCE" = "kanban" ] && existing_issue_task "$board_tasks_json" "$repo" "$number"; then
       skipped=$((skipped + 1))
