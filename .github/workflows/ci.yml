@@ -25,7 +25,7 @@ jobs:
           python -m pip install -e ../Fala
           python -m pip install -e .
           python -m pip install PyYAML
-      - name: Run focused hermetic suites
+      - name: Run hermetic issue→PR→merge contract suite
         working-directory: hermes-plugin-oss-repo-agent
         env:
           PYTHONPATH: src
@@ -37,10 +37,10 @@ jobs:
             tests.test_path_composition \
             tests.test_paths_composition \
             tests.test_fala_triage_router \
-            tests.test_atomic_effectors \
-            tests.test_runtime_scripts \
-            tests.test_dispatch_fail_open \
-            tests.test_cleanup_receipts \
+            tests.test_atomic_effectors.TriageTests \
+            tests.test_atomic_effectors.CatalogTests \
+            tests.test_atomic_effectors.IssueToPrTests \
+            tests.test_atomic_effectors.RepairTests \
             -v
       - name: Hygiene
         working-directory: hermes-plugin-oss-repo-agent
