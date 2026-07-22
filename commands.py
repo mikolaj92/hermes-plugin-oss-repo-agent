@@ -691,7 +691,7 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
     """Copy the runnable plugin and the complete pinned local Fala dependency."""
     project = destination / "project"
     project.mkdir(parents=True)
-    for relative in ("src", "fala", "templates", "pyproject.toml"):
+    for relative in ("src", "fala", "templates", "pyproject.toml", "README.md", "LICENSE"):
         source = project_root / relative
         target = project / relative
         if source.is_dir():

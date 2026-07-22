@@ -309,6 +309,8 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(environment["UV_CACHE_DIR"], str((runtime_root / "cache").resolve()))
             self.assertEqual(arguments[2], "--frozen")
             self.assertTrue((version / "source" / "project" / "uv.lock").is_file())
+            self.assertTrue((version / "source" / "project" / "README.md").is_file())
+            self.assertTrue((version / "source" / "project" / "LICENSE").is_file())
             self.assertNotIn(str(root / "candidates"), " ".join(arguments))
             self.assertEqual(arguments[arguments.index("--project") + 1], str((version / "source" / "project").resolve()))
             self.assertEqual(arguments[arguments.index("--config") + 1], str((version / "source" / "config.toml").resolve()))
