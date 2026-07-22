@@ -307,6 +307,8 @@ class DeploymentCandidateTests(unittest.TestCase):
             runtime_root = root / "runtime" / candidate_id
             self.assertEqual(environment["UV_PROJECT_ENVIRONMENT"], str((runtime_root / ".venv").resolve()))
             self.assertEqual(environment["UV_CACHE_DIR"], str((runtime_root / "cache").resolve()))
+            self.assertEqual(environment["PATH"].split(":" )[0], str((root / "home" / ".local" / "share" / "mise" / "shims").resolve()))
+            self.assertIn(str((root / "home" / ".local" / "bin").resolve()), environment["PATH"].split(":"))
             self.assertEqual(arguments[2], "--frozen")
             self.assertTrue((version / "source" / "project" / "uv.lock").is_file())
             self.assertTrue((version / "source" / "project" / "README.md").is_file())

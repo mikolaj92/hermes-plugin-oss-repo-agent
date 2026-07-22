@@ -41,12 +41,30 @@ require_cmd() {
 launchctl_query() {
   local output
   if ! output="$(launchctl print "$1" 2>&1)"; then
-    [[ "$output" == *"could not find service"* || "$output" == *"No such process"* || "$output" == *"Could not find service"* ]] && return 1
+    [[ "$output" == *"could not find service"* || "$output" == *"No such process"* || "$output" == *"Could not find service"* || "$output" == *"Domain does not support specified action"* ]] && return 1
     printf 'launchctl-error target=%s error=%s\n' "$1" "$output" >&2
     return 2
   fi
   printf '%s\n' "$output"
 }
+uid="$(id -u)"
+launchctl_label_query() {
+  local label="$1" domain output found=""
+  for domain in "user/$uid" "gui/$uid"; do
+    if output="$(launchctl_query "$domain/$label")"; then
+      if [[ -n "$found" ]]; then
+        printf 'launchctl-ambiguous label=%s domains=user/%s,gui/%s\n' "$label" "$uid" "$uid" >&2
+        return 2
+      fi
+      found="$output"
+    else
+      [[ $? -ne 2 ]] || return 2
+    fi
+  done
+  [[ -n "$found" ]] || return 1
+  printf '%s\n' "$found"
+}
+
 FALA_LABEL="${HERMES_REPO_AGENT_FALA_LABEL:-com.mikolaj92.hermes.repo-agent-fala-tick-all}"
 DEPLOYMENT_ROOT="${HERMES_REPO_AGENT_DEPLOYMENT_ROOT:-$HOME/.hermes/oss-repo-agent/deployment}"
 FALA_DB="${HERMES_REPO_AGENT_FALA_DB:-$HOME/.hermes/oss-repo-agent/fala/state.sqlite}"
@@ -57,7 +75,7 @@ status_failures=0
 
 fala_loaded=0
 query_status=0
-if launchctl_query "gui/$(id -u)/$FALA_LABEL" >/dev/null; then fala_loaded=1; else query_status=$?; fi
+if launchctl_label_query "$FALA_LABEL" >/dev/null; then fala_loaded=1; else query_status=$?; fi
 [[ "$query_status" -ne 2 ]] || status_failures=$((status_failures + 1))
 legacy_loaded_labels=()
 for legacy_label in \
@@ -66,12 +84,12 @@ for legacy_label in \
   com.mikolaj92.hermes.repo-pr-triage \
   com.mikolaj92.hermes.repo-agent-cleanup; do
   query_status=0
-  if launchctl_query "gui/$(id -u)/$legacy_label" >/dev/null; then legacy_loaded_labels+=("$legacy_label"); else query_status=$?; fi
+  if launchctl_label_query "$legacy_label" >/dev/null; then legacy_loaded_labels+=("$legacy_label"); else query_status=$?; fi
   [[ "$query_status" -ne 2 ]] || status_failures=$((status_failures + 1))
 done
 health_repair_loaded=0
 query_status=0
-if launchctl_query "gui/$(id -u)/com.mikolaj92.hermes.repo-agent-health" >/dev/null; then
+if launchctl_label_query "com.mikolaj92.hermes.repo-agent-health" >/dev/null; then
   if grep -q -- '--repair' "$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-health.plist" 2>/dev/null; then health_repair_loaded=1; fi
 else query_status=$?; fi
 [[ "$query_status" -ne 2 ]] || status_failures=$((status_failures + 1))
@@ -124,7 +142,8 @@ try:
     manifest_args=manifest.get("program_arguments")
     if not isinstance(manifest_args,list) or any(not isinstance(value,str) for value in manifest_args):
         errors.append("identity-program-arguments-mismatch"); manifest_args=[]
-    expected_args=[manifest_args[0] if manifest_args else "","run","--project",str(cand/"source"/"project"),"repo-agent-tick-all","--config",str(cand/"source"/"config.toml"),"--db",str(manifest.get("db_path") or ""),f"--{mode}","--json"]
+    frozen=["--frozen"] if "--frozen" in manifest_args else []
+    expected_args=[manifest_args[0] if manifest_args else "","run",*frozen,"--project",str(cand/"source"/"project"),"repo-agent-tick-all","--config",str(cand/"source"/"config.toml"),"--db",str(manifest.get("db_path") or ""),f"--{mode}","--json"]
     if not manifest_args or not pathlib.Path(manifest_args[0]).is_absolute() or manifest_args != expected_args: errors.append("identity-program-arguments-mismatch")
     if mode not in {"dry-run","live"}: errors.append("mode-invalid")
     artifacts=manifest.get("artifacts")
@@ -148,7 +167,8 @@ try:
     if runtime.get("plist_sha256") != ph: errors.append("runtime-identity-plist-hash-mismatch")
     if runtime.get("working_directory") != str(cand/"source"/"project"): errors.append("runtime-identity-working-directory-invalid")
     runtime_env=runtime.get("environment_variables")
-    if not isinstance(runtime_env,dict) or set(runtime_env)!={"HOME"} or not isinstance(runtime_env.get("HOME"),str) or not pathlib.Path(runtime_env["HOME"]).is_absolute(): errors.append("runtime-identity-environment-invalid")
+    required_env={"HOME","UV_PROJECT_ENVIRONMENT","UV_CACHE_DIR"}
+    if not isinstance(runtime_env,dict) or not required_env.issubset(runtime_env) or any(not isinstance(runtime_env.get(key),str) or not pathlib.Path(runtime_env[key]).is_absolute() for key in required_env): errors.append("runtime-identity-environment-invalid")
     for key in ("standard_out_path","standard_error_path"):
         value=runtime.get(key)
         if not isinstance(value,str) or not pathlib.Path(value).is_absolute() or "~" in value: errors.append(f"runtime-identity-{key}-invalid")
@@ -246,7 +266,6 @@ if [[ "$fala_loaded" == 1 && "$health_repair_loaded" == 1 ]]; then
   mutator_gate=FAIL
   status_failures=$((status_failures + 1))
 fi
-printf '  mutators legacy_loaded=%s health_repair_loaded=%s fala_loaded=%s gate=%s\n' "${legacy_loaded_labels[*]:-none}" "$health_repair_loaded" "$([[ $fala_loaded == 1 ]] && echo yes || echo no)" "$mutator_gate"
 if [[ "$mutator_gate" == FAIL && "$fala_loaded" == 1 && ("$legacy_count" -gt 0 || "$health_repair_loaded" == 1) ]]; then
   printf '  ERROR dual-mutator legacy-health-repair-and-fala-active\n'
 fi
@@ -265,7 +284,7 @@ printf 'repo-agent status %s\n\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 printf 'Launchd\n'
 for item in "${jobs[@]}"; do
   IFS='|' read -r name label <<<"$item"
-  if info="$(launchctl_query "gui/$uid/$label" 2>/dev/null)"; then
+  if info="$(launchctl_label_query "$label" 2>/dev/null)"; then
     state="$(printf '%s\n' "$info" | awk -F '= ' '/state =/ {print $2; exit}')"
     runs="$(printf '%s\n' "$info" | awk -F '= ' '/runs =/ {gsub(/[^0-9].*/, "", $2); print $2; exit}')"
     last="$(printf '%s\n' "$info" | awk -F '= ' '/last exit code =/ {gsub(/[^0-9-].*/, "", $2); print $2; exit}')"

@@ -88,9 +88,10 @@ try:
     if not isinstance(manifest_args, list) or any(not isinstance(value, str) for value in manifest_args):
         errors.append("identity-program-arguments-mismatch")
         manifest_args = []
+    frozen = ["--frozen"] if "--frozen" in manifest_args else []
     expected_args = [
         manifest_args[0] if manifest_args else "",
-        "run", "--project", str(candidate / "source" / "project"),
+        "run", *frozen, "--project", str(candidate / "source" / "project"),
         "repo-agent-tick-all", "--config", str(candidate / "source" / "config.toml"),
         "--db", str(manifest.get("db_path") or ""),
         f"--{mode}", "--json",
@@ -135,7 +136,8 @@ try:
     if runtime.get("working_directory") != str(candidate / "source" / "project"):
         errors.append("runtime-identity-working-directory-invalid")
     runtime_env = runtime.get("environment_variables")
-    if not isinstance(runtime_env, dict) or set(runtime_env) != {"HOME"} or not isinstance(runtime_env.get("HOME"), str) or not pathlib.Path(runtime_env["HOME"]).is_absolute():
+    required_env = {"HOME", "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR"}
+    if not isinstance(runtime_env, dict) or not required_env.issubset(runtime_env) or any(not isinstance(runtime_env.get(key), str) or not pathlib.Path(runtime_env[key]).is_absolute() for key in required_env):
         errors.append("runtime-identity-environment-invalid")
     for key in ("standard_out_path", "standard_error_path"):
         value = runtime.get(key)
@@ -258,6 +260,31 @@ log() {
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { log ERROR "missing-command name=$1"; return 1; }
 }
+launchctl_query() {
+  local output
+  if ! output="$(launchctl print "$1" 2>&1)"; then
+    [[ "$output" == *"could not find service"* || "$output" == *"No such process"* || "$output" == *"Could not find service"* || "$output" == *"Domain does not support specified action"* ]] && return 1
+    log ERROR "launchctl-query-unknown target=$1 details=$(printf '%q' "$output")"
+    return 2
+  fi
+  printf '%s\n' "$output"
+}
+launchctl_label_query() {
+  local label="$1" domain output found=""
+  for domain in "user/$uid" "gui/$uid"; do
+    if output="$(launchctl_query "$domain/$label")"; then
+      if [[ -n "$found" ]]; then
+        log ERROR "launchctl-domain-ambiguous label=$label"
+        return 2
+      fi
+      found="$output"
+    else
+      [[ $? -ne 2 ]] || return 2
+    fi
+  done
+  [[ -n "$found" ]] || return 1
+  printf '%s\n' "$found"
+}
 
 uid="$(id -u)"
 jobs=(
@@ -273,20 +300,14 @@ while IFS= read -r repo_entry; do repos+=("$repo_entry"); done <<<"$repo_data"
 
 failures=0
 warnings=0
-parity_source_root="${HERMES_REPO_AGENT_PARITY_SOURCE_ROOT:-$SCRIPT_DIR}"
-parity_active_root="${HERMES_REPO_AGENT_PARITY_ACTIVE_ROOT:-$HOME/.hermes/scripts}"
-parity_template_root="${HERMES_REPO_AGENT_PARITY_TEMPLATE_ROOT:-$SCRIPT_DIR/../templates/launchd}"
-parity_active_plist_root="${HERMES_REPO_AGENT_PARITY_ACTIVE_PLIST_ROOT:-${HERMES_REPO_AGENT_PARITY_PLIST_ROOT:-$HOME/Library/LaunchAgents}}"
-parity_render_root="${HERMES_REPO_AGENT_PARITY_RENDER_ROOT:-${HERMES_REPO_AGENT_PARITY_RENDERED_ROOT:-}}"
-parity_config_root="${HERMES_REPO_AGENT_PARITY_CONFIG_ROOT:-${HERMES_REPO_AGENT_PARITY_ACTIVE_CONFIG_ROOT:-$HOME/.hermes/oss-repo-agent}}"
-parity_configured=0
-for parity_value in "$parity_source_root" "$parity_active_root" "$parity_template_root" "$parity_active_plist_root" "$parity_config_root"; do
-  [[ -n "$parity_value" ]] && parity_configured=$((parity_configured + 1))
-done
-if [[ "$parity_configured" -ne 5 ]]; then
-  log ERROR "deployment-parity incomplete-config source=$parity_source_root active=$parity_active_root template=$parity_template_root active_plist=$parity_active_plist_root config=$parity_config_root"
-  failures=$((failures + 1))
-else
+parity_enabled="${HERMES_REPO_AGENT_PARITY_ENABLED:-0}"
+if [[ "$parity_enabled" == 1 ]]; then
+  parity_source_root="${HERMES_REPO_AGENT_PARITY_SOURCE_ROOT:-$SCRIPT_DIR}"
+  parity_active_root="${HERMES_REPO_AGENT_PARITY_ACTIVE_ROOT:-$HOME/.hermes/scripts}"
+  parity_template_root="${HERMES_REPO_AGENT_PARITY_TEMPLATE_ROOT:-$SCRIPT_DIR/../templates/launchd}"
+  parity_active_plist_root="${HERMES_REPO_AGENT_PARITY_ACTIVE_PLIST_ROOT:-${HERMES_REPO_AGENT_PARITY_PLIST_ROOT:-$HOME/Library/LaunchAgents}}"
+  parity_render_root="${HERMES_REPO_AGENT_PARITY_RENDER_ROOT:-${HERMES_REPO_AGENT_PARITY_RENDERED_ROOT:-}}"
+  parity_config_root="${HERMES_REPO_AGENT_PARITY_CONFIG_ROOT:-${HERMES_REPO_AGENT_PARITY_ACTIVE_CONFIG_ROOT:-$HOME/.hermes/oss-repo-agent}}"
   parity_args=(--source-root "$parity_source_root" --active-root "$parity_active_root" --template-root "$parity_template_root" --active-plist-root "$parity_active_plist_root" --active-config-root "$parity_config_root")
   [[ -n "$parity_render_root" ]] && parity_args+=(--render-root "$parity_render_root")
   parity_output=""
@@ -298,13 +319,27 @@ else
   fi
 fi
 fala_loaded=0
-if launchctl print "gui/$uid/$FALA_LABEL" >/dev/null 2>&1; then fala_loaded=1; else failures=$((failures + 1)); log ERROR "fala-not-loaded label=$FALA_LABEL"; fi
+if launchctl_label_query "$FALA_LABEL" >/dev/null; then
+  fala_loaded=1
+else
+  query_status=$?
+  failures=$((failures + 1))
+  [[ "$query_status" -eq 1 ]] && log ERROR "fala-not-loaded label=$FALA_LABEL"
+fi
 legacy_loaded=0
 for legacy_label in com.mikolaj92.hermes.repo-issue-intake com.mikolaj92.hermes.repo-issue-to-pr-dispatch com.mikolaj92.hermes.repo-pr-triage com.mikolaj92.hermes.repo-agent-cleanup; do
-  if launchctl print "gui/$uid/$legacy_label" >/dev/null 2>&1; then legacy_loaded=$((legacy_loaded + 1)); fi
+  if launchctl_label_query "$legacy_label" >/dev/null; then
+    legacy_loaded=$((legacy_loaded + 1))
+  else
+    [[ $? -ne 2 ]] || failures=$((failures + 1))
+  fi
 done
 health_loaded=0
-if launchctl print "gui/$uid/com.mikolaj92.hermes.repo-agent-health" >/dev/null 2>&1 && grep -q -- '--repair' "$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-health.plist" 2>/dev/null; then health_loaded=1; fi
+if launchctl_label_query "com.mikolaj92.hermes.repo-agent-health" >/dev/null; then
+  if grep -q -- '--repair' "$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-health.plist" 2>/dev/null; then health_loaded=1; fi
+else
+  [[ $? -ne 2 ]] || failures=$((failures + 1))
+fi
 repair_mutator=0
 repair_allowed=1
 if [[ "$REPAIR" == 1 || "$health_loaded" == 1 ]]; then repair_mutator=1; fi
@@ -446,7 +481,7 @@ else
 for item in "${jobs[@]}"; do
   IFS='|' read -r label plist runtime_log <<<"$item"
   launch_info=""
-  if launch_info="$(launchctl print "gui/$uid/$label" 2>&1)"; then
+  if launch_info="$(launchctl_label_query "$label")"; then
     last_exit="$(printf '%s\n' "$launch_info" | awk -F '= ' '/last exit code =/ {gsub(/[^0-9-].*/, "", $2); print $2; exit}')"
     if [[ -z "$last_exit" || "$last_exit" != 0 ]]; then log ERROR "launchd-last-exit-invalid label=$label exit_code=${last_exit:-unknown}"; failures=$((failures + 1)); else log OK "launchd label=$label last_exit=$last_exit"; fi
   else

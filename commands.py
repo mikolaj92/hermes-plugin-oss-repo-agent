@@ -1046,6 +1046,18 @@ def _promote_version_runtime(version: Path, deployment_root: Path, candidate_id:
     environment["HOME"] = str(Path.home().resolve())
     environment["UV_PROJECT_ENVIRONMENT"] = str((deployment_root / "runtime" / candidate_id / ".venv").resolve())
     environment["UV_CACHE_DIR"] = str((deployment_root / "runtime" / candidate_id / "cache").resolve())
+    environment["PATH"] = os.pathsep.join(
+        (
+            str((Path.home() / ".local" / "share" / "mise" / "shims").resolve()),
+            str((Path.home() / ".local" / "bin").resolve()),
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        )
+    )
     document["EnvironmentVariables"] = environment
     document["WorkingDirectory"] = str(project)
     Path(environment["UV_PROJECT_ENVIRONMENT"]).parent.mkdir(parents=True, exist_ok=True)

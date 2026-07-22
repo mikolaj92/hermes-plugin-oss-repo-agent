@@ -61,7 +61,7 @@ class HealthStatusScriptTests(unittest.TestCase):
             "config_hash": hashlib.sha256(cls.config.read_bytes()).hexdigest(),
             "db_path": str((cls.root / "state.sqlite").absolute()),
             "metadata_path": "source/metadata.json",
-            "lock_path": "source/uv.lock",
+            "lock_path": "source/project/uv.lock",
             "config_artifact_path": "source/config.toml",
             "revision_path": "source/revision.txt",
             "policy": {
@@ -134,9 +134,11 @@ class HealthStatusScriptTests(unittest.TestCase):
         (fake / "launchctl").write_text(
             """#!/usr/bin/env bash
 if [[ "$1" == print ]]; then
+  domain="${2%/*}"
   label="${2##*/}"
-  case ",${FAKE_LAUNCHCTL_LOADED:-}," in *,"$label",*) printf 'state = running\\nruns = 1\\nlast exit code = %s\\n' "${FAKE_LAUNCHCTL_EXIT_CODE:-0}"; exit 0;; esac
-  printf 'could not find service\\n' >&2; exit 1
+  if [[ "$domain" == gui/* && "${FAKE_LAUNCHCTL_GUI_AVAILABLE:-0}" != 1 ]]; then printf 'Domain does not support specified action\n' >&2; exit 125; fi
+  case ",${FAKE_LAUNCHCTL_LOADED:-}," in *,"$label",*) printf 'state = running\nruns = 1\nlast exit code = %s\n' "${FAKE_LAUNCHCTL_EXIT_CODE:-0}"; exit 0;; esac
+  printf 'could not find service\n' >&2; exit 1
 fi
 exit 0
 """,
@@ -198,6 +200,7 @@ exit 0
         versions.mkdir(parents=True, exist_ok=True)
         version = versions / self.candidate.name
         shutil.copytree(self.candidate, version)
+        self.commands._promote_version_runtime(version, root / "deployment", self.candidate.name)
         current = root / "deployment" / "current"
         current.symlink_to(version, target_is_directory=True)
         if installed_copy:
