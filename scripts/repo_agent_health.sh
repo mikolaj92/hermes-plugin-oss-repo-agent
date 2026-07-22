@@ -39,7 +39,7 @@ require_live = sys.argv[3] == "1"
 deployment_root = pathlib.Path(sys.argv[4]).expanduser().resolve()
 errors = []
 plist_relative = "launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
-pinned_commit = "9f10d58462b4e134d5b1cffe8ff9172909df70ea"
+pinned_commit = "810671075b478c1cc5950eafe892826a17c068bf"
 
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
@@ -110,7 +110,7 @@ try:
     for relative, expected in artifacts.items():
         if (not isinstance(relative, str) or not relative or not isinstance(expected, dict) or set(expected) != {"sha256", "bytes"} or not isinstance(expected.get("sha256"), str) or len(expected["sha256"]) != 64 or not isinstance(expected.get("bytes"), int) or expected["bytes"] < 0):
             errors.append(f"identity-artifact-mismatch:{relative}")
-    if manifest.get("fala_tag") != "0.7.6" or manifest.get("fala_commit") != pinned_commit:
+    if manifest.get("fala_tag") != "0.7.9" or manifest.get("fala_commit") != pinned_commit:
         errors.append("fala-provenance-invalid")
     candidate_plist = candidate / plist_relative
     candidate_bytes = candidate_plist.read_bytes()

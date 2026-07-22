@@ -1,4 +1,4 @@
-# Auto-worker (Fala 0.7.6 package host)
+# Auto-worker (Fala 0.7.9 package host)
 
 Mega-atomic effectors are composed into correlation paths. `auto_worker`,
 invoked by `repo-agent-tick-all`, is the sole scheduled mutator. Individual
@@ -14,7 +14,7 @@ ticks are CLI entrypoints for manual diagnostics only.
 | `cleanup` | `repo-agent-tick-cleanup` | parse branch → verify closed/no PR → remove worktree → delete branch → release claim |
 | `auto_worker` | `repo-agent-tick-all` | one package-host run containing the prefixed intake, dispatch, triage, and cleanup graph |
 
-Fala 0.7.6 package-host conduction passes each upstream effector result directly
+Fala 0.7.9 package-host conduction passes each upstream effector result directly
 to the next prefixed handler; effectors remain single-purpose subprocess adapters.
 
 ## Usage (mini-m4-0)

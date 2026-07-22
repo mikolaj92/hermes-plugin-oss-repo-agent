@@ -114,7 +114,7 @@ else
   fala_check=""
   if fala_check="$(python3 - "$current_target" "$FALA_PLIST" "$FALA_REQUIRE_LIVE" "$DEPLOYMENT_ROOT" <<'PY'
 import hashlib, json, pathlib, plistlib, sys
-cand=pathlib.Path(sys.argv[1]).resolve(); installed=pathlib.Path(sys.argv[2]).expanduser(); require_live=sys.argv[3]=="1"; root=pathlib.Path(sys.argv[4]).expanduser().resolve(); errors=[]; plist_relative="launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"; pinned="9f10d58462b4e134d5b1cffe8ff9172909df70ea"
+cand=pathlib.Path(sys.argv[1]).resolve(); installed=pathlib.Path(sys.argv[2]).expanduser(); require_live=sys.argv[3]=="1"; root=pathlib.Path(sys.argv[4]).expanduser().resolve(); errors=[]; plist_relative="launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"; pinned="810671075b478c1cc5950eafe892826a17c068bf"
 sha=lambda data: hashlib.sha256(data).hexdigest()
 def artifact_path(relative):
     if not isinstance(relative,str) or not relative or "\x00" in relative or pathlib.Path(relative).is_absolute() or ".." in pathlib.Path(relative).parts:
@@ -153,7 +153,7 @@ try:
     if plist_relative not in artifacts: errors.append("identity-artifact-key-set-mismatch")
     for relative,expected in artifacts.items():
         if (not isinstance(relative,str) or not relative or not isinstance(expected,dict) or set(expected)!={"sha256","bytes"} or not isinstance(expected.get("sha256"),str) or len(expected["sha256"])!=64 or not isinstance(expected.get("bytes"),int) or expected["bytes"]<0): errors.append(f"identity-artifact-mismatch:{relative}")
-    if manifest.get("fala_tag") != "0.7.6" or manifest.get("fala_commit") != pinned: errors.append("fala-provenance-invalid")
+    if manifest.get("fala_tag") != "0.7.9" or manifest.get("fala_commit") != pinned: errors.append("fala-provenance-invalid")
     cp=cand/plist_relative; cb=cp.read_bytes(); doc=plistlib.loads(cb); ib=installed.read_bytes(); plistlib.loads(ib); ph=sha(cb)
     runtime=manifest.get("runtime_identity")
     runtime_keys={"program_arguments","working_directory","standard_out_path","standard_error_path","environment_variables","start_interval","run_at_load","process_type","limit_load_to_session_type","plist_sha256"}

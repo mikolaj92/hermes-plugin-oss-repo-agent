@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-FALA_PINNED_COMMIT = "9f10d58462b4e134d5b1cffe8ff9172909df70ea"
+FALA_PINNED_COMMIT = "810671075b478c1cc5950eafe892826a17c068bf"
 # Every shell entrypoint copied to ~/.hermes/scripts is part of the deployment
 # contract. Keeping this list explicit makes a missing deployment fail closed.
 DEPLOYED_SCRIPTS = (
@@ -396,7 +396,7 @@ def _relative_candidate_path(candidate: Path, value: object, label: str, errors:
     return path
 
 
-FALA_TAG = "0.7.6"
+FALA_TAG = "0.7.9"
 
 
 
@@ -585,7 +585,7 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         if not isinstance(value, str) or not Path(value).is_absolute() or "~" in value:
             errors.append(f"Fala runtime {key} is invalid")
     env = runtime.get("environment_variables")
-    expected_env_keys = {"HOME"} if candidate.parent.name == "candidates" else {"HOME", "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "FALA_HOME", "PATH"}
+    expected_env_keys = {"HOME"} if candidate.parent.name == "candidates" else {"HOME", "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "FALA_EFFECTOR_ROOT", "FALA_HOME", "PATH"}
     path_keys = expected_env_keys - {"PATH"}
     if not isinstance(env, dict) or set(env) != expected_env_keys or not isinstance(env.get("HOME"), str) or not Path(env["HOME"]).is_absolute():
         errors.append(f"Fala runtime environment_variables must be exactly {sorted(expected_env_keys)}")
@@ -597,6 +597,8 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         expected_runtime = (deployment_root.expanduser().resolve() / "runtime" / candidate_id).resolve()
         if Path(env["UV_PROJECT_ENVIRONMENT"]).parent.resolve() != expected_runtime or Path(env["UV_CACHE_DIR"]).parent.resolve() != expected_runtime:
             errors.append("Fala UV runtime paths are not candidate-local")
+        if Path(env["FALA_EFFECTOR_ROOT"]).parent.resolve() != expected_runtime:
+            errors.append("Fala effector root is not candidate-local")
         if Path(env["FALA_HOME"]).resolve() != (project / "Fala").resolve():
             errors.append("Fala runtime source path is not version-local")
     if runtime.get("start_interval") != 600 or runtime.get("run_at_load") is not False or runtime.get("process_type") != "Background" or runtime.get("limit_load_to_session_type") not in (None, "Background"):
@@ -693,8 +695,8 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
             lock_text = lock_path.read_text(encoding="utf-8") if lock_path and _regular_file(lock_path) else ""
         except (OSError, UnicodeDecodeError):
             pyproject = fala_project = lock_text = ""
-        if 'name = "fala"' not in fala_project or 'version = "0.7.6"' not in fala_project:
-            errors.append("bundled Fala metadata is not pinned to 0.7.6")
+        if 'name = "fala"' not in fala_project or f'version = "{FALA_TAG}"' not in fala_project:
+            errors.append(f"bundled Fala metadata is not pinned to {FALA_TAG}")
         if 'fala = { path = "Fala", editable = true }' not in pyproject or "../Fala" in pyproject or 'editable = "Fala"' not in lock_text or "../Fala" in lock_text:
             errors.append("bundled Fala dependency path or lock provenance is invalid")
     for required_relative in ("fala-package.toml", "src/repo_agent/effector.py"):

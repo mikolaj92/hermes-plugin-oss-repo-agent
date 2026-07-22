@@ -13,7 +13,7 @@ wheels = [
 
 [[package]]
 name = "fala"
-version = "0.7.6"
+version = "0.7.9"
 source = { editable = "../Fala" }
 
 [package.metadata]

@@ -55,7 +55,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 if checkout == fala_root and command[3:5] == ["cat-file", "-e"]:
                     return subprocess.CompletedProcess(command, 0, "", "")
                 if checkout == fala_root and command[3:5] == ["show", f"{self.commands.FALA_PINNED_COMMIT}:pyproject.toml"]:
-                    return subprocess.CompletedProcess(command, 0, '[project]\nversion = "0.7.6"\n', "")
+                    return subprocess.CompletedProcess(command, 0, '[project]\nversion = "0.7.9"\n', "")
             return real_run(argv, *args, **kwargs)
 
         return patch.object(self.commands.subprocess, "run", side_effect=fake_run)
@@ -88,8 +88,8 @@ class DeploymentCandidateTests(unittest.TestCase):
             "schema": 1,
             "mode": mode,
             "plugin_commit": "plugin-commit",
-            "fala_tag": "0.7.6",
-            "fala_commit": "9f10d58462b4e134d5b1cffe8ff9172909df70ea",
+            "fala_tag": "0.7.9",
+            "fala_commit": "810671075b478c1cc5950eafe892826a17c068bf",
             "lock_hash": hashlib.sha256(lock_data).hexdigest(),
             "config_path": str(config.absolute()),
             "config_hash": hashlib.sha256(config.read_bytes()).hexdigest(),
@@ -216,7 +216,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             with self._fala_git_clean(), patch.object(self.commands.subprocess, "run", side_effect=wrong_version), patch.object(
                 self.commands, "_read_git_revision", return_value="plugin-commit"
             ):
-                with self.assertRaisesRegex(self.commands.ConfigError, "version must be 0.7.6"):
+                with self.assertRaisesRegex(self.commands.ConfigError, "version must be 0.7.9"):
                     self.commands.render_launchd(
                         self.cfg, str(root / "candidates" / "candidate"), config_path=str(config), fala_db=str(root / "state.sqlite"), deployment_root=str(root)
                     )
@@ -375,6 +375,9 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(environment["UV_PROJECT_ENVIRONMENT"], str((runtime_root / ".venv").resolve()))
             self.assertEqual(environment["UV_CACHE_DIR"], str((runtime_root / "cache").resolve()))
             self.assertEqual(environment["FALA_HOME"], str((version / "source" / "project" / "Fala").resolve()))
+            self.assertEqual(environment["FALA_EFFECTOR_ROOT"], str((runtime_root / "effectors").resolve()))
+            self.assertEqual(document["WorkingDirectory"], str((version / "source" / "project").resolve()))
+            self.assertTrue((runtime_root / "effectors").is_dir())
             self.assertEqual(environment["PATH"].split(":" )[0], str((root / "home" / ".local" / "share" / "mise" / "shims").resolve()))
             self.assertIn(str((root / "home" / ".local" / "bin").resolve()), environment["PATH"].split(":"))
             self.assertEqual(arguments[2], "--frozen")

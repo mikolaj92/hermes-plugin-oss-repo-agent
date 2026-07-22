@@ -29,8 +29,8 @@ from .config import ConfigError, OssRepoAgentConfig, default_config_path, load_c
 from .executor import CommandSpec, Runner, planned_command
 
 INTAKE_ASSIGNEE = "repo-agent-intake"
-FALA_PINNED_COMMIT = "9f10d58462b4e134d5b1cffe8ff9172909df70ea"
-FALA_PINNED_VERSION = "0.7.6"
+FALA_PINNED_COMMIT = "810671075b478c1cc5950eafe892826a17c068bf"
+FALA_PINNED_VERSION = "0.7.9"
 
 
 def setup_parser(parser: ArgumentParser) -> None:
@@ -834,9 +834,9 @@ def render_launchd(
             text=True,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
-        raise ConfigError("Fala candidate source does not contain the pinned 0.7.6 commit") from exc
+        raise ConfigError(f"Fala candidate source does not contain pinned commit {FALA_PINNED_COMMIT}") from exc
     if pinned_present.returncode != 0:
-        raise ConfigError("Fala candidate source does not contain the pinned 0.7.6 commit")
+        raise ConfigError(f"Fala candidate source does not contain pinned commit {FALA_PINNED_COMMIT}")
     try:
         pinned_pyproject = subprocess.run(
             ["git", "-C", str(fala_root), "show", f"{FALA_PINNED_COMMIT}:pyproject.toml"],
@@ -1158,8 +1158,10 @@ def _promote_version_runtime(version: Path, deployment_root: Path, candidate_id:
     document["ProgramArguments"] = args
     environment = dict(document.get("EnvironmentVariables") or {})
     environment["HOME"] = str(Path.home().resolve())
-    environment["UV_PROJECT_ENVIRONMENT"] = str((deployment_root / "runtime" / candidate_id / ".venv").resolve())
-    environment["UV_CACHE_DIR"] = str((deployment_root / "runtime" / candidate_id / "cache").resolve())
+    runtime_root = (deployment_root / "runtime" / candidate_id).resolve()
+    environment["UV_PROJECT_ENVIRONMENT"] = str(runtime_root / ".venv")
+    environment["UV_CACHE_DIR"] = str(runtime_root / "cache")
+    environment["FALA_EFFECTOR_ROOT"] = str(runtime_root / "effectors")
     environment["FALA_HOME"] = str((project / "Fala").resolve())
     environment["PATH"] = os.pathsep.join(
         (
@@ -1175,8 +1177,9 @@ def _promote_version_runtime(version: Path, deployment_root: Path, candidate_id:
     )
     document["EnvironmentVariables"] = environment
     document["WorkingDirectory"] = str(project)
-    Path(environment["UV_PROJECT_ENVIRONMENT"]).parent.mkdir(parents=True, exist_ok=True)
+    runtime_root.mkdir(parents=True, exist_ok=True)
     Path(environment["UV_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
+    Path(environment["FALA_EFFECTOR_ROOT"]).mkdir(parents=True, exist_ok=True)
     log_dir = (deployment_root / "logs" / candidate_id).resolve()
     for key in ("StandardOutPath", "StandardErrorPath"):
         value = str(document.get(key) or "")

@@ -42,7 +42,7 @@ class PathRunResult:
     failed: list[dict[str, Any]] = field(default_factory=list)
     processes: list[dict[str, Any]] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
-    fala_version: str = "0.7.6"
+    fala_version: str = "0.7.9"
     status: str = ""
     action: str | None = None
     follow_up: dict[str, Any] | None = None

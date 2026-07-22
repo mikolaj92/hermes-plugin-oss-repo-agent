@@ -276,7 +276,7 @@ class IntakeFlowE2ETests(unittest.TestCase):
         # dry-run claim/kanban use status planned (envelope)
         self.assertIn(result.summary["claim_status"], ("planned", "claimed"))
         self.assertIn(result.summary["kanban_status"], ("planned", "created", "exists"))
-        self.assertEqual(result.fala_version, "0.7.6")
+        self.assertEqual(result.fala_version, "0.7.9")
 
 
 if __name__ == "__main__":
