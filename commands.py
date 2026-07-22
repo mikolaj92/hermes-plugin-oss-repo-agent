@@ -8,6 +8,7 @@ import plistlib
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 from contextlib import contextmanager
@@ -906,9 +907,27 @@ def render_launchd(
                 capture_output=True,
                 text=True,
             )
-        except (OSError, subprocess.CalledProcessError) as exc:
+        except OSError as exc:
             raise ConfigError(f"unable to build candidate Fala native library: {exc}") from exc
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or str(exc)).strip()
+            raise ConfigError(f"unable to build candidate Fala native library: {detail}") from exc
         fala_root = candidate / "source" / "project" / "Fala"
+        process_host_source = fala_root / "mojo" / "fala" / "native_process_host.c"
+        process_host_dir = fala_root / "mojo" / "fala" / "native"
+        process_host_dir.mkdir(parents=True)
+        process_host_name = "libfala_process_host.dylib" if sys.platform == "darwin" else "libfala_process_host.so"
+        process_host = process_host_dir / process_host_name
+        process_host_command = ["cc", "-std=c11", "-Wall", "-Wextra"]
+        process_host_command.extend(["-dynamiclib"] if sys.platform == "darwin" else ["-fPIC", "-shared"])
+        process_host_command.extend(["-o", str(process_host), str(process_host_source)])
+        try:
+            subprocess.run(process_host_command, check=True, capture_output=True, text=True)
+        except OSError as exc:
+            raise ConfigError(f"unable to build candidate Fala process host: {exc}") from exc
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or str(exc)).strip()
+            raise ConfigError(f"unable to build candidate Fala process host: {detail}") from exc
         build_env = dict(os.environ)
         mojo = next(
             (

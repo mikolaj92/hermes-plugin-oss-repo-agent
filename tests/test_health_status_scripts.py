@@ -77,12 +77,16 @@ class HealthStatusScriptTests(unittest.TestCase):
         project_root = ROOT.resolve()
         fala_root = (ROOT.parent / "Fala").resolve()
         real_run = cls.commands.subprocess.run
+        real_which = cls.commands.shutil.which
+
+        def fake_which(command, **kwargs):
+            return "/usr/bin/uv" if command == "uv" else real_which(command, **kwargs)
 
         def fake_git(argv, *args, **kwargs):
             command = list(argv)
             if len(command) >= 3 and command[:2] == ["git", "-C"]:
                 checkout = Path(command[2]).resolve()
-                if "status" in command and checkout in {project_root, fala_root}:
+                if command[3:] == ["status", "--porcelain"] and checkout in {project_root, fala_root}:
                     return subprocess.CompletedProcess(command, 0, "", "")
                 if checkout == fala_root and command[3:5] == ["rev-parse", "HEAD"]:
                     return subprocess.CompletedProcess(command, 0, identity["fala_commit"] + "\n", "")
@@ -90,7 +94,7 @@ class HealthStatusScriptTests(unittest.TestCase):
 
         with patch.object(cls.commands.subprocess, "run", side_effect=fake_git), patch.object(
             cls.commands, "_read_git_revision", return_value=identity["plugin_commit"]
-        ), patch.object(cls.commands.shutil, "which", return_value="/usr/bin/uv"):
+        ), patch.object(cls.commands.shutil, "which", side_effect=fake_which):
             result = cls.commands.render_launchd(
                 cls.cfg,
                 str(candidate),

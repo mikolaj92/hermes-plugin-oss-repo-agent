@@ -383,6 +383,8 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "EmberJson" / "emberjson").is_dir())
             self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "sqlite.fire" / "native" / "sqlite_fire.c").is_file())
             self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "sqlite.fire" / "native" / "libsqlite_fire.dylib").is_file())
+            process_host_name = "libfala_process_host.dylib" if sys.platform == "darwin" else "libfala_process_host.so"
+            self.assertTrue((version / "source" / "project" / "Fala" / "mojo" / "fala" / "native" / process_host_name).is_file())
             self.assertEqual(len(list((version / "source" / "project" / "Fala" / "python" / "fala" / "__mojocache__").glob("_native.hash-*.so"))), 1)
             self.assertNotIn(str(root / "candidates"), " ".join(arguments))
             self.assertEqual(arguments[arguments.index("--project") + 1], str((version / "source" / "project").resolve()))
