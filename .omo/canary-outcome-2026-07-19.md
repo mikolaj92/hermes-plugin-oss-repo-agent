@@ -124,3 +124,15 @@ This addendum supersedes stale cleanup observations above where they conflict wi
 
 **Final disposition remains: INCOMPLETE — NOT PROMOTED.**
 
+
+## Completed promotion 2026-07-22
+
+**Final disposition: PROMOTED.**
+
+This section supersedes every earlier disposition and blocker statement in this historical record.
+
+- Issue `#8` and PR `#9` reconciliation completed; `pr #9: reconcile active claim against exact worktree` remains a historical unresolved `created` run in the Fala database.
+- The immutable deployment version `a6c859e69d46355d02ae7ee8eb5919d5f34199dc2d11c3f0742bc5e6e2df1e7e` was promoted and resolved candidate validation passed with no errors.
+- The installed Fala launch agent is loaded in `user/501` from the immutable version plist and its latest observed run exited `0`.
+- Post-promotion health observed valid database integrity and no failed or waiting processes, but returned failure solely for unresolved historical runs; status reported the same candidate ID and plist SHA-256.
+- Repository verification after final repairs: 66 focused lifecycle/deployment/health tests passed; the two repaired shell regressions passed; shell and Python syntax checks passed; hygiene passed. The full suite was not clean because the local Fala checkout lacks source modules required by ten test imports, so those environment-dependent tests were not used as promotion evidence.

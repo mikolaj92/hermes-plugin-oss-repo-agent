@@ -761,6 +761,8 @@ def render_launchd(
         raise ConfigError("candidate mode must be dry-run or live")
     if mode == "live" and cfg.mode != "live":
         raise ConfigError("live candidate requires config mode='live'")
+    if mode != cfg.mode:
+        raise ConfigError(f"Fala candidate mode does not match config mode: {cfg.mode}")
     project_root = Path(__file__).resolve().parent
     candidate = Path(output).expanduser().resolve()
     root = Path(deployment_root).expanduser().absolute() if deployment_root else None

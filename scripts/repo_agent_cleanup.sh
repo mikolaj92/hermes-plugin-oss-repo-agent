@@ -518,8 +518,14 @@ for entry in "${REPOS[@]}"; do
   while IFS=$'\t' read -r path branch; do
     [[ -n "${path:-}" && -n "${branch:-}" ]] || continue
     [[ "$branch" == ai/fix/* ]] || continue
+    issue="$(issue_from_branch "$branch" 2>/dev/null || true)"
+    state="$(issue_state "$repo" "$issue")"
     processed=$((processed + 1))
-    log "KEEP repo=$repo branch=$branch path=$path reason=no-matching-terminal-receipt"
+    if [[ -n "$issue" && "$state" == "UNKNOWN" ]]; then
+      log "KEEP repo=$repo issue=$issue branch=$branch reason=issue-state-unknown"
+    else
+      log "KEEP repo=$repo branch=$branch path=$path reason=no-matching-terminal-receipt"
+    fi
     skipped=$((skipped + 1))
   done < <(worktree_rows "$clone_path")
 done

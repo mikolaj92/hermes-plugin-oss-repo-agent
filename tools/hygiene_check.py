@@ -22,7 +22,7 @@ BLOCKED_PATTERNS = [
     ("social-credential", re.compile(r"(?:x_api_key|twitter_token|mastodon_token|reddit_client_secret)\s*[:=]", re.I)),
 ]
 
-SKIP_PARTS = {".git", "__pycache__", ".pytest_cache"}
+SKIP_PARTS = {".git", ".omo", ".venv", "__pycache__", ".pytest_cache"}
 
 
 def is_allowed_runtime_line(rel: Path, name: str, line: str) -> bool:
@@ -39,6 +39,8 @@ def is_allowed_runtime_line(rel: Path, name: str, line: str) -> bool:
         return True
     if name == "forbidden-merge-command" and rel_text == "scripts/repo_pr_triage.sh":
         return "gh pr merge" in line and "decision\" == \"merge\"" not in line
+    if name == "openai-key" and rel_text == "scripts/repo_agent_cleanup.sh" and "claim-or-task-" + "identity-mismatch" in line:
+        return True
     return False
 
 

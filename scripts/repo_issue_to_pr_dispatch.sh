@@ -685,6 +685,9 @@ backoff = int(sys.argv[2])
 text = os.environ.get("TASK_SHOW", "")
 attempts = [int(value) for value in re.findall(r"repo-agent retry attempt=(\d+)/\d+", text)]
 attempt = (max(attempts) if attempts else 0) + 1
+if attempt > max_attempts:
+    print(f"attempts-exhausted attempt={attempt}/{max_attempts}")
+    raise SystemExit(1)
 next_retry = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=backoff)
 print(f"repo-agent retry attempt={attempt}/{max_attempts} next_retry_after={next_retry.strftime('%Y-%m-%dT%H:%M:%SZ')}")
 PY
