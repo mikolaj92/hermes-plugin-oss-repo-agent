@@ -9,6 +9,7 @@
   <array>
     <string>{{UV_BIN}}</string>
     <string>run</string>
+    <string>--frozen</string>
     <string>--project</string>
     <string>{{PROJECT_ROOT}}</string>
     <string>repo-agent-tick-all</string>

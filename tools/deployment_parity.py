@@ -432,7 +432,7 @@ def _validate_args(
     if not args:
         errors.append(f"Fala {label} ProgramArguments must not be empty")
         return None
-    expected = [args[0], "run", "--project", str(project), "repo-agent-tick-all", "--config", str(config), "--db", db_path, f"--{mode}", "--json"]
+    expected = [args[0], "run", "--frozen", "--project", str(project), "repo-agent-tick-all", "--config", str(config), "--db", db_path, f"--{mode}", "--json"]
     if len(args) != len(expected) or args != expected:
         errors.append(f"Fala {label} ProgramArguments do not match canonical contract")
     if args.count("--project") != 1 or args.count("--config") != 1 or args.count("--db") != 1:

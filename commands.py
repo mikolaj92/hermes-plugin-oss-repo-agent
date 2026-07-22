@@ -662,7 +662,7 @@ def _render_fala_plist(*, project_root: Path, config_path: Path, db_path: Path, 
     except plistlib.InvalidFileException as exc:
         raise ConfigError(f"invalid Fala launchd template: {exc}") from exc
     arguments = document.get("ProgramArguments")
-    required = [str(uv_bin), "run", "--project", str(project_root), "repo-agent-tick-all", "--config", str(config_path), "--db", str(db_path), f"--{mode}", "--json"]
+    required = [str(uv_bin), "run", "--frozen", "--project", str(project_root), "repo-agent-tick-all", "--config", str(config_path), "--db", str(db_path), f"--{mode}", "--json"]
     if arguments != required:
         raise ConfigError("Fala ProgramArguments do not match immutable candidate contract")
     if (
@@ -744,7 +744,7 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
     )
     (project / "pyproject.toml").write_text(pyproject, encoding="utf-8")
     lock_data = lock.read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
-    (destination / "uv.lock").write_bytes(lock_data)
+    (project / "uv.lock").write_bytes(lock_data)
     return {"config.toml": config.read_bytes(), "uv.lock": lock_data}
 
 
@@ -835,7 +835,7 @@ def render_launchd(
         "config_hash": _sha256_file(config),
         "db_path": str(db),
         "metadata_path": "source/metadata.json",
-        "lock_path": "source/uv.lock",
+        "lock_path": "source/project/uv.lock",
         "config_artifact_path": "source/config.toml",
         "revision_path": "source/revision.txt",
         "policy": policy,

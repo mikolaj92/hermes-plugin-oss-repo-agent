@@ -93,7 +93,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             "config_hash": hashlib.sha256(config.read_bytes()).hexdigest(),
             "db_path": str(db.absolute()),
             "metadata_path": "source/metadata.json",
-            "lock_path": "source/uv.lock",
+            "lock_path": "source/project/uv.lock",
             "config_artifact_path": "source/config.toml",
             "revision_path": "source/revision.txt",
             "policy": {
@@ -162,7 +162,7 @@ class DeploymentCandidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             candidate = self._render(Path(directory))
             metadata = json.loads((candidate / "source" / "metadata.json").read_text(encoding="utf-8"))
-            bundled = (candidate / "source" / "uv.lock").read_bytes()
+            bundled = (candidate / "source" / "project" / "uv.lock").read_bytes()
             import hashlib
             self.assertEqual(metadata["lock_hash"], hashlib.sha256(bundled).hexdigest())
 
@@ -307,6 +307,8 @@ class DeploymentCandidateTests(unittest.TestCase):
             runtime_root = root / "runtime" / candidate_id
             self.assertEqual(environment["UV_PROJECT_ENVIRONMENT"], str((runtime_root / ".venv").resolve()))
             self.assertEqual(environment["UV_CACHE_DIR"], str((runtime_root / "cache").resolve()))
+            self.assertEqual(arguments[2], "--frozen")
+            self.assertTrue((version / "source" / "project" / "uv.lock").is_file())
             self.assertNotIn(str(root / "candidates"), " ".join(arguments))
             self.assertEqual(arguments[arguments.index("--project") + 1], str((version / "source" / "project").resolve()))
             self.assertEqual(arguments[arguments.index("--config") + 1], str((version / "source" / "config.toml").resolve()))
