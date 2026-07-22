@@ -23,7 +23,11 @@ CREATE TABLE processes (
     max_attempts INTEGER NOT NULL,
     output_json TEXT NOT NULL,
     error_json TEXT NOT NULL
-)
+);
+CREATE TABLE runs (
+    id TEXT PRIMARY KEY,
+    metadata TEXT NOT NULL
+);
 """
 
 
@@ -31,11 +35,12 @@ class RuntimeFacadeTests(unittest.TestCase):
     def _db(self, root: Path, rows: list[tuple[object, ...]]) -> Path:
         db = root / "state.sqlite"
         with sqlite3.connect(db) as connection:
-            connection.execute(_SCHEMA)
+            connection.executescript(_SCHEMA)
             connection.executemany(
                 "INSERT INTO processes VALUES (?,?,?,?,?,?,?)",
                 rows,
             )
+            connection.execute("INSERT INTO runs VALUES (?, ?)", ("run-1", "{}"))
         return db
 
     def test_normalizes_exact_journal_evidence(self) -> None:
@@ -76,6 +81,32 @@ class RuntimeFacadeTests(unittest.TestCase):
         self.assertEqual(failed.max_attempts, 1)
         self.assertEqual(failed.error, {"reason": "semantic failure"})
         runner.assert_called_once()
+
+    def test_persists_run_mode_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._db(
+                Path(tmp),
+                [("run-1", "run-1:path:success", "succeeded", 1, 1, "{}", "{}")],
+            )
+            host = {
+                "ok": True,
+                "run_id": "run-1",
+                "run_status": "completed",
+                "replayed": False,
+                "ticks": 1,
+                "processes": [{"id": "run-1:path:success", "status": "succeeded"}],
+            }
+            with patch("repo_agent.flows.runtime.host_run_package", return_value=host):
+                run_package_path(
+                    db_path=db,
+                    package_path=Path(tmp) / "package.toml",
+                    path_id="path",
+                    run_id="run-1",
+                    run_metadata={"mode": "live"},
+                )
+            with sqlite3.connect(db) as connection:
+                metadata = connection.execute("SELECT metadata FROM runs WHERE id='run-1'").fetchone()[0]
+        self.assertEqual(json.loads(metadata), {"mode": "live"})
 
     def test_malformed_journal_json_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

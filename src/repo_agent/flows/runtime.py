@@ -221,6 +221,19 @@ def _normalize_host_result(
     )
 
 
+def _write_run_metadata(db_path: str | Path, run_id: str, metadata: Mapping[str, Any]) -> None:
+    try:
+        encoded = json.dumps(dict(metadata), sort_keys=True, separators=(",", ":"))
+        with sqlite3.connect(Path(db_path).expanduser().resolve()) as connection:
+            cursor = connection.execute("UPDATE runs SET metadata=? WHERE id=?", (encoded, run_id))
+            if cursor.rowcount != 1:
+                raise RuntimeFacadeError("Fala run metadata target is missing")
+    except RuntimeFacadeError:
+        raise
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        raise RuntimeFacadeError(f"unable to persist Fala run metadata: {_redact(str(exc))}") from exc
+
+
 def run_package_path(
     *,
     db_path: str | Path,
@@ -231,6 +244,7 @@ def run_package_path(
     effector_inputs: Mapping[str, Mapping[str, Any]] | None = None,
     effector_configs: Mapping[str, Mapping[str, Any] | str] | None = None,
     command_overrides: Mapping[str, Sequence[str]] | None = None,
+    run_metadata: Mapping[str, Any] | None = None,
     max_ticks: int = 32,
     worker_id: str = "repo-agent",
 ) -> HostPathRunResult:
@@ -250,6 +264,8 @@ def run_package_path(
             max_ticks=max_ticks,
             worker_id=worker_id,
         )
+        if run_metadata is not None:
+            _write_run_metadata(db_path, run_id, run_metadata)
     return _normalize_host_result(
         raw,
         db_path=db_path,

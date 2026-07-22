@@ -119,6 +119,7 @@ async def run_all(*, db_path: Path, config: Any, dry_run: bool, limit: int = 10)
         run_id=run_id,
         inputs=inputs,
         effector_inputs=effector_inputs,
+        run_metadata={"mode": "dry-run" if dry_run else "live"},
         max_ticks=40,
         worker_id="repo-agent:tick-all",
     )
