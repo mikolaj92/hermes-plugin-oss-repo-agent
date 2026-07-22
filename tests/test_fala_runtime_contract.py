@@ -108,6 +108,72 @@ class RuntimeFacadeTests(unittest.TestCase):
                 metadata = connection.execute("SELECT metadata FROM runs WHERE id='run-1'").fetchone()[0]
         self.assertEqual(json.loads(metadata), {"mode": "live"})
 
+    def test_replay_preserves_durable_run_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._db(
+                Path(tmp),
+                [("run-1", "run-1:path:success", "succeeded", 1, 1, "{}", "{}")],
+            )
+            with sqlite3.connect(db) as connection:
+                connection.execute(
+                    "UPDATE runs SET metadata=? WHERE id='run-1'",
+                    (json.dumps({"mode": "dry-run", "host": "kept"}),),
+                )
+            host = {
+                "ok": True,
+                "run_id": "run-1",
+                "run_status": "completed",
+                "replayed": True,
+                "ticks": 0,
+                "processes": [{"id": "run-1:path:success", "status": "succeeded"}],
+            }
+            with (
+                patch("repo_agent.flows.runtime.host_run_package", return_value=host),
+                self.assertRaisesRegex(RuntimeFacadeError, "replay metadata disagrees"),
+            ):
+                run_package_path(
+                    db_path=db,
+                    package_path=Path(tmp) / "package.toml",
+                    path_id="path",
+                    run_id="run-1",
+                    run_metadata={"mode": "live"},
+                )
+            with sqlite3.connect(db) as connection:
+                metadata = connection.execute("SELECT metadata FROM runs WHERE id='run-1'").fetchone()[0]
+        self.assertEqual(json.loads(metadata), {"mode": "dry-run", "host": "kept"})
+
+    def test_matching_replay_metadata_preserves_host_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._db(
+                Path(tmp),
+                [("run-1", "run-1:path:success", "succeeded", 1, 1, "{}", "{}")],
+            )
+            with sqlite3.connect(db) as connection:
+                connection.execute(
+                    "UPDATE runs SET metadata=? WHERE id='run-1'",
+                    (json.dumps({"mode": "dry-run", "host": "kept"}),),
+                )
+            host = {
+                "ok": True,
+                "run_id": "run-1",
+                "run_status": "completed",
+                "replayed": True,
+                "ticks": 0,
+                "processes": [{"id": "run-1:path:success", "status": "succeeded"}],
+            }
+            with patch("repo_agent.flows.runtime.host_run_package", return_value=host):
+                result = run_package_path(
+                    db_path=db,
+                    package_path=Path(tmp) / "package.toml",
+                    path_id="path",
+                    run_id="run-1",
+                    run_metadata={"mode": "dry-run"},
+                )
+            with sqlite3.connect(db) as connection:
+                metadata = connection.execute("SELECT metadata FROM runs WHERE id='run-1'").fetchone()[0]
+        self.assertTrue(result.replayed)
+        self.assertEqual(json.loads(metadata), {"mode": "dry-run", "host": "kept"})
+
     def test_malformed_journal_json_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = self._db(

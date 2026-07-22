@@ -137,3 +137,17 @@ This section supersedes every earlier disposition and blocker statement in this 
 - Health passes with valid database integrity, a latest completed live run, no failed or waiting processes, and 82 unresolved historical runs reported observationally.
 - Status correctly fails closed on those 82 unresolved historical `created` or failed runs. Because the acceptance contract requires health and status both to exit zero, promotion cannot be claimed until those historical runs are reconciled through an auditable supported transition.
 - Repository verification after final repairs: 66 focused lifecycle/deployment/health tests passed; the two repaired shell regressions passed; shell and Python syntax checks passed; hygiene passed. The full suite was not clean because the local Fala checkout lacks source modules required by ten test imports.
+
+## Final source hardening verification 2026-07-22
+
+**Disposition: INCOMPLETE — NOT PROMOTED.**
+
+- The final source hardening preserves existing journal metadata on new runs, rejects conflicting metadata on replay, and requires the latest run to be `completed` in both health and status gates.
+- Focused runtime and health/status verification passed: `23` tests. The isolated adapter cwd-forwarding regression also passed.
+- The full repository suite passed in the required Fala Mojo environment: `207` tests with `FALA_HOME=../Fala` under the sibling Fala Pixi environment. The same real-host intake test fails outside that environment because Mojo/Fala source discovery is unavailable; this is an environment prerequisite, not a source regression.
+- Python and shell syntax checks, `git diff --check`, and repository hygiene passed.
+- The immutable candidate `cfa07aa61e50b602add8dd1d1cc6c4b444fc12ce690e50749538d820f7486419` remains loaded in `user/501`; launchd reports four runs and latest exit code `0`. The latest journal run is `completed`, `live`, and has no failed or waiting processes.
+- Promotion acceptance still fails closed: status reports `99` unresolved historical runs; health exits nonzero because available home-volume space is below the configured `5 GiB` minimum; and the repository smoke detects active-script/layout parity drift because the active scripts root resolves to the immutable version root without the managed script inventory.
+- These operational blockers are not suppressed or repaired by the source hardening. No additional deployment cutover, launchd mutation, historical-run rewrite, or cleanup mutation is claimed.
+
+The source changes may be committed and pushed to `main` under the operator's explicit instruction, but that push does not change the deployment disposition. Promotion remains incomplete until health, status, and active parity all exit zero and provenance is reverified.

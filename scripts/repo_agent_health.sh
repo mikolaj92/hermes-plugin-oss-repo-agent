@@ -399,8 +399,8 @@ try:
         if stamp.tzinfo is None: stamp = stamp.replace(tzinfo=timezone.utc)
         age = max(0, int((datetime.now(timezone.utc) - stamp).total_seconds()))
         if age > max_age: raise ValueError(f"latest-run-stale:{age}")
-        status = str(latest[1]); valid_statuses = {"created", "active", "waiting", "retry_wait", "completed", "failed", "cancel_requested", "cancelled", "timed_out"}
-        if status not in valid_statuses: raise ValueError(f"latest-run-status-invalid:{status}")
+        status = str(latest[1])
+        if status != "completed": raise ValueError(f"latest-run-not-completed:{status}")
         delta = (datetime.now(timezone.utc) - stamp).total_seconds()
         if delta < 0: raise ValueError("future-run-timestamp")
         age = int(delta)

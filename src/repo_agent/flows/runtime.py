@@ -221,16 +221,32 @@ def _normalize_host_result(
     )
 
 
-def _write_run_metadata(db_path: str | Path, run_id: str, metadata: Mapping[str, Any]) -> None:
+def _write_run_metadata(
+    db_path: str | Path,
+    run_id: str,
+    metadata: Mapping[str, Any],
+    *,
+    replayed: bool,
+) -> None:
     try:
-        encoded = json.dumps(dict(metadata), sort_keys=True, separators=(",", ":"))
+        requested = dict(metadata)
         with sqlite3.connect(Path(db_path).expanduser().resolve()) as connection:
-            cursor = connection.execute("UPDATE runs SET metadata=? WHERE id=?", (encoded, run_id))
-            if cursor.rowcount != 1:
+            row = connection.execute("SELECT metadata FROM runs WHERE id=?", (run_id,)).fetchone()
+            if row is None:
                 raise RuntimeFacadeError("Fala run metadata target is missing")
+            existing = json.loads(row[0] or "{}")
+            if not isinstance(existing, dict):
+                raise RuntimeFacadeError("Fala run metadata must decode to an object")
+            if replayed:
+                if any(existing.get(key) != value for key, value in requested.items()):
+                    raise RuntimeFacadeError("Fala replay metadata disagrees with the durable journal")
+                return
+            existing.update(requested)
+            encoded = json.dumps(existing, sort_keys=True, separators=(",", ":"))
+            connection.execute("UPDATE runs SET metadata=? WHERE id=?", (encoded, run_id))
     except RuntimeFacadeError:
         raise
-    except (sqlite3.Error, TypeError, ValueError) as exc:
+    except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as exc:
         raise RuntimeFacadeError(f"unable to persist Fala run metadata: {_redact(str(exc))}") from exc
 
 
@@ -265,7 +281,7 @@ def run_package_path(
             worker_id=worker_id,
         )
         if run_metadata is not None:
-            _write_run_metadata(db_path, run_id, run_metadata)
+            _write_run_metadata(db_path, run_id, run_metadata, replayed=bool(raw.get("replayed")))
     return _normalize_host_result(
         raw,
         db_path=db_path,

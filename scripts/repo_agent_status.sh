@@ -234,8 +234,8 @@ try:
     if not latest[0] or not latest[1] or not latest[2]: raise ValueError("latest-run-missing-or-invalid")
     stamp=datetime.fromisoformat(str(latest[2]).replace("Z","+00:00")); stamp=stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc); age=max(0,int((datetime.now(timezone.utc)-stamp).total_seconds()))
     if age>max_age: raise ValueError(f"latest-run-stale:{age}")
-    status=str(latest[1]); valid_statuses={"created","active","waiting","retry_wait","completed","failed","cancel_requested","cancelled","timed_out"}
-    if status not in valid_statuses: raise ValueError(f"latest-run-status-invalid:{status}")
+    status=str(latest[1])
+    if status!="completed": raise ValueError(f"latest-run-not-completed:{status}")
     if unresolved: raise ValueError(f"unresolved-runs:{unresolved}")
     metadata=json.loads(latest[3] or "{}"); mode=metadata.get("mode")
     if mode not in {"live","dry-run"}: mode="dry-run" if metadata.get("dry_run") is True else ("live" if metadata.get("dry_run") is False else None)

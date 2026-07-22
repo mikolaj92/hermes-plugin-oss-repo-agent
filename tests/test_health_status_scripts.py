@@ -266,6 +266,36 @@ exit 0
         completed = self._run("repo_agent_status.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("runtime-identity-process_type-mismatch", completed.stdout)
+    def test_health_rejects_latest_incomplete_run(self):
+        db = self.root / "latest-incomplete.sqlite"
+        self._write_db(db, mode="live")
+        with sqlite3.connect(db) as connection:
+            connection.execute("UPDATE runs SET status='created' WHERE id='latest'")
+        layout = self._layout(db=db)
+        completed = self._run(
+            "repo_agent_health.sh",
+            db=db,
+            deployment=layout / "deployment",
+            extra={"HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "1"},
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("latest-run-not-completed:created", completed.stdout)
+
+    def test_status_rejects_latest_incomplete_run(self):
+        db = self.root / "latest-incomplete-status.sqlite"
+        self._write_db(db, mode="live")
+        with sqlite3.connect(db) as connection:
+            connection.execute("UPDATE runs SET status='active' WHERE id='latest'")
+        layout = self._layout(db=db)
+        completed = self._run(
+            "repo_agent_status.sh",
+            db=db,
+            deployment=layout / "deployment",
+            extra={"HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "1"},
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("latest-run-not-completed:active", completed.stdout)
+
     def test_health_marks_non_live_production_gate(self):
         db = self.root / "non-live.sqlite"
         self._write_db(db, mode="dry-run")
