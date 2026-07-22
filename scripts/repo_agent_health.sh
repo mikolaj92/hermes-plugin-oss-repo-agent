@@ -272,6 +272,7 @@ repos=()
 while IFS= read -r repo_entry; do repos+=("$repo_entry"); done <<<"$repo_data"
 
 failures=0
+warnings=0
 parity_source_root="${HERMES_REPO_AGENT_PARITY_SOURCE_ROOT:-$SCRIPT_DIR}"
 parity_active_root="${HERMES_REPO_AGENT_PARITY_ACTIVE_ROOT:-$HOME/.hermes/scripts}"
 parity_template_root="${HERMES_REPO_AGENT_PARITY_TEMPLATE_ROOT:-$SCRIPT_DIR/../templates/launchd}"
