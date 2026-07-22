@@ -1272,6 +1272,10 @@ class CleanupTests(unittest.TestCase):
             req({"branch": "ai/fix/17-fix-login"})
         )
         self.assertEqual(out["issue"], 17)
+        conducted = cleanup.parse_issue_from_branch(
+            {"input": {"conduction": {"repair_push_branch": {"branch": "ai/fix/18-fix-session"}}}, "config": {}}
+        )
+        self.assertEqual(conducted["issue"], 18)
 
     def test_parse_issue_fail(self) -> None:
         out = cleanup.parse_issue_from_branch(req({"branch": "feature/foo"}))

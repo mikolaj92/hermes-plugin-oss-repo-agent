@@ -19,6 +19,7 @@ from repo_agent.adapters_git import (
 from repo_agent.envelope import (
     cfg_of,
     cond_blob,
+    cond_get,
     dry_run_flag,
     fail,
     input_of,
