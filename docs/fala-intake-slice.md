@@ -13,12 +13,12 @@ fala == 0.7.9
 ```
 
 The local path dependency is `../Fala`; verify it is checked out at commit
-`810671075b478c1cc5950eafe892826a17c068bf` before syncing.
+`69bc2ec9d4cdf61773114847c0c582fb2652296d` before syncing.
 
 ## Run diagnostic
 
 ```bash
-cd ../Fala && git fetch --tags && git checkout 810671075b478c1cc5950eafe892826a17c068bf && cd -
+cd ../Fala && git fetch --tags && git checkout 69bc2ec9d4cdf61773114847c0c582fb2652296d && cd -
 uv sync
 uv run repo-agent-tick-intake --dry-run
 ```
