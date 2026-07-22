@@ -797,11 +797,17 @@ def render_launchd(
     revision = _read_git_revision(project_root, "")
     fala_root = (project_root.parent / "Fala").resolve()
     try:
-        fala_revision = subprocess.run(["git", "-C", str(fala_root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        fala_revision = ""
-    if fala_revision != "9c5f419abe63c4683ad3e17ff708200c3c83d9e9":
-        raise ConfigError("Fala candidate source is not pinned to 0.2.1 commit")
+        pinned_present = subprocess.run(
+            ["git", "-C", str(fala_root), "cat-file", "-e", f"{FALA_PINNED_COMMIT}^{{commit}}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ConfigError("Fala candidate source does not contain the pinned 0.2.1 maintenance commit") from exc
+    if pinned_present.returncode != 0:
+        raise ConfigError("Fala candidate source does not contain the pinned 0.2.1 maintenance commit")
+    fala_revision = FALA_PINNED_COMMIT
     lock_data = lock.read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
     lock_hash = _sha256_bytes(lock_data)
     policy = {

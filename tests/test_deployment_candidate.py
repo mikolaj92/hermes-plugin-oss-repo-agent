@@ -43,7 +43,6 @@ class DeploymentCandidateTests(unittest.TestCase):
     def _fala_git_clean(self):
         project_root = ROOT.resolve()
         fala_root = (ROOT.parent / "Fala").resolve()
-        pinned = "9c5f419abe63c4683ad3e17ff708200c3c83d9e9"
         real_run = self.commands.subprocess.run
 
         def fake_run(argv, *args, **kwargs):
@@ -52,8 +51,8 @@ class DeploymentCandidateTests(unittest.TestCase):
                 checkout = Path(command[2]).resolve()
                 if "status" in command and checkout in {project_root, fala_root}:
                     return subprocess.CompletedProcess(command, 0, "", "")
-                if checkout == fala_root and command[3:5] == ["rev-parse", "HEAD"]:
-                    return subprocess.CompletedProcess(command, 0, pinned + "\n", "")
+                if checkout == fala_root and command[3:5] == ["cat-file", "-e"]:
+                    return subprocess.CompletedProcess(command, 0, "", "")
             return real_run(argv, *args, **kwargs)
 
         return patch.object(self.commands.subprocess, "run", side_effect=fake_run)
