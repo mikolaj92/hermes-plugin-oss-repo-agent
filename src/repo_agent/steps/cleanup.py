@@ -218,6 +218,9 @@ def release_active_issue_claim(request: EffectorRunRequest) -> EffectorRunResult
         blob = raw_conduction.get(name)
         return blob if isinstance(blob, dict) else None
 
+    parsed = evidence("parse_issue_from_branch")
+    if parsed is not None and parsed.get("ok") is True and parsed.get("reason") == "no_branch":
+        return noop("no_branch")
     removed = evidence("remove_worktree")
     closed = evidence("check_issue_closed")
     no_open_pr = evidence("check_no_open_pr")
@@ -247,7 +250,6 @@ def release_active_issue_claim(request: EffectorRunRequest) -> EffectorRunResult
 
     claim_path = str(data.get("claim_path") or cfg.get("active_issue_path") or "").strip()
     repo = str(data.get("repo") or closed.get("repo") or "").strip()
-    parsed = evidence("parse_issue_from_branch")
     raw_issue = data.get("issue") or (parsed or {}).get("issue") or closed.get("issue")
     try:
         issue = int(raw_issue)

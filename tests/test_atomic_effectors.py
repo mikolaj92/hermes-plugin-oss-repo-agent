@@ -1338,6 +1338,20 @@ class CleanupTests(unittest.TestCase):
             self.assertTrue(out["mutated"])
             self.assertFalse(path.exists())
 
+    def test_release_active_claim_noops_without_branch(self) -> None:
+        out = cleanup.release_active_issue_claim(
+            req(
+                {
+                    "dry_run": False,
+                    "conduction": {
+                        "parse_issue_from_branch": {"ok": True, "status": "noop", "reason": "no_branch"},
+                    },
+                }
+            )
+        ).output
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "no_branch")
+
     def test_create_maintenance_dry(self) -> None:
         out = cleanup.create_maintenance_task(
             req(
