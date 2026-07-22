@@ -688,6 +688,29 @@ def _runtime_identity(document: dict[str, Any], plist_data: bytes) -> dict[str, 
         "limit_load_to_session_type": document.get("LimitLoadToSessionType"),
         "plist_sha256": _sha256_bytes(plist_data),
     }
+def _copy_git_tree(repo: Path, revision: str, destination: Path) -> None:
+    try:
+        archive = subprocess.run(
+            ["git", "-C", str(repo), "archive", "--format=tar", revision],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ConfigError(f"unable to archive pinned source {repo}: {exc}") from exc
+    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
+            for member in bundle.getmembers():
+                target = (destination / member.name).resolve()
+                try:
+                    target.relative_to(destination.resolve())
+                except ValueError as exc:
+                    raise ConfigError("pinned source archive contains an unsafe path") from exc
+            bundle.extractall(destination)
+    except (OSError, tarfile.TarError) as exc:
+        raise ConfigError(f"unable to unpack pinned source {repo}: {exc}") from exc
+
+
 def _copy_candidate_source(project_root: Path, destination: Path, config: Path, lock: Path) -> dict[str, bytes]:
     """Copy the runnable plugin and the complete pinned local Fala dependency."""
     project = destination / "project"
@@ -711,28 +734,31 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
             capture_output=True,
             text=True,
         )
-        archive = subprocess.run(
-            ["git", "-C", str(fala_root), "archive", "--format=tar", FALA_PINNED_COMMIT],
+        submodules = subprocess.run(
+            ["git", "-C", str(fala_root), "submodule", "status", "--recursive"],
             check=True,
             capture_output=True,
+            text=True,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ConfigError(f"unable to verify pinned Fala checkout: {exc}") from exc
     if status.stdout.strip():
         raise ConfigError("pinned Fala checkout is dirty")
     fala_target = project / "Fala"
-    fala_target.mkdir(parents=True, exist_ok=True)
-    try:
-        with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
-            for member in bundle.getmembers():
-                target = (fala_target / member.name).resolve()
-                try:
-                    target.relative_to(fala_target.resolve())
-                except ValueError as exc:
-                    raise ConfigError("pinned Fala archive contains an unsafe path") from exc
-            bundle.extractall(fala_target)
-    except (OSError, tarfile.TarError) as exc:
-        raise ConfigError(f"unable to unpack pinned Fala source: {exc}") from exc
+    _copy_git_tree(fala_root, FALA_PINNED_COMMIT, project / "Fala")
+    for line in submodules.stdout.splitlines():
+        if not line or line[0] != " ":
+            raise ConfigError("pinned Fala submodules are not initialized at recorded commits")
+        fields = line[1:].split()
+        if len(fields) < 2:
+            raise ConfigError("unable to parse pinned Fala submodule status")
+        commit, relative = fields[:2]
+        submodule = (fala_root / relative).resolve()
+        try:
+            submodule.relative_to(fala_root)
+        except ValueError as exc:
+            raise ConfigError("pinned Fala submodule path is unsafe") from exc
+        _copy_git_tree(submodule, commit, project / "Fala" / relative)
     (fala_target / "revision.txt").write_text(
         FALA_PINNED_COMMIT + "\n",
         encoding="utf-8",
@@ -1055,6 +1081,7 @@ def _promote_version_runtime(version: Path, deployment_root: Path, candidate_id:
     environment["HOME"] = str(Path.home().resolve())
     environment["UV_PROJECT_ENVIRONMENT"] = str((deployment_root / "runtime" / candidate_id / ".venv").resolve())
     environment["UV_CACHE_DIR"] = str((deployment_root / "runtime" / candidate_id / "cache").resolve())
+    environment["FALA_HOME"] = str((project / "Fala").resolve())
     environment["PATH"] = os.pathsep.join(
         (
             str((Path.home() / ".local" / "share" / "mise" / "shims").resolve()),

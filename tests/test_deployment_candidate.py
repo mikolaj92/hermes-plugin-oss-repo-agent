@@ -49,7 +49,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             command = list(argv)
             if len(command) >= 3 and command[:2] == ["git", "-C"]:
                 checkout = Path(command[2]).resolve()
-                if "status" in command and checkout in {project_root, fala_root}:
+                if command[3:] == ["status", "--porcelain"] and checkout in {project_root, fala_root}:
                     return subprocess.CompletedProcess(command, 0, "", "")
                 if checkout == fala_root and command[3:5] == ["cat-file", "-e"]:
                     return subprocess.CompletedProcess(command, 0, "", "")
@@ -370,12 +370,15 @@ class DeploymentCandidateTests(unittest.TestCase):
             runtime_root = root / "runtime" / candidate_id
             self.assertEqual(environment["UV_PROJECT_ENVIRONMENT"], str((runtime_root / ".venv").resolve()))
             self.assertEqual(environment["UV_CACHE_DIR"], str((runtime_root / "cache").resolve()))
+            self.assertEqual(environment["FALA_HOME"], str((version / "source" / "project" / "Fala").resolve()))
             self.assertEqual(environment["PATH"].split(":" )[0], str((root / "home" / ".local" / "share" / "mise" / "shims").resolve()))
             self.assertIn(str((root / "home" / ".local" / "bin").resolve()), environment["PATH"].split(":"))
             self.assertEqual(arguments[2], "--frozen")
             self.assertTrue((version / "source" / "project" / "uv.lock").is_file())
             self.assertTrue((version / "source" / "project" / "README.md").is_file())
             self.assertTrue((version / "source" / "project" / "LICENSE").is_file())
+            self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "EmberJson" / "emberjson").is_dir())
+            self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "sqlite.fire" / "native" / "sqlite_fire.c").is_file())
             self.assertNotIn(str(root / "candidates"), " ".join(arguments))
             self.assertEqual(arguments[arguments.index("--project") + 1], str((version / "source" / "project").resolve()))
             self.assertEqual(arguments[arguments.index("--config") + 1], str((version / "source" / "config.toml").resolve()))

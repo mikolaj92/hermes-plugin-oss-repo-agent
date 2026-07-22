@@ -585,7 +585,7 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         if not isinstance(value, str) or not Path(value).is_absolute() or "~" in value:
             errors.append(f"Fala runtime {key} is invalid")
     env = runtime.get("environment_variables")
-    expected_env_keys = {"HOME"} if candidate.parent.name == "candidates" else {"HOME", "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "PATH"}
+    expected_env_keys = {"HOME"} if candidate.parent.name == "candidates" else {"HOME", "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "FALA_HOME", "PATH"}
     path_keys = expected_env_keys - {"PATH"}
     if not isinstance(env, dict) or set(env) != expected_env_keys or not isinstance(env.get("HOME"), str) or not Path(env["HOME"]).is_absolute():
         errors.append(f"Fala runtime environment_variables must be exactly {sorted(expected_env_keys)}")
@@ -597,6 +597,8 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         expected_runtime = (deployment_root.expanduser().resolve() / "runtime" / candidate_id).resolve()
         if Path(env["UV_PROJECT_ENVIRONMENT"]).parent.resolve() != expected_runtime or Path(env["UV_CACHE_DIR"]).parent.resolve() != expected_runtime:
             errors.append("Fala UV runtime paths are not candidate-local")
+        if Path(env["FALA_HOME"]).resolve() != (project / "Fala").resolve():
+            errors.append("Fala runtime source path is not version-local")
     if runtime.get("start_interval") != 600 or runtime.get("run_at_load") is not False or runtime.get("process_type") != "Background" or runtime.get("limit_load_to_session_type") not in (None, "Background"):
         errors.append("Fala runtime schedule/process/session contract is invalid")
     if plist_path is not None and runtime.get("plist_sha256") != sha256(plist_path):
