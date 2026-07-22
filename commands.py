@@ -908,6 +908,56 @@ def render_launchd(
             )
         except (OSError, subprocess.CalledProcessError) as exc:
             raise ConfigError(f"unable to build candidate Fala native library: {exc}") from exc
+        fala_root = candidate / "source" / "project" / "Fala"
+        build_env = dict(os.environ)
+        mojo = next(
+            (
+                value
+                for value in (build_env.get("MODULAR_MOJO_MAX_DRIVER_PATH"), build_env.get("MOJO"))
+                if value and Path(value).is_file()
+            ),
+            None,
+        ) or shutil.which("mojo", path=build_env.get("PATH"))
+        if not mojo:
+            pixi_root = Path(build_env["CONDA_PREFIX"]) if build_env.get("CONDA_PREFIX") else project_root.parent / "Fala" / ".pixi" / "envs" / "default"
+            pixi_mojo = pixi_root / "bin" / "mojo"
+            pixi_import = pixi_root / "lib" / "mojo"
+            if pixi_mojo.is_file() and pixi_import.is_dir():
+                mojo = str(pixi_mojo)
+                build_env.setdefault("MODULAR_MAX_PACKAGE_ROOT", str(pixi_root))
+                build_env.setdefault("MODULAR_MOJO_MAX_PACKAGE_ROOT", str(pixi_root))
+                build_env.setdefault("MODULAR_MOJO_MAX_DRIVER_PATH", mojo)
+                build_env.setdefault("MODULAR_MOJO_MAX_IMPORT_PATH", str(pixi_import))
+                build_env["PATH"] = str(pixi_root / "bin") + os.pathsep + build_env.get("PATH", "")
+        if not mojo:
+            raise ConfigError("unable to locate Mojo compiler for candidate runtime")
+        mojo_cache = fala_root / "python" / "fala" / "__mojocache__"
+        mojo_cache.mkdir()
+        mojo_sources = sorted(
+            list((fala_root / "python" / "fala").glob("*.mojo"))
+            + list((fala_root / "mojo" / "fala").rglob("*.mojo"))
+            + list((fala_root / "vendor" / "EmberJson").rglob("*.mojo"))
+            + list((fala_root / "vendor" / "sqlite.fire").rglob("*.mojo"))
+        )
+        digest = hashlib.sha256()
+        for path in mojo_sources:
+            try:
+                relative = str(path.relative_to(fala_root))
+            except ValueError:
+                relative = path.name
+            digest.update(relative.encode())
+            digest.update(path.read_bytes())
+        mojo_output = mojo_cache / f"_native.hash-{digest.hexdigest()[:16]}.so"
+        try:
+            subprocess.run(
+                [mojo, "build", str(fala_root / "python" / "fala" / "_native.mojo"), "--emit", "shared-lib", "-I", str(fala_root / "mojo"), "-I", str(fala_root / "vendor" / "EmberJson"), "-I", str(fala_root / "vendor" / "sqlite.fire" / "src"), "-o", str(mojo_output)],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=build_env,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise ConfigError(f"unable to build candidate Fala Mojo extension: {exc}") from exc
         candidate_project = candidate / "source" / "project"
         candidate_config = candidate / "source" / "config.toml"
         uv_bin = shutil.which("uv")

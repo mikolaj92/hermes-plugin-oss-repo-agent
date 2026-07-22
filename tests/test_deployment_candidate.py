@@ -107,8 +107,11 @@ class DeploymentCandidateTests(unittest.TestCase):
         }
         candidate_id = hashlib.sha256((json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
         candidate = root / "candidates" / candidate_id
+        real_which = self.commands.shutil.which
+        def fake_which(command, **kwargs):
+            return "/usr/bin/uv" if command == "uv" else real_which(command, **kwargs)
         with self._fala_git_clean(), patch.object(self.commands, "_read_git_revision", return_value="plugin-commit"), patch.object(
-            self.commands.shutil, "which", return_value="/usr/bin/uv"
+            self.commands.shutil, "which", side_effect=fake_which
         ):
             result = self.commands.render_launchd(
                 self.cfg, str(candidate), config_path=str(config), fala_db=str(db), mode=mode, deployment_root=str(root)
@@ -380,6 +383,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "EmberJson" / "emberjson").is_dir())
             self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "sqlite.fire" / "native" / "sqlite_fire.c").is_file())
             self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "sqlite.fire" / "native" / "libsqlite_fire.dylib").is_file())
+            self.assertEqual(len(list((version / "source" / "project" / "Fala" / "python" / "fala" / "__mojocache__").glob("_native.hash-*.so"))), 1)
             self.assertNotIn(str(root / "candidates"), " ".join(arguments))
             self.assertEqual(arguments[arguments.index("--project") + 1], str((version / "source" / "project").resolve()))
             self.assertEqual(arguments[arguments.index("--config") + 1], str((version / "source" / "config.toml").resolve()))
