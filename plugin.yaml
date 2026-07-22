@@ -1,7 +1,7 @@
 manifest_version: 1
 name: oss-repo-agent
-version: 0.1.0
-description: Generic guarded GitHub issue to PR workflow for Hermes.
+version: 0.2.1
+description: Guarded GitHub issue-to-PR automation for Hermes, orchestrated by Fala.
 author: mikolaj92
 kind: standalone
 provides_hooks: []

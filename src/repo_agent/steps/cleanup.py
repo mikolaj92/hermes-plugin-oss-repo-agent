@@ -105,19 +105,7 @@ def check_no_open_pr_for_branch(request: EffectorRunRequest) -> EffectorRunResul
         return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False, repo=repo, branch=branch, idempotency_key=f"cleanup:pr:{repo}:{branch}:check-open")
     try:
         proc = run_cmd(
-            [
-                gh,
-                "pr",
-                "list",
-                "--repo",
-                repo,
-                "--head",
-                branch,
-                "--state",
-                "open",
-                "--json",
-                "number",
-            ],
+            [gh, "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "number"],
             timeout=60,
         )
         raw = (proc.stdout or "").strip()
@@ -130,12 +118,7 @@ def check_no_open_pr_for_branch(request: EffectorRunRequest) -> EffectorRunResul
         return fail("pr_list_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), repo=repo, branch=branch, idempotency_key=f"cleanup:pr:{repo}:{branch}:check-open")
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         return fail("invalid_pr_list", failure_class="terminal", retry_safe=False, error=str(exc), repo=repo, branch=branch, idempotency_key=f"cleanup:pr:{repo}:{branch}:check-open")
-    return ok(
-        status="checked",
-        open_count=len(prs),
-        safe_to_cleanup=len(prs) == 0,
-        prs=prs,
-    )
+    return ok(status="checked", open_count=len(prs), safe_to_cleanup=len(prs) == 0, prs=prs)
 
 
 def remove_worktree(request: EffectorRunRequest) -> EffectorRunResult:
@@ -152,28 +135,16 @@ def remove_worktree(request: EffectorRunRequest) -> EffectorRunResult:
             guard_class = str(guard.get("failure_class") or "terminal") if isinstance(guard, dict) else "terminal"
             guard_retry_safe = bool(guard.get("retry_safe", False)) if isinstance(guard, dict) else False
             return fail("cleanup_guard_failed", failure_class=guard_class, retry_safe=guard_retry_safe, guard=guard_name, guard_output=guard, clone_path=str(data.get("clone_path") or cfg.get("clone_path") or ""), worktree_path=str(data.get("worktree_path") or cfg.get("worktree_path") or ""), idempotency_key=cleanup_key)
-    upstream = upstream_noop(
-        request, "check_issue_closed", "check_no_open_pr", "parse_issue_from_branch"
-    )
+    upstream = upstream_noop(request, "check_issue_closed", "check_no_open_pr", "parse_issue_from_branch")
     if upstream:
         return noop(str(upstream.get("reason") or "cleanup_not_ready"))
     if require_safe and (closed_blob or open_pr_blob):
         if closed_blob and closed_blob.get("closed") is False:
-            return noop(
-                "issue_still_open",
-                closed=False,
-                issue=closed_blob.get("issue"),
-            )
+            return noop("issue_still_open", closed=False, issue=closed_blob.get("issue"))
         if open_pr_blob and open_pr_blob.get("safe_to_cleanup") is False:
-            return noop(
-                "open_pr_exists",
-                safe_to_cleanup=False,
-                open_count=open_pr_blob.get("open_count"),
-            )
+            return noop("open_pr_exists", safe_to_cleanup=False, open_count=open_pr_blob.get("open_count"))
     clone_path = str(data.get("clone_path") or cfg.get("clone_path") or "")
-    worktree_path = str(
-        data.get("worktree_path") or cfg.get("worktree_path") or ""
-    )
+    worktree_path = str(data.get("worktree_path") or cfg.get("worktree_path") or "")
     force = bool(data.get("force", False))
     if not clone_path or not worktree_path:
         return fail("missing_clone_or_worktree", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=worktree_path, idempotency_key=f"cleanup:worktree:{clone_path}:{worktree_path}:remove")
@@ -182,34 +153,14 @@ def remove_worktree(request: EffectorRunRequest) -> EffectorRunResult:
         return planned(clone_path=clone_path, worktree_path=worktree_path, force=force)
     if not worktree.exists():
         return fail("worktree_missing", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=worktree_path, branch=str(data.get("branch") or cfg.get("branch") or ""), idempotency_key=f"cleanup:worktree:{clone_path}:{worktree_path}:remove")
-    # Never remove an arbitrary directory: prove git owns this path and branch.
     expected_branch = str(data.get("branch") or cfg.get("branch") or "")
     try:
         rows = parse_worktree_porcelain(worktree_list(clone_path))
     except CommandError as exc:
-        return fail(
-            "worktree_provenance_read_failed",
-            failure_class="retryable_read",
-            retry_safe=True,
-            mutated=False,
-            error=str(exc),
-            clone_path=clone_path,
-            worktree_path=worktree_path,
-            branch=expected_branch,
-            idempotency_key=cleanup_key,
-        )
+        return fail("worktree_provenance_read_failed", failure_class="retryable_read", retry_safe=True, mutated=False, error=str(exc), clone_path=clone_path, worktree_path=worktree_path, branch=expected_branch, idempotency_key=cleanup_key)
     matches = [row for row in rows if str(Path(row.get("path") or "")).resolve() == str(worktree.resolve())]
     if not matches or (expected_branch and matches[0].get("branch") != expected_branch):
-        return fail(
-            "worktree_provenance_mismatch",
-            failure_class="terminal",
-            retry_safe=False,
-            clone_path=clone_path,
-            worktree_path=worktree_path,
-            branch=expected_branch,
-            actual_branch=(matches[0].get("branch") if matches else ""),
-            idempotency_key=cleanup_key,
-        )
+        return fail("worktree_provenance_mismatch", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=worktree_path, branch=expected_branch, actual_branch=(matches[0].get("branch") if matches else ""), idempotency_key=cleanup_key)
     try:
         worktree_remove(clone_path, worktree_path, force=force)
     except CommandError as exc:
@@ -233,9 +184,7 @@ def delete_local_fix_branch(request: EffectorRunRequest) -> EffectorRunResult:
     if removed.get("status") in {"noop", "failed"}:
         return noop("skipped_after_remove_guard", upstream_reason=removed.get("reason"), upstream_status=removed.get("status"))
     clone_path = str(data.get("clone_path") or cfg.get("clone_path") or "")
-    branch = str(
-        data.get("branch") or parsed.get("branch") or cfg.get("branch") or ""
-    )
+    branch = str(data.get("branch") or parsed.get("branch") or cfg.get("branch") or "")
     force = bool(data.get("force", True))
     if not clone_path or not branch:
         return fail("missing_clone_or_branch", failure_class="terminal", retry_safe=False, clone_path=clone_path, branch=branch, idempotency_key=f"cleanup:branch:{clone_path}:{branch}:delete")
@@ -245,16 +194,7 @@ def delete_local_fix_branch(request: EffectorRunRequest) -> EffectorRunResult:
     try:
         delete_local_branch(clone_path, branch, force=force)
     except CommandError as exc:
-        # A failed delete is ambiguous; absence alone is not proof of a
-        # successful mutation without a receipt/provenance record.
-        return fail(
-            "delete_failed",
-            failure_class="reconcile_then_retry",
-            retry_safe=False,
-            error=str(exc),
-            idempotency_key=key,
-            mutated=True,
-        )
+        return fail("delete_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), idempotency_key=key, mutated=True)
     try:
         if branch_exists(clone_path, branch):
             return fail("delete_not_confirmed", failure_class="reconcile_then_retry", retry_safe=False, branch=branch, idempotency_key=key, mutated=True)
@@ -264,45 +204,85 @@ def delete_local_fix_branch(request: EffectorRunRequest) -> EffectorRunResult:
 
 
 def release_active_issue_claim(request: EffectorRunRequest) -> EffectorRunResult:
-    """Remove active-issue claim file only after exact repo/issue read-back."""
+    """Remove an active-issue claim only after every cleanup guard succeeds."""
     import json
+
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
-    parsed = cond_blob(request, "parse_issue_from_branch", "parse")
-    closed = cond_blob(request, "check_issue_closed")
-    removed = cond_blob(request, "remove_worktree")
-    if removed.get("status") in {"noop", "failed"}:
-        return noop("skipped_after_remove_guard", upstream_reason=removed.get("reason"), upstream_status=removed.get("status"))
-    claim_path = str(data.get("claim_path") or cfg.get("active_issue_path") or "")
-    repo = str(data.get("repo") or closed.get("repo") or cfg.get("repo") or "")
-    issue = str(data.get("issue") or parsed.get("issue") or closed.get("issue") or "")
-    key = f"cleanup:claim:{claim_path}:{repo}:{issue}:release"
-    if not claim_path:
-        return fail("missing_claim_path", failure_class="terminal", retry_safe=False, claim_path=claim_path, repo=repo, issue=issue, idempotency_key=key)
-    if not repo or not issue:
-        return fail("missing_claim_provenance", failure_class="terminal", retry_safe=False, claim_path=claim_path, repo=repo, issue=issue, idempotency_key=key)
-    p = Path(claim_path)
-    if not p.exists():
-        return ok(status="absent", claim_path=claim_path, mutated=False)
-    try:
-        payload = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return fail("claim_corrupt", failure_class="terminal", retry_safe=False, error=str(exc), claim_path=claim_path, repo=repo, issue=issue, idempotency_key=key)
-    if str(payload.get("repo") or "") != repo:
-        return fail("claim_repo_mismatch", failure_class="terminal", retry_safe=False, claim_path=claim_path, repo=repo, issue=issue, payload=payload, idempotency_key=key)
-    if str(payload.get("issue") or payload.get("number") or "") != issue:
-        return fail("claim_issue_mismatch", failure_class="terminal", retry_safe=False, claim_path=claim_path, repo=repo, issue=issue, payload=payload, idempotency_key=key)
+    raw_conduction = data.get("conduction")
+    if not isinstance(raw_conduction, dict) or not raw_conduction:
+        return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False)
+
+    def evidence(name: str) -> dict[str, object] | None:
+        blob = raw_conduction.get(name)
+        return blob if isinstance(blob, dict) else None
+
+    removed = evidence("remove_worktree")
+    closed = evidence("check_issue_closed")
+    no_open_pr = evidence("check_no_open_pr")
+    deleted = evidence("delete_local_fix_branch")
     if dry:
-        return planned(claim_path=claim_path, payload=payload)
+        for name in ("parse_issue_from_branch", "remove_worktree", "check_issue_closed", "check_no_open_pr", "delete_local_fix_branch"):
+            blob = evidence(name)
+            if blob is not None and blob.get("status") in {"noop", "planned"}:
+                details = {k: v for k, v in blob.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}}
+                return noop(str(blob.get("reason") or "cleanup_planned"), **details)
+    if removed is None:
+        return fail("remove_worktree_evidence_missing", failure_class="terminal", retry_safe=False)
+    if removed.get("ok") is not True or removed.get("status") not in {"removed", "already_absent"}:
+        return fail("remove_worktree_not_successful", failure_class="terminal", retry_safe=False, evidence=removed)
+    if closed is None:
+        return fail("check_issue_closed_evidence_missing", failure_class="terminal", retry_safe=False)
+    if closed.get("ok") is not True or closed.get("closed") is not True:
+        return fail("issue_not_closed", failure_class="terminal", retry_safe=False, evidence=closed)
+    if no_open_pr is None:
+        return fail("check_no_open_pr_evidence_missing", failure_class="terminal", retry_safe=False)
+    if no_open_pr.get("ok") is not True or no_open_pr.get("safe_to_cleanup") is not True:
+        return fail("open_pr_cleanup_unsafe", failure_class="terminal", retry_safe=False, evidence=no_open_pr)
+    if deleted is None:
+        return fail("delete_local_fix_branch_evidence_missing", failure_class="terminal", retry_safe=False)
+    if deleted.get("ok") is not True or deleted.get("status") not in {"deleted", "already_absent"}:
+        return fail("delete_local_fix_branch_not_successful", failure_class="terminal", retry_safe=False, evidence=deleted)
+
+    claim_path = str(data.get("claim_path") or cfg.get("active_issue_path") or "").strip()
+    repo = str(data.get("repo") or closed.get("repo") or "").strip()
+    parsed = evidence("parse_issue_from_branch")
+    raw_issue = data.get("issue") or (parsed or {}).get("issue") or closed.get("issue")
     try:
-        p.unlink()
+        issue = int(raw_issue)
+    except (TypeError, ValueError):
+        issue = 0
+    if not claim_path:
+        return fail("missing_claim_path", failure_class="terminal", retry_safe=False)
+    if not repo or issue <= 0:
+        return fail("missing_claim_identity", failure_class="terminal", retry_safe=False, repo=repo, issue=issue)
+    path = Path(claim_path).expanduser()
+    if not path.exists():
+        return ok(status="already_absent", claim_path=str(path), repo=repo, issue=issue, mutated=False)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc))
+    if not isinstance(payload, dict):
+        return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload)
+    claim_repo = str(payload.get("repo") or "").strip()
+    claim_board = str(payload.get("board") or "").strip()
+    claim_at = str(payload.get("claimedAt") or "").strip()
+    claim_issue = payload.get("issue")
+    if payload.get("version") != 1 or not claim_repo or not claim_board or not claim_at or isinstance(claim_issue, bool) or not isinstance(claim_issue, int) or claim_issue <= 0:
+        return fail("claim_malformed", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload)
+    if claim_repo != repo:
+        return fail("claim_repo_mismatch", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload, repo=repo)
+    if claim_issue != issue:
+        return fail("claim_issue_mismatch", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload, issue=issue)
+    if dry:
+        return planned(claim_path=str(path), payload=payload, repo=repo, issue=issue)
+    try:
+        path.unlink()
     except OSError as exc:
-        if not p.exists():
-            return ok(status="absent", claim_path=claim_path, repo=repo, issue=issue, idempotency_key=key, mutated=True, reconciled=True)
-    if p.exists():
-        return fail("unlink_not_confirmed", failure_class="reconcile_then_retry", retry_safe=False, claim_path=claim_path, repo=repo, issue=issue, idempotency_key=key, mutated=True)
-    return ok(status="released", claim_path=claim_path, repo=repo, issue=issue, idempotency_key=key, mutated=True, retry_safe=True)
+        return fail("unlink_failed", failure_class="reconcile_then_retry", retry_safe=False, claim_path=str(path), error=str(exc), mutated=True)
+    return ok(status="released", claim_path=str(path), repo=repo, issue=issue, mutated=True)
 
 
 def create_maintenance_task(request: EffectorRunRequest) -> EffectorRunResult:

@@ -9,10 +9,11 @@ export PATH="/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local/bin:/us
 
 DRY_RUN="${HERMES_PR_TRIAGE_DRY_RUN:-0}"
 COMMENT_ENABLED="${HERMES_PR_TRIAGE_COMMENT:-0}"
-AUTOMERGE="${HERMES_PR_AUTOMERGE:-1}"
-REQUIRE_APPROVED="${HERMES_PR_REQUIRE_APPROVED:-0}"
-ALLOW_NO_CHECKS="${HERMES_PR_ALLOW_NO_CHECKS:-1}"
-REQUIRE_TEST_EVIDENCE="${HERMES_PR_REQUIRE_TEST_EVIDENCE:-0}"
+AUTOMERGE="${HERMES_PR_AUTOMERGE:-0}"
+REQUIRE_APPROVED="${HERMES_PR_REQUIRE_APPROVED:-1}"
+ALLOW_NO_CHECKS="${HERMES_PR_ALLOW_NO_CHECKS:-0}"
+REQUIRE_TEST_EVIDENCE="${HERMES_PR_REQUIRE_TEST_EVIDENCE:-1}"
+BASE_BRANCH="${HERMES_REPO_AGENT_BASE_BRANCH:-main}"
 PR_LIST_LIMIT="${HERMES_PR_TRIAGE_LIST_LIMIT:-100}"
 LOG_FILE="${HERMES_PR_TRIAGE_LOG:-/Users/mini-m4-main/.hermes/logs/repo-pr-triage.log}"
 LOCK_DIR="${HERMES_PR_TRIAGE_LOCK_DIR:-/tmp/hermes-repo-pr-triage.lock}"
@@ -27,11 +28,9 @@ source "$SCRIPT_DIR/repo_agent_repos.sh"
 usage() {
   cat <<'USAGE'
 Usage: repo_pr_triage.sh [--dry-run|--live] [--comment]
-
-Live mode is the default; --dry-run is an explicit no-op override. Live
-comments require --comment or HERMES_PR_TRIAGE_COMMENT=1. Automerge is enabled
-by default, with checks, test evidence, and human approval not mandatory;
-corresponding HERMES_PR_* values remain explicit 0/1 overrides.
+Live mode is opt-in with --live; dry-run remains available and safe. Automerge
+is disabled by default. Approval, passing checks, and test evidence are required
+by default; HERMES_PR_* values may explicitly override these safety policies.
 USAGE
 }
 
@@ -202,28 +201,73 @@ write_merge_receipt() {
   local repo="$1" pr="$2" issue="$3" base_sha="$4" head_sha="$5" merge_sha="$6" merged_at="$7" base_ref="$8" origin_main_sha="$9" branch="${10}" path tmp
   mkdir -p "$MERGE_RECEIPT_DIR" || return 1
   path="$MERGE_RECEIPT_DIR/$(printf '%s' "$repo-$pr" | tr '/:' '__').json"
-  tmp="${path}.tmp.$$"
-  RECEIPT_TMP="$tmp" python3 - "$repo" "$pr" "$issue" "$base_sha" "$head_sha" "$merge_sha" "$merged_at" "$base_ref" "$origin_main_sha" "$branch" <<'PY'
+  tmp="$(mktemp "$MERGE_RECEIPT_DIR/.receipt.XXXXXX")" || return 1
+  if ! RECEIPT_TMP="$tmp" RECEIPT_PATH="$path" python3 - "$repo" "$pr" "$issue" "$base_sha" "$head_sha" "$merge_sha" "$merged_at" "$base_ref" "$origin_main_sha" "$branch" <<'PY'
 import json, os, sys
+
+tmp = os.environ["RECEIPT_TMP"]
+path = os.environ["RECEIPT_PATH"]
 payload = {"repo": sys.argv[1], "pr": int(sys.argv[2]), "issue": int(sys.argv[3]), "baseSha": sys.argv[4], "headSha": sys.argv[5], "mergeSha": sys.argv[6], "mergedAt": sys.argv[7], "baseRef": sys.argv[8], "originMainSha": sys.argv[9], "branch": sys.argv[10], "phase": "MERGE_VERIFIED"}
-with open(os.environ["RECEIPT_TMP"], "w", encoding="utf-8") as handle:
-    json.dump(payload, handle, sort_keys=True)
-    handle.write("\n")
+try:
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    with open(tmp, encoding="utf-8") as handle:
+        if json.load(handle) != payload:
+            raise RuntimeError("merge receipt temp read-back mismatch")
+    try:
+        os.link(tmp, path)
+    except FileExistsError:
+        with open(path, encoding="utf-8") as handle:
+            if json.load(handle) != payload:
+                raise RuntimeError("conflicting merge receipt already exists")
+    else:
+        with open(path, encoding="utf-8") as handle:
+            if json.load(handle) != payload:
+                raise RuntimeError("merge receipt publication read-back mismatch")
+    os.unlink(tmp)
+    directory = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
 PY
-  mv -f "$tmp" "$path" || return 1
+  then
+    rm -f "$tmp"
+    return 1
+  fi
   MERGE_RECEIPT_PATH="$path"
 }
 
 release_active_claim() {
-  local repo="$1" issue="$2" payload claim_repo claim_issue
+  local repo="$1" issue="$2"
   local active_dir="${HERMES_REPO_AGENT_ACTIVE_ISSUE_DIR:-${HOME}/.hermes/state/repo-agent-active}"
   local claim_path="$active_dir/claim.json"
   [[ -f "$claim_path" ]] || return 0
-  payload="$(cat "$claim_path" 2>/dev/null || true)"
-  claim_repo="$(CLAIM_JSON="$payload" python3 -c 'import json,os; print(json.loads(os.environ["CLAIM_JSON"]).get("repo", ""))' 2>/dev/null || true)"
-  claim_issue="$(CLAIM_JSON="$payload" python3 -c 'import json,os; print(json.loads(os.environ["CLAIM_JSON"]).get("issue", ""))' 2>/dev/null || true)"
-  [[ "$claim_repo" == "$repo" && "$claim_issue" == "$issue" ]] || return 0
-  rm -f "$claim_path"
+  python3 - "$claim_path" "$repo" "$issue" <<'PY'
+import json, os, sys
+path, repo, issue = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    payload = json.load(stream)
+if str(payload.get("repo", "")) != repo or str(payload.get("issue", "")) != issue:
+    raise SystemExit(0)
+os.unlink(path)
+if os.path.exists(path):
+    raise RuntimeError("active claim remained after release")
+directory = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
   rmdir "$active_dir" 2>/dev/null || true
 }
 
@@ -260,14 +304,14 @@ PY
   fi
   readback="$(gh pr view "$number" --repo "$repo" --json state,mergedAt,mergeCommit,baseRefName,baseRefOid,headRefName,headRefOid,body,closingIssuesReferences 2>/dev/null)" || readback_rc=$?
   [[ "$readback_rc" -eq 0 ]] || { log "MERGE_READBACK_FAILED repo=$repo pr=$number reason=api"; return 11; }
-  if ! validated="$(MERGE_READBACK="$readback" MERGE_HEAD="$branch" MERGE_EXPECTED_HEAD="$head_oid" python3 - <<'PY'
+  if ! validated="$(MERGE_READBACK="$readback" MERGE_HEAD="$branch" MERGE_EXPECTED_HEAD="$head_oid" MERGE_BASE_BRANCH="$BASE_BRANCH" python3 - <<'PY'
 import json, os, re, sys
 try:
     row = json.loads(os.environ["MERGE_READBACK"])
     commit = row.get("mergeCommit") or {}
     if row.get("state") != "MERGED" or not row.get("mergedAt") or not commit.get("oid"):
         raise ValueError("unverified-merge")
-    if row.get("baseRefName") != "main" or not row.get("baseRefOid") or not row.get("headRefOid"):
+    if row.get("baseRefName") != os.environ.get("MERGE_BASE_BRANCH") or not row.get("baseRefOid") or not row.get("headRefOid"):
         raise ValueError("invalid-base-or-head")
     if row.get("headRefOid") != os.environ.get("MERGE_EXPECTED_HEAD"):
         raise ValueError("head-mismatch")
@@ -292,16 +336,16 @@ PY
     return 12
   fi
   IFS=$'\t' read -r base_sha head_sha merge_sha merged_at base_ref issue <<<"$validated"
-  [[ -n "$base_sha" && -n "$head_sha" && -n "$merge_sha" && -n "$merged_at" && "$base_ref" == main && "$issue" =~ ^[0-9]+$ ]] || {
+  [[ -n "$base_sha" && -n "$head_sha" && -n "$merge_sha" && -n "$merged_at" && "$base_ref" == "$BASE_BRANCH" && "$issue" =~ ^[0-9]+$ ]] || {
     log "MERGE_READBACK_FAILED repo=$repo pr=$number reason=missing-required-fields"
     return 12
   }
   [[ -d "$clone_path/.git" ]] || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=missing-clone"; return 13; }
-  GIT_MASTER=1 git -C "$clone_path" fetch --prune origin main >/dev/null 2>&1 || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=fetch"; return 13; }
-  GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet refs/remotes/origin/main || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=missing-origin-main"; return 13; }
-  GIT_MASTER=1 git -C "$clone_path" merge-base --is-ancestor "$merge_sha" refs/remotes/origin/main || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=not-ancestor sha=$merge_sha"; return 13; }
-  origin_main_sha="$(GIT_MASTER=1 git -C "$clone_path" rev-parse refs/remotes/origin/main 2>/dev/null)" || { log "MERGE_RECEIPT_FAILED repo=$repo pr=$number reason=origin-main-sha"; return 14; }
-  [[ -n "$origin_main_sha" ]] || { log "MERGE_RECEIPT_FAILED repo=$repo pr=$number reason=origin-main-sha"; return 14; }
+  GIT_MASTER=1 git -C "$clone_path" fetch --prune origin "$BASE_BRANCH" >/dev/null 2>&1 || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=fetch"; return 13; }
+  GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/remotes/origin/$BASE_BRANCH" || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=missing-origin-$BASE_BRANCH"; return 13; }
+  GIT_MASTER=1 git -C "$clone_path" merge-base --is-ancestor "$merge_sha" "refs/remotes/origin/$BASE_BRANCH" || { log "MERGE_ANCESTRY_FAILED repo=$repo pr=$number reason=not-ancestor sha=$merge_sha"; return 13; }
+  origin_main_sha="$(GIT_MASTER=1 git -C "$clone_path" rev-parse "refs/remotes/origin/$BASE_BRANCH" 2>/dev/null)" || { log "MERGE_RECEIPT_FAILED repo=$repo pr=$number reason=origin-base-sha"; return 14; }
+  [[ -n "$origin_main_sha" ]] || { log "MERGE_RECEIPT_FAILED repo=$repo pr=$number reason=origin-base-sha"; return 14; }
   write_merge_receipt "$repo" "$number" "$issue" "$base_sha" "$head_sha" "$merge_sha" "$merged_at" "$base_ref" "$origin_main_sha" "$branch" || { log "MERGE_RECEIPT_FAILED repo=$repo pr=$number"; return 14; }
   if [[ "$ambiguous_merge" -eq 1 ]]; then
     log "MERGE_RECEIPT_WRITTEN repo=$repo pr=$number phase=MERGE_VERIFIED receipt=$MERGE_RECEIPT_PATH"
@@ -365,20 +409,69 @@ release_clean_worktree_for_branch() {
         if [[ "$wt_branch" == "$branch" && -n "$path_real" &&
           ( ( -n "$clone_worktrees_real" && "$path_real" == "$clone_worktrees_real/"* ) ||
             ( -n "$root_real" && "$path_real" == "$root_real/"* ) ) ]]; then
-          if [[ -z "$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" ]]; then
-            if GIT_MASTER=1 git -C "$clone_path" worktree remove "$path" >/dev/null 2>&1 ||
-              GIT_MASTER=1 git -C "$clone_path" worktree remove --force "$path" >/dev/null 2>&1; then
+          local status_output status_rc=0
+          status_output="$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" || status_rc=$?
+          if [[ "$status_rc" -ne 0 ]]; then
+            log "WORKTREE_RELEASE_SKIPPED branch=$branch path=$path reason=status-check-failed rc=$status_rc"
+          elif [[ -z "$status_output" ]]; then
+            if GIT_MASTER=1 git -C "$clone_path" worktree remove "$path" >/dev/null 2>&1; then
               log "WORKTREE_RELEASED branch=$branch path=$path"
             else
               log "WORKTREE_RELEASE_FAILED branch=$branch path=$path"
             fi
           else
             log "WORKTREE_RELEASE_SKIPPED branch=$branch path=$path reason=dirty"
-          fi
+        fi
         fi
         ;;
     esac
   done < <(GIT_MASTER=1 git -C "$clone_path" worktree list --porcelain 2>/dev/null || true)
+}
+
+mark_receipt_closed() {
+  local path="$1" tmp
+  [[ -f "$path" ]] || return 1
+  tmp="$(mktemp "$(dirname "$path")/.receipt.XXXXXX")" || return 1
+  if ! RECEIPT_PATH="$path" RECEIPT_TMP="$tmp" python3 - <<'PY'
+import json, os
+path = os.environ["RECEIPT_PATH"]
+tmp = os.environ["RECEIPT_TMP"]
+try:
+    with open(path, encoding="utf-8") as handle:
+        original = handle.read().encode("utf-8")
+    payload = json.loads(original.decode("utf-8"))
+    payload["phase"] = "ISSUE_CLOSED_CONFIRMED"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    with open(tmp, encoding="utf-8") as handle:
+        if json.load(handle).get("phase") != "ISSUE_CLOSED_CONFIRMED":
+            raise RuntimeError("closure receipt temp read-back mismatch")
+    with open(path, encoding="utf-8") as handle:
+        if handle.read().encode("utf-8") != original:
+            raise RuntimeError("receipt changed during closure update")
+    os.replace(tmp, path)
+    with open(path, encoding="utf-8") as handle:
+        if json.load(handle).get("phase") != "ISSUE_CLOSED_CONFIRMED":
+            raise RuntimeError("closure receipt publication read-back mismatch")
+    directory = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+  then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 retry_receipt_closures() {
@@ -395,26 +488,10 @@ retry_receipt_closures() {
     branch="$(RECEIPT_JSON="$payload" python3 -c 'import json,os; print(json.loads(os.environ["RECEIPT_JSON"]).get("branch", ""))' 2>/dev/null || true)"
     pr="$(RECEIPT_JSON="$payload" python3 -c 'import json,os; print(json.loads(os.environ["RECEIPT_JSON"]).get("pr", ""))' 2>/dev/null || true)"
     if close_linked_issue "$repo" "$issue"; then
-      RECEIPT_PATH="$path" python3 - <<'PY'
-import json, os, tempfile
-path = os.environ["RECEIPT_PATH"]
-with open(path, encoding="utf-8") as handle:
-    payload = json.load(handle)
-payload["phase"] = "ISSUE_CLOSED_CONFIRMED"
-directory = os.path.dirname(path)
-fd, tmp = tempfile.mkstemp(prefix=".receipt.", dir=directory, text=True)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, sort_keys=True)
-        handle.write("\n")
-    os.replace(tmp, path)
-except Exception:
-    try:
-        os.unlink(tmp)
-    except FileNotFoundError:
-        pass
-    raise
-PY
+      if ! mark_receipt_closed "$path"; then
+        log "ISSUE_CLOSE_RECEIPT_FAILED repo=$repo issue=$issue receipt=$path"
+        return 1
+      fi
       if [[ -z "$branch" && "$pr" =~ ^[0-9]+$ ]]; then
         branch="$(gh pr view "$pr" --repo "$repo" --json headRefName --jq .headRefName 2>/dev/null || true)"
       fi
@@ -442,9 +519,12 @@ refresh_clone_base() {
   GIT_MASTER=1 git -C "$clone_path" fetch --prune origin >/dev/null 2>&1 || return 0
   current="$(GIT_MASTER=1 git -C "$clone_path" branch --show-current 2>/dev/null || true)"
   case "$current" in
-    main|master)
-      if [[ -z "$(GIT_MASTER=1 git -C "$clone_path" status --porcelain --untracked-files=no 2>/dev/null)" ]] &&
-        GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/remotes/origin/$current"; then
+    "$BASE_BRANCH")
+      local status_output status_rc=0
+      status_output="$(GIT_MASTER=1 git -C "$clone_path" status --porcelain --untracked-files=no 2>/dev/null)" || status_rc=$?
+      if [[ "$status_rc" -ne 0 ]]; then
+        log "BASE_REFRESH_SKIPPED clone=$clone_path reason=status-check-failed rc=$status_rc"
+      elif [[ -z "$status_output" ]] && GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/remotes/origin/$current"; then
         GIT_MASTER=1 git -C "$clone_path" merge --ff-only "origin/$current" >/dev/null 2>&1 || true
       fi
       ;;
@@ -629,9 +709,8 @@ for entry in "${REPOS[@]}"; do
       decision="skip"
       reason="missing-required-ai-labels"
       skipped=$((skipped + 1))
-    elif [[ "$base" != "main" ]]; then
-      decision="merge-blocked"
-      reason="base-not-main"
+    elif [[ "$base" != "$BASE_BRANCH" ]]; then
+      reason="base-not-$BASE_BRANCH"
       blocked=$((blocked + 1))
     elif [[ "$merge_state" == "CLEAN" ]]; then
       if [[ "$REQUIRE_APPROVED" == 1 && "$review_decision" != "APPROVED" ]]; then

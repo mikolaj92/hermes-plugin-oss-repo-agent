@@ -578,24 +578,46 @@ async def run_triage_with_router(
     if follow is None:
         return decide
 
-    if follow.status in {"waiting", "retry_wait", "failed", "cancelled", "timed_out"}:
+    follow_status = str(follow.status or "")
+    follow_failed_steps: list[str] = []
+    raw_failed_steps = follow.summary.get("failed_steps") if isinstance(follow.summary, dict) else None
+    if isinstance(raw_failed_steps, list):
+        follow_failed_steps.extend(str(step) for step in raw_failed_steps if step)
+    for process in follow.processes:
+        if str(process.get("status") or "").lower() not in {"failed", "cancelled", "timed_out"}:
+            continue
+        step_id = process.get("step_id")
+        if step_id and str(step_id) not in follow_failed_steps:
+            follow_failed_steps.append(str(step_id))
+    failed_follow_up = bool(follow.failed or follow_failed_steps)
+    normalized_status = follow_status.lower()
+    if normalized_status in {"waiting", "retry_wait", "failed", "cancelled", "timed_out"}:
         decide.status = follow.status
-        decide.summary["run_status"] = follow.status
-        decide.summary["follow_up_incomplete"] = follow.status in {"waiting", "retry_wait"}
-    # Keep the follow-up visible to flow/tick callers.  In particular, a follow-up
-    # can be waiting or timed out even when the decide path itself completed.
+        decide.summary["follow_up_incomplete"] = normalized_status in {"waiting", "retry_wait"}
+    elif failed_follow_up:
+        decide.status = "failed"
+        decide.summary["follow_up_incomplete"] = False
+    decide.summary["run_status"] = decide.status
+    # Keep the follow-up visible to flow/tick callers, including failures hidden
+    # in a completed runtime wrapper.
     decide.follow_up = follow.to_dict()
     decide.processes = list(decide.processes) + list(follow.processes)
     decide.completed = list(decide.completed) + list(follow.completed)
     decide.failed = list(decide.failed) + list(follow.failed)
+    for process in follow.processes:
+        if str(process.get("status") or "").lower() not in {"failed", "cancelled", "timed_out"}:
+            continue
+        if process not in decide.failed:
+            decide.failed.append(process)
     decide.summary["follow_up_status"] = follow.status
     decide.summary["failed_steps"] = list(dict.fromkeys(
         [
             *[str(step) for step in decide.summary.get("failed_steps", [])],
+            *follow_failed_steps,
             *[
                 str(process.get("step_id"))
                 for process in decide.processes
-                if process.get("status") in {"failed", "cancelled", "timed_out"}
+                if str(process.get("status") or "").lower() in {"failed", "cancelled", "timed_out"}
             ],
         ]
     ))

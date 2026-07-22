@@ -62,7 +62,7 @@ uv run repo-agent-tick-triage --dry-run
 uv run repo-agent-tick-cleanup --branch 'ai/fix/N-slug' --dry-run
 ```
 
-- `issue_intake`: poll → claim → kanban
+- `issue_intake`: poll → direction decide → reject comment → claim → kanban
 - `issue_to_pr`: load → parse → worktree → omp → verify → push → open_pr → labels → receipt → complete
 - `pr_triage`: list → load → checks → evidence → **decide** → router → (`pr_merge` | `pr_comment_block` | `pr_repair`)
 - `pr_merge`: claim_pr → merge → receipt → close_issue

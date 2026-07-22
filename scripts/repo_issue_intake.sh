@@ -94,86 +94,131 @@ run_claim_guard_hook() {
   bash -c "$hook"
 }
 
+validate_active_claim() {
+  local path="$1" repo="$2" issue="$3" board="$4" assignee="${5:-${CLAIM_ASSIGNEE:-mikolaj92}}"
+  python3 - "$path" "$repo" "$issue" "$board" "$assignee" <<'PY'
+import json
+import re
+import sys
+
+path, expected_repo, expected_issue, expected_board, expected_assignee = sys.argv[1:]
+if not re.fullmatch(r"[1-9][0-9]*", expected_issue):
+    raise SystemExit(2)
+try:
+    with open(path, encoding="utf-8") as stream:
+        payload = json.load(stream)
+except Exception:
+    raise SystemExit(2)
+if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload.get("version") != 1:
+    raise SystemExit(2)
+issue = payload.get("issue")
+if isinstance(issue, bool) or not isinstance(issue, int) or issue <= 0:
+    raise SystemExit(2)
+for key in ("repo", "board", "assignee", "claimedAt"):
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(2)
+if (payload["repo"], issue, payload["board"], payload["assignee"]) != (
+    expected_repo,
+    int(expected_issue),
+    expected_board,
+    expected_assignee,
+):
+    raise SystemExit(3)
+PY
+}
+
 ensure_active_claim() {
-  local repo="$1" issue="$2" board="$3" existing_repo existing_issue tmp
+  local repo="$1" issue="$2" board="$3" assignee="${CLAIM_ASSIGNEE:-mikolaj92}" tmp status
+  [[ -n "$repo" && "$issue" =~ ^[1-9][0-9]*$ && -n "$board" && -n "$assignee" ]] || return 2
   mkdir -p "$ACTIVE_ISSUE_DIR" || return 1
   if [[ -f "$ACTIVE_CLAIM_PATH" ]]; then
-    existing_repo="$(python3 - "$ACTIVE_CLAIM_PATH" <<'PY'
-import json, sys
-try:
-    with open(sys.argv[1], encoding="utf-8") as stream:
-        payload = json.load(stream)
-except Exception:
-    raise SystemExit(2)
-print(str(payload.get("repo") or ""))
-PY
-)" || return 1
-    existing_issue="$(python3 - "$ACTIVE_CLAIM_PATH" <<'PY'
-import json, sys
-try:
-    with open(sys.argv[1], encoding="utf-8") as stream:
-        payload = json.load(stream)
-except Exception:
-    raise SystemExit(2)
-print(str(payload.get("issue") or payload.get("number") or ""))
-PY
-)" || return 1
-    if [[ "$existing_repo" != "$repo" || "$existing_issue" != "$issue" ]]; then
-      log "ERROR repo=$repo issue=$issue claim_mismatch active_repo=$existing_repo active_issue=$existing_issue"
-      return 2
+    if validate_active_claim "$ACTIVE_CLAIM_PATH" "$repo" "$issue" "$board" "$assignee"; then
+      return 0
+    else
+      status=$?
     fi
-    return 0
+    if [[ "$status" -eq 3 ]]; then
+      log "ERROR repo=$repo issue=$issue claim_mismatch"
+    else
+      log "ERROR repo=$repo issue=$issue claim_malformed"
+    fi
+    return 2
   fi
   tmp="$(mktemp "$ACTIVE_ISSUE_DIR/.claim.XXXXXX")" || return 1
-  if ! ACTIVE_CLAIM_TMP="$tmp" python3 - "$repo" "$issue" "$board" <<'PY'
+  if ! ACTIVE_CLAIM_TMP="$tmp" ACTIVE_CLAIM_PATH="$ACTIVE_CLAIM_PATH" python3 - "$repo" "$issue" "$board" "$assignee" <<'PY'
 import datetime as dt
 import json
 import os
 import sys
-payload = {"version": 1, "repo": sys.argv[1], "issue": int(sys.argv[2]), "board": sys.argv[3], "claimedAt": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-with open(os.environ["ACTIVE_CLAIM_TMP"], "w", encoding="utf-8") as stream:
-    json.dump(payload, stream, separators=(",", ":"))
-    stream.write("\n")
-    stream.flush()
-    os.fsync(stream.fileno())
+
+tmp = os.environ["ACTIVE_CLAIM_TMP"]
+path = os.environ["ACTIVE_CLAIM_PATH"]
+expected = {
+    "version": 1,
+    "repo": sys.argv[1],
+    "issue": int(sys.argv[2]),
+    "board": sys.argv[3],
+    "assignee": sys.argv[4],
+}
+payload = dict(expected, claimedAt=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+def valid_claim(candidate):
+    if not isinstance(candidate, dict) or type(candidate.get("version")) is not int or candidate.get("version") != 1:
+        return False
+    issue = candidate.get("issue")
+    if isinstance(issue, bool) or not isinstance(issue, int) or issue <= 0:
+        return False
+    for key in ("repo", "board", "assignee", "claimedAt"):
+        value = candidate.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return False
+    return all(candidate.get(key) == value for key, value in expected.items())
+
+try:
+    with open(tmp, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, separators=(",", ":"))
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    with open(tmp, encoding="utf-8") as stream:
+        if not valid_claim(json.load(stream)):
+            raise RuntimeError("claim temp read-back mismatch")
+    try:
+        os.link(tmp, path)
+    except FileExistsError:
+        with open(path, encoding="utf-8") as stream:
+            if not valid_claim(json.load(stream)):
+                raise RuntimeError("conflicting active claim already exists")
+    else:
+        with open(path, encoding="utf-8") as stream:
+            if not valid_claim(json.load(stream)):
+                raise RuntimeError("claim publication read-back mismatch")
+    os.unlink(tmp)
+    directory = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
 PY
   then
     rm -f "$tmp"
     return 1
   fi
-  if [[ -e "$ACTIVE_CLAIM_PATH" ]]; then
-    rm -f "$tmp"
-  else
-    mv "$tmp" "$ACTIVE_CLAIM_PATH" || { rm -f "$tmp"; return 1; }
-  fi
 }
 
 check_active_claim() {
-  local repo="$1" issue="$2" existing_repo existing_issue
+  local repo="$1" issue="$2" board="$3" assignee="${CLAIM_ASSIGNEE:-mikolaj92}"
   run_claim_guard_hook
   [[ -f "$ACTIVE_CLAIM_PATH" ]] || return 0
-  existing_repo="$(python3 - "$ACTIVE_CLAIM_PATH" <<'PY'
-import json, sys
-try:
-    with open(sys.argv[1], encoding="utf-8") as stream:
-        payload = json.load(stream)
-except Exception:
-    raise SystemExit(2)
-print(str(payload.get("repo") or ""))
-PY
-)" || return 1
-  existing_issue="$(python3 - "$ACTIVE_CLAIM_PATH" <<'PY'
-import json, sys
-try:
-    with open(sys.argv[1], encoding="utf-8") as stream:
-        payload = json.load(stream)
-except Exception:
-    raise SystemExit(2)
-print(str(payload.get("issue") or payload.get("number") or ""))
-PY
-)" || return 1
-  if [[ "$existing_repo" != "$repo" || "$existing_issue" != "$issue" ]]; then
-    log "ERROR repo=$repo issue=$issue claim_mismatch active_repo=$existing_repo active_issue=$existing_issue"
+  if ! validate_active_claim "$ACTIVE_CLAIM_PATH" "$repo" "$issue" "$board" "$assignee"; then
+    log "ERROR repo=$repo issue=$issue claim_mismatch"
     return 2
   fi
   return 0
@@ -287,7 +332,7 @@ for entry in "${repos[@]}"; do
       continue
     fi
 
-    if ! check_active_claim "$repo" "$number"; then
+    if ! check_active_claim "$repo" "$number" "$board"; then
       if [[ -n "${HERMES_INTAKE_CLAIM_GUARD_HOOK:-}" ]]; then
         failures=$((failures + 1))
       else

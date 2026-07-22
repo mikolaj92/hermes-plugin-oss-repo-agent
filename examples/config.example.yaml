@@ -1,11 +1,14 @@
 version: 1
-mode: dry-run
-clone_root: <clone-root>
-worktree_root: <worktree-root>
+mode: live
+clone_root: /absolute/path/to/repos
+worktree_root: /absolute/path/to/worktrees
 branch_prefix: ai/fix
-# Set to true to auto-merge own PRs (author == repo owner) when mergeStateStatus == CLEAN.
-# External PRs are never auto-merged.
-automerge: true
+# Safe defaults: automerge is disabled until human approval, passing checks,
+# and test evidence are all present.
+automerge: false
+require_human_approval: true
+require_checks: true
+require_test_evidence: true
 github:
   cli: gh
   default_limit: 10
@@ -17,14 +20,18 @@ labels:
   pr_opened: ai:pr-opened
   generated: ai:generated
 executor:
-  enabled: false
+  enabled: true
   # Uses the local omp command in a controlled worktree.
-  # Max concurrent workers is controlled by HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS (default 3).
   command: omp
+  model: omniroute/omp/default
+  thinking: medium
+  timeout_seconds: 7200
+  max_attempts: 3
+  retry_backoff_seconds: 60
 repos:
   - repo: owner/example-repo
     board: owner-example-repo
-    clone_path: <clone-root>/example-repo
+    clone_path: /absolute/path/to/repos/example-repo
     trusted_authors: [owner]
     trusted_branch_prefixes: [ai/fix]
     allowed_base_branches: [main]

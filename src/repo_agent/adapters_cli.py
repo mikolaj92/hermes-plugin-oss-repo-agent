@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any
 
 
@@ -24,6 +25,7 @@ def run_cmd(
     timeout: float = 120.0,
     env: dict[str, str] | None = None,
     check: bool = True,
+    cwd: str | Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     merged = {**os.environ, **(env or {})}
     # Never leak through shell.
@@ -34,6 +36,7 @@ def run_cmd(
         text=True,
         timeout=timeout,
         env=merged,
+        cwd=cwd,
     )
     if check and proc.returncode != 0:
         raise CommandError(cmd, proc.returncode, proc.stdout, proc.stderr)

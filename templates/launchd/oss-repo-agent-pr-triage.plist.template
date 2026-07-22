@@ -13,8 +13,23 @@
   <key>StartInterval</key>
   <integer>600</integer>
   <key>RunAtLoad</key>
-  <true/>
+  <false/>
   <key>LimitLoadToSessionType</key>
   <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HERMES_PR_TRIAGE_DRY_RUN</key>
+    <string>0</string>
+    <key>HERMES_PR_TRIAGE_COMMENT</key>
+    <string>1</string>
+    <key>HERMES_PR_AUTOMERGE</key>
+    <string>0</string>
+    <key>HERMES_PR_REQUIRE_APPROVED</key>
+    <string>1</string>
+    <key>HERMES_PR_ALLOW_NO_CHECKS</key>
+    <string>0</string>
+    <key>HERMES_PR_REQUIRE_TEST_EVIDENCE</key>
+    <string>1</string>
+  </dict>
 </dict>
 </plist>

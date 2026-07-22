@@ -221,11 +221,12 @@ usage() {
   cat <<'USAGE'
 Usage: repo_agent_health.sh [--repair]
 
-Checks launchd, Fala candidate/plist provenance, Fala DB freshness and safe
-run/process state, gh auth, disk space, stale locks, recent logs, active
-workers, and the watched GitHub/Kanban queues. With --repair it enables/
-bootstraps missing legacy LaunchAgents and removes stale lock directories only
-when no legacy mutator or Fala scheduler is active.
+Checks launchd, deployment parity and Fala candidate provenance, Fala DB
+freshness and safe run/process state, gh auth, disk space, stale locks, recent
+logs, active workers, and the watched GitHub/Kanban queues. With --repair it
+may remove stale local lock artifacts only when no mutator is active. It does
+not bootstrap, enable, or reload LaunchAgents; deployment and launchd changes
+remain explicit metadata-only or separately controlled operations.
 USAGE
 }
 
@@ -271,7 +272,30 @@ repos=()
 while IFS= read -r repo_entry; do repos+=("$repo_entry"); done <<<"$repo_data"
 
 failures=0
-warnings=0
+parity_source_root="${HERMES_REPO_AGENT_PARITY_SOURCE_ROOT:-$SCRIPT_DIR}"
+parity_active_root="${HERMES_REPO_AGENT_PARITY_ACTIVE_ROOT:-$HOME/.hermes/scripts}"
+parity_template_root="${HERMES_REPO_AGENT_PARITY_TEMPLATE_ROOT:-$SCRIPT_DIR/../templates/launchd}"
+parity_active_plist_root="${HERMES_REPO_AGENT_PARITY_ACTIVE_PLIST_ROOT:-${HERMES_REPO_AGENT_PARITY_PLIST_ROOT:-$HOME/Library/LaunchAgents}}"
+parity_render_root="${HERMES_REPO_AGENT_PARITY_RENDER_ROOT:-${HERMES_REPO_AGENT_PARITY_RENDERED_ROOT:-}}"
+parity_config_root="${HERMES_REPO_AGENT_PARITY_CONFIG_ROOT:-${HERMES_REPO_AGENT_PARITY_ACTIVE_CONFIG_ROOT:-$HOME/.hermes/oss-repo-agent}}"
+parity_configured=0
+for parity_value in "$parity_source_root" "$parity_active_root" "$parity_template_root" "$parity_active_plist_root" "$parity_config_root"; do
+  [[ -n "$parity_value" ]] && parity_configured=$((parity_configured + 1))
+done
+if [[ "$parity_configured" -ne 5 ]]; then
+  log ERROR "deployment-parity incomplete-config source=$parity_source_root active=$parity_active_root template=$parity_template_root active_plist=$parity_active_plist_root config=$parity_config_root"
+  failures=$((failures + 1))
+else
+  parity_args=(--source-root "$parity_source_root" --active-root "$parity_active_root" --template-root "$parity_template_root" --active-plist-root "$parity_active_plist_root" --active-config-root "$parity_config_root")
+  [[ -n "$parity_render_root" ]] && parity_args+=(--render-root "$parity_render_root")
+  parity_output=""
+  if parity_output="$(python3 "$SCRIPT_DIR/../tools/deployment_parity.py" "${parity_args[@]}" 2>&1)"; then
+    log OK "deployment-parity source=$parity_source_root active=$parity_active_root active_plist=$parity_active_plist_root config=$parity_config_root"
+  else
+    log ERROR "deployment-parity mismatch details=${parity_output:-unknown}"
+    failures=$((failures + 1))
+  fi
+fi
 fala_loaded=0
 if launchctl print "gui/$uid/$FALA_LABEL" >/dev/null 2>&1; then fala_loaded=1; else failures=$((failures + 1)); log ERROR "fala-not-loaded label=$FALA_LABEL"; fi
 legacy_loaded=0

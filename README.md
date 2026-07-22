@@ -33,17 +33,20 @@ After install, Hermes may show [`after-install.md`](after-install.md). The short
 
 ## Deployment
 
-The legacy `render-launchd` command currently reports deployment metadata; it does not write files or install LaunchAgents. Do not pass `--deploy`.
+The deployment renderer creates an immutable Fala candidate and never installs
+LaunchAgents or changes `deployment/current`:
 
 ```bash
-hermes oss-repo-agent --config ~/.hermes/oss-repo-agent/config.toml render-launchd --output <metadata-path>
+hermes oss-repo-agent --config ~/.hermes/oss-repo-agent/config.toml render-launchd \
+  --output ~/.hermes/oss-repo-agent/deployment/candidates/<candidate-id> \
+  --fala-db ~/.hermes/oss-repo-agent/fala/state.sqlite --mode dry-run
 ```
 
-The Fala scheduler is currently a source template only:
-`templates/launchd/oss-repo-agent-fala-tick-all.plist.template`. Render its
-`UV_BIN`, `REPO_ROOT`, and `HOME` placeholders explicitly, validate with
-`plutil -lint`, and keep the existing shell jobs until dry-run and controlled
-live validation authorize cutover.
+Validate the candidate with parity and `plutil -lint` before any separately
+controlled promotion. Fala and legacy shell mutators, including the health
+LaunchAgent when it invokes `repo_agent_health.sh --repair`, must never be
+loaded together. Keep legacy plists only as rollback artifacts; do not run
+live Fala and legacy jobs in parallel.
 
 ## 3-minute happy path
 

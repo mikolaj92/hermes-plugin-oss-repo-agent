@@ -128,24 +128,23 @@ class OssInitAndDryRunTests(unittest.TestCase):
             with self.assertRaises(self.config.ConfigError):
                 self.commands.run_from_args(args)
 
-    def test_root_config_example_is_production_policy(self):
+    def test_root_config_example_uses_safe_production_policy(self):
         example = PLUGIN_ROOT / "config.example.yaml"
         self.assertTrue(example.exists())
         loaded = self.config.load_config(str(example))
         self.assertEqual(loaded.mode, "live")
-        self.assertTrue(loaded.automerge)
+        self.assertFalse(loaded.automerge)
         self.assertTrue(loaded.executor.enabled)
         self.assertEqual(loaded.executor.command, "omp")
         self.assertTrue(loaded.repos)
 
-    def test_alternate_config_example_uses_production_policy(self):
+    def test_alternate_config_example_uses_safe_production_policy(self):
         example = PLUGIN_ROOT / "examples" / "config.example.yaml"
         loaded = self.config.load_config(str(example))
         self.assertEqual(loaded.mode, "live")
-        self.assertTrue(loaded.automerge)
+        self.assertFalse(loaded.automerge)
         self.assertTrue(loaded.executor.enabled)
         self.assertEqual(loaded.executor.command, "omp")
-
     def test_docs_and_ci_are_present_for_three_minute_path(self):
         readme = (PLUGIN_ROOT / "README.md").read_text()
         after_install = PLUGIN_ROOT / "after-install.md"

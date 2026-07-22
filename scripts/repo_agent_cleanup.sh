@@ -11,6 +11,7 @@ DELETE_LOCAL_BRANCHES="${HERMES_REPO_CLEANUP_DELETE_LOCAL_BRANCHES:-1}"
 LOG_FILE="${HERMES_REPO_CLEANUP_LOG:-/Users/mini-m4-main/.hermes/logs/repo-agent-cleanup.log}"
 LOCK_DIR="${HERMES_REPO_CLEANUP_LOCK_DIR:-/tmp/hermes-repo-agent-cleanup.lock}"
 STALE_LOCK_MINUTES="${HERMES_STALE_LOCK_MINUTES:-180}"
+BASE_BRANCH="${HERMES_REPO_AGENT_BASE_BRANCH:-main}"
 WORKTREE_ROOT="${HERMES_WORKTREE_ROOT:-/Users/mini-m4-main/.hermes/worktrees/repo-fixer}"
 MAINTENANCE_ASSIGNEE="${HERMES_KANBAN_MAINTENANCE_ASSIGNEE:-repo-agent-fixer}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -161,19 +162,63 @@ PY
 }
 
 quarantine_receipt() {
-  local path="$1" reason="$2" target
+  local path="$1" reason="$2" target tmp
   [[ -n "$QUARANTINE_DIR" ]] || { log "KEEP_RECEIPT path=$path reason=$reason"; return 0; }
-  mkdir -p "$QUARANTINE_DIR"
-  target="$QUARANTINE_DIR/$(basename "$path")"
-  if [[ -e "$target" ]]; then
-    target="$QUARANTINE_DIR/$(basename "$path" .json)-$(date -u '+%Y%m%d%H%M%S').json"
+  if ! mkdir -p "$QUARANTINE_DIR"; then
+    log "QUARANTINE_WRITE_FAILED path=$path reason=mkdir"
+    return 1
   fi
-  mv -f "$path" "$target"
-  log "RECEIPT_QUARANTINED path=$path target=$target reason=$reason"
+  tmp="$(mktemp "$QUARANTINE_DIR/.quarantine.XXXXXX")" || {
+    log "QUARANTINE_WRITE_FAILED path=$path reason=mktemp"
+    return 1
+  }
+  if ! QUARANTINE_TMP="$tmp" QUARANTINE_DIR="$QUARANTINE_DIR" QUARANTINE_SOURCE="$path" python3 - "$reason" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+source = os.environ["QUARANTINE_SOURCE"]
+directory = os.environ["QUARANTINE_DIR"]
+with open(source, "rb") as stream:
+    content = stream.read()
+digest = hashlib.sha256(content).hexdigest()
+stem = os.path.basename(source).removesuffix(".json")
+target = os.path.join(directory, f"quarantine-{stem}-{digest[:32]}.json")
+temporary = os.environ["QUARANTINE_TMP"]
+with open(temporary, "wb") as stream:
+    stream.write(content)
+    stream.flush()
+    os.fsync(stream.fileno())
+try:
+    os.link(temporary, target)
+except FileExistsError:
+    with open(target, "rb") as stream:
+        if hashlib.sha256(stream.read()).hexdigest() != digest:
+            raise RuntimeError("quarantine destination collision")
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+fd = os.open(directory, os.O_RDONLY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+os.unlink(source)
+print(target)
+PY
+  then
+    rm -f "$tmp" || true
+    log "QUARANTINE_WRITE_FAILED path=$path reason=write"
+    return 1
+  fi
+  log "RECEIPT_QUARANTINED path=$path target=$QUARANTINE_DIR reason=$reason"
 }
 
 cleanup_receipt_worktree() {
-  local repo="$1" board="$2" clone_path="$3" branch="$4" path wt_branch pid_file pid
+  local repo="$1" board="$2" clone_path="$3" branch="$4" path wt_branch pid_file pid status_output status_rc branch_check_rc
   pid_file="$WORKTREE_ROOT/$board/.agent.lock/pid"
   if [[ -f "$pid_file" ]]; then
     pid="$(cat "$pid_file" 2>/dev/null || true)"
@@ -188,7 +233,14 @@ cleanup_receipt_worktree() {
       log "KEEP repo=$repo branch=$branch path=$path reason=worktree-provenance-unverifiable"
       return 0
     }
-    if [[ -n "$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" ]]; then
+    status_rc=0
+    status_output="$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" || status_rc=$?
+    if [[ "$status_rc" -ne 0 ]]; then
+      log "KEEP repo=$repo branch=$branch path=$path reason=status-check-failed rc=$status_rc"
+      failures=$((failures + 1))
+      return 0
+    fi
+    if [[ -n "$status_output" ]]; then
       log "KEEP repo=$repo branch=$branch path=$path reason=dirty-worktree"
       return 0
     fi
@@ -196,11 +248,39 @@ cleanup_receipt_worktree() {
       log "DRY_RUN repo=$repo branch=$branch path=$path reason=terminal-receipt"
       return 0
     fi
+    if ! controlled_worktree_path "$clone_path" "$path"; then
+      log "KEEP repo=$repo branch=$branch path=$path reason=cleanup-race-before-remove"
+      return 0
+    fi
     if GIT_MASTER=1 git -C "$clone_path" worktree remove "$path" >/dev/null 2>&1; then
       log "WORKTREE_REMOVED repo=$repo branch=$branch path=$path reason=terminal-receipt"
-      if [[ "$DELETE_LOCAL_BRANCHES" == 1 ]] && GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/heads/$branch"; then
-        GIT_MASTER=1 git -C "$clone_path" branch -D "$branch" >/dev/null 2>&1 || true
-        log "LOCAL_BRANCH_REMOVED repo=$repo branch=$branch"
+      if [[ "$DELETE_LOCAL_BRANCHES" == 1 ]]; then
+        branch_check_rc=0
+        GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/heads/$branch" || branch_check_rc=$?
+        if [[ "$branch_check_rc" -gt 1 ]]; then
+          log "KEEP repo=$repo branch=$branch reason=branch-check-failed rc=$branch_check_rc"
+          failures=$((failures + 1))
+          return 0
+        fi
+        if [[ "$branch_check_rc" -eq 0 ]]; then
+          if ! GIT_MASTER=1 git -C "$clone_path" branch -D "$branch" >/dev/null 2>&1; then
+            log "LOCAL_BRANCH_DELETE_FAILED repo=$repo branch=$branch"
+            failures=$((failures + 1))
+            return 0
+          fi
+          branch_check_rc=0
+          GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/heads/$branch" || branch_check_rc=$?
+          if [[ "$branch_check_rc" -eq 0 ]]; then
+            log "LOCAL_BRANCH_DELETE_FAILED repo=$repo branch=$branch reason=still-present"
+            failures=$((failures + 1))
+            return 0
+          elif [[ "$branch_check_rc" -gt 1 ]]; then
+            log "LOCAL_BRANCH_DELETE_FAILED repo=$repo branch=$branch reason=verify-failed rc=$branch_check_rc"
+            failures=$((failures + 1))
+            return 0
+          fi
+          log "LOCAL_BRANCH_REMOVED repo=$repo branch=$branch"
+        fi
       fi
     else
       log "REMOVE_FAILED repo=$repo branch=$branch path=$path reason=terminal-receipt"
@@ -211,38 +291,44 @@ cleanup_receipt_worktree() {
 }
 
 process_receipts_for_repo() {
-  local repo="$1" board="$2" clone_path="$3" path payload receipt_repo issue phase branch state open_prs merge_sha origin_main_sha current_origin
+  local repo="$1" board="$2" clone_path="$3" path payload receipt_repo issue phase branch state open_prs merge_sha origin_base_sha current_origin
   [[ -n "$RECEIPT_DIR" && -d "$RECEIPT_DIR" ]] || return 0
   shopt -s nullglob
   for path in "$RECEIPT_DIR"/*.json; do
     payload="$(cat "$path" 2>/dev/null || true)"
     receipt_repo="$(receipt_field "$payload" repo 2>/dev/null || true)"
+    if [[ -z "$receipt_repo" ]]; then
+      quarantine_receipt "$path" "malformed-repo" || failures=$((failures + 1))
+      continue
+    fi
     [[ "$receipt_repo" == "$repo" ]] || continue
     issue="$(receipt_field "$payload" issue 2>/dev/null || true)"
     branch="$(receipt_field "$payload" branch 2>/dev/null || true)"
-    [[ -n "$branch" ]] || { log "KEEP_RECEIPT path=$path reason=missing-branch"; continue; }
+    if [[ -z "$branch" ]]; then
+      quarantine_receipt "$path" "malformed-branch" || failures=$((failures + 1))
+      continue
+    fi
     phase="$(receipt_field "$payload" phase 2>/dev/null || true)"
     if [[ "$phase" != "ISSUE_CLOSED_CONFIRMED" ]]; then
-      quarantine_receipt "$path" "phase=${phase:-missing}"
+      quarantine_receipt "$path" "phase=${phase:-missing}" || failures=$((failures + 1))
       continue
     fi
     if [[ ! "$issue" =~ ^[0-9]+$ ]]; then
-      quarantine_receipt "$path" "invalid-issue"
+      quarantine_receipt "$path" "invalid-issue" || failures=$((failures + 1))
       continue
     fi
     state="$(issue_state "$repo" "$issue")"
     open_prs="$(open_pr_for_branch "$repo" "$branch")"
     if [[ "$state" != "CLOSED" || "$open_prs" != "0" ]]; then
-      quarantine_receipt "$path" "issue_state=$state open_prs=$open_prs"
+      quarantine_receipt "$path" "issue_state=$state open_prs=$open_prs" || failures=$((failures + 1))
       continue
     fi
     merge_sha="$(receipt_field "$payload" mergeSha 2>/dev/null || true)"
-    origin_main_sha="$(receipt_field "$payload" originMainSha 2>/dev/null || true)"
-    current_origin="$(GIT_MASTER=1 git -C "$clone_path" rev-parse refs/remotes/origin/main 2>/dev/null || true)"
-    if [[ ! "$merge_sha" =~ ^[0-9a-fA-F]{40}$ || ! "$origin_main_sha" =~ ^[0-9a-fA-F]{40}$ ||
-      -z "$current_origin" || "$origin_main_sha" != "$current_origin" ]] ||
+    origin_base_sha="$(receipt_field "$payload" originMainSha 2>/dev/null || true)"
+    current_origin="$(GIT_MASTER=1 git -C "$clone_path" rev-parse "refs/remotes/origin/$BASE_BRANCH" 2>/dev/null || true)"
+    if [[ ! "$merge_sha" =~ ^[0-9a-fA-F]{40}$ || ! "$origin_base_sha" =~ ^[0-9a-fA-F]{40}$ || -z "$current_origin" || "$origin_base_sha" != "$current_origin" ]] ||
       ! GIT_MASTER=1 git -C "$clone_path" merge-base --is-ancestor "$merge_sha" "$current_origin" >/dev/null 2>&1; then
-      log "KEEP repo=$repo issue=$issue branch=$branch reason=merge-provenance-unverifiable"
+      log "KEEP repo=$repo issue=$issue branch=$branch reason=merge-provenance-unverifiable base=$BASE_BRANCH"
       continue
     fi
     cleanup_receipt_worktree "$repo" "$board" "$clone_path" "$branch"
@@ -274,54 +360,9 @@ for entry in "${REPOS[@]}"; do
   while IFS=$'\t' read -r path branch; do
     [[ -n "${path:-}" && -n "${branch:-}" ]] || continue
     [[ "$branch" == ai/fix/* ]] || continue
-    if [[ "$path" != "$WORKTREE_ROOT/$board/"* && "$path" != "$clone_path/.worktrees/"* ]]; then
-      continue
-    fi
     processed=$((processed + 1))
-    issue="$(issue_from_branch "$branch" || true)"
-    if [[ -z "$issue" ]]; then
-      log "SKIP repo=$repo branch=$branch path=$path reason=no-issue-number"
-      skipped=$((skipped + 1))
-      continue
-    fi
-    state="$(issue_state "$repo" "$issue")"
-    open_prs="$(open_pr_for_branch "$repo" "$branch")"
-    if [[ "$state" == "UNKNOWN" ]]; then
-      log "KEEP repo=$repo issue=$issue branch=$branch reason=issue-state-unknown path=$path open_prs=$open_prs"
-      skipped=$((skipped + 1))
-      continue
-    fi
-    if [[ "$state" == "OPEN" || "$open_prs" != "0" ]]; then
-      log "KEEP repo=$repo issue=$issue branch=$branch path=$path issue_state=$state open_prs=$open_prs"
-      skipped=$((skipped + 1))
-      continue
-    fi
-    if [[ -n "$(GIT_MASTER=1 git -C "$path" status --porcelain 2>/dev/null)" ]]; then
-      log "SKIP repo=$repo issue=$issue branch=$branch path=$path reason=dirty-worktree"
-      if [[ "$DRY_RUN" == 0 ]]; then
-        create_dirty_worktree_task "$repo" "$board" "$path" "$branch" "$issue"
-        log "MAINTENANCE_TASK_ENSURED repo=$repo issue=$issue branch=$branch path=$path"
-      fi
-      skipped=$((skipped + 1))
-      continue
-    fi
-    if [[ "$DRY_RUN" == 1 ]]; then
-      log "DRY_RUN repo=$repo issue=$issue action=remove-worktree branch=$branch path=$path issue_state=$state"
-      continue
-    fi
-    if GIT_MASTER=1 git -C "$clone_path" worktree remove "$path" >/dev/null 2>&1; then
-      log "WORKTREE_REMOVED repo=$repo issue=$issue branch=$branch path=$path issue_state=$state"
-      removed=$((removed + 1))
-      if [[ "$DELETE_LOCAL_BRANCHES" == 1 ]]; then
-        if GIT_MASTER=1 git -C "$clone_path" branch --list "$branch" | grep -Fq "$branch"; then
-          GIT_MASTER=1 git -C "$clone_path" branch -D "$branch" >/dev/null 2>&1 && \
-            log "LOCAL_BRANCH_REMOVED repo=$repo branch=$branch" || true
-        fi
-      fi
-    else
-      log "REMOVE_FAILED repo=$repo issue=$issue branch=$branch path=$path"
-      failures=$((failures + 1))
-    fi
+    log "KEEP repo=$repo branch=$branch path=$path reason=no-matching-terminal-receipt"
+    skipped=$((skipped + 1))
   done < <(worktree_rows "$clone_path")
 done
 

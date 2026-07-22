@@ -8,6 +8,7 @@ import json
 import os
 import plistlib
 import subprocess
+import re
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -36,6 +37,7 @@ TEMPLATE_ENTRYPOINTS = {
     "oss-repo-agent-dispatch.plist.template": "repo_issue_to_pr_dispatch.sh",
     "oss-repo-agent-health.plist.template": "repo_agent_health.sh",
     "oss-repo-agent-hermes-update.plist.template": "repo_agent_hermes_update.sh",
+    "oss-repo-agent-intake.plist.template": "repo_issue_intake.sh",
     "oss-repo-agent-pr-triage.plist.template": "repo_pr_triage.sh",
 }
 
@@ -49,73 +51,265 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _regular_file(path: Path) -> bool:
+    """Return true only for an unlinked, non-symlink regular file."""
+    try:
+        stat = path.lstat()
+    except OSError:
+        return False
+    return stat.st_nlink == 1 and path.is_file() and not path.is_symlink()
+
+
+def _root_path(path: Path, label: str, errors: list[str]) -> Path:
+    """Resolve a deployment root without allowing a symlinked root."""
+    path = path.expanduser()
+    if path.is_symlink():
+        errors.append(f"{label} root must not be a symlink: {path}")
+    return path.resolve()
+
+
+def _validate_root_inventory(root: Path, label: str, errors: list[str]) -> None:
+    """Reject unexpected, linked, or non-regular files in a deployment root."""
+    if not root.is_dir():
+        return
+    for path in sorted(root.rglob("*")):
+        if not (path.is_file() or path.is_symlink()):
+            continue
+        try:
+            stat = path.lstat()
+        except OSError:
+            errors.append(f"unable to inspect {label} artifact: {path}")
+            continue
+        if path.is_symlink():
+            errors.append(f"{label} artifact must not be a symlink: {path}")
+        elif stat.st_nlink != 1:
+            errors.append(f"{label} artifact must not be a hardlink: {path}")
+
+
+def _validate_script_inventory(root: Path, label: str, errors: list[str]) -> None:
+    """Reject files that are not explicitly part of the script deployment."""
+    if root.is_symlink():
+        errors.append(f"{label} script root must not be a symlink: {root}")
+        return
+    if not root.is_dir():
+        return
+    expected = set(DEPLOYED_SCRIPTS)
+    for path in sorted(root.iterdir()):
+        if not (path.is_file() or path.is_symlink()):
+            continue
+        if path.name not in expected:
+            errors.append(f"unexpected {label} script: {path}")
+            continue
+        try:
+            stat = path.lstat()
+        except OSError:
+            continue
+        if path.is_symlink():
+            errors.append(f"{label} script must not be a symlink: {path}")
+        elif stat.st_nlink != 1:
+            errors.append(f"{label} script must not be a hardlink: {path}")
+
+
+def _validate_config_roots(roots: Iterable[Path], errors: list[str]) -> dict[str, str]:
+    """Validate the exact active config inventory and return its hashes."""
+    allowed = {"config.toml", "config.yaml", "config.yml", "config.json"}
+    hashes: dict[str, str] = {}
+    seen: set[Path] = set()
+    for root in roots:
+        root = root.expanduser()
+        if root in seen:
+            errors.append(f"duplicate active config root: {root}")
+            continue
+        seen.add(root)
+        if root.is_symlink():
+            errors.append(f"active config root must not be a symlink: {root}")
+        root = root.resolve()
+        if not root.is_dir():
+            errors.append(f"required active config directory missing: {root}")
+            continue
+        files = sorted(path for path in root.iterdir() if path.is_file() or path.is_symlink())
+        if not files:
+            errors.append(f"no active config artifacts found: {root}")
+        for path in files:
+            if path.name not in allowed:
+                errors.append(f"unexpected active config artifact: {path}")
+                continue
+            if not _regular_file(path):
+                errors.append(f"active config artifact must be a private regular file: {path}")
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                errors.append(f"invalid active config artifact {path}: {exc}")
+                continue
+            if "{{" in text or "}}" in text or "<config-path>" in text:
+                errors.append(f"unresolved active config placeholder: {path}")
+            hashes[str(path)] = sha256(path)
+    return hashes
+
 def _template_files(roots: Iterable[Path]) -> list[Path]:
     files: list[Path] = []
+    seen_roots: set[Path] = set()
     for root in roots:
+        root = root.expanduser().resolve()
+        if root in seen_roots:
+            raise ValueError(f"duplicate launchd template root: {root}")
+        seen_roots.add(root)
+        if root.name != "launchd" or root.parent.name != "templates":
+            raise ValueError(f"non-canonical launchd template root: {root}; expected templates/launchd")
         if not root.is_dir():
             raise ValueError(f"required launchd template directory missing: {root}")
-        files.extend(sorted(root.rglob("*.plist.template")))
+        files.extend(sorted(root.glob("*.plist.template")))
     if not files:
         raise ValueError("no launchd templates found")
     return files
 
 
-def validate(source_root: Path, active_root: Path, template_roots: Iterable[Path]) -> dict[str, object]:
+def _render_template(raw: str, active_home: Path, active_root: Path | None = None) -> str:
+    """Render compatibility markers used by canonical launchd fixtures."""
+    rendered = raw
+    active_root = active_root or (active_home / ".hermes" / "scripts")
+    replacements = {
+        "{{HOME}}": str(active_home),
+        "{{ACTIVE_SCRIPTS}}": str(active_root),
+        "{{UV_BIN}}": "/usr/bin/uv",
+        "{{PROJECT_ROOT}}": str(active_home / ".hermes" / "project"),
+        "{{CONFIG_PATH}}": str(active_home / ".hermes" / "config.toml"),
+        "{{DB_PATH}}": str(active_home / ".hermes" / "fala.sqlite"),
+        "{{MODE_ARG}}": "--dry-run",
+        "{{INTAKE_LIMIT}}": "10",
+        "{{LOG_DIR}}": str(active_home / ".hermes" / "logs"),
+        "<config-path>": str(active_home / ".hermes" / "config.toml"),
+    }
+    for marker, value in replacements.items():
+        rendered = rendered.replace(marker, value)
+    return rendered
+
+
+def _plist_name(template: Path) -> str:
+    suffix = ".plist.template"
+    return template.name[:-len(suffix)] + ".plist" if template.name.endswith(suffix) else template.name
+
+
+def _validate_rendered_roots(
+    templates: list[Path],
+    roots: Iterable[Path],
+    *,
+    label: str,
+    contracts: dict[str, tuple[str, tuple[str, ...]]],
+    errors: list[str],
+) -> dict[str, Path]:
+    """Validate one rendered plist inventory without merging root identities."""
+    expected = {_plist_name(path): path for path in templates}
+    parsed: dict[str, Path] = {}
+    seen_roots: set[Path] = set()
+    for root_input in roots:
+        root = root_input.expanduser()
+        if root in seen_roots:
+            errors.append(f"duplicate {label} root: {root}")
+            continue
+        seen_roots.add(root)
+        if root.is_symlink():
+            errors.append(f"{label} root must not be a symlink: {root}")
+        root = root.resolve()
+        if not root.is_dir():
+            errors.append(f"required {label} directory missing: {root}")
+            continue
+        root_names: set[str] = set()
+        all_files = sorted(path for path in root.rglob("*") if path.is_file() or path.is_symlink())
+        for path in all_files:
+            name = path.name
+            root_names.add(name)
+            if path.is_symlink():
+                errors.append(f"{label} launchd artifact must not be a symlink: {path}")
+                continue
+            try:
+                stat = path.lstat()
+            except OSError:
+                errors.append(f"unable to inspect {label} launchd artifact: {path}")
+                continue
+            if stat.st_nlink != 1:
+                errors.append(f"{label} launchd artifact must not be a hardlink: {path}")
+            if path.suffix != ".plist" or name not in expected:
+                errors.append(f"unexpected {label} launchd artifact: {path}")
+                continue
+            try:
+                document = plistlib.loads(path.read_bytes())
+                raw = path.read_text(encoding="utf-8")
+            except (OSError, plistlib.InvalidFileException, UnicodeDecodeError, ValueError) as exc:
+                errors.append(f"invalid {label} launchd plist {path}: {exc}")
+                continue
+            if not isinstance(document, dict):
+                errors.append(f"{label} launchd plist must be a dictionary: {path}")
+                continue
+            if re.search(r"\{\{[^}]+\}\}|<[A-Z][A-Z0-9_-]*>|<config-path>", raw):
+                errors.append(f"unresolved {label} launchd template placeholder: {path}")
+            contract = contracts.get(name)
+            if contract is not None:
+                expected_label, expected_args = contract
+                if document.get("Label") != expected_label:
+                    errors.append(f"{label} launchd Label mismatch: {path}")
+                if document.get("ProgramArguments") != list(expected_args):
+                    errors.append(f"{label} launchd ProgramArguments mismatch: {path}")
+            if name in parsed:
+                errors.append(f"duplicate {label} launchd artifact: {name}")
+            parsed[name] = path
+        missing = set(expected) - root_names
+        errors.extend(f"missing {label} launchd artifact: {name}" for name in sorted(missing))
+    return parsed
+
+
+def validate(
+    source_root: Path,
+    active_root: Path,
+    template_roots: Iterable[Path],
+    *,
+    active_plist_roots: Iterable[Path] | None = None,
+    render_roots: Iterable[Path] | None = None,
+    active_config_roots: Iterable[Path] | None = None,
+) -> dict[str, object]:
     errors: list[str] = []
-    source_root = source_root.expanduser().resolve()
+    source_root = _root_path(source_root, "source", errors)
     if (source_root / "scripts").is_dir():
         source_root = source_root / "scripts"
-    active_root = active_root.expanduser().resolve()
+    active_root = _root_path(active_root, "active", errors)
     hashes: dict[str, str] = {}
-
+    _validate_script_inventory(source_root, "source", errors)
+    _validate_script_inventory(active_root, "active", errors)
     for name in DEPLOYED_SCRIPTS:
-        source = source_root / name
-        active = active_root / name
+        source, active = source_root / name, active_root / name
         if not _regular_file(source):
             errors.append(f"missing source script: {source}")
             continue
         if not _regular_file(active):
             errors.append(f"missing active script: {active}")
             continue
-        source_hash = sha256(source)
-        active_hash = sha256(active)
+        source_hash, active_hash = sha256(source), sha256(active)
         hashes[name] = source_hash
         if source_hash != active_hash:
             errors.append(f"deployment hash mismatch: {name} source={source_hash} active={active_hash}")
-
     home = Path(os.environ.get("HOME", str(Path.home()))).expanduser().resolve()
     active_home = active_root.parent.parent if active_root.name == "scripts" else home
     templates = _template_files(template_roots)
+    contracts: dict[str, tuple[str, tuple[str, ...]]] = {}
     seen_labels: dict[str, Path] = {}
+    seen_executors: dict[tuple[str, ...], Path] = {}
     seen_names: set[str] = set()
-    expected_names = set(TEMPLATE_ENTRYPOINTS) | {"oss-repo-agent-intake.plist.template", "oss-repo-agent-fala-tick-all.plist.template"}
+    expected_names = set(TEMPLATE_ENTRYPOINTS) | {"oss-repo-agent-fala-tick-all.plist.template"}
     for template in templates:
         if template.name in seen_names:
             errors.append(f"duplicate launchd template entry: {template.name}")
         seen_names.add(template.name)
         try:
             raw = template.read_text(encoding="utf-8")
-            if "{{" in raw or "}}" in raw:
-                rendered = raw
-                replacements = {
-                    "{{HOME}}": str(active_home), "{{UV_BIN}}": "/usr/bin/uv",
-                    "{{PROJECT_ROOT}}": str(active_root.parent / "project"),
-                    "{{CONFIG_PATH}}": str(active_home / ".hermes" / "config.toml"),
-                    "{{DB_PATH}}": str(active_home / ".hermes" / "fala.sqlite"),
-                    "{{MODE_ARG}}": "--dry-run", "{{LOG_DIR}}": str(active_home / ".hermes" / "logs"),
-                    "<config-path>": str(active_home / ".hermes" / "config.toml"),
-                }
-                for marker, value in replacements.items():
-                    rendered = rendered.replace(marker, value)
-                if "{{" in rendered or "}}" in rendered:
-                    errors.append(f"unresolved launchd template placeholder: {template}")
-            else:
-                rendered = raw
+            rendered = _render_template(raw, active_home, active_root)
+            unresolved = re.findall(r"\{\{[^}]+\}\}|<[A-Z][A-Z0-9_-]*>|<config-path>", rendered)
+            if unresolved:
+                errors.append(f"unresolved launchd template placeholder: {template}: {', '.join(sorted(set(unresolved)))}")
             document = plistlib.loads(rendered.encode("utf-8"))
         except (OSError, plistlib.InvalidFileException, UnicodeDecodeError, ValueError) as exc:
             errors.append(f"invalid launchd template {template}: {exc}")
             continue
-
         if not isinstance(document, dict):
             errors.append(f"launchd plist must be a dictionary: {template}")
             continue
@@ -130,18 +324,21 @@ def validate(source_root: Path, active_root: Path, template_roots: Iterable[Path
         if not isinstance(arguments, list) or not arguments or any(not isinstance(value, str) or not value for value in arguments):
             errors.append(f"launchd ProgramArguments missing or invalid: {template}")
             continue
+        executor = tuple(arguments)
+        if executor in seen_executors:
+            errors.append(f"duplicate launchd ProgramArguments executor: {template} and {seen_executors[executor]}")
+        else:
+            seen_executors[executor] = template
+        contracts[_plist_name(template)] = (label, tuple(arguments))
         executable = arguments[0]
-        if executable.endswith(".sh"):
-            name = Path(executable).name
-            expected_name = TEMPLATE_ENTRYPOINTS.get(template.name)
-            expected = active_root / (expected_name or name)
-            if expected_name and name != expected_name:
-                errors.append(f"launchd entrypoint mismatch: {template} points to {name}; expected {expected_name}")
-            elif name not in DEPLOYED_SCRIPTS:
-                errors.append(f"launchd references undeployed script {name}: {template}")
+        expected_name = TEMPLATE_ENTRYPOINTS.get(template.name)
+        if expected_name:
+            expected = active_root / expected_name
+            if Path(executable).name != expected_name:
+                errors.append(f"launchd entrypoint mismatch: {template} points to {Path(executable).name}; expected {expected_name}")
             elif Path(executable).expanduser().resolve() != expected:
                 errors.append(f"launchd ProgramArguments path mismatch: {template} points to {executable}; expected {expected}")
-        elif template.name not in {"oss-repo-agent-intake.plist.template", "oss-repo-agent-fala-tick-all.plist.template"}:
+        elif template.name != "oss-repo-agent-fala-tick-all.plist.template":
             errors.append(f"launchd executable is not a deployed script: {template}")
         if template.name == "oss-repo-agent-fala-tick-all.plist.template":
             if label != "com.mikolaj92.hermes.repo-agent-fala-tick-all":
@@ -160,15 +357,7 @@ def validate(source_root: Path, active_root: Path, template_roots: Iterable[Path
             if len(mode_flags) != 1:
                 errors.append(f"Fala launchd mode flags are not exactly once: {template}")
             else:
-                _validate_args(
-                    arguments,
-                    project=active_root.parent / "project",
-                    config=active_home / ".hermes" / "config.toml",
-                    db_path=str(active_home / ".hermes" / "fala.sqlite"),
-                    mode=mode_flags[0][2:],
-                    label="launchd template",
-                    errors=errors,
-                )
+                _validate_args(arguments, project=active_root.parent / "project", config=active_home / ".hermes" / "config.toml", db_path=str(active_home / ".hermes" / "fala.sqlite"), mode=mode_flags[0][2:], label="launchd template", errors=errors)
             project_index = arguments.index("--project") if "--project" in arguments else -1
             if project_index < 0 or project_index + 1 >= len(arguments):
                 errors.append(f"Fala launchd project path is missing: {template}")
@@ -181,14 +370,31 @@ def validate(source_root: Path, active_root: Path, template_roots: Iterable[Path
                 if document.get("WorkingDirectory") != arguments[project_index + 1]:
                     errors.append(f"Fala launchd WorkingDirectory is not project-local: {template}")
 
-    missing = expected_names - seen_names
-    errors.extend(f"missing launchd template: {name}" for name in sorted(missing))
-    result: dict[str, object] = {"ok": not errors, "source_root": str(source_root), "active_root": str(active_root), "scripts": hashes, "templates": sorted(str(path) for path in templates), "errors": errors}
+    errors.extend(f"missing launchd template: {name}" for name in sorted(expected_names - seen_names))
+    plist_roots = list(active_plist_roots or [])
+    rendered_roots = list(render_roots or [])
+    config_roots = list(active_config_roots or [])
+    if active_plist_roots is not None:
+        if not plist_roots or any(root is None for root in plist_roots):
+            errors.append("active plist parity root is omitted")
+        else:
+            _validate_rendered_roots(templates, plist_roots, label="active", contracts=contracts, errors=errors)
+    if render_roots is not None:
+        if not rendered_roots or any(root is None for root in rendered_roots):
+            errors.append("rendered parity root is omitted")
+        else:
+            _validate_rendered_roots(templates, rendered_roots, label="rendered", contracts=contracts, errors=errors)
+    if active_config_roots is not None:
+        if not config_roots or any(root is None for root in config_roots):
+            errors.append("active config parity root is omitted")
+        else:
+            config_hashes = _validate_config_roots(config_roots, errors)
+    else:
+        config_hashes = {}
+    result: dict[str, object] = {"ok": not errors, "source_root": str(source_root), "active_root": str(active_root), "scripts": hashes, "configs": config_hashes, "templates": sorted(str(path) for path in templates), "errors": errors}
     if errors:
         raise DeploymentParityError(result)
     return result
-
-
 def _relative_candidate_path(candidate: Path, value: object, label: str, errors: list[str]) -> Path | None:
     if not isinstance(value, str) or not value or Path(value).is_absolute() or "\x00" in value or ".." in Path(value).parts:
         errors.append(f"Fala {label} must be a safe relative candidate path")
@@ -205,8 +411,6 @@ def _relative_candidate_path(candidate: Path, value: object, label: str, errors:
 FALA_TAG = "0.2.1"
 
 
-def _regular_file(path: Path) -> bool:
-    return path.is_file() and not path.is_symlink()
 
 
 def _validate_args(
@@ -478,7 +682,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--active-config-root", type=Path, default=None)
     args = parser.parse_args(argv)
     try:
-        result = validate(args.source_root, args.active_root, args.template_root)
+        result = validate(
+            args.source_root,
+            args.active_root,
+            args.template_root,
+            active_plist_roots=[args.active_plist_root] if args.active_plist_root else None,
+            render_roots=[args.render_root] if args.render_root else None,
+            active_config_roots=[args.active_config_root] if args.active_config_root else None,
+        )
     except DeploymentParityError as exc:
         print(json.dumps(exc.result, indent=2, sort_keys=True), file=sys.stderr)
         return 1

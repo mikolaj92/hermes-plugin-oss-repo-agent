@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import tempfile
 from pathlib import Path
 from typing import Any
 from fala.adapters import EffectorRunRequest, EffectorRunResult
@@ -46,6 +48,70 @@ def _pr_view(gh: str, repo: str, number: int, fields: str) -> Any:
         [gh, "pr", "view", str(number), "--repo", repo, "--json", fields],
         timeout=60,
     )
+def _read_merge_view(gh: str, repo: str, number: int) -> dict[str, Any]:
+    proc = _pr_view(gh, repo, number, "state,mergedAt,mergeCommit,headRefOid,headRefName")
+    raw = (getattr(proc, "stdout", "") or "").strip()
+    if not raw:
+        raise ValueError("blank merge read-back")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict) or not payload:
+        raise ValueError("invalid merge read-back shape")
+    return payload
+
+
+def _provenance_from_view(payload: dict[str, Any], *, repo: str, number: int, expected_head: str) -> dict[str, str | int]:
+    if str(payload.get("state") or "").upper() != "MERGED":
+        raise ValueError("PR is not merged")
+    merged_at = str(payload.get("mergedAt") or "").strip()
+    observed_head = str(payload.get("headRefOid") or "").strip()
+    head_ref = str(payload.get("headRefName") or "").strip()
+    commit = payload.get("mergeCommit")
+    merge_oid = str(commit.get("oid") or "").strip() if isinstance(commit, dict) else ""
+    if not merged_at or not observed_head or observed_head != expected_head or not head_ref or not merge_oid:
+        raise ValueError("incomplete or mismatched merge provenance")
+    return {
+        "source": "github_pr_readback",
+        "state": "MERGED",
+        "repo": repo,
+        "number": number,
+        "head_oid": observed_head,
+        "head_ref": head_ref,
+        "merge_oid": merge_oid,
+        "merged_at": merged_at,
+    }
+
+
+def _provided_provenance(request: EffectorRunRequest, *effector_ids: str) -> dict[str, Any]:
+    data = input_of(request)
+    value = data.get("verified_provenance")
+    if isinstance(value, dict):
+        return dict(value)
+    for effector_id in effector_ids:
+        value = cond_blob(request, effector_id).get("verified_provenance")
+        if isinstance(value, dict):
+            return dict(value)
+    return {}
+
+
+def _verify_provenance(
+    request: EffectorRunRequest,
+    *,
+    repo: str,
+    number: int,
+    expected_head: str | None = None,
+) -> dict[str, str | int]:
+    provided = _provided_provenance(request, "merge", "merge_pull_request")
+    if not provided:
+        raise ValueError("verified merge provenance is required")
+    if provided.get("source") != "github_pr_readback" or provided.get("repo") != repo or int(provided.get("number") or 0) != number:
+        raise ValueError("verified merge provenance identity mismatch")
+    head = str(provided.get("head_oid") or expected_head or "").strip()
+    if not head:
+        raise ValueError("verified merge provenance has no head oid")
+    authoritative = _provenance_from_view(_read_merge_view(str(cfg_of(request).get("gh_cli") or "gh"), repo, number), repo=repo, number=number, expected_head=head)
+    if authoritative != provided:
+        raise ValueError("verified merge provenance does not match authoritative read-back")
+    return authoritative
 
 
 def _comment_bodies(value: Any) -> list[str]:
@@ -238,7 +304,7 @@ def evaluate_test_evidence(request: EffectorRunRequest) -> EffectorRunResult:
     if upstream:
         return noop(str(upstream.get("reason") or "no_open_prs"))
     require = bool(
-        data.get("require_test_evidence", cfg_of(request).get("require_test_evidence", False))
+        data.get("require_test_evidence", cfg_of(request).get("require_test_evidence", True))
     )
     body = str(pr.get("body") or "")
     markers = data.get("markers") or [
@@ -284,7 +350,7 @@ def decide_triage_action(request: EffectorRunRequest) -> EffectorRunResult:
     evidence_pass = bool(
         data.get(
             "evidence_pass",
-            evidence.get("pass_", evidence.get("pass", True)),
+            evidence.get("pass_", evidence.get("pass", False)),
         )
     )
     automerge = bool(data.get("automerge", cfg.get("automerge", False)))
@@ -341,7 +407,7 @@ def decide_triage_action(request: EffectorRunRequest) -> EffectorRunResult:
 
 
 def claim_pr_assignee(request: EffectorRunRequest) -> EffectorRunResult:
-    """Assign PR to configured maintainer once."""
+    """Assign PR to configured maintainer once, with authoritative reconciliation."""
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
@@ -357,27 +423,34 @@ def claim_pr_assignee(request: EffectorRunRequest) -> EffectorRunResult:
         return fail("missing_repo_or_number", failure_class="terminal", retry_safe=False, **context)
     if dry:
         return planned(**context)
-    try:
+
+    def read_assignees() -> set[str]:
         view = _pr_view(gh, repo, number, "assignees")
-    except CommandError as exc:
-        return fail(
-            "assignee_read_failed",
-            failure_class="retryable_read",
-            retry_safe=True,
-            error=str(exc),
-            mutated=False,
-            **context,
-        )
-    raw = (getattr(view, "stdout", "") or "").strip()
-    if not raw:
-        return fail("assignee_read_failed", failure_class="terminal", retry_safe=False, error="blank assignee read-back", mutated=False, **context)
+        raw = (getattr(view, "stdout", "") or "").strip()
+        if not raw:
+            raise ValueError("blank assignee read-back")
+        current = json.loads(raw)
+        if not isinstance(current, dict) or not isinstance(current.get("assignees"), list):
+            raise ValueError("invalid assignee read-back shape")
+        names: set[str] = set()
+        for item in current["assignees"]:
+            if isinstance(item, dict):
+                login = item.get("login")
+                if not isinstance(login, str) or not login.strip():
+                    raise ValueError("invalid assignee read-back item")
+                names.add(login.strip())
+            elif isinstance(item, str) and item.strip():
+                names.add(item.strip())
+            else:
+                raise ValueError("invalid assignee read-back item")
+        return names
+
     try:
-        current = _json_output(raw, None)
+        names = read_assignees()
+    except CommandError as exc:
+        return fail("assignee_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=False, **context)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        return fail("assignee_read_failed", failure_class="terminal", retry_safe=False, error=f"invalid assignee JSON: {exc}", mutated=False, **context)
-    if not isinstance(current, dict) or not isinstance(current.get("assignees"), list):
-        return fail("assignee_read_failed", failure_class="terminal", retry_safe=False, error="invalid assignee read-back shape", mutated=False, **context)
-    names = _names(current["assignees"])
+        return fail("assignee_read_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False, **context)
     if assignee in names:
         return ok(status="already_claimed", mutated=False, **context)
     if names:
@@ -386,7 +459,15 @@ def claim_pr_assignee(request: EffectorRunRequest) -> EffectorRunResult:
         run_cmd([gh, "pr", "edit", str(number), "--repo", repo, "--add-assignee", assignee], timeout=60)
     except CommandError as exc:
         return fail("claim_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, **context)
-    return ok(status="claimed", mutated=True, **context)
+    try:
+        after = read_assignees()
+    except CommandError as exc:
+        return fail("assignee_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, **context)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("assignee_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, **context)
+    if assignee not in after:
+        return fail("assignee_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, assignees=sorted(after), mutated=True, **context)
+    return ok(status="claimed", assignees=sorted(after), mutated=True, **context)
 def comment_pr_once(request: EffectorRunRequest) -> EffectorRunResult:
     """Post one PR comment, reconciling an existing stable marker first."""
     data = input_of(request)
@@ -417,83 +498,50 @@ def comment_pr_once(request: EffectorRunRequest) -> EffectorRunResult:
     if not repo or not number or not body:
         return fail("missing_repo_number_or_body", failure_class="terminal", retry_safe=False, **context)
     if body.count(hidden_marker) > 1:
-        return fail(
-            "comment_marker_conflict",
-            failure_class="terminal",
-            retry_safe=False,
-            **context,
-        )
+        return fail("comment_marker_conflict", failure_class="terminal", retry_safe=False, **context)
     posted_body = body if hidden_marker in body else f"{body.rstrip()}\n\n{hidden_marker}"
     if dry:
         return planned(**context, body=body[:200])
-    try:
+
+    def read_comments() -> list[dict[str, Any]]:
         view = _pr_view(gh, repo, number, "comments")
-    except CommandError as exc:
-        return fail(
-            "comment_read_failed",
-            failure_class="retryable_read",
-            retry_safe=True,
-            error=str(exc),
-            mutated=False,
-            **context,
-        )
-    raw = (getattr(view, "stdout", "") or "").strip()
-    if not raw:
-        return fail(
-            "comment_read_failed",
-            failure_class="terminal",
-            retry_safe=False,
-            error="blank comment read-back",
-            mutated=False,
-            **context,
-        )
+        raw = (getattr(view, "stdout", "") or "").strip()
+        if not raw:
+            raise ValueError("blank comment read-back")
+        existing = json.loads(raw)
+        comments = existing.get("comments") if isinstance(existing, dict) else existing
+        if not isinstance(comments, list) or any(not isinstance(item, dict) for item in comments):
+            raise ValueError("invalid comment read-back shape")
+        if any("body" not in item or not isinstance(item["body"], str) for item in comments):
+            raise ValueError("invalid comment read-back body")
+        return comments
+
     try:
-        existing = _json_output(raw, None)
+        comments = read_comments()
+    except CommandError as exc:
+        return fail("comment_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=False, **context)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        return fail(
-            "comment_read_failed",
-            failure_class="terminal",
-            retry_safe=False,
-            error=f"invalid comment JSON: {exc}",
-            mutated=False,
-            **context,
-        )
-    comments = existing.get("comments") if isinstance(existing, dict) else existing
-    if not isinstance(comments, list) or any(not isinstance(item, dict) for item in comments):
-        return fail(
-            "comment_read_failed",
-            failure_class="terminal",
-            retry_safe=False,
-            error="invalid comment read-back shape",
-            mutated=False,
-            **context,
-        )
+        return fail("comment_read_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False, **context)
     matches = sum(str(item.get("body") or "").count(hidden_marker) for item in comments)
     if matches > 1:
-        return fail(
-            "comment_marker_conflict",
-            failure_class="terminal",
-            retry_safe=False,
-            matches=matches,
-            mutated=False,
-            **context,
-        )
+        return fail("comment_marker_conflict", failure_class="terminal", retry_safe=False, matches=matches, mutated=False, **context)
     if matches == 1:
         return ok(status="commented", reconciled=True, mutated=False, **context)
     try:
-        run_cmd(
-            [gh, "pr", "comment", str(number), "--repo", repo, "--body", posted_body],
-            timeout=60,
-        )
+        run_cmd([gh, "pr", "comment", str(number), "--repo", repo, "--body", posted_body], timeout=60)
     except CommandError as exc:
-        return fail(
-            "comment_failed",
-            failure_class="reconcile_then_retry",
-            retry_safe=False,
-            error=str(exc),
-            mutated=True,
-            **context,
-        )
+        return fail("comment_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, **context)
+    try:
+        after = read_comments()
+    except CommandError as exc:
+        return fail("comment_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, **context)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("comment_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, **context)
+    after_matches = sum(str(item.get("body") or "").count(hidden_marker) for item in after)
+    if after_matches > 1:
+        return fail("comment_marker_conflict", failure_class="terminal", retry_safe=False, matches=after_matches, mutated=True, **context)
+    if after_matches != 1:
+        return fail("comment_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, matches=after_matches, mutated=True, **context)
     return ok(status="commented", mutated=True, **context)
 
 
@@ -501,7 +549,7 @@ def comment_pr_once(request: EffectorRunRequest) -> EffectorRunResult:
 
 
 def merge_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
-    """Merge PR with optional --match-head-commit."""
+    """Merge a PR only after authoritative pre/post state verification."""
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
@@ -531,41 +579,57 @@ def merge_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
         return planned(method=method, **context)
     if not head_oid:
         return fail("missing_head_oid", failure_class="terminal", retry_safe=False, **context)
-    args = [gh, "pr", "merge", str(number), "--repo", repo, f"--{method}", "--match-head-commit", head_oid]
     try:
-        run_cmd(args, timeout=120)
+        before = _read_merge_view(gh, repo, number)
+        before_state = str(before.get("state") or "").upper()
+        if before_state == "MERGED":
+            provenance = _provenance_from_view(before, repo=repo, number=number, expected_head=head_oid)
+            return ok(status="already_merged", mutated=False, reconciled=True, verified_provenance=provenance, **context)
+        if before_state != "OPEN":
+            return fail("merge_precondition_failed", failure_class="terminal", retry_safe=False, state=before_state, mutated=False, **context)
+        observed_head = str(before.get("headRefOid") or "").strip()
+        if observed_head != head_oid:
+            return fail("merge_head_mismatch", failure_class="terminal", retry_safe=False, observed_head=observed_head, mutated=False, **context)
     except CommandError as exc:
-        try:
-            view = _pr_view(gh, repo, number, "state,mergedAt,mergeCommit,headRefOid")
-            raw = (getattr(view, "stdout", "") or "").strip()
-            payload = json.loads(raw)
-            commit = payload.get("mergeCommit") if isinstance(payload, dict) else None
-            observed_head = str(payload.get("headRefOid") or "").strip() if isinstance(payload, dict) else ""
-            if (
-                isinstance(payload, dict)
-                and payload.get("state") == "MERGED"
-                and payload.get("mergedAt")
-                and isinstance(commit, dict)
-                and str(commit.get("oid") or "").strip()
-                and observed_head == head_oid
-            ):
-                return ok(status="merge_verified", merge_oid=str(commit["oid"]), reconciled=True, mutated=True, **context)
-        except (CommandError, TypeError, ValueError, json.JSONDecodeError):
-            pass
+        return fail("merge_precondition_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=False, **context)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("merge_precondition_read_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False, **context)
+
+    merge_error: CommandError | None = None
+    try:
+        run_cmd([gh, "pr", "merge", str(number), "--repo", repo, f"--{method}", "--match-head-commit", head_oid], timeout=120)
+    except CommandError as exc:
+        merge_error = exc
+    try:
+        after = _read_merge_view(gh, repo, number)
+        provenance = _provenance_from_view(after, repo=repo, number=number, expected_head=head_oid)
+    except CommandError as exc:
         return fail(
             "merge_failed",
             failure_class="reconcile_then_retry",
             retry_safe=False,
-            error=str(exc),
-            stderr=exc.stderr[-400:],
+            error=str(merge_error or exc),
+            stderr=(merge_error.stderr if merge_error else exc.stderr)[-400:],
             mutated=True,
             **context,
         )
-    return ok(status="merged", mutated=True, **context)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail(
+            "merge_failed",
+            failure_class="reconcile_then_retry",
+            retry_safe=False,
+            error=str(merge_error or exc),
+            stderr=(merge_error.stderr if merge_error else "")[-400:],
+            mutated=True,
+            **context,
+        )
+    if merge_error is not None:
+        return ok(status="merge_verified", merge_oid=str(provenance["merge_oid"]), reconciled=True, mutated=True, verified_provenance=provenance, **context)
+    return ok(status="merged", merge_oid=str(provenance["merge_oid"]), mutated=True, verified_provenance=provenance, **context)
 
 
 def close_linked_issue(request: EffectorRunRequest) -> EffectorRunResult:
-    """Close GitHub issue after merge, reusing an already-closed state."""
+    """Close an issue only after validating authoritative merged-PR provenance."""
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
@@ -575,7 +639,6 @@ def close_linked_issue(request: EffectorRunRequest) -> EffectorRunResult:
     gh = str(cfg.get("gh_cli") or "gh")
     issue = int(data.get("issue") or data.get("number") or 0)
     if not issue and isinstance(pr, dict):
-        import re
         match = re.search(r"(?:^|/)ai/fix/(\d+)", str(pr.get("headRefName") or ""))
         if match:
             issue = int(match.group(1))
@@ -585,6 +648,15 @@ def close_linked_issue(request: EffectorRunRequest) -> EffectorRunResult:
         return fail("missing_repo_or_issue", failure_class="terminal", retry_safe=False, **context)
     if dry:
         return planned(**context)
+    provenance = _provided_provenance(request, "merge", "merge_pull_request")
+    try:
+        verified = _verify_provenance(request, repo=repo, number=int(provenance.get("number") or 0))
+        match = re.search(r"(?:^|/)ai/fix/(\d+)", str(verified.get("head_ref") or ""))
+        if not match or int(match.group(1)) != issue:
+            raise ValueError("merge provenance is not linked to issue")
+    except (CommandError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("merge_provenance_unverified", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False, **context)
+
     def read_state() -> str:
         view = run_cmd([gh, "issue", "view", str(issue), "--repo", repo, "--json", "state"], timeout=60)
         raw = (view.stdout or "").strip()
@@ -598,88 +670,106 @@ def close_linked_issue(request: EffectorRunRequest) -> EffectorRunResult:
     try:
         state = read_state()
     except CommandError as exc:
-        return fail(
-            "close_read_failed",
-            failure_class="retryable_read",
-            retry_safe=True,
-            error=str(exc),
-            mutated=False,
-            **context,
-        )
+        return fail("close_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=False, verified_provenance=verified, **context)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        return fail(
-            "close_read_failed",
-            failure_class="terminal",
-            retry_safe=False,
-            error=str(exc),
-            mutated=False,
-            **context,
-        )
+        return fail("close_read_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False, verified_provenance=verified, **context)
     if state == "CLOSED":
-        return ok(status="already_closed", mutated=False, **context)
+        return ok(status="already_closed", mutated=False, reconciled=True, verified_provenance=verified, **context)
     try:
         run_cmd([gh, "issue", "close", str(issue), "--repo", repo, "--reason", "completed"], timeout=60)
         final_state = read_state()
         if final_state != "CLOSED":
-            return fail(
-                "close_readback_mismatch",
-                failure_class="reconcile_then_retry",
-                retry_safe=False,
-                state=final_state,
-                mutated=True,
-                **context,
-            )
+            return fail("close_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, state=final_state, mutated=True, verified_provenance=verified, **context)
     except (CommandError, TypeError, ValueError, json.JSONDecodeError) as exc:
         try:
             if read_state() == "CLOSED":
-                return ok(
-                    status="closed",
-                    mutated=True,
-                    reconciled=True,
-                    **context,
-                )
+                return ok(status="closed", mutated=True, reconciled=True, verified_provenance=verified, **context)
         except (CommandError, TypeError, ValueError, json.JSONDecodeError):
             pass
-        return fail(
-            "close_failed",
-            failure_class="reconcile_then_retry",
-            retry_safe=False,
-            error=str(exc),
-            mutated=True,
-            **context,
-        )
-    return ok(status="closed", mutated=True, **context)
+        return fail("close_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, verified_provenance=verified, **context)
+    return ok(status="closed", mutated=True, verified_provenance=verified, **context)
 def write_merge_receipt(request: EffectorRunRequest) -> EffectorRunResult:
-    """Write merge receipt atomically, reusing only an exact match."""
+    """Write a receipt only from a fresh authoritative merged-PR read-back."""
     data = input_of(request)
+    cfg = cfg_of(request)
     dry = dry_run_flag(request)
-    path = str(data.get("receipt_path") or cfg_of(request).get("receipt_path") or "")
+    path = str(data.get("receipt_path") or cfg.get("receipt_path") or "")
     payload = data.get("payload")
     if not isinstance(payload, dict) or not payload:
         merge = cond_blob(request, "merge", "merge_pull_request")
         claim = cond_blob(request, "claim_pr", "claim_pr_assignee")
         payload = {"phase": "MERGED", "repo": merge.get("repo") or claim.get("repo"), "number": merge.get("number") or claim.get("number"), "dry_run": dry, "merge_status": merge.get("status")}
+    else:
+        payload = dict(payload)
     if not path:
         return fail("missing_receipt_path", failure_class="terminal", retry_safe=False)
     if dry:
         return planned(receipt_path=path, payload=payload)
+    repo = str(payload.get("repo") or "").strip()
+    number = int(payload.get("pr") or payload.get("number") or 0)
+    if not repo or not number:
+        return fail("merge_provenance_missing", failure_class="terminal", retry_safe=False, receipt_path=path)
     try:
-        p = Path(path)
-        if p.exists():
-            try:
-                existing = json.loads(p.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                return fail("receipt_conflict", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
-            if existing == payload:
-                return ok(status="exists", receipt_path=path, payload=payload, mutated=False)
-            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
+        verified = _verify_provenance(request, repo=repo, number=number)
+    except (CommandError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("merge_provenance_unverified", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
+    payload.update(
+        {
+            "repo": repo,
+            "pr": number,
+            "headSha": verified["head_oid"],
+            "mergeSha": verified["merge_oid"],
+            "mergedAt": verified["merged_at"],
+            "verified_provenance": verified,
+        }
+    )
+    p = Path(path)
+
+    def existing_result() -> EffectorRunResult | None:
+        if not p.exists():
+            return None
+        try:
+            existing = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
+        if existing == payload:
+            return ok(status="exists", receipt_path=path, payload=payload, mutated=False)
+        return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
+
+    prior = existing_result()
+    if prior is not None:
+        return prior
+    tmp_path: Path | None = None
+    try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        with tmp.open("r+b") as fh:
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
-        tmp.replace(p)
-    except OSError as exc:
+        try:
+            os.link(tmp_path, p)
+        except FileExistsError:
+            prior = existing_result()
+            if prior is not None:
+                return prior
+            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
+        os.unlink(tmp_path)
+        tmp_path = None
+        dir_fd = os.open(str(p.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        if not p.is_file() or json.loads(p.read_text(encoding="utf-8")) != payload:
+            raise ValueError("receipt read-back mismatch")
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
         return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path, mutated=True)
-    return ok(status="written", receipt_path=path, mutated=True)
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+    return ok(status="written", receipt_path=path, payload=payload, verified_provenance=verified, mutated=True)

@@ -45,7 +45,7 @@ DB: `~/.hermes/oss-repo-agent/fala/state.sqlite`
 
 | Path id | Tick CLI | Effectors (condensed) |
 |---------|----------|------------------------|
-| `issue_intake` | `repo-agent-tick-intake` | poll → claim → kanban |
+| `issue_intake` | `repo-agent-tick-intake` | poll → direction → comment → claim → kanban |
 | `issue_to_pr` | `repo-agent-tick-dispatch` | load → parse → worktree → omp → verify → push → open_pr → labels → receipt → complete |
 | `pr_triage` | `repo-agent-tick-triage` | list → load → checks → evidence → decide |
 | `pr_merge` | (router follow-up) | claim_pr → merge → receipt → close_issue |

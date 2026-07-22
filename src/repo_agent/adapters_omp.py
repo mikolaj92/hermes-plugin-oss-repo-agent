@@ -26,6 +26,7 @@ def run_omp(
         timeout=timeout,
         env=None,
         check=True,
+        cwd=Path(cwd).resolve(),
     )
     # Note: real omp flags may differ; this is the atomic adapter boundary.
     return {

@@ -70,6 +70,20 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result.output["status"], "failed")
         claim.assert_not_called()
 
+    def test_explicit_triage_payload_and_head_oid_override_conduction(self) -> None:
+        parent = request(input={"pr": {"number": 9, "headRefName": "ai/fix/9-explicit", "headRefOid": "head-explicit"}, "action": "merge", "repo": "input/repo", "conduction": {"load_pr_fields": {"pr": {"number": 4, "headRefName": "ai/fix/4-old", "headRefOid": "old"}}, "decide_triage_action": {"action": "merge"}}})
+        with mock.patch("repo_agent.flows.bridges.cleanup.parse_issue_from_branch", return_value=ok(status="parsed", issue=9)), mock.patch("repo_agent.flows.bridges.triage.claim_pr_assignee", return_value=ok(status="claimed", mutated=False)), mock.patch("repo_agent.flows.bridges.triage.merge_pull_request", return_value=noop("already_merged")) as merge:
+            bridges.apply_triage_decision(parent)
+        self.assertEqual(merge.call_args.args[0].input["number"], 9)
+        self.assertEqual(merge.call_args.args[0].input["head_oid"], "head-explicit")
+
+    def test_failed_ok_child_stops_triage(self) -> None:
+        with mock.patch("repo_agent.flows.bridges.triage.claim_pr_assignee") as claim:
+            result = bridges.apply_triage_decision(request(input={"conduction": {"load_pr_fields": {"status": "failed", "ok": True, "mutated": True}, "decide_triage_action": {"action": "merge"}}}))
+        self.assertEqual(result.output["status"], "failed")
+        self.assertTrue(result.output["mutated"])
+        claim.assert_not_called()
+
     def test_merge_noop_stops_receipt(self) -> None:
         with mock.patch("repo_agent.flows.bridges.cleanup.parse_issue_from_branch", return_value=ok(status="parsed", issue=3)), mock.patch(
             "repo_agent.flows.bridges.triage.claim_pr_assignee", return_value=ok(status="claimed", mutated=True)

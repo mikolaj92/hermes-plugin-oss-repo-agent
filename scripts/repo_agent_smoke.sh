@@ -6,13 +6,19 @@ ACTIVE_SCRIPTS="${HERMES_REPO_AGENT_ACTIVE_SCRIPTS:-${HOME:-/Users/mini-m4-main}
 [[ -f "$ROOT/tests/test_runtime_scripts.py" ]]
 [[ -f "$ROOT/docs/github-kanban-mapping.md" ]]
 [[ -d "$ROOT/templates/launchd" ]]
-python3 "$ROOT/tools/deployment_parity.py" \
-  --source-root "$ROOT/scripts" \
-  --active-root "$ACTIVE_SCRIPTS" \
-  --template-root "$ROOT/templates/launchd" \
-  ${HERMES_REPO_AGENT_DEPLOYMENT_MANIFEST:+--manifest "$HERMES_REPO_AGENT_DEPLOYMENT_MANIFEST"} \
-  >/dev/null
-
+parity_args=(
+  --source-root "${HERMES_REPO_AGENT_PARITY_SOURCE_ROOT:-$ROOT/scripts}"
+  --active-root "$ACTIVE_SCRIPTS"
+  --template-root "${HERMES_REPO_AGENT_PARITY_TEMPLATE_ROOT:-$ROOT/templates/launchd}"
+)
+active_plist_root="${HERMES_REPO_AGENT_ACTIVE_PLIST_ROOT:-${HERMES_REPO_AGENT_PARITY_PLIST_ROOT:-}}"
+config_root="${HERMES_REPO_AGENT_ACTIVE_CONFIG_ROOT:-${HERMES_REPO_AGENT_PARITY_CONFIG_ROOT:-}}"
+render_root="${HERMES_REPO_AGENT_RENDER_ROOT:-${HERMES_REPO_AGENT_PARITY_RENDER_ROOT:-}}"
+[[ -n "$active_plist_root" ]] && parity_args+=(--active-plist-root "$active_plist_root")
+[[ -n "$render_root" ]] && parity_args+=(--render-root "$render_root")
+[[ -n "$config_root" ]] && parity_args+=(--active-config-root "$config_root")
+[[ -n "${HERMES_REPO_AGENT_DEPLOYMENT_MANIFEST:-}" ]] && parity_args+=(--manifest "$HERMES_REPO_AGENT_DEPLOYMENT_MANIFEST")
+python3 "$ROOT/tools/deployment_parity.py" "${parity_args[@]}" >/dev/null
 bash -n "$ROOT/scripts/repo_issue_intake.sh"
 bash -n "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
 bash -n "$ROOT/scripts/repo_pr_triage.sh"
@@ -23,6 +29,9 @@ bash -n "$ROOT/scripts/repo_agent_hermes_update.sh"
 bash -n "$ROOT/scripts/repo_agent_repos.sh"
 bash -n "$ROOT/scripts/repo_agent_backfill.sh"
 bash -n "$ROOT/scripts/repo_agent_webhook.sh"
+bash -n "$ROOT/scripts/cron_repo_issue_to_pr_dispatch.sh"
+bash -n "$ROOT/scripts/cron_repo_pr_triage.sh"
+bash -n "$ROOT/scripts/repo_agent_smoke.sh"
 
 grep -Fq '[fix-pr-review]' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
 grep -Fq 'complete-stale-review' "$ROOT/scripts/repo_issue_to_pr_dispatch.sh"
@@ -49,7 +58,11 @@ grep -Fq 'watchdog-worker-log-stale' "$ROOT/scripts/repo_agent_health.sh"
 grep -Fq 'ASSIGN_FAILED' "$ROOT/scripts/repo_agent_status.sh"
 grep -Fq 'PR_ASSIGNED' "$ROOT/scripts/repo_agent_status.sh"
 
-python3 -m unittest discover -s "$ROOT/tests"
+PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python3 -m unittest \
+  tests.test_runtime_scripts \
+  tests.test_deployment_parity \
+  tests.test_health_status_scripts \
+  tests.test_facade_fail_closed
 
 if [[ "${HERMES_REPO_AGENT_SMOKE_MODEL:-0}" == 1 ]]; then
   provider="${HERMES_REPO_AGENT_SMOKE_PROVIDER:-custom}"

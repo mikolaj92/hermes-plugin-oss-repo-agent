@@ -49,10 +49,10 @@ class LabelConfig:
 @dataclass(frozen=True)
 class AutomationConfig:
     max_active_issues: int = 1
-    automerge: bool = True
-    require_human_approval: bool = False
-    require_checks: bool = False
-    require_test_evidence: bool = False
+    automerge: bool = False
+    require_human_approval: bool = True
+    require_checks: bool = True
+    require_test_evidence: bool = True
     fixer_assignee: str = "repo-agent-fixer"
     merge_method: str = "merge"
 
@@ -283,10 +283,10 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
     )
     automation = AutomationConfig(
         max_active_issues=int(automation_data.get("max_active_issues", 1)),
-        automerge=_bool(automation_data.get("automerge", True), "automation.automerge"),
-        require_human_approval=_bool(automation_data.get("require_human_approval", False), "automation.require_human_approval"),
-        require_checks=_bool(automation_data.get("require_checks", False), "automation.require_checks"),
-        require_test_evidence=_bool(automation_data.get("require_test_evidence", False), "automation.require_test_evidence"),
+        automerge=_bool(automation_data.get("automerge", False), "automation.automerge"),
+        require_human_approval=_bool(automation_data.get("require_human_approval", True), "automation.require_human_approval"),
+        require_checks=_bool(automation_data.get("require_checks", True), "automation.require_checks"),
+        require_test_evidence=_bool(automation_data.get("require_test_evidence", True), "automation.require_test_evidence"),
         fixer_assignee=str(automation_data.get("fixer_assignee", "repo-agent-fixer")),
         merge_method=str(automation_data.get("merge_method", "merge")),
     )

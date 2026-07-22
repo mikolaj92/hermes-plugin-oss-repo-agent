@@ -97,6 +97,32 @@ class TriageRouterAggregationTests(unittest.TestCase):
         self.assertFalse(result.failed)
         self.assertEqual([p["step_id"] for p in result.completed], ["decide", "merge"])
 
+    def test_completed_follow_up_with_failed_process_promotes_parent(self) -> None:
+        decide = self._result(status="completed", path_id="pr_triage", action="merge", step="decide")
+        follow = self._result(status="completed", path_id="pr_merge", action="merge", step="merge")
+        follow.processes[0]["status"] = "failed"
+        follow.completed = []
+        follow.failed = []
+        follow.summary["failed_steps"] = ["merge"]
+        cfg = AgentConfig(
+            mode="dry-run",
+            repos=(RepoEntry(repo="o/r", board="board", clone_path="/tmp/o-r"),),
+        )
+
+        async def scenario() -> PathRunResult:
+            with mock.patch("repo_agent.flows.triage.run_pr_triage_decide", new=mock.AsyncMock(return_value=decide)), mock.patch(
+                "repo_agent.flows.triage.run_follow_up_path", new=mock.AsyncMock(return_value=follow)
+            ):
+                return await run_triage_with_router(
+                    db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True
+                )
+
+        result = asyncio.run(scenario())
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.summary["run_status"], "failed")
+        self.assertIn("merge", result.summary["failed_steps"])
+        self.assertEqual([p["step_id"] for p in result.failed], ["merge"])
+
     def test_router_does_not_seed_followup_from_transient_decide_run(self) -> None:
         decide = self._result(status="completed", path_id="pr_triage", action="merge", step="decide")
         decide.run_id = "decide-run"

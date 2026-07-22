@@ -57,6 +57,26 @@ class DeploymentCandidateTests(unittest.TestCase):
             return real_run(argv, *args, **kwargs)
 
         return patch.object(self.commands.subprocess, "run", side_effect=fake_run)
+    def test_init_force_overwrite_preserves_original_on_fsync_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.toml"
+            original = "mode = 'dry-run'\noriginal = true\n"
+            target.write_text(original, encoding="utf-8")
+            with patch.object(self.commands.os, "fsync", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    self.commands.init_project(str(target), "owner/repo", "owner-board", "/tmp/clones", "/tmp/worktrees", None, True)
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+            self.assertEqual(list(target.parent.glob(f".{target.name}.*")), [])
+
+    def test_candidate_tree_fsync_failure_removes_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(self.commands, "_fsync_tree", side_effect=self.commands.ConfigError("candidate fsync failed")):
+                with self.assertRaisesRegex(self.commands.ConfigError, "candidate fsync failed"):
+                    self._render(root)
+            candidates = root / "candidates"
+            self.assertEqual(list(candidates.iterdir()) if candidates.exists() else [], [])
+
     def _render(self, root: Path, *, mode: str = "dry-run", config_path: Path | None = None, db_path: Path | None = None) -> Path:
         config = config_path or root / "config.toml"
         config.write_text(f"mode = '{mode}'\n", encoding="utf-8")
@@ -87,6 +107,44 @@ class DeploymentCandidateTests(unittest.TestCase):
             )
         self.assertTrue(result["ok"])
         return candidate
+    def test_staging_directory_fsync_failure_cleans_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidates_root = root / "candidates"
+            original_fsync_directory = self.commands._fsync_directory
+
+            def fail_staging(path: Path) -> None:
+                if Path(path).name == "candidates":
+                    raise self.commands.ConfigError("staging directory fsync failed")
+                original_fsync_directory(path)
+
+            with patch.object(self.commands, "_fsync_directory", side_effect=fail_staging):
+                with self.assertRaisesRegex(self.commands.ConfigError, "staging directory fsync failed"):
+                    self._render(root)
+            self.assertFalse(any(candidates_root.iterdir()) if candidates_root.exists() else False)
+
+    def test_bootstrap_apply_is_metadata_only(self):
+        with patch.object(self.commands.subprocess, "run") as run:
+            result = self.commands.bootstrap(self.cfg, True)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["effective_live"])
+        run.assert_not_called()
+
+    def test_render_launchd_is_metadata_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls: list[list[str]] = []
+            real_run = self.commands.subprocess.run
+
+            def record_run(argv, *args, **kwargs):
+                calls.append(list(argv))
+                return real_run(argv, *args, **kwargs)
+
+            with patch.object(self.commands.subprocess, "run", side_effect=record_run):
+                self._render(root)
+            self.assertFalse(any(call[:2] == ["launchctl", "bootstrap"] for call in calls))
+            self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in calls))
+
 
     def test_fala_source_tree_includes_src(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -237,6 +295,139 @@ class DeploymentCandidateTests(unittest.TestCase):
             plist_artifact = version_manifest["artifacts"]["launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"]
             self.assertEqual(plist_artifact["sha256"], hashlib.sha256(installed.read_bytes()).hexdigest())
             self.assertEqual(plist_artifact["bytes"], installed.stat().st_size)
+    def test_durability_failure_prevents_cutover(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            calls: list[list[str]] = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(list(argv))
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch.object(self.commands, "_assert_legacy_mutators_unloaded", return_value={}), patch.object(
+                self.commands, "_fsync_tree", side_effect=self.commands.ConfigError("version fsync failed")
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "version fsync failed"):
+                    self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+            self.assertFalse((root / "current").exists())
+            self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in calls))
+
+    def test_version_directory_fsync_failure_prevents_cutover(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            versions_root = root / "versions"
+            original_fsync_directory = self.commands._fsync_directory
+            failed = False
+
+            def fail_version_directory(path: Path) -> None:
+                nonlocal failed
+                if Path(path) == versions_root and not failed:
+                    failed = True
+                    raise self.commands.ConfigError("version directory fsync failed")
+                original_fsync_directory(path)
+
+            calls: list[list[str]] = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(list(argv))
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch.object(self.commands, "_assert_legacy_mutators_unloaded", return_value={}), patch.object(
+                self.commands, "_fsync_directory", side_effect=fail_version_directory
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "version directory fsync failed"):
+                    self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+            self.assertFalse((root / "current").exists())
+            self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in calls))
+            candidate_id = json.loads((candidate / "manifest.json").read_text())["candidate_id"]
+            self.assertFalse((versions_root / candidate_id).exists())
+
+    def test_candidate_parent_directory_fsync_failure_cleans_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate_parent = root / "candidates"
+            original_fsync_directory = self.commands._fsync_directory
+            failed = False
+
+            def fail_candidate_parent(path: Path) -> None:
+                nonlocal failed
+                if Path(path).name == "candidates" and not failed:
+                    failed = True
+                    raise self.commands.ConfigError("candidate parent fsync failed")
+                original_fsync_directory(path)
+
+            with patch.object(self.commands, "_fsync_directory", side_effect=fail_candidate_parent):
+                with self.assertRaisesRegex(self.commands.ConfigError, "candidate parent fsync failed"):
+                    self._render(root)
+            self.assertFalse(any(candidate_parent.iterdir()) if candidate_parent.exists() else False)
+        
+    def test_cutover_directory_fsync_failure_prevents_launchctl_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            calls: list[list[str]] = []
+            original_fsync_directory = self.commands._fsync_directory
+            failed = False
+
+            def fail_cutover(path: Path) -> None:
+                nonlocal failed
+                if Path(path) == root and not failed:
+                    failed = True
+                    raise self.commands.ConfigError("cutover directory fsync failed")
+                original_fsync_directory(path)
+
+            def fake_run(argv, **kwargs):
+                calls.append(list(argv))
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch.object(self.commands, "_assert_legacy_mutators_unloaded", return_value={}), patch.object(
+                self.commands, "_fsync_directory", side_effect=fail_cutover
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "cutover directory fsync failed"):
+                    self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+            self.assertFalse(any(call[:2] == ["launchctl", "bootstrap"] for call in calls))
+            self.assertFalse((root / "current").exists())
+
+    def test_existing_current_is_restored_after_cutover_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._render(root)
+
+            def successful_run(argv, **kwargs):
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
+                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+            ), patch.object(self.commands.subprocess, "run", side_effect=successful_run):
+                self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
+            old_target = (root / "current").resolve()
+            other_config = root / "other.toml"
+            second = self._render(root, config_path=other_config, db_path=root / "other.sqlite")
+
+            def failing_run(argv, **kwargs):
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                if argv[:2] == ["launchctl", "bootstrap"]:
+                    raise subprocess.CalledProcessError(1, argv)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
+                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+            ), patch.object(self.commands.subprocess, "run", side_effect=failing_run):
+                with self.assertRaises(self.commands.ConfigError):
+                    self.commands.deploy_fala(self.cfg, str(second), True, deployment_root=str(root))
+            self.assertEqual((root / "current").resolve(), old_target)
+
     def test_render_and_candidate_independent_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

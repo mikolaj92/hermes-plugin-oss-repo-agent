@@ -1,49 +1,58 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["version", "mode", "repos"],
-  "additionalProperties": true,
+  "required": ["version", "mode", "branch_prefix", "base_branch", "github", "labels", "automation", "executor", "paths", "repos"],
+  "additionalProperties": false,
   "properties": {
     "version": {"type": "integer", "const": 1},
     "mode": {"type": "string", "enum": ["dry-run", "live"]},
-    "clone_root": {"type": ["string", "null"]},
-    "worktree_root": {"type": ["string", "null"]},
-    "branch_prefix": {"type": "string"},
-    "automerge": {"type": "boolean", "const": false},
+    "branch_prefix": {"type": "string", "minLength": 1},
+    "base_branch": {"type": "string", "minLength": 1},
     "github": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
+      "properties": {"cli": {"type": "string", "minLength": 1}, "assignee": {"type": "string", "minLength": 1}}
+    },
+    "labels": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ready", "in_progress", "blocked", "pr_opened", "generated"],
+      "properties": {"ready": {"type": "string", "minLength": 1}, "in_progress": {"type": "string", "minLength": 1}, "blocked": {"type": "string", "minLength": 1}, "pr_opened": {"type": "string", "minLength": 1}, "generated": {"type": "string", "minLength": 1}}
+    },
+    "automation": {
+      "type": "object", "additionalProperties": false,
       "properties": {
-        "cli": {"type": "string"},
-        "default_limit": {"type": "integer", "minimum": 1, "maximum": 100},
-        "assignee": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}$"}
+        "max_active_issues": {"type": "integer", "minimum": 1}, "automerge": {"type": "boolean"},
+        "require_human_approval": {"type": "boolean"}, "require_checks": {"type": "boolean"},
+        "require_test_evidence": {"type": "boolean"}, "fixer_assignee": {"type": "string", "minLength": 1},
+        "merge_method": {"type": "string", "enum": ["merge", "squash", "rebase"]}
+      }
+    },
+    "direction": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "repo_goal": {"type": "string"},
+        "require_keywords": {"type": "array", "items": {"type": "string"}},
+        "deny_keywords": {"type": "array", "items": {"type": "string"}},
+        "reject_labels": {"type": "array", "items": {"type": "string"}},
+        "min_goal_overlap": {"type": "integer", "minimum": 1}
       }
     },
     "executor": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "properties": {
-        "enabled": {"type": "boolean"},
-        "command": {"type": "string"},
-        "timeout_seconds": {"type": "integer", "minimum": 1}
+        "enabled": {"type": "boolean"}, "command": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1}, "thinking": {"type": "string", "minLength": 1},
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0}, "max_attempts": {"type": "integer", "minimum": 1},
+        "retry_backoff_seconds": {"type": "number", "minimum": 0}
       }
     },
+    "paths": {
+      "type": "object", "additionalProperties": false,
+      "required": ["worktree_root", "dispatch_receipts", "merge_receipts", "active_issue"],
+      "properties": {"worktree_root": {"type": "string", "minLength": 1}, "dispatch_receipts": {"type": "string", "minLength": 1}, "merge_receipts": {"type": "string", "minLength": 1}, "active_issue": {"type": "string", "minLength": 1}}
+    },
     "repos": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["repo", "board"],
-        "additionalProperties": true,
-        "properties": {
-          "repo": {"type": "string"},
-          "board": {"type": "string"},
-          "clone_path": {"type": ["string", "null"]},
-          "trusted_authors": {"type": "array", "items": {"type": "string"}},
-          "trusted_branch_prefixes": {"type": "array", "items": {"type": "string"}},
-          "allowed_base_branches": {"type": "array", "items": {"type": "string"}},
-          "external_pr_policy": {"type": "string", "enum": ["block", "report", "ignore"]}
-        }
-      }
+      "type": "array", "minItems": 1,
+      "items": {"type": "object", "required": ["repo", "board", "clone_path"], "additionalProperties": false, "properties": {"repo": {"type": "string", "minLength": 1}, "board": {"type": "string", "minLength": 1}, "clone_path": {"type": "string", "minLength": 1}, "priority": {"type": "integer"}}}
     }
   }
 }

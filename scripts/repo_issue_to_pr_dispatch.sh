@@ -133,41 +133,55 @@ receipt_write_claim() {
   local task_id="$1" repo="$2" issue="$3" branch="$4" clone_path="$5" base_sha="$6" path tmp
   path="$(receipt_file "$task_id")"
   mkdir -p "$RECEIPT_DIR" || return 1
-  if [[ -f "$path" ]]; then
-    return 0
-  fi
   tmp="$(mktemp "$RECEIPT_DIR/.receipt.XXXXXX")" || return 1
-  if ! RECEIPT_TMP="$tmp" python3 - "$task_id" "$repo" "$issue" "$branch" "$clone_path" "$base_sha" <<'PY'
+  if ! RECEIPT_TMP="$tmp" RECEIPT_PATH="$path" python3 - "$task_id" "$repo" "$issue" "$branch" "$clone_path" "$base_sha" <<'PY'
 import datetime as dt
 import json
 import os
 import sys
 
-payload = {
-    "version": 1,
-    "task_id": sys.argv[1],
-    "repo": sys.argv[2],
-    "issue": sys.argv[3],
-    "branch": sys.argv[4],
-    "clone_path": sys.argv[5],
-    "base_sha": sys.argv[6],
-    "claimed_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "phase": "claimed",
-}
-with open(os.environ["RECEIPT_TMP"], "w", encoding="utf-8") as stream:
-    json.dump(payload, stream, sort_keys=True)
-    stream.write("\n")
-    stream.flush()
-    os.fsync(stream.fileno())
+tmp = os.environ["RECEIPT_TMP"]
+path = os.environ["RECEIPT_PATH"]
+expected = {"version": 1, "task_id": sys.argv[1], "repo": sys.argv[2], "issue": sys.argv[3], "branch": sys.argv[4], "clone_path": sys.argv[5], "base_sha": sys.argv[6], "phase": "claimed"}
+payload = dict(expected, claimed_at=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+try:
+    with open(tmp, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    with open(tmp, encoding="utf-8") as stream:
+        readback = json.load(stream)
+    if any(readback.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("receipt temp read-back mismatch")
+    try:
+        os.link(tmp, path)
+    except FileExistsError:
+        with open(path, encoding="utf-8") as stream:
+            existing = json.load(stream)
+        if any(existing.get(key) != value for key, value in expected.items()):
+            raise RuntimeError("conflicting receipt already exists")
+    else:
+        with open(path, encoding="utf-8") as stream:
+            published = json.load(stream)
+        if any(published.get(key) != value for key, value in expected.items()):
+            raise RuntimeError("receipt publication read-back mismatch")
+    os.unlink(tmp)
+    directory = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
 PY
   then
     rm -f "$tmp"
     return 1
-  fi
-  if [[ -e "$path" ]]; then
-    rm -f "$tmp"
-  else
-    mv "$tmp" "$path" || { rm -f "$tmp"; return 1; }
   fi
 }
 
@@ -181,15 +195,41 @@ import json
 import os
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as stream:
-    payload = json.load(stream)
-payload[sys.argv[2]] = sys.argv[3]
-with open(os.environ["RECEIPT_TMP"], "w", encoding="utf-8") as stream:
-    json.dump(payload, stream, sort_keys=True)
-    stream.write("\n")
-    stream.flush()
-    os.fsync(stream.fileno())
-os.replace(os.environ["RECEIPT_TMP"], sys.argv[1])
+path, field, value = sys.argv[1:]
+tmp = os.environ["RECEIPT_TMP"]
+try:
+    with open(path, encoding="utf-8") as stream:
+        original = stream.read().encode("utf-8")
+    payload = json.loads(original.decode("utf-8"))
+    payload[field] = value
+    with open(tmp, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    with open(tmp, encoding="utf-8") as stream:
+        readback = json.load(stream)
+    if readback.get(field) != value:
+        raise RuntimeError("receipt temp read-back mismatch")
+    with open(path, encoding="utf-8") as stream:
+        if stream.read().encode("utf-8") != original:
+            raise RuntimeError("receipt changed during update")
+    os.replace(tmp, path)
+    with open(path, encoding="utf-8") as stream:
+        published = json.load(stream)
+    if published.get(field) != value:
+        raise RuntimeError("receipt publication read-back mismatch")
+    directory = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
 PY
   then
     rm -f "$tmp"
@@ -318,30 +358,73 @@ PY
 }
 
 ensure_clean_clone() {
-  local clone_path="$1"
-  GIT_MASTER=1 git -C "$clone_path" rev-parse --is-inside-work-tree >/dev/null
-  GIT_MASTER=1 git -C "$clone_path" diff --quiet
-  GIT_MASTER=1 git -C "$clone_path" diff --cached --quiet
+  local clone_path="$1" status_line code reason
+  if ! GIT_MASTER=1 git -C "$clone_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    log "CLONE_CLEANNESS_UNKNOWN clone=$clone_path reason=not-a-worktree"
+    return 1
+  fi
+  if ! status_line="$(GIT_MASTER=1 git -C "$clone_path" status --porcelain=v1 --untracked-files=all --ignored=matching)"; then
+    log "CLONE_CLEANNESS_UNKNOWN clone=$clone_path reason=status-failed"
+    return 1
+  fi
+  [[ -z "$status_line" ]] && return 0
+  while IFS= read -r code; do
+    [[ -n "$code" ]] || continue
+    code="${code:0:2}"
+    case "$code" in
+      '??') reason=untracked ;;
+      '!!') reason=ignored ;;
+      [![:space:]][[:space:]]) reason=staged ;;
+      [[:space:]][![:space:]]) reason=tracked ;;
+      [![:space:]][![:space:]]) reason=staged-and-tracked ;;
+      *) reason=unknown ;;
+    esac
+    log "CLONE_NOT_CLEAN clone=$clone_path reason=$reason status=$(printf '%q' "$code")"
+  done <<<"$status_line"
+  return 1
 }
 
 refresh_clone_base() {
-  local clone_path="$1" current
-  [[ -d "$clone_path/.git" ]] || return 0
-  GIT_MASTER=1 git -C "$clone_path" fetch --prune origin >/dev/null 2>&1 || return 0
-  current="$(GIT_MASTER=1 git -C "$clone_path" branch --show-current 2>/dev/null || true)"
-  case "$current" in
-    main|master)
-      if [[ -z "$(GIT_MASTER=1 git -C "$clone_path" status --porcelain --untracked-files=no 2>/dev/null)" ]] &&
-        GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/remotes/origin/$current"; then
-        GIT_MASTER=1 git -C "$clone_path" merge --ff-only "origin/$current" >/dev/null 2>&1 || true
-      fi
-      ;;
-  esac
+  local clone_path="$1" current base_branch
+  base_branch="${HERMES_REPO_AGENT_BASE_BRANCH:-main}"
+  if [[ ! -e "$clone_path/.git" ]]; then
+    log "BASE_REFRESH_DEFERRED clone=$clone_path reason=not-a-repository"
+    return 1
+  fi
+  if ! GIT_MASTER=1 git -C "$clone_path" remote get-url origin >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! GIT_MASTER=1 git -C "$clone_path" fetch --prune origin >/dev/null 2>&1; then
+    log "BASE_REFRESH_DEFERRED clone=$clone_path reason=fetch-failed base=$base_branch"
+    return 1
+  fi
+  if ! current="$(GIT_MASTER=1 git -C "$clone_path" branch --show-current 2>/dev/null)"; then
+    log "BASE_REFRESH_DEFERRED clone=$clone_path reason=current-branch-failed base=$base_branch"
+    return 1
+  fi
+  if [[ "$current" == "$base_branch" ]]; then
+    if ! ensure_clean_clone "$clone_path"; then
+      log "BASE_REFRESH_DEFERRED clone=$clone_path reason=base-not-clean base=$base_branch"
+      return 1
+    fi
+    if ! GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+      log "BASE_REFRESH_DEFERRED clone=$clone_path reason=missing-origin-base base=$base_branch"
+      return 1
+    fi
+    if ! GIT_MASTER=1 git -C "$clone_path" merge --ff-only "origin/$base_branch" >/dev/null 2>&1; then
+      log "BASE_REFRESH_DEFERRED clone=$clone_path reason=fast-forward-failed base=$base_branch"
+      return 1
+    fi
+  fi
 }
 
 create_fix_task() {
   local board="$1" clone_path="$2" source_task_id="$3" repo="$4" issue="$5" title="$6"
   local slug branch key body fix_title
+  if ! refresh_clone_base "$clone_path"; then
+    log "CREATE_FIX_TASK_DEFERRED board=$board task=$source_task_id repo=$repo issue=$issue reason=base-refresh"
+    return "$OPENCODE_DEFERRED_RC"
+  fi
   slug="$(slugify "$repo-$issue-$title")"
   branch="ai/fix/${issue}-${slug}"
   key="fix-pr:${repo}:${issue}"
@@ -367,7 +450,6 @@ Required policy:
 - Add/keep ai:generated and ai:pr-opened labels when applicable.
 - Do not merge, delete branches, force-push, expose secrets, or bypass safeguards."
 
-  refresh_clone_base "$clone_path"
   hermes kanban --board "$board" create "$fix_title" \
     --body "$body" \
     --assignee "$KANBAN_FIXER_ASSIGNEE" \
@@ -407,9 +489,10 @@ verify_remote_branch_changed() {
 }
 
 validate_expected_pr() {
-  local repo="$1" issue="$2" branch="$3" pr_number="$4" pr_url="$5" pr_json
+  local repo="$1" issue="$2" branch="$3" pr_number="$4" pr_url="$5" pr_json base_branch
+  base_branch="${HERMES_REPO_AGENT_BASE_BRANCH:-main}"
   pr_json="$(gh pr view "$pr_number" --repo "$repo" --json state,url,author,headRefName,headRefOid,baseRefName,closingIssuesReferences 2>/dev/null)" || return 1
-  PR_JSON="$pr_json" python3 - "$repo" "$issue" "$branch" "$pr_number" "$pr_url" <<'PY'
+  PR_JSON="$pr_json" python3 - "$repo" "$issue" "$branch" "$pr_number" "$pr_url" "$base_branch" <<'PY'
 import json
 import os
 import sys
@@ -418,7 +501,7 @@ try:
     pr = json.loads(os.environ.get("PR_JSON", "{}"))
 except Exception:
     sys.exit(1)
-repo, issue, branch, number, fallback_url = sys.argv[1:]
+repo, issue, branch, number, fallback_url, base_branch = sys.argv[1:]
 owner = repo.split("/", 1)[0]
 author = pr.get("author") if isinstance(pr.get("author"), dict) else {}
 refs = pr.get("closingIssuesReferences") if isinstance(pr.get("closingIssuesReferences"), list) else []
@@ -427,7 +510,7 @@ if not linked or str(pr.get("state") or "").upper() != "OPEN":
     sys.exit(1)
 if str(author.get("login") or "") != owner:
     sys.exit(1)
-if str(pr.get("headRefName") or "") != branch or str(pr.get("baseRefName") or "") != "main":
+if str(pr.get("headRefName") or "") != branch or str(pr.get("baseRefName") or "") != base_branch:
     sys.exit(1)
 url = str(pr.get("url") or fallback_url)
 head_oid = str(pr.get("headRefOid") or "")
@@ -436,6 +519,7 @@ if not head_oid:
 print(f"{number}\t{url}")
 PY
 }
+
 
 
 validated_open_pr_for_branch() {
@@ -590,35 +674,6 @@ blocked_task_manual_only() {
 retry_gate() {
   local board="$1" task_id="$2" show_text
   show_text="$(hermes kanban --board "$board" show "$task_id" 2>/dev/null || true)"
-  TASK_SHOW="$show_text" python3 - "$MAX_TASK_ATTEMPTS" <<'PY'
-import datetime as dt
-import os
-import re
-import sys
-
-max_attempts = int(sys.argv[1])
-text = os.environ.get("TASK_SHOW", "")
-attempts = [int(value) for value in re.findall(r"repo-agent retry attempt=(\d+)/\d+", text)]
-attempt = max(attempts) if attempts else 0
-if attempt >= max_attempts:
-    print(f"attempts-exhausted attempts={attempt}/{max_attempts}")
-    sys.exit(1)
-
-next_values = re.findall(r"next_retry_after=([0-9T:\-]+Z)", text)
-if next_values:
-    next_time = dt.datetime.strptime(next_values[-1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
-    now = dt.datetime.now(dt.timezone.utc)
-    if next_time > now:
-        print(f"backoff-active attempts={attempt}/{max_attempts} next_retry_after={next_values[-1]}")
-        sys.exit(1)
-
-print(f"retry-ready attempts={attempt}/{max_attempts}")
-PY
-}
-
-retry_failure_note() {
-  local board="$1" task_id="$2" show_text
-  show_text="$(hermes kanban --board "$board" show "$task_id" 2>/dev/null || true)"
   TASK_SHOW="$show_text" python3 - "$MAX_TASK_ATTEMPTS" "$RETRY_BACKOFF_SECONDS" <<'PY'
 import datetime as dt
 import os
@@ -688,16 +743,23 @@ ensure_existing_worktree_ready() {
 
 ensure_worktree_ready() {
   local clone_path="$1" worktree="$2" branch="$3"
-  local existing_worktree base_ref="HEAD"
+  local existing_worktree base_ref="HEAD" base_branch
+  base_branch="${HERMES_REPO_AGENT_BASE_BRANCH:-main}"
   ENSURE_WORKTREE_READY_PATH="$worktree"
-  refresh_clone_base "$clone_path"
-  if GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet refs/remotes/origin/main; then
-    base_ref="origin/main"
-  elif GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet refs/remotes/origin/master; then
-    base_ref="origin/master"
+  if type refresh_clone_base >/dev/null 2>&1; then
+    if ! refresh_clone_base "$clone_path"; then
+      log "OPENCODE_BLOCKED reason=base-refresh-failed branch=$branch clone=$clone_path base=$base_branch"
+      return 1
+    fi
+  fi
+  if GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+    base_ref="origin/$base_branch"
   fi
   if GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-    GIT_MASTER=1 git -C "$clone_path" branch -f "$branch" "origin/$branch" >/dev/null 2>&1 || true
+    if ! GIT_MASTER=1 git -C "$clone_path" branch -f "$branch" "origin/$branch" >/dev/null 2>&1; then
+      log "OPENCODE_BLOCKED reason=branch-sync-failed branch=$branch clone=$clone_path"
+      return 1
+    fi
   fi
   if [[ -d "$worktree" ]]; then
     ensure_existing_worktree_ready "$worktree" "$branch"
@@ -778,7 +840,6 @@ run_omp_for_fix_worker() {
   local board="$1" task_id="$2" repo="$3" issue="$4" branch="$5" worktree="$6" prompt="$7" log_file="$8" lock="$9" pid_file="${10}"
   local child="" timer="" rc=1 pr_info pr_number pr_url retry_note worktree_status status_inline base_sha
   trap 'if [[ -n "${timer:-}" ]]; then kill "$timer" 2>/dev/null || true; fi; if [[ -n "${child:-}" ]] && kill -0 "$child" 2>/dev/null; then kill "$child" 2>/dev/null || true; sleep 1; kill -9 "$child" 2>/dev/null || true; fi; rm -f "$pid_file"; rmdir "$lock" 2>/dev/null || true' EXIT TERM INT
-
   printf '%s OMP_START task=%s repo=%s branch=%s timeout=%s model=%s thinking=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$repo" "$branch" "$OMP_TIMEOUT_SECONDS" "$OMP_MODEL" "$OMP_THINKING"
   omp_args=(--cwd "$worktree" --model "$OMP_MODEL" --thinking "$OMP_THINKING" --approval-mode yolo -p "$prompt")
   [[ -n "$OMP_MAX_TIME" ]] && omp_args+=(--max-time "$OMP_MAX_TIME")
@@ -802,14 +863,9 @@ run_omp_for_fix_worker() {
   wait "$timer" 2>/dev/null || true
   timer=""
   printf '%s OMP_EXIT task=%s pid=%s rc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$child" "$rc"
-
   if [[ "$rc" -ne 0 ]]; then
-    if type finalize_retry_failure >/dev/null 2>&1; then
-      retry_note="$(finalize_retry_failure "$board" "$task_id" "$repo" "$issue" "repo-agent OMP worker exited with rc=${rc}" "$log_file")"
-    else
-      retry_note="$(retry_failure_note "$board" "$task_id")"
-      hermes kanban --board "$board" block "$task_id" "repo-agent OMP worker exited with rc=${rc}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
-    fi
+    retry_note="$(retry_failure_note "$board" "$task_id")"
+    hermes kanban --board "$board" block "$task_id" "repo-agent OMP worker exited with rc=${rc}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
     printf '%s OMP_FINALIZED task=%s outcome=failed rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
   elif ! worktree_status="$(GIT_MASTER=1 git -C "$worktree" status --short 2>&1)"; then
     retry_note="$(retry_failure_note "$board" "$task_id")"
@@ -819,33 +875,25 @@ run_omp_for_fix_worker() {
     retry_note="$(retry_failure_note "$board" "$task_id")"
     status_inline="${worktree_status//$'\n'/; }"
     hermes kanban --board "$board" block "$task_id" "worktree-dirty-after-omp for branch ${branch}; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
+    printf '%s OMP_FINALIZED task=%s outcome=worktree-dirty-after-omp rc=%s branch=%s status=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$status_inline" "$retry_note"
+  elif pr_info="$(validated_open_pr_for_branch "$repo" "$issue" "$branch" 2>/dev/null)"; then
     pr_number="${pr_info%%$'\t'*}"
     pr_url="${pr_info#*$'\t'}"
     if ! gh pr edit "$pr_number" --repo "$repo" --add-label ai:generated --add-label ai:pr-opened >/dev/null 2>&1; then
       retry_note="$(retry_failure_note "$board" "$task_id")"
-      hermes kanban --board "$board" block "$task_id" "PR label mutation failed; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
-      printf '%s OMP_FINALIZED task=%s outcome=pr-label-failed pr=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$retry_note"
+      hermes kanban --board "$board" block "$task_id" "PR label mutation failed; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
     elif ! complete_task "$board" "$task_id" "Open PR for ${repo}#${issue}: ${pr_url}"; then
       retry_note="$(retry_failure_note "$board" "$task_id")"
-      hermes kanban --board "$board" block "$task_id" "Kanban completion failed; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
-      printf '%s OMP_FINALIZED task=%s outcome=completion-failed pr=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$retry_note"
-    elif [[ "$task_id" == gh-issue-* ]] && ! gh issue edit "$issue" --repo "$repo" --add-label ai:pr-opened --remove-label ai:in-progress >/dev/null 2>&1; then
-      retry_note="$(retry_failure_note "$board" "$task_id")"
-      hermes kanban --board "$board" block "$task_id" "Issue label mutation failed after PR validation; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
-      printf '%s OMP_FINALIZED task=%s outcome=issue-label-failed pr=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$retry_note"
+      hermes kanban --board "$board" block "$task_id" "Kanban completion failed; ${retry_note}; log: ${log_file}" >/dev/null 2>&1 || true
     else
-      receipt_update "$task_id" phase pr-opened 2>/dev/null || true
       printf '%s OMP_FINALIZED task=%s outcome=pr-open pr=%s url=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$pr_number" "$pr_url"
-      release_clean_worktree_for_branch "$clone_path" "$branch"
     fi
   else
     retry_note="$(retry_failure_note "$board" "$task_id")"
-    hermes kanban --board "$board" block "$task_id" "repo-agent worker finished without a verified open PR for branch ${branch}; ${retry_note}; manual inspection required if attempts are exhausted." >/dev/null 2>&1 || log "KANBAN_BLOCK_FAILED task=$task_id"
+    hermes kanban --board "$board" block "$task_id" "repo-agent worker finished without a verified open PR for branch ${branch}; ${retry_note}" >/dev/null 2>&1 || true
     printf '%s OMP_FINALIZED task=%s outcome=no-pr rc=%s branch=%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$task_id" "$rc" "$branch" "$retry_note"
   fi
 }
-
-
 run_omp_for_fix() {
   local board="$1" clone_path="$2" task_id="$3" title="$4" repo="$5" issue="$6" task_branch="$7" existing_worktree="${8:-}"
   local slug branch worktree prompt log_file lock pid_file worker_pid base_sha active
@@ -868,7 +916,7 @@ run_omp_for_fix() {
     return "$OPENCODE_DEFERRED_RC"
   fi
   if ! command -v omp >/dev/null 2>&1; then
-    log "OMP_SKIPPED task=$task_id reason=missing-command command=omp repo=$repo branch=$branch"
+    log "OMP_SKIPPED task=$task_id reason=missing-command command=omp repo=$repo branch=$task_branch"
     return "$OPENCODE_DEFERRED_RC"
   fi
   active="$(active_omp_agents)"

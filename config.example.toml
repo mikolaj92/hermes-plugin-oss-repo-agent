@@ -1,5 +1,5 @@
 version = 1
-mode = "dry-run"
+mode = "live"
 branch_prefix = "ai/fix"
 base_branch = "main"
 
@@ -16,13 +16,23 @@ generated = "ai:generated"
 
 [automation]
 max_active_issues = 1
-automerge = true
-require_human_approval = false
-require_checks = false
-require_test_evidence = false
+automerge = false
+require_human_approval = true
+require_checks = true
+require_test_evidence = true
+fixer_assignee = "repo-agent-fixer"
+merge_method = "merge"
+
+[direction]
+# Free-text goal; issues must share tokens with this text when set.
+repo_goal = ""
+require_keywords = []
+deny_keywords = []
+reject_labels = ["ai:out-of-scope", "wontfix", "invalid"]
+min_goal_overlap = 1
 
 [executor]
-enabled = false
+enabled = true
 command = "omp"
 model = "omniroute/omp/default"
 thinking = "medium"

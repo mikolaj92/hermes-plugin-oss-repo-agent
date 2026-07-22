@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 from dataclasses import dataclass
@@ -453,6 +456,35 @@ def prepare_worktree(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="prepared", worktree_path=path, branch=branch, head=head, mutated=True)
 
 
+def _omp_diff_paths(worktree_path: str) -> list[str]:
+    """Return changed paths reported by git, including untracked files."""
+    status = git(
+        ["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree_path
+    )
+    paths: list[str] = []
+    for line in status.splitlines():
+        value = line[3:] if len(line) >= 3 else line
+        if " -> " in value:
+            value = value.rsplit(" -> ", 1)[-1]
+        if value:
+            paths.append(value)
+    for args in (["diff", "--name-only", "HEAD"], ["diff", "--cached", "--name-only"]):
+        paths.extend(p for p in git(args, cwd=worktree_path).splitlines() if p)
+    return paths
+
+
+def _escaped_omp_paths(worktree_path: str, paths: list[str]) -> list[str]:
+    root = Path(worktree_path).resolve()
+    escaped: list[str] = []
+    for value in paths:
+        path = Path(value)
+        candidate = path.resolve() if path.is_absolute() else (root / path).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            escaped.append(value)
+    return escaped
+
 def run_omp_worker(request: EffectorRunRequest) -> EffectorRunResult:
     """Single OMP invocation in a worktree (no PR open, no labels)."""
     data = input_of(request)
@@ -461,58 +493,66 @@ def run_omp_worker(request: EffectorRunRequest) -> EffectorRunResult:
     upstream = upstream_noop(request, "prepare_worktree", "parse_issue_ref")
     if upstream:
         return noop(str(upstream.get("reason") or "no_ready_task"))
-    worktree_path = str(
-        data.get("worktree_path")
-        or cond_get(request, "worktree_path", "prepare_worktree")
-        or ""
-    )
-    prompt = str(
-        data.get("prompt")
-        or cond_get(request, "prompt", "build_repair_prompt")
-        or ""
-    )
+    worktree_path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "prepare_worktree") or "")
+    prompt = str(data.get("prompt") or cond_get(request, "prompt", "build_repair_prompt") or "")
     if not prompt:
-        # issue_to_pr default prompt from parse_issue_ref
         parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
         if parsed.get("repo") and parsed.get("issue"):
-            prompt = (
-                f"Implement a minimal fix for {parsed['repo']}#{parsed['issue']}.\n"
-                f"Branch: {parsed.get('branch') or ''}\n"
-                f"Task: {parsed.get('task_title') or ''}\n"
-                f"Keep scope tight. Do not force-push. Do not open/merge PRs.\n"
-            )
+            prompt = (f"Implement a minimal fix for {parsed['repo']}#{parsed['issue']}.\n"
+                      f"Branch: {parsed.get('branch') or ''}\n"
+                      f"Task: {parsed.get('task_title') or ''}\n"
+                      "Keep scope tight. Do not force-push. Do not open/merge PRs.\n")
     model = str(data.get("model") or cfg.get("model") or "omniroute/omp/default")
     timeout = float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800)
+    intended_branch = str(data.get("branch") or cond_get(request, "branch", "prepare_worktree") or cond_get(request, "branch", "parse_issue_ref") or "")
+    clone_path = str(data.get("clone_path") or cond_get(request, "clone_path", "refresh_clone_base", "prepare_worktree") or cfg.get("clone_path") or "")
+    base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
     if not worktree_path or not prompt:
         return fail("missing_worktree_or_prompt", failure_class="terminal", retry_safe=False)
-    # Live execution is fail-closed when the configured executor is disabled.
-    # Keep dry-run as a planned no-op and, crucially, do not invoke omp.
     if not dry and not bool(data.get("executor_enabled", cfg.get("executor_enabled", True))):
         return fail("executor_disabled", failure_class="terminal", retry_safe=False)
+    if not dry:
+        try:
+            if git(["rev-parse", "--is-inside-work-tree"], cwd=worktree_path) != "true":
+                return fail("omp_worktree_invalid", failure_class="terminal", retry_safe=False)
+            top_level = git(["rev-parse", "--show-toplevel"], cwd=worktree_path)
+            if not top_level or Path(top_level).resolve() != Path(worktree_path).resolve():
+                return fail("omp_worktree_confinement", failure_class="terminal", retry_safe=False, top_level=top_level)
+            if not intended_branch:
+                return fail("omp_postcondition_failed", failure_class="terminal", retry_safe=False, detail="missing_intended_branch")
+            pre_branch = git(["branch", "--show-current"], cwd=worktree_path)
+            pre_head = rev_parse(worktree_path)
+            base = rev_parse(clone_path or worktree_path, f"origin/{base_branch}")
+            if pre_branch != intended_branch:
+                return fail("omp_branch_mismatch", failure_class="terminal", retry_safe=False, expected_branch=intended_branch, actual_branch=pre_branch)
+        except CommandError as exc:
+            return fail("omp_worktree_invalid", failure_class="terminal", retry_safe=False, error=str(exc))
     try:
-        out = run_omp(
-            prompt=prompt,
-            cwd=worktree_path,
-            model=model,
-            timeout=timeout,
-            dry_run=dry,
-        )
+        out = run_omp(prompt=prompt, cwd=worktree_path, model=model, timeout=timeout, dry_run=dry)
     except CommandError as exc:
-        return fail("omp_failed", failure_class="terminal", retry_safe=False, error= str(exc), stderr=exc.stderr[-500:], mutated=True)
+        return fail("omp_failed", failure_class="terminal", retry_safe=False, error=str(exc), stderr=exc.stderr[-500:], mutated=True)
     if dry:
-        return planned(
-            worktree_path=worktree_path,
-            model=model,
-            omp=out,
-            prompt_len=out.get("prompt_len"),
-        )
-    return ok(
-        status="omp_finished",
-        worktree_path=worktree_path,
-        model=model,
-        omp=out,
-        mutated=True,
-    )
+        return planned(worktree_path=worktree_path, model=model, omp=out, prompt_len=out.get("prompt_len"))
+    try:
+        post_top_level = git(["rev-parse", "--show-toplevel"], cwd=worktree_path)
+        if not post_top_level or Path(post_top_level).resolve() != Path(worktree_path).resolve():
+            return fail("omp_worktree_confinement", failure_class="terminal", retry_safe=False, top_level=post_top_level)
+        post_branch = git(["branch", "--show-current"], cwd=worktree_path)
+        if post_branch != intended_branch:
+            return fail("omp_branch_mismatch", failure_class="terminal", retry_safe=False, expected_branch=intended_branch, actual_branch=post_branch)
+        post_head = rev_parse(worktree_path)
+        if post_head == pre_head:
+            return fail("omp_head_unchanged", failure_class="terminal", retry_safe=False, head=post_head, pre_head=pre_head)
+        if post_head == base:
+            return fail("omp_no_new_commits", failure_class="terminal", retry_safe=False, head=post_head, base=base)
+        escaped = _escaped_omp_paths(worktree_path, _omp_diff_paths(worktree_path))
+        if escaped:
+            return fail("omp_diff_path_escape", failure_class="terminal", retry_safe=False, paths=escaped)
+    except CommandError as exc:
+        return fail("omp_postcondition_failed", failure_class="terminal", retry_safe=False, error=str(exc))
+    except (OSError, ValueError) as exc:
+        return fail("omp_postcondition_failed", failure_class="terminal", retry_safe=False, error=str(exc))
+    return ok(status="omp_finished", worktree_path=worktree_path, model=model, omp=out, pre_head=pre_head, head=post_head, base=base, branch=post_branch, mutated=True)
 
 
 def verify_branch_has_commits(request: EffectorRunRequest) -> EffectorRunResult:
@@ -684,10 +724,7 @@ def apply_pr_labels(request: EffectorRunRequest) -> EffectorRunResult:
 
 
 def write_dispatch_receipt(request: EffectorRunRequest) -> EffectorRunResult:
-    """Write a receipt once, reusing identical durable payloads."""
-    import json
-    import os
-
+    """Write a receipt once, using durable atomic no-clobber publication."""
     data = input_of(request)
     dry = dry_run_flag(request)
     upstream = upstream_noop(
@@ -731,33 +768,40 @@ def write_dispatch_receipt(request: EffectorRunRequest) -> EffectorRunResult:
         return prior
     if dry:
         return planned(receipt_path=path, payload=payload)
+
+    tmp_path: Path | None = None
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
         try:
-            tmp.replace(p)
+            os.link(tmp_path, p)
         except FileExistsError:
             prior = existing_result()
             if prior is not None:
                 return prior
-            raise
-        finally:
-            if tmp.exists():
-                tmp.unlink()
+            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
+        os.unlink(tmp_path)
+        tmp_path = None
+        dir_fd = os.open(str(p.parent), os.O_RDONLY)
         try:
-            dir_fd = os.open(p.parent, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        if not p.is_file() or json.loads(p.read_text(encoding="utf-8")) != payload:
+            raise ValueError("receipt read-back mismatch")
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
         return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path, mutated=True)
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
     return ok(status="written", receipt_path=path, payload=payload, mutated=True)
 
 
