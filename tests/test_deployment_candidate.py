@@ -379,6 +379,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertTrue((version / "source" / "project" / "LICENSE").is_file())
             self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "EmberJson" / "emberjson").is_dir())
             self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "sqlite.fire" / "native" / "sqlite_fire.c").is_file())
+            self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "sqlite.fire" / "native" / "libsqlite_fire.dylib").is_file())
             self.assertNotIn(str(root / "candidates"), " ".join(arguments))
             self.assertEqual(arguments[arguments.index("--project") + 1], str((version / "source" / "project").resolve()))
             self.assertEqual(arguments[arguments.index("--config") + 1], str((version / "source" / "config.toml").resolve()))

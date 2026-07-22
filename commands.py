@@ -898,6 +898,16 @@ def render_launchd(
         (candidate / "launchd").mkdir()
         (candidate / "source").mkdir()
         _copy_candidate_source(project_root, candidate / "source", config, lock)
+        native_dir = candidate / "source" / "project" / "Fala" / "vendor" / "sqlite.fire" / "native"
+        try:
+            subprocess.run(
+                ["make", "-C", str(native_dir)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise ConfigError(f"unable to build candidate Fala native library: {exc}") from exc
         candidate_project = candidate / "source" / "project"
         candidate_config = candidate / "source" / "config.toml"
         uv_bin = shutil.which("uv")
