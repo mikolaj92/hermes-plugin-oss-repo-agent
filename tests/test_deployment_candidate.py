@@ -223,6 +223,27 @@ class DeploymentCandidateTests(unittest.TestCase):
             with self.assertRaises(self.commands.ConfigError):
                 self._render(root, mode="live", config_path=other, db_path=root / "other.sqlite")
 
+    def test_legacy_mutators_probe_user_and_gui_domains(self):
+        calls: list[str] = []
+
+        def fake_state(label: str, domain: str):
+            calls.append(domain)
+            return {"label": label, "domain": domain, "loaded": False}
+
+        with patch.object(self.commands, "_launchctl_loaded_state", side_effect=fake_state):
+            states = self.commands._assert_legacy_mutators_unloaded()
+        self.assertEqual(set(states), set(self.commands.LEGACY_MUTATOR_LABELS))
+        self.assertEqual(calls.count(f"user/{self.commands.os.getuid()}"), len(self.commands.LEGACY_MUTATOR_LABELS))
+        self.assertEqual(calls.count(f"gui/{self.commands.os.getuid()}"), len(self.commands.LEGACY_MUTATOR_LABELS))
+
+    def test_legacy_mutator_loaded_in_both_domains_fails_closed(self):
+        def fake_state(label: str, domain: str):
+            return {"label": label, "domain": domain, "loaded": label == self.commands.LEGACY_MUTATOR_LABELS[0]}
+
+        with patch.object(self.commands, "_launchctl_loaded_state", side_effect=fake_state):
+            with self.assertRaisesRegex(self.commands.ConfigError, "multiple domains"):
+                self.commands._assert_legacy_mutators_unloaded()
+
     def test_version_copy_failure_removes_partial_version(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

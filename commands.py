@@ -926,9 +926,11 @@ def _launchctl_loaded_state(label: str, domain: str) -> dict[str, Any]:
     except OSError as exc:
         raise ConfigError(f"unable to inspect launchd state: {exc}") from exc
     if result.returncode == 0:
-        return {"label": label, "domain": domain, "loaded": True}
+        return {"label": label, "domain": domain, "loaded": True, "available": True}
+    if "domain does not support specified action" in f"{result.stdout or ''}\n{result.stderr or ''}".lower():
+        return {"label": label, "domain": domain, "loaded": False, "available": False}
     if _launchctl_absent(result):
-        return {"label": label, "domain": domain, "loaded": False}
+        return {"label": label, "domain": domain, "loaded": False, "available": True}
     detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
     raise ConfigError(f"unable to inspect launchd state for {domain}/{label}: {detail}")
 
@@ -979,8 +981,16 @@ LEGACY_MUTATOR_LABELS = (
 
 
 def _assert_legacy_mutators_unloaded() -> dict[str, dict[str, Any]]:
-    domain = f"gui/{os.getuid()}"
-    states = {label: _launchctl_loaded_state(label, domain) for label in LEGACY_MUTATOR_LABELS}
+    states: dict[str, dict[str, Any]] = {}
+    for label in LEGACY_MUTATOR_LABELS:
+        per_domain = {
+            domain: _launchctl_loaded_state(label, domain)
+            for domain in (f"user/{os.getuid()}", f"gui/{os.getuid()}")
+        }
+        loaded = [state for state in per_domain.values() if state.get("loaded")]
+        if len(loaded) > 1:
+            raise ConfigError(f"legacy mutator label is loaded in multiple domains: {label}")
+        states[label] = loaded[0] if loaded else next(iter(per_domain.values()))
     health = states["com.mikolaj92.hermes.repo-agent-health"]
     if health.get("loaded"):
         health_plist = Path.home() / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-health.plist"
@@ -1120,7 +1130,6 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
             if old_manifest.get("candidate_id") != old_current_target.name:
                 raise ConfigError("deployment current manifest candidate_id mismatch")
             validate_fala_candidate(old_current_target, deployment_root=root)
-
         plist = candidate / "launchd" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
         try:
             subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True, text=True)
@@ -1128,7 +1137,7 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
             raise ConfigError(f"Fala plist lint failed: {exc}") from exc
         _assert_legacy_mutators_unloaded()
         label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
-        domain = f"gui/{os.getuid()}"
+        domain = f"user/{os.getuid()}"
         loaded_state = _launchctl_loaded_state(label, domain)
         launch_agents = Path.home() / "Library" / "LaunchAgents"
         target = launch_agents / plist.name
