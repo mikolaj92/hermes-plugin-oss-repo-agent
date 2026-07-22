@@ -303,6 +303,10 @@ class DeploymentCandidateTests(unittest.TestCase):
             installed = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
             document = plistlib.loads(installed.read_bytes())
             arguments = document["ProgramArguments"]
+            environment = document["EnvironmentVariables"]
+            runtime_root = root / "runtime" / candidate_id
+            self.assertEqual(environment["UV_PROJECT_ENVIRONMENT"], str((runtime_root / ".venv").resolve()))
+            self.assertEqual(environment["UV_CACHE_DIR"], str((runtime_root / "cache").resolve()))
             self.assertNotIn(str(root / "candidates"), " ".join(arguments))
             self.assertEqual(arguments[arguments.index("--project") + 1], str((version / "source" / "project").resolve()))
             self.assertEqual(arguments[arguments.index("--config") + 1], str((version / "source" / "config.toml").resolve()))

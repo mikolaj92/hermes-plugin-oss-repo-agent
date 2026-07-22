@@ -597,8 +597,15 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         if not isinstance(value, str) or not Path(value).is_absolute() or "~" in value:
             errors.append(f"Fala runtime {key} is invalid")
     env = runtime.get("environment_variables")
-    if not isinstance(env, dict) or set(env) != {"HOME"} or not isinstance(env.get("HOME"), str) or not Path(env["HOME"]).is_absolute():
-        errors.append("Fala runtime environment_variables must be exactly an absolute HOME")
+    expected_env_keys = {"HOME"} if candidate.parent.name == "candidates" else {"HOME", "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR"}
+    if not isinstance(env, dict) or set(env) != expected_env_keys or not isinstance(env.get("HOME"), str) or not Path(env["HOME"]).is_absolute():
+        errors.append(f"Fala runtime environment_variables must be exactly {sorted(expected_env_keys)} with absolute paths")
+    elif any(not isinstance(env[key], str) or not Path(env[key]).is_absolute() for key in expected_env_keys):
+        errors.append("Fala runtime environment variable paths must be absolute")
+    elif deployment_root is not None and "UV_PROJECT_ENVIRONMENT" in env:
+        expected_runtime = (deployment_root.expanduser().resolve() / "runtime" / candidate_id).resolve()
+        if Path(env["UV_PROJECT_ENVIRONMENT"]).parent.resolve() != expected_runtime or Path(env["UV_CACHE_DIR"]).parent.resolve() != expected_runtime:
+            errors.append("Fala UV runtime paths are not candidate-local")
     if runtime.get("start_interval") != 600 or runtime.get("run_at_load") is not False or runtime.get("process_type") != "Background" or runtime.get("limit_load_to_session_type") not in (None, "Background"):
         errors.append("Fala runtime schedule/process/session contract is invalid")
     if plist_path is not None and runtime.get("plist_sha256") != sha256(plist_path):
@@ -709,6 +716,8 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         env = document.get("EnvironmentVariables")
         if not isinstance(env, dict) or not isinstance(env.get("HOME"), str) or not Path(env["HOME"]).is_absolute():
             errors.append("Fala plist HOME is invalid")
+        if env != runtime.get("environment_variables"):
+            errors.append("Fala plist EnvironmentVariables mismatch")
         for key, runtime_key in (("StandardOutPath", "standard_out_path"), ("StandardErrorPath", "standard_error_path")):
             if document.get(key) != runtime.get(runtime_key):
                 errors.append(f"Fala plist {key} mismatch")

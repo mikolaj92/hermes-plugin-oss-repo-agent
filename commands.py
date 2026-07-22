@@ -1044,8 +1044,12 @@ def _promote_version_runtime(version: Path, deployment_root: Path, candidate_id:
     document["ProgramArguments"] = args
     environment = dict(document.get("EnvironmentVariables") or {})
     environment["HOME"] = str(Path.home().resolve())
+    environment["UV_PROJECT_ENVIRONMENT"] = str((deployment_root / "runtime" / candidate_id / ".venv").resolve())
+    environment["UV_CACHE_DIR"] = str((deployment_root / "runtime" / candidate_id / "cache").resolve())
     document["EnvironmentVariables"] = environment
     document["WorkingDirectory"] = str(project)
+    Path(environment["UV_PROJECT_ENVIRONMENT"]).parent.mkdir(parents=True, exist_ok=True)
+    Path(environment["UV_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
     log_dir = (deployment_root / "logs" / candidate_id).resolve()
     for key in ("StandardOutPath", "StandardErrorPath"):
         value = str(document.get(key) or "")
