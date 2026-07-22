@@ -279,6 +279,41 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertLess(max(bootouts), min(bootstraps))
 
 
+    def test_promotion_replaces_legacy_current_that_fails_new_parity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._render(root)
+
+            def fake_run(argv, **kwargs):
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                return subprocess.CompletedProcess(argv, 0, "OK\n", "")
+
+            with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
+                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+                self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
+
+            legacy = (root / "current").resolve()
+            legacy_manifest = legacy / "manifest.json"
+            legacy.chmod(0o755)
+            legacy_manifest.chmod(0o644)
+            document = json.loads(legacy_manifest.read_text(encoding="utf-8"))
+            document["fala_commit"] = "legacy-invalid"
+            legacy_manifest.write_text(json.dumps(document), encoding="utf-8")
+            legacy_manifest.chmod(0o444)
+            legacy.chmod(0o555)
+
+            other_config = root / "other.toml"
+            second = self._render(root, config_path=other_config, db_path=root / "other.sqlite")
+            with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
+                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+                result = self.commands.deploy_fala(self.cfg, str(second), True, deployment_root=str(root))
+
+            self.assertTrue(result["promoted"])
+            self.assertNotEqual((root / "current").resolve(), legacy)
+
     def test_promotion_installs_version_local_runtime_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

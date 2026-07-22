@@ -1138,7 +1138,9 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
                 raise ConfigError(f"deployment current manifest is invalid: {old_current_target}") from exc
             if old_manifest.get("candidate_id") != old_current_target.name:
                 raise ConfigError("deployment current manifest candidate_id mismatch")
-            validate_fala_candidate(old_current_target, deployment_root=root)
+            # The current deployment may predate stricter provenance gates.
+            # Keep its path for rollback, but do not let invalid historical
+            # bytes block promotion of a newly validated candidate.
         plist = candidate / "launchd" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
         try:
             subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True, text=True)
