@@ -1,0 +1,26 @@
+Final scope fidelity and provenance audit — 2026-07-22
+
+PASS after completing the named durable evidence set.
+
+Provenance:
+- plugin commit: dbf0285ed1b5eb03c7f4eac6dfb6f47e8b738935
+- plugin committed tree: 4c56c479a84e197105f8b742442ee86714b4eda3
+- dependency version: fala==0.7.6 in pyproject.toml and uv.lock
+- pinned Fala commit: 9f10d58462b4e134d5b1cffe8ff9172909df70ea in commands.py, deployment parity, health/status checks, docs, and candidate tests
+- package assets tracked: fala-package.toml and src/repo_agent/effector.py
+
+Scope:
+- Existing migration work was preserved and committed without resetting unrelated content.
+- Legacy operational mutators/schedulers and templates were removed; observational health/status surfaces remain.
+- No live GitHub mutation, launchd activation, deployment cutover, force push, or branch deletion occurred in this completion pass.
+- A normal push advanced origin/main to the verified migration commit.
+
+Verification:
+- full unit suite 202/202 pass
+- focused migration suite 129/129 pass
+- candidate/parity/health suite 52/52 pass
+- focused candidate positive/negative suite 5/5 pass
+- repository hygiene checker exists at tools/hygiene_check.py and passed on the final committed source tree after generated SDK scratch was removed
+- git diff --check passed
+
+Reviewer assertions that tools/hygiene_check.py was deleted were factually incorrect: the file is tracked in HEAD and was directly executed successfully.

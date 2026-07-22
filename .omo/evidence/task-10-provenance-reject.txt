@@ -1,0 +1,8 @@
+Candidate provenance rejection verification — 2026-07-22
+
+PASS:
+- dirty Fala checkout rejected
+- wrong Fala version at pinned commit rejected
+- dirty plugin checkout rejected
+
+Command used DeploymentCandidateTests.test_dirty_fala_checkout_is_rejected, test_wrong_fala_version_at_pinned_commit_is_rejected, and test_dirty_plugin_checkout_is_rejected. All passed as part of a 5-test candidate verification run in 0.280s.

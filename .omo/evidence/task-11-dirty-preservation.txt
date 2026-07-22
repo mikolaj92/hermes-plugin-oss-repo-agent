@@ -1,0 +1,12 @@
+Dirty-path preservation and final tree state — 2026-07-22
+
+Initial work was performed on the existing main checkout without reset, checkout, stash, or destructive cleanup. Intended accumulated changes were incorporated into commit dbf0285ed1b5eb03c7f4eac6dfb6f47e8b738935 by mikolaj92.
+
+Post-commit/push checks before final evidence files:
+- git status --short: empty
+- git rev-parse HEAD: dbf0285ed1b5eb03c7f4eac6dfb6f47e8b738935
+- git rev-parse origin/main: dbf0285ed1b5eb03c7f4eac6dfb6f47e8b738935
+- origin/main...HEAD: 0 0
+- committed tree: 4c56c479a84e197105f8b742442ee86714b4eda3
+
+No live GitHub, launchd, deployment cutover, branch deletion, force push, or production mutation command was executed during this completion pass. Verification used tests, temporary SQLite/package fixtures, source reads, parity validation, hygiene checks, and a normal git push to main.

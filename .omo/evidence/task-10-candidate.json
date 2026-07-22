@@ -1,0 +1,13 @@
+{
+  "verified_at": "2026-07-22",
+  "plugin_commit": "dbf0285ed1b5eb03c7f4eac6dfb6f47e8b738935",
+  "plugin_tree": "4c56c479a84e197105f8b742442ee86714b4eda3",
+  "fala_version": "0.7.6",
+  "fala_commit": "9f10d58462b4e134d5b1cffe8ff9172909df70ea",
+  "required_assets": ["fala-package.toml", "src/repo_agent/effector.py"],
+  "checks": {
+    "render_and_independent_validation": "pass",
+    "safe_policy_required": "pass",
+    "deployment_candidate_parity_health_suite": "52/52 pass"
+  }
+}

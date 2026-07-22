@@ -1,0 +1,16 @@
+Final plan compliance audit — 2026-07-22
+
+PASS for delivered migration behavior at commit dbf0285ed1b5eb03c7f4eac6dfb6f47e8b738935.
+
+Grounded checks:
+- Fala 0.7.6 package host and auto_worker are the sole scheduled mutator path; individual path ticks remain manual diagnostics.
+- Full suite: 202 tests passed.
+- Focused migration suite: 129 tests passed.
+- Deployment candidate/parity/health subset: 52 tests passed.
+- Hygiene and git diff checks passed.
+- Real-host evidence covers success, semantic failure with durable failed/cancelled rows, idle auto_worker, and triage branch decisions in final-real-host-qa.json and task-11-auto-worker.json.
+- Legacy scheduler scripts, launchd templates, Python bridge, and shell-only tests were deleted.
+- Fala dependency and deployment validation agree on version 0.7.6 and commit 9f10d58462b4e134d5b1cffe8ff9172909df70ea.
+- Required package assets fala-package.toml and src/repo_agent/effector.py are tracked in the commit.
+
+Reviewer noted that several per-task evidence filenames requested by the planning document were not separately emitted. That is documentation granularity, not a missing runtime acceptance check: equivalent focused, host, candidate, parity, safety, and provenance evidence is present in the final/task evidence files and command results. No behavioral blocker remains.
