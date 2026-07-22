@@ -114,7 +114,7 @@ try:
     if not isinstance(identity,dict): errors.append("manifest-identity-invalid"); identity={}
     if cid != cand.name: errors.append("candidate-id-path-mismatch")
     if sha((json.dumps(identity,sort_keys=True,separators=(",",":"))+"\n").encode()) != cid: errors.append("manifest-hash-mismatch")
-    stable_keys={"schema","mode","plugin_commit","fala_tag","fala_commit","lock_hash","config_path","config_hash","db_path","metadata_path","lock_path","config_artifact_path","revision_path"}
+    stable_keys={"schema","mode","plugin_commit","fala_tag","fala_commit","lock_hash","config_path","config_hash","db_path","metadata_path","lock_path","config_artifact_path","revision_path","policy"}
     expected_manifest_keys=stable_keys|{"candidate_id","identity","created_at","program_arguments","artifacts","runtime_identity"}
     if set(manifest)!=expected_manifest_keys: errors.append("manifest-key-set-mismatch")
     if set(identity)!=stable_keys: errors.append("manifest-identity-key-set-mismatch")

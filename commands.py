@@ -97,6 +97,17 @@ def run_from_args(args: Namespace, runner: Runner | None = None) -> dict[str, An
             getattr(args, "assignee", None),
             bool(getattr(args, "force", False)),
         )
+    if command == "validate-fala-candidate":
+        from tools.deployment_parity import validate_fala_candidate
+
+        candidate_arg = Path(str(getattr(args, "candidate"))).expanduser()
+        root_arg = getattr(args, "deployment_root", None)
+        root_path = None
+        if root_arg:
+            root_path = Path(str(root_arg)).expanduser().absolute()
+            if not candidate_arg.is_absolute():
+                candidate_arg = root_path / "candidates" / candidate_arg
+        return validate_fala_candidate(candidate_arg, deployment_root=root_path)
     cfg = load_config(getattr(args, "config", None))
     if command == "validate":
         return validate(cfg)
@@ -118,15 +129,6 @@ def run_from_args(args: Namespace, runner: Runner | None = None) -> dict[str, An
             config_path=getattr(args, "config", None),
             deployment_root=getattr(args, "deployment_root", None),
         )
-    if command == "validate-fala-candidate":
-        from tools.deployment_parity import validate_fala_candidate
-        candidate_arg = Path(str(getattr(args, "candidate"))).expanduser()
-        root_arg = getattr(args, "deployment_root", None)
-        if root_arg:
-            root = Path(str(root_arg)).expanduser().absolute()
-            if not candidate_arg.is_absolute():
-                candidate_arg = root / "candidates" / candidate_arg
-        return validate_fala_candidate(candidate_arg, deployment_root=root_arg)
     if command == "deploy-fala":
         return deploy_fala(
             cfg,
@@ -815,6 +817,13 @@ def render_launchd(
         raise ConfigError("Fala candidate source is not pinned to 0.2.1 commit")
     lock_data = lock.read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
     lock_hash = _sha256_bytes(lock_data)
+    policy = {
+        "automerge": bool(runtime_config.automerge),
+        "require_human_approval": bool(runtime_config.require_human_approval),
+        "require_checks": bool(runtime_config.require_checks),
+        "require_test_evidence": bool(runtime_config.require_test_evidence),
+        "executor_enabled": bool(runtime_config.executor.enabled),
+    }
     identity: dict[str, Any] = {
         "schema": 1,
         "mode": mode,
@@ -829,6 +838,7 @@ def render_launchd(
         "lock_path": "source/uv.lock",
         "config_artifact_path": "source/config.toml",
         "revision_path": "source/revision.txt",
+        "policy": policy,
     }
     candidate_id = _sha256_bytes(_canonical_json(identity))
     if candidate.name != candidate_id:

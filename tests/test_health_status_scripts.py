@@ -64,6 +64,13 @@ class HealthStatusScriptTests(unittest.TestCase):
             "lock_path": "source/uv.lock",
             "config_artifact_path": "source/config.toml",
             "revision_path": "source/revision.txt",
+            "policy": {
+                "automerge": False,
+                "require_human_approval": True,
+                "require_checks": True,
+                "require_test_evidence": True,
+                "executor_enabled": False,
+            },
         }
         candidate_id = hashlib.sha256((json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
         candidate = cls.root / "deployment" / "candidates" / candidate_id

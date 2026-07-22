@@ -96,6 +96,13 @@ class DeploymentCandidateTests(unittest.TestCase):
             "lock_path": "source/uv.lock",
             "config_artifact_path": "source/config.toml",
             "revision_path": "source/revision.txt",
+            "policy": {
+                "automerge": False,
+                "require_human_approval": True,
+                "require_checks": True,
+                "require_test_evidence": True,
+                "executor_enabled": False,
+            },
         }
         candidate_id = hashlib.sha256((json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
         candidate = root / "candidates" / candidate_id
@@ -440,7 +447,59 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(result["candidate_id"], manifest["candidate_id"])
             self.assertTrue(result["ok"])
 
+    def test_candidate_policy_is_required_and_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            import tools.deployment_parity as parity
+
+            result = parity.validate_fala_candidate(candidate, deployment_root=root)
+            self.assertTrue(result["ok"])
+            manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["policy"],
+                {
+                    "automerge": False,
+                    "require_human_approval": True,
+                    "require_checks": True,
+                    "require_test_evidence": True,
+                    "executor_enabled": False,
+                },
+            )
+
+            # Make candidate mutable for tamper checks.
+            for path in [candidate, *candidate.rglob("*")]:
+                if path.is_dir():
+                    path.chmod(0o755)
+                elif path.is_file():
+                    path.chmod(0o644)
+            manifest["policy"]["automerge"] = True
+            manifest["identity"]["policy"]["automerge"] = True
+            (candidate / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+            with self.assertRaises(parity.DeploymentParityError) as raised:
+                parity.validate_fala_candidate(candidate, deployment_root=root)
+            self.assertTrue(any("unsafe" in error for error in raised.exception.result["errors"]))
+
+    def test_validate_fala_candidate_cli_skips_default_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            parser = self.module.commands.ArgumentParser(prog="oss-repo-agent")
+            self.module.commands.setup_parser(parser)
+            args = parser.parse_args([
+                "validate-fala-candidate",
+                "--candidate",
+                str(candidate),
+                "--deployment-root",
+                str(root),
+            ])
+            with patch.object(self.module.commands, "load_config", side_effect=AssertionError("default config must not load")):
+                result = self.module.commands.run_from_args(args)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["candidate_id"], candidate.name)
+
     def test_unmanifested_candidate_artifact_fails_closed(self):
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             candidate = self._render(root)

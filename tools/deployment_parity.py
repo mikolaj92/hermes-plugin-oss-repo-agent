@@ -476,7 +476,22 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
     if not isinstance(manifest, dict):
         raise DeploymentParityError({"ok": False, "candidate": str(candidate), "errors": ["Fala manifest must be an object"]})
 
-    stable_keys = {"schema", "mode", "plugin_commit", "fala_tag", "fala_commit", "lock_hash", "config_path", "config_hash", "db_path", "metadata_path", "lock_path", "config_artifact_path", "revision_path"}
+    stable_keys = {
+        "schema",
+        "mode",
+        "plugin_commit",
+        "fala_tag",
+        "fala_commit",
+        "lock_hash",
+        "config_path",
+        "config_hash",
+        "db_path",
+        "metadata_path",
+        "lock_path",
+        "config_artifact_path",
+        "revision_path",
+        "policy",
+    }
     manifest_required = stable_keys | {"candidate_id", "identity", "created_at", "program_arguments", "artifacts", "runtime_identity"}
     if manifest.get("schema") != 1:
         errors.append("Fala manifest schema must be 1")
@@ -595,6 +610,45 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
     revision_path = paths["revision_path"]
     if config_artifact_path and _regular_file(config_artifact_path) and identity.get("config_hash") != sha256(config_artifact_path):
         errors.append("Fala config hash does not match candidate config bytes")
+    policy = identity.get("policy")
+    policy_keys = {
+        "automerge",
+        "require_human_approval",
+        "require_checks",
+        "require_test_evidence",
+        "executor_enabled",
+    }
+    if not isinstance(policy, dict) or set(policy) != policy_keys:
+        errors.append("Fala identity policy key set is invalid")
+        policy = policy if isinstance(policy, dict) else {}
+    else:
+        for key in policy_keys:
+            if not isinstance(policy.get(key), bool):
+                errors.append(f"Fala identity policy {key} must be a bool")
+        if (
+            policy.get("automerge") is not False
+            or policy.get("require_human_approval") is not True
+            or policy.get("require_checks") is not True
+            or policy.get("require_test_evidence") is not True
+            or policy.get("executor_enabled") is not False
+        ):
+            errors.append("Fala identity policy is unsafe for promotion")
+    if config_artifact_path and _regular_file(config_artifact_path) and isinstance(policy, dict) and set(policy) == policy_keys:
+        try:
+            from repo_agent.config import load_config as load_runtime_config
+
+            embedded = load_runtime_config(config_artifact_path)
+            expected_policy = {
+                "automerge": bool(embedded.automerge),
+                "require_human_approval": bool(embedded.require_human_approval),
+                "require_checks": bool(embedded.require_checks),
+                "require_test_evidence": bool(embedded.require_test_evidence),
+                "executor_enabled": bool(embedded.executor.enabled),
+            }
+            if policy != expected_policy:
+                errors.append("Fala identity policy does not match embedded config")
+        except Exception as exc:
+            errors.append(f"Fala embedded config policy is unreadable: {exc}")
     metadata: dict[str, object] | None = None
     if metadata_path and _regular_file(metadata_path):
         try:
