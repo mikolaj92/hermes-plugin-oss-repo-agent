@@ -13,14 +13,14 @@ from repo_agent.steps.kanban_intake import ensure_kanban_intake
 
 
 def req(input_data=None, config=None):
-    return SimpleNamespace(
-        input=input_data or {},
-        config=config or {},
-        process_id="p1",
-        impulse_id=None,
-        work_dir=None,
-        adapter=None,
-    )
+    return {
+        "input": input_data or {},
+        "config": config or {},
+        "process_id": "p1",
+        "impulse_id": None,
+        "work_dir": None,
+        "adapter": None,
+    }
 
 
 class IssueDirectionIntakeTests(unittest.TestCase):
@@ -53,7 +53,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
                     "dry_run": False,
                 }
             )
-        ).output
+        )
         self.assertEqual(decide["action"], "reject_comment")
         self.assertEqual(decide["reason"], "out_of_direction_goal")
 
@@ -75,7 +75,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
                     },
                     config={"gh_cli": "gh"},
                 )
-            ).output
+            )
         self.assertEqual(comment["status"], "commented")
         self.assertTrue(comment["mutated"])
         cmds = [list(c.args[0]) for c in run_cmd.call_args_list]
@@ -92,7 +92,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
                 },
                 config={"assignee": "owner"},
             )
-        ).output
+        )
         self.assertEqual(claim["status"], "noop")
         self.assertIn("out_of_direction", claim.get("reason", ""))
 
@@ -108,7 +108,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
                 },
                 config={"kanban_intake_assignee": "repo-agent-intake"},
             )
-        ).output
+        )
         self.assertEqual(kanban["status"], "noop")
 
     def test_accept_aligned_issue_claims(self) -> None:
@@ -124,7 +124,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
                     "dry_run": False,
                 }
             )
-        ).output
+        )
         self.assertEqual(decide["action"], "accept")
         self.assertEqual(decide["reason"], "goal_aligned")
 
@@ -135,7 +135,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
                     "conduction": {"poll": poll, "decide_issue_action": decide},
                 }
             )
-        ).output
+        )
         self.assertEqual(comment["status"], "noop")
 
         claim = claim_github_issue(
@@ -146,7 +146,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
                 },
                 config={"assignee": "owner"},
             )
-        ).output
+        )
         self.assertEqual(claim["status"], "planned")
         self.assertEqual(claim["selected"]["number"], 99)
 
@@ -154,7 +154,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
         poll = self._poll(labels=["ai:ready", "wontfix"], title="Anything")
         decide = decide_issue_action(
             req({"conduction": {"poll": poll}, "dry_run": True})
-        ).output
+        )
         self.assertEqual(decide["action"], "reject_comment")
         planned = comment_issue_once(
             req(
@@ -163,7 +163,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
                     "conduction": {"poll": poll, "decide_issue_action": decide},
                 }
             )
-        ).output
+        )
         self.assertEqual(planned["status"], "planned")
         self.assertIn("repo-agent:owner/repo:99:issue-direction", planned["comment_marker"])
 

@@ -1,0 +1,7 @@
+Fala 0.7.6 package parse/graph probe
+issue_intake: effectors=5 dangling=[] timeouts=[900]
+issue_to_pr: effectors=10 dangling=[] timeouts=[900]
+pr_triage: effectors=15 dangling=[] timeouts=[900]
+cleanup: effectors=6 dangling=[] timeouts=[900]
+auto_worker: effectors=36 dangling=[] timeouts=[900]
+All paths parsed; every conduction reference resolves.

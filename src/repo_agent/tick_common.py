@@ -89,5 +89,18 @@ def print_path_result(result: PathRunResult, *, as_json: bool) -> int:
                 f"ticks={fu.get('ticks')}"
             )
         if result.failed or result.status in {"failed", "cancelled", "timed_out"}:
-            print(f"FAILED_STEPS={len(result.failed)}", file=sys.stderr)
+            for failure in result.failed:
+                print(
+                    "FAILED_PROCESS=" + json.dumps(
+                        {
+                            "id": failure.get("id"),
+                            "status": failure.get("status"),
+                            "attempt": failure.get("attempt"),
+                            "error": failure.get("error"),
+                        },
+                        sort_keys=True,
+                        default=str,
+                    ),
+                    file=sys.stderr,
+                )
     return 1 if result.failed or result.status in {"failed", "cancelled", "timed_out"} else 0

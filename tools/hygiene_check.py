@@ -33,14 +33,6 @@ def is_allowed_runtime_line(rel: Path, name: str, line: str) -> bool:
         rel_text.startswith("scripts/") or rel_text.startswith("templates/launchd/")
     ):
         return True
-    if name == "automerge-env" and rel_text == "scripts/cron_repo_pr_triage.sh":
-        return True
-    if name == "automerge-env" and rel_text == "scripts/repo_pr_triage.sh" and "HERMES_PR_AUTOMERGE=1" in line:
-        return True
-    if name == "forbidden-merge-command" and rel_text == "scripts/repo_pr_triage.sh":
-        return "gh pr merge" in line and "decision\" == \"merge\"" not in line
-    if name == "openai-key" and rel_text == "scripts/repo_agent_cleanup.sh" and "claim-or-task-" + "identity-mismatch" in line:
-        return True
     return False
 
 

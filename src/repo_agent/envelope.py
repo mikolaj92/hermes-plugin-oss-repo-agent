@@ -1,10 +1,13 @@
-"""Shared output envelope for mega-atomic Fala effectors (0.2.x)."""
+"""Plain dictionary contract shared by repo-agent Fala effectors."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
-from fala.adapters import EffectorRunResult
+
+Request = Mapping[str, Any]
+Result = dict[str, Any]
 
 
 def result(
@@ -15,31 +18,26 @@ def result(
     dry_run: bool | None = None,
     reason: str | None = None,
     **extra: Any,
-) -> EffectorRunResult:
-    # Omit dry_run unless explicit so runtime can inject request dry_run metadata.
-    # Explicit False still fails closed against expected True (contract tests).
-    out: dict[str, Any] = {
-        "status": status,
-        "ok": ok,
-        "mutated": mutated,
-    }
+) -> Result:
+    out: Result = {"status": status, "ok": ok, "mutated": mutated}
+    # Keep absent unless explicit: the host validates and injects request dry-run metadata.
     if dry_run is not None:
         out["dry_run"] = dry_run
     if reason is not None:
         out["reason"] = reason
     out.update(extra)
-    return EffectorRunResult(output=out)
+    return out
 
 
-def ok(status: str = "ok", **extra: Any) -> EffectorRunResult:
+def ok(status: str = "ok", **extra: Any) -> Result:
     return result(status=status, ok=True, **extra)
 
 
-def planned(**extra: Any) -> EffectorRunResult:
+def planned(**extra: Any) -> Result:
     return result(status="planned", ok=True, dry_run=True, mutated=False, **extra)
 
 
-def noop(reason: str, **extra: Any) -> EffectorRunResult:
+def noop(reason: str, **extra: Any) -> Result:
     return result(status="noop", ok=True, mutated=False, reason=reason, **extra)
 
 
@@ -50,7 +48,7 @@ def fail(
     retry_safe: bool = False,
     mutated: bool = False,
     **extra: Any,
-) -> EffectorRunResult:
+) -> Result:
     return result(
         status="failed",
         ok=False,
@@ -62,19 +60,22 @@ def fail(
     )
 
 
-def cfg_of(request: Any) -> dict[str, Any]:
-    return dict(getattr(request, "config", None) or {})
+def cfg_of(request: Request) -> dict[str, Any]:
+    value = request.get("config")
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
-def input_of(request: Any) -> dict[str, Any]:
-    return dict(getattr(request, "input", None) or {})
+def input_of(request: Request) -> dict[str, Any]:
+    value = request.get("input")
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
-def conduction_of(request: Any) -> dict[str, Any]:
-    return dict(input_of(request).get("conduction") or {})
+def conduction_of(request: Request) -> dict[str, Any]:
+    value = input_of(request).get("conduction")
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
-def dry_run_flag(request: Any, default: bool = True) -> bool:
+def dry_run_flag(request: Request, default: bool = True) -> bool:
     data = input_of(request)
     if "dry_run" in data:
         return bool(data["dry_run"])
@@ -89,42 +90,49 @@ def _empty(value: Any) -> bool:
 
 
 def cond_get(
-    request: Any,
+    request: Request,
     key: str,
     *effector_ids: str,
     default: Any = None,
     aliases: tuple[str, ...] = (),
 ) -> Any:
-    """Resolve ``key`` from request.input, else first matching conduction output.
-
-    ``aliases`` are alternate keys tried in both input and each conduction blob
-    (e.g. number / pr_number). Prefer explicit input over conduction.
-    """
+    """Resolve a key from explicit input, then matching conduction outputs."""
     data = input_of(request)
     keys = (key, *aliases)
-    for k in keys:
-        if k in data and not _empty(data[k]):
-            return data[k]
+    for candidate in keys:
+        if candidate in data and not _empty(data[candidate]):
+            return data[candidate]
     cond = conduction_of(request)
-    for eid in effector_ids:
-        blob = cond.get(eid)
-        if not isinstance(blob, dict):
-            continue
-        for k in keys:
-            if k in blob and not _empty(blob[k]):
-                return blob[k]
+    def matching_blobs(effector_id: str):
+        exact = cond.get(effector_id)
+        if exact is not None:
+            yield exact
+        suffix = f"_{effector_id}"
+        yield from (blob for name, blob in cond.items() if name.endswith(suffix))
+    for effector_id in effector_ids:
+        for blob in matching_blobs(effector_id):
+            if not isinstance(blob, Mapping):
+                continue
+            for candidate in keys:
+                if candidate in blob and not _empty(blob[candidate]):
+                    return blob[candidate]
     return default
 
 
-def cond_blob(request: Any, *effector_ids: str) -> dict[str, Any]:
-    """First non-empty conduction dict among effector ids."""
+def cond_blob(request: Request, *effector_ids: str) -> dict[str, Any]:
+    """Return the first non-empty conduction dictionary."""
     cond = conduction_of(request)
-    for eid in effector_ids:
-        blob = cond.get(eid)
-        if isinstance(blob, dict) and blob:
+    for effector_id in effector_ids:
+        blob = cond.get(effector_id)
+        if not isinstance(blob, Mapping) or not blob:
+            suffix = f"_{effector_id}"
+            blob = next((value for name, value in cond.items() if name.endswith(suffix) and isinstance(value, Mapping) and value), None)
+        if isinstance(blob, Mapping) and blob:
             return dict(blob)
     return {}
-def upstream_noop(request: Any, *effector_ids: str) -> dict[str, Any]:
+
+
+def upstream_noop(request: Request, *effector_ids: str) -> dict[str, Any]:
     """Return the first upstream no-op output, if any."""
     for effector_id in effector_ids:
         blob = cond_blob(request, effector_id)

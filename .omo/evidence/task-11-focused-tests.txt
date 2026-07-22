@@ -1,0 +1,18 @@
+2026-07-22 focused migration verification
+
+Command:
+FALA_HOME=/Users/mini-m4-main/Developer/Fala uv run python -m unittest tests.test_path_composition tests.test_atomic_effectors tests.test_effector tests.test_fala_runtime_contract tests.test_fala_intake_flow tests.test_fala_triage_router tests.test_receipt_durability tests.test_deployment_candidate tests.test_deployment_parity tests.test_mapping_contract
+
+Result: PASS — Ran 129 tests in 4.325s, OK.
+
+Additional checks:
+- FALA_HOME=/Users/mini-m4-main/Developer/Fala uv run python -m unittest discover -s tests
+  PASS — Ran 202 tests in 8.671s, OK.
+- uv run python tools/hygiene_check.py .
+  PASS — Hygiene check passed.
+- uv run python -c "import fala; print(fala.__version__)"
+  PASS — 0.7.6.
+- git diff --check
+  PASS.
+
+The ResourceWarning lines emitted during focused tests are from temporary SQLite fixtures; all assertions passed. The production runtime reader uses contextlib.closing around sqlite3.connect.

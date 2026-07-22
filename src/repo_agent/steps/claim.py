@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fala.adapters import EffectorRunRequest, EffectorRunResult
+from repo_agent.envelope import Request, Result
 
 from repo_agent.adapters_cli import CommandError, run_cmd
 from repo_agent.envelope import cfg_of, conduction_of, dry_run_flag, fail, input_of, noop, ok, planned
@@ -119,15 +119,15 @@ def _reserve_claim(path: Path, *, repo: str, issue: int, board: str, assignee: s
     return existing, None, False
 
 
-def claim_github_issue(request: EffectorRunRequest) -> EffectorRunResult:
+def claim_github_issue(request: Request) -> Result:
     data = input_of(request)
     cond = conduction_of(request)
-    poll = dict(cond.get("poll") or cond.get("poll_eligible_issues") or {})
-    decide = dict(cond.get("decide_issue_action") or cond.get("decide") or {})
+    poll = dict(cond.get("poll") or cond.get("poll_eligible_issues") or cond.get("intake_poll") or {})
+    decide = dict(cond.get("decide_issue_action") or cond.get("decide") or cond.get("intake_decide_issue_action") or {})
     for upstream in (poll, decide):
         if upstream.get("ok") is False or str(upstream.get("status") or "") in {"failed", "cancelled", "timed_out"}:
             return fail("upstream_failed", failure_class="terminal", retry_safe=False, upstream=upstream)
-    input_decide = data.get("decide_issue_action") or data.get("decide")
+    input_decide = data.get("decide_issue_action") or data.get("decide") or data.get("intake_decide_issue_action")
     if isinstance(input_decide, dict):
         decide = dict(input_decide)
     dry_run = dry_run_flag(request, default=bool(poll.get("dry_run", True)))

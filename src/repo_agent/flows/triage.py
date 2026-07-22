@@ -1,162 +1,28 @@
-"""PR triage correlation paths + action router (merge | comment_block | repair)."""
+"""PR triage package path: decide + merge/comment/repair branches in one host run."""
 
 from __future__ import annotations
-import hashlib
 
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from repo_agent.flows.runtime import FailurePolicy, run_repo_agent_path
-from fala.models import CorrelationPathSpec
-from fala.runtime_backend import Run, RuntimeBackendService
-
 from repo_agent.config import AgentConfig, ConfigError, load_config
-from repo_agent.flows.common import PathRunResult, effector, process_summary
+from repo_agent.flows.common import PathRunResult, process_summary, process_values
+from repo_agent.flows.runtime import run_package_path_async
 
-# Decide path only — tick routes follow-up paths based on action.
-PR_TRIAGE_PATH = CorrelationPathSpec(
-    id="pr_triage",
-    title="PR triage decide (list → load → checks → evidence → decide)",
-    effectors=[
-        effector(
-            "list_ai_fix_prs",
-            "repo_agent.steps.triage.list_ai_fix_prs",
-        ),
-        effector(
-            "load_pr_fields",
-            "repo_agent.steps.triage.load_pr_fields",
-            conduction=["list_ai_fix_prs"],
-        ),
-        effector(
-            "evaluate_checks",
-            "repo_agent.steps.triage.evaluate_checks",
-            conduction=["load_pr_fields"],
-        ),
-        effector(
-            "evaluate_test_evidence",
-            "repo_agent.steps.triage.evaluate_test_evidence",
-            conduction=["load_pr_fields"],
-        ),
-        effector(
-            "decide_triage_action",
-            "repo_agent.steps.triage.decide_triage_action",
-            conduction=[
-                "load_pr_fields",
-                "evaluate_checks",
-                "evaluate_test_evidence",
-            ],
-        ),
-    ],
+PATH_ID = "pr_triage"
+PACKAGE_PATH = Path(__file__).resolve().parents[3] / "fala-package.toml"
+_TERMINAL_FAILURES = frozenset({"failed", "cancelled", "timed_out"})
+_IDLE_REASONS = frozenset(
+    {
+        "no_open_prs",
+        "no_repositories",
+        "no_selected_pr",
+        "not_selected",
+        "skip",
+    }
 )
-
-# Public name used by the generic path-composition API.
-TRIAGE_PATH = PR_TRIAGE_PATH
-
-PR_MERGE_PATH = CorrelationPathSpec(
-    id="pr_merge",
-    title="PR merge (claim → merge → receipt → close issue)",
-    effectors=[
-        effector(
-            "claim_pr",
-            "repo_agent.steps.triage.claim_pr_assignee",
-        ),
-        effector(
-            "merge",
-            "repo_agent.steps.triage.merge_pull_request",
-            conduction=["claim_pr"],
-        ),
-        effector(
-            "write_merge_receipt",
-            "repo_agent.steps.triage.write_merge_receipt",
-            conduction=["claim_pr", "merge"],
-        ),
-        effector(
-            "close_linked_issue",
-            "repo_agent.steps.triage.close_linked_issue",
-            conduction=["merge", "claim_pr"],
-        ),
-    ],
-)
-
-PR_COMMENT_PATH = CorrelationPathSpec(
-    id="pr_comment_block",
-    title="PR comment block (single comment)",
-    effectors=[
-        effector(
-            "comment_pr",
-            "repo_agent.steps.triage.comment_pr_once",
-        ),
-    ],
-)
-
-PR_REPAIR_PATH = CorrelationPathSpec(
-    id="pr_repair",
-    title="PR repair (review task → worktree → prompt → omp → push)",
-    effectors=[
-        effector(
-            "create_review_fix_task",
-            "repo_agent.steps.repair.create_review_fix_task",
-        ),
-        effector(
-            "build_repair_prompt",
-            "repo_agent.steps.repair.build_repair_prompt",
-            conduction=["create_review_fix_task"],
-        ),
-        effector(
-            "prepare_worktree",
-            "repo_agent.steps.issue_to_pr.prepare_worktree",
-            conduction=["build_repair_prompt"],
-        ),
-        effector(
-            "run_omp",
-            "repo_agent.steps.issue_to_pr.run_omp_worker",
-            conduction=["prepare_worktree", "build_repair_prompt"],
-        ),
-        effector(
-            "push_branch",
-            "repo_agent.steps.issue_to_pr.push_branch",
-            conduction=["prepare_worktree", "run_omp"],
-        ),
-    ],
-)
-
-TRIAGE_FAILURE_POLICIES = {
-    "list_ai_fix_prs": FailurePolicy.retryable_read,
-    "load_pr_fields": FailurePolicy.retryable_read,
-    "evaluate_checks": FailurePolicy.terminal,
-    "evaluate_test_evidence": FailurePolicy.terminal,
-    "decide_triage_action": FailurePolicy.terminal,
-}
-TRIAGE_MAX_ATTEMPTS = {
-    "list_ai_fix_prs": 3, "load_pr_fields": 3,
-    "evaluate_checks": 1, "evaluate_test_evidence": 1,
-    "decide_triage_action": 1,
-}
-MERGE_FAILURE_POLICIES = {
-    "claim_pr": FailurePolicy.reconcile_then_retry,
-    "merge": FailurePolicy.terminal,
-    "write_merge_receipt": FailurePolicy.terminal,
-    "close_linked_issue": FailurePolicy.reconcile_then_retry,
-}
-MERGE_MAX_ATTEMPTS = {"claim_pr": 3, "merge": 1, "write_merge_receipt": 1, "close_linked_issue": 3}
-COMMENT_FAILURE_POLICIES = {"comment_pr": FailurePolicy.reconcile_then_retry}
-COMMENT_MAX_ATTEMPTS = {"comment_pr": 3}
-REPAIR_FAILURE_POLICIES = {
-    "create_review_fix_task": FailurePolicy.reconcile_then_retry,
-    "build_repair_prompt": FailurePolicy.terminal,
-    "prepare_worktree": FailurePolicy.terminal,
-    "run_omp": FailurePolicy.terminal,
-    "push_branch": FailurePolicy.reconcile_then_retry,
-}
-REPAIR_MAX_ATTEMPTS = {
-    "create_review_fix_task": 3,
-    "build_repair_prompt": 1,
-    "prepare_worktree": 1,
-    "run_omp": 1,
-    "push_branch": 3,
-}
 
 
 def _step_config(cfg: AgentConfig, *, is_dry: bool, **extra: Any) -> dict[str, Any]:
@@ -186,6 +52,72 @@ def _step_config(cfg: AgentConfig, *, is_dry: bool, **extra: Any) -> dict[str, A
     }
 
 
+def _resolve_dry_run(cfg: AgentConfig, dry_run: bool | None) -> bool:
+    if dry_run is False and not cfg.live:
+        raise ConfigError("live execution requires config mode='live'")
+    if dry_run is None:
+        return not cfg.live
+    return bool(dry_run)
+
+
+def _by_step(summaries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(item["step_id"]): item
+        for item in summaries
+        if item.get("step_id")
+    }
+
+
+def _output_of(by_step: dict[str, dict[str, Any]], *step_ids: str) -> dict[str, Any]:
+    for step_id in step_ids:
+        values = process_values(by_step.get(step_id) or {})
+        if values:
+            return values
+    return {}
+
+
+def _failed_steps(summaries: list[dict[str, Any]]) -> list[str]:
+    steps: list[str] = []
+    for item in summaries:
+        if str(item.get("status") or "") not in _TERMINAL_FAILURES:
+            continue
+        step_id = item.get("step_id")
+        if step_id and str(step_id) not in steps:
+            steps.append(str(step_id))
+    return steps
+
+
+def _normalize_status(
+    *,
+    run_status: str,
+    summaries: list[dict[str, Any]],
+    decide_out: dict[str, Any],
+    list_out: dict[str, Any],
+) -> tuple[str, str]:
+    status = str(run_status or "")
+    failed = _failed_steps(summaries)
+    if failed:
+        # Preserve exact terminal failure labels from process evidence when the host
+        # already reported one; otherwise promote to failed.
+        if status in _TERMINAL_FAILURES:
+            return status, status
+        return "failed", "failed"
+
+    list_status = str(list_out.get("status") or "")
+    decide_status = str(decide_out.get("status") or "")
+    action = str(decide_out.get("action") or "")
+    reason = str(decide_out.get("reason") or list_out.get("reason") or "")
+    idle = (
+        list_status == "noop"
+        or decide_status == "noop"
+        or action in {"", "skip"}
+        or reason in _IDLE_REASONS
+    )
+    if idle and status in {"", "completed", "succeeded"}:
+        return "idle", reason or "idle"
+    return status or "completed", status or "completed"
+
+
 async def run_pr_triage_decide(
     *,
     db_path: Path,
@@ -196,101 +128,204 @@ async def run_pr_triage_decide(
     run_id: str | None = None,
     limit: int = 30,
     worker_id: str = "repo-agent:tick-triage",
-    max_ticks: int = 20,
+    max_ticks: int = 40,
 ) -> PathRunResult:
-    """Run pr_triage decide path only (no mutations beyond dry_run flags)."""
+    """Run the pr_triage package path once (decide + gated branch effectors)."""
     cfg = config or load_config()
-    is_dry = True if dry_run is None else dry_run
-    if dry_run is False and not cfg.live:
-        raise ConfigError("live execution requires config mode='live'")
-    if dry_run is None and cfg.live:
-        is_dry = False
+    is_dry = _resolve_dry_run(cfg, dry_run)
+
+    if not cfg.repos and not repo and not pr_number:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return PathRunResult(
+            run_id=run_id or f"pr-triage-empty-{stamp}",
+            path_id=PATH_ID,
+            dry_run=is_dry,
+            ticks=0,
+            stopped_reason="no_repositories",
+            summary={
+                "run_status": "idle",
+                "repo": "",
+                "pr_number": None,
+                "action": "skip",
+                "reason": "no_repositories",
+                "failed_steps": [],
+                "worked": False,
+            },
+            status="idle",
+            action="skip",
+        )
 
     resolved_repo = repo or (cfg.repos[0].repo if cfg.repos else "")
+    board = cfg.repos[0].board if cfg.repos else ""
+    clone_path = cfg.repos[0].clone_path if cfg.repos else ""
+    for entry in cfg.repos:
+        if entry.repo == resolved_repo:
+            board = entry.board
+            clone_path = entry.clone_path
+            break
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rid = run_id or f"pr-triage-{stamp}-{uuid.uuid4().hex[:8]}"
-    step_config = _step_config(cfg, is_dry=is_dry, repo=resolved_repo)
+    receipt = str(
+        Path(cfg.paths.merge_receipts)
+        / f"merge-{resolved_repo.replace('/', '_')}-{pr_number or 'auto'}-{rid}.json"
+    )
+    step_config = _step_config(
+        cfg,
+        is_dry=is_dry,
+        repo=resolved_repo,
+        board=board,
+        clone_path=clone_path,
+        worktree_root=cfg.paths.worktree_root,
+        receipt_path=receipt,
+    )
 
-    service = RuntimeBackendService.sqlite(db_path)
-    result = await run_repo_agent_path(
-        service,
-        run=Run(
-            id=rid,
-            title=f"pr_triage dry_run={is_dry} repo={resolved_repo}",
-            metadata={
-                "correlation_path": PR_TRIAGE_PATH.id,
-                "dry_run": is_dry,
-                "repo": resolved_repo,
-                "plugin": "oss-repo-agent",
-            },
-        ),
-        correlation_path=PR_TRIAGE_PATH,
-        worker_id=worker_id,
-        correlation_path_id=f"{rid}:{PR_TRIAGE_PATH.id}",
-        effector_inputs={
-            "list_ai_fix_prs": {
-                "repo": resolved_repo,
-                "dry_run": is_dry,
-                "limit": limit,
-            },
-            "load_pr_fields": {
-                "repo": resolved_repo,
-                "dry_run": is_dry,
-                **({"number": pr_number} if pr_number else {}),
-            },
-            "evaluate_checks": {
-                "dry_run": is_dry,
-                "require_checks": step_config["require_checks"],
-            },
-            "evaluate_test_evidence": {"dry_run": is_dry},
-            "decide_triage_action": {
-                "dry_run": is_dry,
-                "automerge": step_config["automerge"],
-            },
+    dry_input = {"dry_run": is_dry}
+    list_input: dict[str, Any] = {
+        "repo": resolved_repo,
+        "dry_run": is_dry,
+        "limit": limit,
+    }
+    load_input: dict[str, Any] = {
+        "repo": resolved_repo,
+        "dry_run": is_dry,
+    }
+    if pr_number:
+        load_input["number"] = pr_number
+
+    effector_inputs: dict[str, dict[str, Any]] = {
+        "list_ai_fix_prs": list_input,
+        "load_pr_fields": load_input,
+        "evaluate_checks": {
+            "dry_run": is_dry,
+            "require_checks": step_config["require_checks"],
         },
-        effector_configs={e.id: step_config for e in PR_TRIAGE_PATH.effectors},
+        "evaluate_test_evidence": {
+            "dry_run": is_dry,
+            "require_test_evidence": step_config["require_test_evidence"],
+        },
+        "decide_triage_action": {
+            "dry_run": is_dry,
+            "automerge": step_config["automerge"],
+            "branch_prefix": step_config["branch_prefix"],
+            "base_branch": step_config["base_branch"],
+        },
+        "claim_pr": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
+        "merge": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
+        "write_merge_receipt": {**dry_input, "receipt_path": receipt},
+        "close_linked_issue": {**dry_input, "repo": resolved_repo},
+        "comment_pr": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
+        "create_review_fix_task": {
+            **dry_input,
+            "repo": resolved_repo,
+            "board": board,
+            **({"number": pr_number} if pr_number else {}),
+        },
+        "build_repair_prompt": dry_input,
+        "repair_prepare_worktree": {
+            **dry_input,
+            "clone_path": clone_path,
+            "worktree_root": step_config["worktree_root"],
+            "base_branch": step_config["base_branch"],
+        },
+        "repair_run_omp": dry_input,
+        "repair_push_branch": dry_input,
+    }
+
+    host = await run_package_path_async(
+        db_path=db_path,
+        package_path=PACKAGE_PATH,
+        path_id=PATH_ID,
+        run_id=rid,
+        inputs=step_config,
+        effector_inputs=effector_inputs,
+        effector_configs={
+            step_id: step_config
+            for step_id in (
+                "list_ai_fix_prs",
+                "load_pr_fields",
+                "evaluate_checks",
+                "evaluate_test_evidence",
+                "decide_triage_action",
+                "claim_pr",
+                "merge",
+                "write_merge_receipt",
+                "close_linked_issue",
+                "comment_pr",
+                "create_review_fix_task",
+                "build_repair_prompt",
+                "repair_prepare_worktree",
+                "repair_run_omp",
+                "repair_push_branch",
+            )
+        },
         max_ticks=max_ticks,
-        lease_seconds=300.0,
-        actor=worker_id,
-        failure_policy_by_effector=TRIAGE_FAILURE_POLICIES,
-        max_attempts_by_effector=TRIAGE_MAX_ATTEMPTS,
-        retry_backoff_seconds=cfg.executor.retry_backoff_seconds,
+        worker_id=worker_id,
     )
 
-    processes = list(result.processes or [])
-    summaries = [process_summary(p) for p in processes]
-    by_step = {s["step_id"]: s for s in summaries if s.get("step_id")}
-    decide_out = (by_step.get("decide_triage_action") or {}).get("output") or {}
-    load_out = (by_step.get("load_pr_fields") or {}).get("output") or {}
-    status = (
-        result.status.value if hasattr(result.status, "value") else str(result.status)
-    )
+    summaries = [process_summary(process) for process in host.processes]
+    by_step = _by_step(summaries)
+    decide_out = _output_of(by_step, "decide_triage_action")
+    list_out = _output_of(by_step, "list_ai_fix_prs")
+    load_out = _output_of(by_step, "load_pr_fields")
     action = decide_out.get("action")
     pr_obj = load_out.get("pr") if isinstance(load_out.get("pr"), dict) else {}
-    pr_number = load_out.get("number") or pr_obj.get("number")
+    resolved_number = load_out.get("number") or pr_obj.get("number") or pr_number
+    status, stopped_reason = _normalize_status(
+        run_status=host.run_status,
+        summaries=summaries,
+        decide_out=decide_out,
+        list_out=list_out,
+    )
+    failed_steps = _failed_steps(summaries)
+    worked = bool(
+        action
+        and action != "skip"
+        and status not in {"idle", *_TERMINAL_FAILURES}
+        and any(
+            bool(process_values(item).get("mutated"))
+            or str(item.get("status") or "") == "succeeded"
+            and str(process_values(item).get("status") or "") not in {"noop", "planned", ""}
+            for item in summaries
+            if item.get("step_id")
+            in {
+                "claim_pr",
+                "merge",
+                "write_merge_receipt",
+                "close_linked_issue",
+                "comment_pr",
+                "create_review_fix_task",
+                "repair_prepare_worktree",
+                "repair_run_omp",
+                "repair_push_branch",
+            }
+        )
+    )
     summary = {
         "repo": resolved_repo,
         "action": action,
-        "reason": decide_out.get("reason"),
-        "pr_number": pr_number,
+        "reason": decide_out.get("reason") or list_out.get("reason"),
+        "pr_number": resolved_number,
         "pr": load_out.get("pr"),
-        "failed_steps": [s["step_id"] for s in summaries if s.get("status") in {"failed", "cancelled", "timed_out"}],
+        "failed_steps": failed_steps,
         "run_status": status,
+        "worked": worked,
+        "replayed": host.replayed,
     }
-
     return PathRunResult(
-        run_id=rid,
-        path_id=PR_TRIAGE_PATH.id,
+        run_id=host.run_id,
+        path_id=PATH_ID,
         dry_run=is_dry,
-        ticks=result.outcome.ticks,
-        stopped_reason=result.outcome.stopped_reason,
-        completed=[process_summary(p) for p in result.outcome.completed],
-        failed=[process_summary(p) for p in result.outcome.failed],
+        ticks=host.ticks,
+        stopped_reason=stopped_reason,
+        completed=[process_summary(process) for process in host.completed],
+        failed=[process_summary(process) for process in host.failed],
         processes=summaries,
         summary=summary,
         status=status,
         action=str(action) if action else None,
     )
+
 
 async def run_triage_flow(
     *,
@@ -302,9 +337,9 @@ async def run_triage_flow(
     limit: int = 30,
     run_id: str | None = None,
     worker_id: str = "repo-agent:tick-triage",
-    max_ticks: int = 20,
+    max_ticks: int = 40,
 ) -> PathRunResult:
-    """Run the decide-only triage path for a full worker cycle."""
+    """Public triage flow: one pr_triage package path invocation."""
     return await run_pr_triage_decide(
         db_path=db_path,
         config=config,
@@ -316,310 +351,3 @@ async def run_triage_flow(
         worker_id=worker_id,
         max_ticks=max_ticks,
     )
-
-
-async def run_follow_up_path(
-    *,
-    action: str,
-    db_path: Path,
-    config: AgentConfig | None = None,
-    dry_run: bool = True,
-    repo: str,
-    pr: dict[str, Any] | None = None,
-    number: int | None = None,
-    board: str | None = None,
-    clone_path: str | None = None,
-    worktree_root: str | None = None,
-    receipt_path: str | None = None,
-    reason: str | None = None,
-    worker_id: str = "repo-agent:tick-triage-followup",
-    max_ticks: int = 30,
-) -> PathRunResult | None:
-    """Run merge / comment_block / repair path after decide. skip → None."""
-    if action in (None, "skip", ""):
-        return None
-
-    cfg = config or load_config()
-    pr = pr or {}
-    number = int(number or pr.get("number") or 0)
-    board = board or (cfg.repos[0].board if cfg.repos else "")
-    clone_path = clone_path or (cfg.repos[0].clone_path if cfg.repos else "")
-    import os
-
-    wt_root = worktree_root or os.environ.get(
-        "HERMES_WORKTREE_ROOT",
-        str(Path.home() / ".hermes" / "worktrees" / "repo-fixer"),
-    )
-    # The decide run is transient; the PR domain key must survive later ticks.
-    identity_parts = [action, repo, str(number)]
-    if action in {"merge", "repair"}:
-        head_oid = str(pr.get("headRefOid") or "").strip()
-        if head_oid:
-            identity_parts.append(head_oid)
-    stable_key = "|".join(identity_parts)
-    rid = f"pr-{action}-{hashlib.sha256(stable_key.encode()).hexdigest()[:20]}"
-    receipt = receipt_path or str(
-        Path.home()
-        / ".hermes"
-        / "oss-repo-agent"
-        / "receipts"
-        / f"merge-{repo.replace('/', '_')}-{number}-{rid}.json"
-    )
-    step_config = _step_config(
-        cfg,
-        is_dry=dry_run,
-        repo=repo,
-        board=board,
-        clone_path=clone_path,
-        worktree_root=wt_root,
-        receipt_path=receipt,
-    )
-    branch = str(pr.get("headRefName") or "")
-    service = RuntimeBackendService.sqlite(db_path)
-
-    if action == "merge":
-        path = PR_MERGE_PATH
-        effector_inputs = {
-            "claim_pr": {
-                "dry_run": dry_run,
-                "repo": repo,
-                "number": number,
-                "pr": pr,
-            },
-            "merge": {
-                "dry_run": dry_run,
-                "repo": repo,
-                "number": number,
-                "pr": pr,
-                "head_oid": pr.get("headRefOid"),
-            },
-            "write_merge_receipt": {
-                "dry_run": dry_run,
-                "receipt_path": receipt,
-            },
-            "close_linked_issue": {
-                "dry_run": dry_run,
-                "repo": repo,
-                "pr": pr,
-            },
-        }
-    elif action == "comment_block":
-        path = PR_COMMENT_PATH
-        effector_inputs = {
-            "comment_pr": {
-                "dry_run": dry_run,
-                "repo": repo,
-                "number": number,
-                "pr": pr,
-                "body": (
-                    f"repo-agent triage: blocked ({reason or 'policy'}). "
-                    f"Please address and re-request review."
-                ),
-            },
-        }
-    elif action == "repair":
-        path = PR_REPAIR_PATH
-        effector_inputs = {
-            "create_review_fix_task": {
-                "dry_run": dry_run,
-                "repo": repo,
-                "number": number,
-                "board": board,
-                "pr": pr,
-                "reason": reason or "checks_not_green",
-            },
-            "build_repair_prompt": {
-                "dry_run": dry_run,
-                "pr": pr,
-                "reason": reason or "checks_not_green",
-            },
-            "prepare_worktree": {
-                "dry_run": dry_run,
-                "clone_path": clone_path,
-                "worktree_root": wt_root,
-                "branch": branch,
-                "base_branch": cfg.base_branch,
-            },
-            "run_omp": {"dry_run": dry_run},
-            "push_branch": {
-                "dry_run": dry_run,
-                "branch": branch,
-            },
-        }
-    else:
-        return None
-
-    result = await run_repo_agent_path(
-        service,
-        run=Run(
-            id=rid,
-            title=f"{path.id} dry_run={dry_run} {repo}#{number}",
-            metadata={
-                "correlation_path": path.id,
-                "dry_run": dry_run,
-                "repo": repo,
-                "number": number,
-                "action": action,
-                "plugin": "oss-repo-agent",
-            },
-        ),
-        correlation_path=path,
-        worker_id=worker_id,
-        correlation_path_id=f"{rid}:{path.id}",
-        effector_inputs=effector_inputs,
-        effector_configs={e.id: step_config for e in path.effectors},
-        failure_policy_by_effector=(
-            MERGE_FAILURE_POLICIES if action == "merge"
-            else COMMENT_FAILURE_POLICIES if action == "comment_block"
-            else REPAIR_FAILURE_POLICIES
-        ),
-        max_attempts_by_effector=(
-            MERGE_MAX_ATTEMPTS if action == "merge"
-            else COMMENT_MAX_ATTEMPTS if action == "comment_block"
-            else REPAIR_MAX_ATTEMPTS
-        ),
-        retry_backoff_seconds=cfg.executor.retry_backoff_seconds,
-        max_ticks=max_ticks,
-        lease_seconds=600.0,
-        actor=worker_id,
-    )
-
-    processes = list(result.processes or [])
-    summaries = [process_summary(p) for p in processes]
-    status = (
-        result.status.value if hasattr(result.status, "value") else str(result.status)
-    )
-    return PathRunResult(
-        run_id=rid,
-        path_id=path.id,
-        dry_run=dry_run,
-        ticks=result.outcome.ticks,
-        stopped_reason=result.outcome.stopped_reason,
-        completed=[process_summary(p) for p in result.outcome.completed],
-        failed=[process_summary(p) for p in result.outcome.failed],
-        processes=summaries,
-        summary={
-            "action": action,
-            "repo": repo,
-            "number": number,
-            "run_status": status,
-            "failed_steps": [
-                s["step_id"] for s in summaries if s.get("status") in {"failed", "cancelled", "timed_out"}
-            ],
-        },
-        status=status,
-        action=action,
-    )
-async def run_triage_with_router(
-    *,
-    db_path: Path,
-    config: AgentConfig | None = None,
-    dry_run: bool | None = None,
-    repo: str | None = None,
-    pr_number: int | None = None,
-    limit: int = 30,
-    execute_follow_up: bool = True,
-    worker_id: str = "repo-agent:tick-triage",
-) -> PathRunResult:
-    """Decide then optionally run merge/comment/repair follow-up path."""
-    cfg = config or load_config()
-    if not cfg.repos and not repo and not pr_number:
-        return PathRunResult(
-            run_id=f"pr-triage-empty-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
-            path_id=TRIAGE_PATH.id,
-            dry_run=True if dry_run is None else dry_run,
-            ticks=0,
-            stopped_reason="no_repositories",
-            summary={"run_status": "completed", "repo": "", "pr_number": None, "action": "skip", "reason": "no_repositories", "failed_steps": []},
-            status="completed",
-            action="skip",
-        )
-    decide = await run_pr_triage_decide(
-        db_path=db_path,
-        config=cfg,
-        dry_run=dry_run,
-        repo=repo,
-        pr_number=pr_number,
-        limit=limit,
-        worker_id=worker_id,
-    )
-    action = decide.action or "skip"
-    if not execute_follow_up or action == "skip":
-        return decide
-
-    cfg = config or load_config()
-    resolved_repo = (
-        repo
-        or decide.summary.get("repo")
-        or (cfg.repos[0].repo if cfg.repos else "")
-    )
-    # Match clone/board for this repo
-    board = cfg.repos[0].board if cfg.repos else ""
-    clone_path = cfg.repos[0].clone_path if cfg.repos else ""
-    for r in cfg.repos:
-        if r.repo == resolved_repo:
-            board = r.board
-            clone_path = r.clone_path
-            break
-
-    follow = await run_follow_up_path(
-        action=action,
-        db_path=db_path,
-        config=cfg,
-        dry_run=decide.dry_run,
-        repo=str(resolved_repo),
-        pr=decide.summary.get("pr") if isinstance(decide.summary.get("pr"), dict) else {},
-        number=int(decide.summary.get("pr_number") or pr_number or 0) or None,
-        board=board,
-        clone_path=clone_path,
-        reason=str(decide.summary.get("reason") or ""),
-        worker_id=f"{worker_id}:followup",
-    )
-    if follow is None:
-        return decide
-
-    follow_status = str(follow.status or "")
-    follow_failed_steps: list[str] = []
-    raw_failed_steps = follow.summary.get("failed_steps") if isinstance(follow.summary, dict) else None
-    if isinstance(raw_failed_steps, list):
-        follow_failed_steps.extend(str(step) for step in raw_failed_steps if step)
-    for process in follow.processes:
-        if str(process.get("status") or "").lower() not in {"failed", "cancelled", "timed_out"}:
-            continue
-        step_id = process.get("step_id")
-        if step_id and str(step_id) not in follow_failed_steps:
-            follow_failed_steps.append(str(step_id))
-    failed_follow_up = bool(follow.failed or follow_failed_steps)
-    normalized_status = follow_status.lower()
-    if normalized_status in {"waiting", "retry_wait", "failed", "cancelled", "timed_out"}:
-        decide.status = follow.status
-        decide.summary["follow_up_incomplete"] = normalized_status in {"waiting", "retry_wait"}
-    elif failed_follow_up:
-        decide.status = "failed"
-        decide.summary["follow_up_incomplete"] = False
-    decide.summary["run_status"] = decide.status
-    # Keep the follow-up visible to flow/tick callers, including failures hidden
-    # in a completed runtime wrapper.
-    decide.follow_up = follow.to_dict()
-    decide.processes = list(decide.processes) + list(follow.processes)
-    decide.completed = list(decide.completed) + list(follow.completed)
-    decide.failed = list(decide.failed) + list(follow.failed)
-    for process in follow.processes:
-        if str(process.get("status") or "").lower() not in {"failed", "cancelled", "timed_out"}:
-            continue
-        if process not in decide.failed:
-            decide.failed.append(process)
-    decide.summary["follow_up_status"] = follow.status
-    decide.summary["failed_steps"] = list(dict.fromkeys(
-        [
-            *[str(step) for step in decide.summary.get("failed_steps", [])],
-            *follow_failed_steps,
-            *[
-                str(process.get("step_id"))
-                for process in decide.processes
-                if str(process.get("status") or "").lower() in {"failed", "cancelled", "timed_out"}
-            ],
-        ]
-    ))
-    decide.summary["follow_up_path_id"] = follow.path_id
-    return decide

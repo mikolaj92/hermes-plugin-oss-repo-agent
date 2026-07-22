@@ -1,0 +1,537 @@
+version = "2"
+id = "hermes-oss-repo-agent"
+title = "Hermes OSS repo-agent"
+description = "Guarded issue intake, dispatch, PR triage, and cleanup processes."
+
+[[capabilities]]
+id = "repo_agent_step"
+title = "Run one allowlisted repo-agent domain step"
+
+[[correlation_paths]]
+id = "issue_intake"
+title = "Issue Intake"
+
+[[correlation_paths.effectors]]
+id = "poll"
+capability = "repo_agent_step"
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.poll.poll_eligible_issues" }
+
+[[correlation_paths.effectors]]
+id = "decide_issue_action"
+capability = "repo_agent_step"
+conduction = ["poll"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_direction.decide_issue_action" }
+
+[[correlation_paths.effectors]]
+id = "comment_issue"
+capability = "repo_agent_step"
+conduction = ["poll", "decide_issue_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_direction.comment_issue_once" }
+
+[[correlation_paths.effectors]]
+id = "claim"
+capability = "repo_agent_step"
+conduction = ["poll", "decide_issue_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.claim.claim_github_issue" }
+
+[[correlation_paths.effectors]]
+id = "kanban"
+capability = "repo_agent_step"
+conduction = ["claim", "decide_issue_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.kanban_intake.ensure_kanban_intake" }
+
+[[correlation_paths]]
+id = "issue_to_pr"
+title = "Issue To Pr"
+
+[[correlation_paths.effectors]]
+id = "load_kanban_task"
+capability = "repo_agent_step"
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.load_kanban_task" }
+
+[[correlation_paths.effectors]]
+id = "parse_issue_ref"
+capability = "repo_agent_step"
+conduction = ["load_kanban_task"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.parse_issue_ref_from_task" }
+
+[[correlation_paths.effectors]]
+id = "prepare_worktree"
+capability = "repo_agent_step"
+conduction = ["parse_issue_ref"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.prepare_worktree" }
+
+[[correlation_paths.effectors]]
+id = "run_omp"
+capability = "repo_agent_step"
+conduction = ["prepare_worktree", "parse_issue_ref"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.run_omp_worker" }
+
+[[correlation_paths.effectors]]
+id = "verify_branch"
+capability = "repo_agent_step"
+conduction = ["prepare_worktree", "run_omp"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.verify_branch_has_commits" }
+
+[[correlation_paths.effectors]]
+id = "push_branch"
+capability = "repo_agent_step"
+conduction = ["prepare_worktree", "verify_branch", "parse_issue_ref"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.push_branch" }
+
+[[correlation_paths.effectors]]
+id = "open_pull_request"
+capability = "repo_agent_step"
+conduction = ["parse_issue_ref", "prepare_worktree", "push_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.open_pull_request" }
+
+[[correlation_paths.effectors]]
+id = "apply_pr_labels"
+capability = "repo_agent_step"
+conduction = ["open_pull_request", "parse_issue_ref"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.apply_pr_labels" }
+
+[[correlation_paths.effectors]]
+id = "write_dispatch_receipt"
+capability = "repo_agent_step"
+conduction = ["parse_issue_ref", "prepare_worktree", "open_pull_request", "apply_pr_labels"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.write_dispatch_receipt" }
+
+[[correlation_paths.effectors]]
+id = "complete_kanban_task"
+capability = "repo_agent_step"
+conduction = ["load_kanban_task", "parse_issue_ref", "write_dispatch_receipt"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.complete_kanban_task" }
+
+[[correlation_paths]]
+id = "pr_triage"
+title = "Pr Triage"
+
+[[correlation_paths.effectors]]
+id = "list_ai_fix_prs"
+capability = "repo_agent_step"
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.list_ai_fix_prs" }
+
+[[correlation_paths.effectors]]
+id = "load_pr_fields"
+capability = "repo_agent_step"
+conduction = ["list_ai_fix_prs"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.load_pr_fields" }
+
+[[correlation_paths.effectors]]
+id = "evaluate_checks"
+capability = "repo_agent_step"
+conduction = ["load_pr_fields"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.evaluate_checks" }
+
+[[correlation_paths.effectors]]
+id = "evaluate_test_evidence"
+capability = "repo_agent_step"
+conduction = ["load_pr_fields"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.evaluate_test_evidence" }
+
+[[correlation_paths.effectors]]
+id = "decide_triage_action"
+capability = "repo_agent_step"
+conduction = ["load_pr_fields", "evaluate_checks", "evaluate_test_evidence"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.decide_triage_action" }
+
+[[correlation_paths.effectors]]
+id = "claim_pr"
+capability = "repo_agent_step"
+conduction = ["decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.claim_pr_assignee" }
+
+[[correlation_paths.effectors]]
+id = "merge"
+capability = "repo_agent_step"
+conduction = ["claim_pr", "decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.merge_pull_request" }
+
+[[correlation_paths.effectors]]
+id = "write_merge_receipt"
+capability = "repo_agent_step"
+conduction = ["claim_pr", "merge", "decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.write_merge_receipt" }
+
+[[correlation_paths.effectors]]
+id = "close_linked_issue"
+capability = "repo_agent_step"
+conduction = ["merge", "claim_pr", "decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.close_linked_issue" }
+
+[[correlation_paths.effectors]]
+id = "comment_pr"
+capability = "repo_agent_step"
+conduction = ["decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.comment_pr_once" }
+
+[[correlation_paths.effectors]]
+id = "create_review_fix_task"
+capability = "repo_agent_step"
+conduction = ["decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.repair.create_review_fix_task" }
+
+[[correlation_paths.effectors]]
+id = "build_repair_prompt"
+capability = "repo_agent_step"
+conduction = ["create_review_fix_task", "decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.repair.build_repair_prompt" }
+
+[[correlation_paths.effectors]]
+id = "repair_prepare_worktree"
+capability = "repo_agent_step"
+conduction = ["build_repair_prompt", "decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.prepare_worktree" }
+
+[[correlation_paths.effectors]]
+id = "repair_run_omp"
+capability = "repo_agent_step"
+conduction = ["repair_prepare_worktree", "build_repair_prompt", "decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.run_omp_worker" }
+
+[[correlation_paths.effectors]]
+id = "repair_push_branch"
+capability = "repo_agent_step"
+conduction = ["repair_prepare_worktree", "repair_run_omp", "decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.push_branch" }
+
+[[correlation_paths]]
+id = "cleanup"
+title = "Cleanup"
+
+[[correlation_paths.effectors]]
+id = "parse_issue_from_branch"
+capability = "repo_agent_step"
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.parse_issue_from_branch" }
+
+[[correlation_paths.effectors]]
+id = "check_issue_closed"
+capability = "repo_agent_step"
+conduction = ["parse_issue_from_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.check_issue_closed" }
+
+[[correlation_paths.effectors]]
+id = "check_no_open_pr"
+capability = "repo_agent_step"
+conduction = ["parse_issue_from_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.check_no_open_pr_for_branch" }
+
+[[correlation_paths.effectors]]
+id = "remove_worktree"
+capability = "repo_agent_step"
+conduction = ["check_issue_closed", "check_no_open_pr", "parse_issue_from_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.remove_worktree" }
+
+[[correlation_paths.effectors]]
+id = "delete_local_fix_branch"
+capability = "repo_agent_step"
+conduction = ["remove_worktree", "parse_issue_from_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.delete_local_fix_branch" }
+
+[[correlation_paths.effectors]]
+id = "release_active_issue_claim"
+capability = "repo_agent_step"
+conduction = ["remove_worktree", "parse_issue_from_branch", "check_issue_closed", "check_no_open_pr", "delete_local_fix_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.release_active_issue_claim" }
+
+# The full worker is one Fala run. Prefixes keep process IDs unique while
+# preserving each domain handler's stable operation name in config.
+[[correlation_paths]]
+id = "auto_worker"
+title = "Auto Worker"
+
+[[correlation_paths.effectors]]
+id = "intake_poll"
+capability = "repo_agent_step"
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.poll.poll_eligible_issues" }
+
+[[correlation_paths.effectors]]
+id = "intake_decide_issue_action"
+capability = "repo_agent_step"
+conduction = ["intake_poll"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_direction.decide_issue_action" }
+
+[[correlation_paths.effectors]]
+id = "intake_comment_issue"
+capability = "repo_agent_step"
+conduction = ["intake_poll", "intake_decide_issue_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_direction.comment_issue_once" }
+
+[[correlation_paths.effectors]]
+id = "intake_claim"
+capability = "repo_agent_step"
+conduction = ["intake_poll", "intake_decide_issue_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.claim.claim_github_issue" }
+
+[[correlation_paths.effectors]]
+id = "intake_kanban"
+capability = "repo_agent_step"
+conduction = ["intake_claim", "intake_decide_issue_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.kanban_intake.ensure_kanban_intake" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_load_kanban_task"
+capability = "repo_agent_step"
+conduction = ["intake_comment_issue", "intake_kanban"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.load_kanban_task" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_parse_issue_ref"
+capability = "repo_agent_step"
+conduction = ["dispatch_load_kanban_task"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.parse_issue_ref_from_task" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_prepare_worktree"
+capability = "repo_agent_step"
+conduction = ["dispatch_parse_issue_ref"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.prepare_worktree" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_run_omp"
+capability = "repo_agent_step"
+conduction = ["dispatch_prepare_worktree", "dispatch_parse_issue_ref"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.run_omp_worker" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_verify_branch"
+capability = "repo_agent_step"
+conduction = ["dispatch_prepare_worktree", "dispatch_run_omp"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.verify_branch_has_commits" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_push_branch"
+capability = "repo_agent_step"
+conduction = ["dispatch_prepare_worktree", "dispatch_verify_branch", "dispatch_parse_issue_ref"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.push_branch" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_open_pull_request"
+capability = "repo_agent_step"
+conduction = ["dispatch_parse_issue_ref", "dispatch_prepare_worktree", "dispatch_push_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.open_pull_request" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_apply_pr_labels"
+capability = "repo_agent_step"
+conduction = ["dispatch_open_pull_request", "dispatch_parse_issue_ref"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.apply_pr_labels" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_write_dispatch_receipt"
+capability = "repo_agent_step"
+conduction = ["dispatch_parse_issue_ref", "dispatch_prepare_worktree", "dispatch_open_pull_request", "dispatch_apply_pr_labels"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.write_dispatch_receipt" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_complete_kanban_task"
+capability = "repo_agent_step"
+conduction = ["dispatch_load_kanban_task", "dispatch_parse_issue_ref", "dispatch_write_dispatch_receipt"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.complete_kanban_task" }
+
+[[correlation_paths.effectors]]
+id = "triage_list_ai_fix_prs"
+capability = "repo_agent_step"
+conduction = ["dispatch_complete_kanban_task"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.list_ai_fix_prs" }
+
+[[correlation_paths.effectors]]
+id = "triage_load_pr_fields"
+capability = "repo_agent_step"
+conduction = ["triage_list_ai_fix_prs"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.load_pr_fields" }
+
+[[correlation_paths.effectors]]
+id = "triage_evaluate_checks"
+capability = "repo_agent_step"
+conduction = ["triage_load_pr_fields"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.evaluate_checks" }
+
+[[correlation_paths.effectors]]
+id = "triage_evaluate_test_evidence"
+capability = "repo_agent_step"
+conduction = ["triage_load_pr_fields"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.evaluate_test_evidence" }
+
+[[correlation_paths.effectors]]
+id = "triage_decide_triage_action"
+capability = "repo_agent_step"
+conduction = ["triage_load_pr_fields", "triage_evaluate_checks", "triage_evaluate_test_evidence"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.decide_triage_action" }
+
+[[correlation_paths.effectors]]
+id = "triage_claim_pr"
+capability = "repo_agent_step"
+conduction = ["triage_decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.claim_pr_assignee" }
+
+[[correlation_paths.effectors]]
+id = "triage_merge"
+capability = "repo_agent_step"
+conduction = ["triage_claim_pr", "triage_decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.merge_pull_request" }
+
+[[correlation_paths.effectors]]
+id = "triage_write_merge_receipt"
+capability = "repo_agent_step"
+conduction = ["triage_claim_pr", "triage_merge", "triage_decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.write_merge_receipt" }
+
+[[correlation_paths.effectors]]
+id = "triage_close_linked_issue"
+capability = "repo_agent_step"
+conduction = ["triage_merge", "triage_claim_pr", "triage_decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.close_linked_issue" }
+
+[[correlation_paths.effectors]]
+id = "triage_comment_pr"
+capability = "repo_agent_step"
+conduction = ["triage_decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.triage.comment_pr_once" }
+
+[[correlation_paths.effectors]]
+id = "triage_create_review_fix_task"
+capability = "repo_agent_step"
+conduction = ["triage_decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.repair.create_review_fix_task" }
+
+[[correlation_paths.effectors]]
+id = "triage_build_repair_prompt"
+capability = "repo_agent_step"
+conduction = ["triage_create_review_fix_task", "triage_decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.repair.build_repair_prompt" }
+
+[[correlation_paths.effectors]]
+id = "triage_repair_prepare_worktree"
+capability = "repo_agent_step"
+conduction = ["triage_build_repair_prompt", "triage_decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.prepare_worktree" }
+
+[[correlation_paths.effectors]]
+id = "triage_repair_run_omp"
+capability = "repo_agent_step"
+conduction = ["triage_repair_prepare_worktree", "triage_build_repair_prompt", "triage_decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.run_omp_worker" }
+
+[[correlation_paths.effectors]]
+id = "triage_repair_push_branch"
+capability = "repo_agent_step"
+conduction = ["triage_repair_prepare_worktree", "triage_repair_run_omp", "triage_decide_triage_action"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.issue_to_pr.push_branch" }
+
+[[correlation_paths.effectors]]
+id = "cleanup_parse_issue_from_branch"
+capability = "repo_agent_step"
+conduction = ["triage_write_merge_receipt", "triage_close_linked_issue", "triage_comment_pr", "triage_repair_push_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.parse_issue_from_branch" }
+
+[[correlation_paths.effectors]]
+id = "cleanup_check_issue_closed"
+capability = "repo_agent_step"
+conduction = ["cleanup_parse_issue_from_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.check_issue_closed" }
+
+[[correlation_paths.effectors]]
+id = "cleanup_check_no_open_pr"
+capability = "repo_agent_step"
+conduction = ["cleanup_parse_issue_from_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.check_no_open_pr_for_branch" }
+
+[[correlation_paths.effectors]]
+id = "cleanup_remove_worktree"
+capability = "repo_agent_step"
+conduction = ["cleanup_check_issue_closed", "cleanup_check_no_open_pr", "cleanup_parse_issue_from_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.remove_worktree" }
+
+[[correlation_paths.effectors]]
+id = "cleanup_delete_local_fix_branch"
+capability = "repo_agent_step"
+conduction = ["cleanup_remove_worktree", "cleanup_parse_issue_from_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.delete_local_fix_branch" }
+
+[[correlation_paths.effectors]]
+id = "cleanup_release_active_issue_claim"
+capability = "repo_agent_step"
+conduction = ["cleanup_remove_worktree", "cleanup_parse_issue_from_branch", "cleanup_check_issue_closed", "cleanup_check_no_open_pr", "cleanup_delete_local_fix_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.release_active_issue_claim" }
+
+[runtime.backend]
+kind = "sqlite"
+path = ".fala/repo-agent.sqlite"
+
+[runtime.reaction_store]
+kind = "filesystem"
+root = ".fala/reactions"

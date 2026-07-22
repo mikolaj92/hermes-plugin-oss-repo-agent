@@ -29,7 +29,7 @@ hermes plugins install mikolaj92/hermes-plugin-oss-repo-agent --enable
 This repository is a standalone Hermes plugin: `plugin.yaml` and `__init__.py`
 live at the repository root.
 
-After install, Hermes may show [`after-install.md`](after-install.md). The short version is: create a starter config, validate it, then run dry-run intake and dispatch.
+After install, Hermes may show [`after-install.md`](after-install.md). The short version is: create a starter config, validate it, then run the Fala auto-worker in dry-run mode.
 
 ## Deployment
 
@@ -42,26 +42,24 @@ hermes oss-repo-agent --config ~/.hermes/oss-repo-agent/config.toml render-launc
   --fala-db ~/.hermes/oss-repo-agent/fala/state.sqlite --mode dry-run
 ```
 
-Validate the candidate with parity and `plutil -lint` before any separately
-controlled promotion. Fala and legacy shell mutators, including the health
-LaunchAgent when it invokes `repo_agent_health.sh --repair`, must never be
-loaded together. Keep legacy plists only as rollback artifacts; do not run
-live Fala and legacy jobs in parallel.
+Validate the candidate with parity and `plutil -lint` before separately
+controlled promotion. `repo-agent-tick-all` / `auto_worker` is the sole
+scheduled mutator. Individual Fala ticks are manual diagnostics only and must
+not be installed as separate scheduled jobs.
 
 ## 3-minute happy path
 
 ```bash
 hermes oss-repo-agent --config config.yaml init
 hermes oss-repo-agent --config config.yaml validate
-hermes oss-repo-agent --config config.yaml intake --limit 3
-hermes oss-repo-agent --config config.yaml dispatch --max 2
+uv run repo-agent-tick-all --dry-run
 ```
 
 Expected dry-run signals:
 
 - `effective_live: false`
 - `executed: false`
-- `planned_work` showing the GitHub issue read or guarded Kanban task draft intent
+- `planned_work` showing the composed auto-worker graph
 - `safety_guards` showing the no-merge, no-force-push, no-branch-deletion policy
 
 The plugin registers:
@@ -78,58 +76,17 @@ The plugin registers:
 ```bash
 hermes oss-repo-agent --config <config.json-or-yaml> init
 hermes oss-repo-agent --config <config.json-or-yaml> validate
-hermes oss-repo-agent --config <config> bootstrap --apply
-hermes oss-repo-agent --config <config> intake --live
-hermes oss-repo-agent --config <config> dispatch --live --run-executor
-hermes oss-repo-agent --config <config> pr-triage --live --comment
 hermes oss-repo-agent --config <config> render-launchd --output <dir>
+uv run repo-agent-tick-all --dry-run
+uv run repo-agent-tick-all --live
 ```
 
-Live mutation requires both `mode: live` in config and an explicit live/apply CLI
-flag. Executor runs require live mode, `--run-executor`, and
-`executor.enabled: true`.
-
-The mini dispatcher runs OMP workers only when live mode and `--run-opencode`
-are enabled. Configure the OMP model, thinking mode, timeout, and worker cap
-with `HERMES_ISSUE_TO_PR_OMP_MODEL`, `HERMES_ISSUE_TO_PR_OMP_THINKING`,
-`HERMES_OMP_TIMEOUT_SECONDS`, and `HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS`.
-
-## Mini runtime harness
-
-The production `mini-m4-0` automation is tracked in `scripts/`:
-
-- `repo_issue_intake.sh` polls eligible GitHub issues, assigns them to the
-  configured repo-agent account, and creates idempotent Hermes Kanban `[issue]`
-  tasks.
-- `repo_issue_to_pr_dispatch.sh` turns `[issue]` tasks into explicit
-  `[fix-pr]` work, runs OMP workers with per-board locks and a hard timeout,
-  finalizes Kanban tasks when an open PR appears, and handles `[fix-pr-review]`
-  repair tasks from PR triage.
-- `repo_pr_triage.sh` watches and claims owner-authored `ai/fix/*` PRs, requires
-  labels, checks, mergeability, test evidence, and optional review approval
-  before merge, comments on blocked PRs, and queues Kanban repair work for
-  fixable failures.
-- `repo_agent_cleanup.sh` removes clean controlled `ai/fix` worktrees, and local
-  branches, after their GitHub issue is closed and no open PR remains.
-- `repo_agent_health.sh` checks launchd, `gh auth`, disk space, logs, stale
-  locks, active workers, GitHub queues, Kanban board stats, and Hermes update
-  availability.
-- `repo_agent_status.sh` prints a one-screen dashboard with launchd state,
-  worker locks, queue counts, and recent dispatch/triage/cleanup decisions.
-- `repo_agent_hermes_update.sh` checks for Hermes updates and can run
-  `hermes update --backup --yes` only when no repo-agent worker lock is active.
-- `repo_agent_backfill.sh` runs intake, dispatch, PR triage, and cleanup
-  reconciliation without starting code workers.
-- `repo_agent_webhook.sh` is an optional trusted event entrypoint that maps
-  GitHub events to the same reconciliation scripts; it is not an HTTP listener
-  and does not validate webhook signatures.
-- `repo_agent_repos.sh` is the single runtime repo registry used by intake,
-  dispatch, PR triage, cleanup, health, and status.
-- `repo_agent_smoke.sh` runs local runtime regressions.
-
-The launchd templates live in `templates/launchd/` and include
-`LimitLoadToSessionType=Background`; without that macOS can reject SSH-driven
-`launchctl bootstrap` with an opaque input/output error.
+`repo-agent-tick-all` / `auto_worker` is the only scheduled mutator. Use
+`repo-agent-tick-intake`, `repo-agent-tick-dispatch`,
+`repo-agent-tick-triage`, or `repo-agent-tick-cleanup` only as manual
+diagnostic runs while investigating one correlation path; they are not
+deployment or scheduling instructions. Legacy shell scripts, backfill,
+webhook, and cron entrypoints are removed and are not runnable paths.
 
 Runtime defaults:
 

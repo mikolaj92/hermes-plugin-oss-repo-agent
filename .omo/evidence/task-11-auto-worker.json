@@ -1,0 +1,1761 @@
+{
+  "failure": {
+    "journal_processes": [
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "cleanup_parse_issue_from_branch"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:cleanup_check_issue_closed",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "cleanup_check_issue_closed",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "cleanup_parse_issue_from_branch"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:cleanup_check_no_open_pr",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "cleanup_check_no_open_pr",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "cleanup_parse_issue_from_branch"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:cleanup_delete_local_fix_branch",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "cleanup_delete_local_fix_branch",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_write_merge_receipt",
+            "triage_close_linked_issue",
+            "triage_comment_pr",
+            "triage_repair_push_branch"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:cleanup_parse_issue_from_branch",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "cleanup_parse_issue_from_branch",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "cleanup_parse_issue_from_branch"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:cleanup_release_active_issue_claim",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "cleanup_release_active_issue_claim",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "cleanup_parse_issue_from_branch"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:cleanup_remove_worktree",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "cleanup_remove_worktree",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "dispatch_open_pull_request"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:dispatch_apply_pr_labels",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "dispatch_apply_pr_labels",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "dispatch_write_dispatch_receipt"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:dispatch_complete_kanban_task",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "dispatch_complete_kanban_task",
+        "values": {}
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-failure:auto_worker:dispatch_load_kanban_task",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_load_kanban_task",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "dispatch_load_kanban_task",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "dispatch_push_branch"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:dispatch_open_pull_request",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "dispatch_open_pull_request",
+        "values": {}
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-failure:auto_worker:dispatch_parse_issue_ref",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_parse_issue_ref",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "dispatch_parse_issue_ref",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-failure:auto_worker:dispatch_prepare_worktree",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_prepare_worktree",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "dispatch_prepare_worktree",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "dispatch_verify_branch"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:dispatch_push_branch",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "dispatch_push_branch",
+        "values": {}
+      },
+      {
+        "attempt": 1,
+        "error": {
+          "code": "adapter_failed",
+          "message": "subprocess adapter failed: qa_semantic_failure\\nqa_semantic_failure\\n"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:dispatch_run_omp",
+        "max_attempts": 1,
+        "status": "failed",
+        "step_id": "dispatch_run_omp",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "dispatch_run_omp"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:dispatch_verify_branch",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "dispatch_verify_branch",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "dispatch_open_pull_request"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:dispatch_write_dispatch_receipt",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "dispatch_write_dispatch_receipt",
+        "values": {}
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-failure:auto_worker:intake_claim",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_claim",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "intake_claim",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-failure:auto_worker:intake_comment_issue",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_comment_issue",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "intake_comment_issue",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-failure:auto_worker:intake_decide_issue_action",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_decide_issue_action",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "intake_decide_issue_action",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-failure:auto_worker:intake_kanban",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_kanban",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "intake_kanban",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-failure:auto_worker:intake_poll",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_poll",
+        "values": {
+          "action": "skip",
+          "conduction_count": 0,
+          "marker": "intake_poll",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_decide_triage_action"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_build_repair_prompt",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_build_repair_prompt",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_decide_triage_action"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_claim_pr",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_claim_pr",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_decide_triage_action"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_close_linked_issue",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_close_linked_issue",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_decide_triage_action"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_comment_pr",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_comment_pr",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_decide_triage_action"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_create_review_fix_task",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_create_review_fix_task",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_load_pr_fields"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_decide_triage_action",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_decide_triage_action",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_load_pr_fields"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_evaluate_checks",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_evaluate_checks",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_load_pr_fields"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_evaluate_test_evidence",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_evaluate_test_evidence",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "dispatch_complete_kanban_task"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_list_ai_fix_prs",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_list_ai_fix_prs",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_list_ai_fix_prs"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_load_pr_fields",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_load_pr_fields",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_decide_triage_action"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_merge",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_merge",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_decide_triage_action"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_repair_prepare_worktree",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_repair_prepare_worktree",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_decide_triage_action"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_repair_push_branch",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_repair_push_branch",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_decide_triage_action"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_repair_run_omp",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_repair_run_omp",
+        "values": {}
+      },
+      {
+        "attempt": 0,
+        "error": {
+          "code": "dead_upstream",
+          "dead_upstreams": [
+            "triage_decide_triage_action"
+          ],
+          "reason": "dead_upstream"
+        },
+        "id": "qa-auto-worker-failure:auto_worker:triage_write_merge_receipt",
+        "max_attempts": 1,
+        "status": "cancelled",
+        "step_id": "triage_write_merge_receipt",
+        "values": {}
+      }
+    ],
+    "process_count": 36,
+    "run_status": "failed"
+  },
+  "idle": {
+    "journal_processes": [
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:cleanup_check_issue_closed",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_check_issue_closed",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "cleanup_check_issue_closed",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:cleanup_check_no_open_pr",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_check_no_open_pr",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "cleanup_check_no_open_pr",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:cleanup_delete_local_fix_branch",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_delete_local_fix_branch",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "cleanup_delete_local_fix_branch",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:cleanup_parse_issue_from_branch",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_parse_issue_from_branch",
+        "values": {
+          "action": "skip",
+          "conduction_count": 4,
+          "marker": "cleanup_parse_issue_from_branch",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:cleanup_release_active_issue_claim",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_release_active_issue_claim",
+        "values": {
+          "action": "skip",
+          "conduction_count": 5,
+          "marker": "cleanup_release_active_issue_claim",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:cleanup_remove_worktree",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_remove_worktree",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "cleanup_remove_worktree",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:dispatch_apply_pr_labels",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_apply_pr_labels",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "dispatch_apply_pr_labels",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:dispatch_complete_kanban_task",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_complete_kanban_task",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "dispatch_complete_kanban_task",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:dispatch_load_kanban_task",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_load_kanban_task",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "dispatch_load_kanban_task",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:dispatch_open_pull_request",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_open_pull_request",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "dispatch_open_pull_request",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:dispatch_parse_issue_ref",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_parse_issue_ref",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "dispatch_parse_issue_ref",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:dispatch_prepare_worktree",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_prepare_worktree",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "dispatch_prepare_worktree",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:dispatch_push_branch",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_push_branch",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "dispatch_push_branch",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:dispatch_run_omp",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_run_omp",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "dispatch_run_omp",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:dispatch_verify_branch",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_verify_branch",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "dispatch_verify_branch",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:dispatch_write_dispatch_receipt",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_write_dispatch_receipt",
+        "values": {
+          "action": "skip",
+          "conduction_count": 4,
+          "marker": "dispatch_write_dispatch_receipt",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:intake_claim",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_claim",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "intake_claim",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:intake_comment_issue",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_comment_issue",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "intake_comment_issue",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:intake_decide_issue_action",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_decide_issue_action",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "intake_decide_issue_action",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:intake_kanban",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_kanban",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "intake_kanban",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:intake_poll",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_poll",
+        "values": {
+          "action": "skip",
+          "conduction_count": 0,
+          "marker": "intake_poll",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_build_repair_prompt",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_build_repair_prompt",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "triage_build_repair_prompt",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_claim_pr",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_claim_pr",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_claim_pr",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_close_linked_issue",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_close_linked_issue",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "triage_close_linked_issue",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_comment_pr",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_comment_pr",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_comment_pr",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_create_review_fix_task",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_create_review_fix_task",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_create_review_fix_task",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_decide_triage_action",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_decide_triage_action",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "triage_decide_triage_action",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_evaluate_checks",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_evaluate_checks",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_evaluate_checks",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_evaluate_test_evidence",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_evaluate_test_evidence",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_evaluate_test_evidence",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_list_ai_fix_prs",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_list_ai_fix_prs",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_list_ai_fix_prs",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_load_pr_fields",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_load_pr_fields",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_load_pr_fields",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_merge",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_merge",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "triage_merge",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_repair_prepare_worktree",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_repair_prepare_worktree",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "triage_repair_prepare_worktree",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_repair_push_branch",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_repair_push_branch",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "triage_repair_push_branch",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_repair_run_omp",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_repair_run_omp",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "triage_repair_run_omp",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-idle:auto_worker:triage_write_merge_receipt",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_write_merge_receipt",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "triage_write_merge_receipt",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      }
+    ],
+    "process_count": 36,
+    "run_status": "completed",
+    "worked": false
+  },
+  "success": {
+    "all_max_attempts_one": true,
+    "all_timeouts_900": true,
+    "declared_processes": [
+      "intake_poll",
+      "intake_decide_issue_action",
+      "intake_comment_issue",
+      "intake_claim",
+      "intake_kanban",
+      "dispatch_load_kanban_task",
+      "dispatch_parse_issue_ref",
+      "dispatch_prepare_worktree",
+      "dispatch_run_omp",
+      "dispatch_verify_branch",
+      "dispatch_push_branch",
+      "dispatch_open_pull_request",
+      "dispatch_apply_pr_labels",
+      "dispatch_write_dispatch_receipt",
+      "dispatch_complete_kanban_task",
+      "triage_list_ai_fix_prs",
+      "triage_load_pr_fields",
+      "triage_evaluate_checks",
+      "triage_evaluate_test_evidence",
+      "triage_decide_triage_action",
+      "triage_claim_pr",
+      "triage_merge",
+      "triage_write_merge_receipt",
+      "triage_close_linked_issue",
+      "triage_comment_pr",
+      "triage_create_review_fix_task",
+      "triage_build_repair_prompt",
+      "triage_repair_prepare_worktree",
+      "triage_repair_run_omp",
+      "triage_repair_push_branch",
+      "cleanup_parse_issue_from_branch",
+      "cleanup_check_issue_closed",
+      "cleanup_check_no_open_pr",
+      "cleanup_remove_worktree",
+      "cleanup_delete_local_fix_branch",
+      "cleanup_release_active_issue_claim"
+    ],
+    "journal_processes": [
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:cleanup_check_issue_closed",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_check_issue_closed",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "cleanup_check_issue_closed",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:cleanup_check_no_open_pr",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_check_no_open_pr",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "cleanup_check_no_open_pr",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:cleanup_delete_local_fix_branch",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_delete_local_fix_branch",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "cleanup_delete_local_fix_branch",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:cleanup_parse_issue_from_branch",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_parse_issue_from_branch",
+        "values": {
+          "action": "skip",
+          "conduction_count": 4,
+          "marker": "cleanup_parse_issue_from_branch",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:cleanup_release_active_issue_claim",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_release_active_issue_claim",
+        "values": {
+          "action": "skip",
+          "conduction_count": 5,
+          "marker": "cleanup_release_active_issue_claim",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:cleanup_remove_worktree",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "cleanup_remove_worktree",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "cleanup_remove_worktree",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:dispatch_apply_pr_labels",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_apply_pr_labels",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "dispatch_apply_pr_labels",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:dispatch_complete_kanban_task",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_complete_kanban_task",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "dispatch_complete_kanban_task",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:dispatch_load_kanban_task",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_load_kanban_task",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "dispatch_load_kanban_task",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:dispatch_open_pull_request",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_open_pull_request",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "dispatch_open_pull_request",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:dispatch_parse_issue_ref",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_parse_issue_ref",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "dispatch_parse_issue_ref",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:dispatch_prepare_worktree",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_prepare_worktree",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "dispatch_prepare_worktree",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:dispatch_push_branch",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_push_branch",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "dispatch_push_branch",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:dispatch_run_omp",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_run_omp",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "dispatch_run_omp",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:dispatch_verify_branch",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_verify_branch",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "dispatch_verify_branch",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:dispatch_write_dispatch_receipt",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "dispatch_write_dispatch_receipt",
+        "values": {
+          "action": "skip",
+          "conduction_count": 4,
+          "marker": "dispatch_write_dispatch_receipt",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:intake_claim",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_claim",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "intake_claim",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:intake_comment_issue",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_comment_issue",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "intake_comment_issue",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:intake_decide_issue_action",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_decide_issue_action",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "intake_decide_issue_action",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:intake_kanban",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_kanban",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "intake_kanban",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:intake_poll",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "intake_poll",
+        "values": {
+          "action": "skip",
+          "conduction_count": 0,
+          "marker": "intake_poll",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_build_repair_prompt",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_build_repair_prompt",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "triage_build_repair_prompt",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_claim_pr",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_claim_pr",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_claim_pr",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_close_linked_issue",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_close_linked_issue",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "triage_close_linked_issue",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_comment_pr",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_comment_pr",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_comment_pr",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_create_review_fix_task",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_create_review_fix_task",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_create_review_fix_task",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_decide_triage_action",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_decide_triage_action",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "triage_decide_triage_action",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_evaluate_checks",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_evaluate_checks",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_evaluate_checks",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_evaluate_test_evidence",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_evaluate_test_evidence",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_evaluate_test_evidence",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_list_ai_fix_prs",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_list_ai_fix_prs",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_list_ai_fix_prs",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_load_pr_fields",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_load_pr_fields",
+        "values": {
+          "action": "skip",
+          "conduction_count": 1,
+          "marker": "triage_load_pr_fields",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_merge",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_merge",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "triage_merge",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_repair_prepare_worktree",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_repair_prepare_worktree",
+        "values": {
+          "action": "skip",
+          "conduction_count": 2,
+          "marker": "triage_repair_prepare_worktree",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_repair_push_branch",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_repair_push_branch",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "triage_repair_push_branch",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_repair_run_omp",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_repair_run_omp",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "triage_repair_run_omp",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      },
+      {
+        "attempt": 1,
+        "error": {},
+        "id": "qa-auto-worker-success:auto_worker:triage_write_merge_receipt",
+        "max_attempts": 1,
+        "status": "succeeded",
+        "step_id": "triage_write_merge_receipt",
+        "values": {
+          "action": "skip",
+          "conduction_count": 3,
+          "marker": "triage_write_merge_receipt",
+          "mutated": false,
+          "ok": true,
+          "status": "noop"
+        }
+      }
+    ],
+    "process_count": 36,
+    "run_status": "completed"
+  }
+}

@@ -53,6 +53,8 @@ class DeploymentCandidateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0, "", "")
                 if checkout == fala_root and command[3:5] == ["cat-file", "-e"]:
                     return subprocess.CompletedProcess(command, 0, "", "")
+                if checkout == fala_root and command[3:5] == ["show", f"{self.commands.FALA_PINNED_COMMIT}:pyproject.toml"]:
+                    return subprocess.CompletedProcess(command, 0, '[project]\nversion = "0.7.6"\n', "")
             return real_run(argv, *args, **kwargs)
 
         return patch.object(self.commands.subprocess, "run", side_effect=fake_run)
@@ -85,8 +87,8 @@ class DeploymentCandidateTests(unittest.TestCase):
             "schema": 1,
             "mode": mode,
             "plugin_commit": "plugin-commit",
-            "fala_tag": "0.2.1",
-            "fala_commit": "9c5f419abe63c4683ad3e17ff708200c3c83d9e9",
+            "fala_tag": "0.7.6",
+            "fala_commit": "9f10d58462b4e134d5b1cffe8ff9172909df70ea",
             "lock_hash": hashlib.sha256(lock_data).hexdigest(),
             "config_path": str(config.absolute()),
             "config_hash": hashlib.sha256(config.read_bytes()).hexdigest(),
@@ -152,11 +154,15 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in calls))
 
 
-    def test_fala_source_tree_includes_src(self):
+    def test_fala_source_tree_includes_python_package(self):
         with tempfile.TemporaryDirectory() as directory:
-            fala_src = self._render(Path(directory)) / "source" / "project" / "Fala" / "src"
+            project = self._render(Path(directory)) / "source" / "project"
+            fala_src = project / "Fala" / "python" / "fala"
             self.assertTrue(fala_src.is_dir())
             self.assertTrue(any(fala_src.rglob("*.py")))
+            self.assertTrue((project / "fala-package.toml").is_file())
+            self.assertTrue((project / "src" / "repo_agent" / "effector.py").is_file())
+            self.assertFalse((project / "fala" / "packages" / "issue_intake.yaml").exists())
     def test_metadata_lock_hash_matches_bundled_lock_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             candidate = self._render(Path(directory))
@@ -187,6 +193,29 @@ class DeploymentCandidateTests(unittest.TestCase):
                         self.cfg, str(root / "candidates" / "candidate"), config_path=str(config), fala_db=str(root / "state.sqlite"), deployment_root=str(root)
                     )
 
+
+    def test_wrong_fala_version_at_pinned_commit_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.toml"
+            config.write_text("mode = 'dry-run'\n", encoding="utf-8")
+            real_run = self.commands.subprocess.run
+
+            def wrong_version(argv, *args, **kwargs):
+                command = list(argv)
+                if len(command) >= 3 and command[:2] == ["git", "-C"] and "status" in command:
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if command[3:5] == ["show", f"{self.commands.FALA_PINNED_COMMIT}:pyproject.toml"]:
+                    return subprocess.CompletedProcess(command, 0, '[project]\nversion = "0.7.5"\n', "")
+                return real_run(argv, *args, **kwargs)
+
+            with self._fala_git_clean(), patch.object(self.commands.subprocess, "run", side_effect=wrong_version), patch.object(
+                self.commands, "_read_git_revision", return_value="plugin-commit"
+            ):
+                with self.assertRaisesRegex(self.commands.ConfigError, "version must be 0.7.6"):
+                    self.commands.render_launchd(
+                        self.cfg, str(root / "candidates" / "candidate"), config_path=str(config), fala_db=str(root / "state.sqlite"), deployment_root=str(root)
+                    )
 
     def test_dirty_plugin_checkout_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from dataclasses import dataclass
 
-from fala.adapters import EffectorRunRequest, EffectorRunResult
+from repo_agent.envelope import Request, Result
 
 from repo_agent.adapters_cli import CommandError, hermes_kanban_json, run_cmd
 from repo_agent.adapters_git import (
@@ -44,6 +44,24 @@ class KanbanTaskResolution:
     status: str
     error: str | None = None
 
+
+def _repair_action_gate(request: Request) -> Result | None:
+    """Prevent shared repair handlers from running for another triage action."""
+    decision = cond_blob(request, "decide_triage_action", "decide")
+    if not decision:
+        return None
+    if decision.get("status") == "noop":
+        return noop("not_selected", upstream=decision)
+    if decision.get("status") == "failed" or decision.get("ok") is False:
+        return fail(
+            "upstream_decision_failed",
+            failure_class="terminal",
+            retry_safe=False,
+            upstream=decision,
+        )
+    if decision.get("action") != "repair":
+        return noop("not_selected", action=decision.get("action"), upstream=decision)
+    return None
 
 def resolve_kanban_task_id_after_create_result(
     *,
@@ -91,22 +109,18 @@ def _parse_task_id_from_stdout(stdout: str) -> str | None:
     return None
 
 
-def resolve_kanban_task_id_after_create(
-    *,
-    board: str,
-    task_title: str,
-    stdout: str = "",
-) -> str | None:
-    """Backward-compatible task-id-only wrapper around typed read-back."""
-    return resolve_kanban_task_id_after_create_result(
-        board=board, task_title=task_title, stdout=stdout
-    ).task_id
 
 
-def load_kanban_task(request: EffectorRunRequest) -> EffectorRunResult:
+def load_kanban_task(request: Request) -> Result:
     """Read one Kanban task by id (or first ready [fix-pr]/[issue])."""
     data = input_of(request)
     cfg = cfg_of(request)
+    upstream = upstream_noop(request, "intake_comment_issue", "intake_kanban")
+    if upstream:
+        return noop(
+            str(upstream.get("reason") or "no_intake_work"),
+            worked=False,
+        )
     board = str(data.get("board") or cfg.get("board") or "")
     task_id = data.get("task_id")
     if not board:
@@ -137,7 +151,7 @@ def load_kanban_task(request: EffectorRunRequest) -> EffectorRunResult:
     return noop("no_ready_task", board=board)
 
 
-def parse_issue_ref_from_task(request: EffectorRunRequest) -> EffectorRunResult:
+def parse_issue_ref_from_task(request: Request) -> Result:
     """Pure: extract owner/repo#N and preferred branch from task title/body."""
     data = input_of(request)
     upstream = upstream_noop(request, "load_kanban_task")
@@ -172,7 +186,7 @@ def parse_issue_ref_from_task(request: EffectorRunRequest) -> EffectorRunResult:
     )
 
 
-def create_fix_pr_task(request: EffectorRunRequest) -> EffectorRunResult:
+def create_fix_pr_task(request: Request) -> Result:
     """Create Kanban [fix-pr] task for an issue (idempotent-ish skip if exists)."""
     data = input_of(request)
     cfg = cfg_of(request)
@@ -270,7 +284,7 @@ def create_fix_pr_task(request: EffectorRunRequest) -> EffectorRunResult:
     )
 
 
-def complete_kanban_task(request: EffectorRunRequest) -> EffectorRunResult:
+def complete_kanban_task(request: Request) -> Result:
     """Mark one Kanban task done with a short result string."""
     data = input_of(request)
     cfg = cfg_of(request)
@@ -342,7 +356,7 @@ def complete_kanban_task(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="completed", board=board, task_id=task_id, result=result_text, idempotency_key=f"kanban:{board}:{task_id}:complete", mutated=True)
 
 
-def refresh_clone_base(request: EffectorRunRequest) -> EffectorRunResult:
+def refresh_clone_base(request: Request) -> Result:
     """Fetch origin and ensure clone is a git worktree root."""
     data = input_of(request)
     dry = dry_run_flag(request)
@@ -371,10 +385,13 @@ def refresh_clone_base(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="refreshed", clone_path=clone_path, base_branch=base_branch, mutated=True)
 
 
-def prepare_worktree(request: EffectorRunRequest) -> EffectorRunResult:
+def prepare_worktree(request: Request) -> Result:
     """Create or reattach a controlled worktree for branch under worktree_root."""
     data = input_of(request)
     cfg = cfg_of(request)
+    gated = _repair_action_gate(request)
+    if gated is not None:
+        return gated
     dry = dry_run_flag(request)
     upstream = upstream_noop(request, "parse_issue_ref")
     if upstream:
@@ -485,10 +502,13 @@ def _escaped_omp_paths(worktree_path: str, paths: list[str]) -> list[str]:
             escaped.append(value)
     return escaped
 
-def run_omp_worker(request: EffectorRunRequest) -> EffectorRunResult:
+def run_omp_worker(request: Request) -> Result:
     """Single OMP invocation in a worktree (no PR open, no labels)."""
     data = input_of(request)
     cfg = cfg_of(request)
+    gated = _repair_action_gate(request)
+    if gated is not None:
+        return gated
     dry = dry_run_flag(request)
     upstream = upstream_noop(request, "prepare_worktree", "parse_issue_ref")
     if upstream:
@@ -502,8 +522,11 @@ def run_omp_worker(request: EffectorRunRequest) -> EffectorRunResult:
                       f"Branch: {parsed.get('branch') or ''}\n"
                       f"Task: {parsed.get('task_title') or ''}\n"
                       "Keep scope tight. Do not force-push. Do not open/merge PRs.\n")
+    command = str(data.get("command") or cfg.get("executor_command") or "omp")
     model = str(data.get("model") or cfg.get("model") or "omniroute/omp/default")
+    thinking = str(data.get("thinking") or cfg.get("thinking") or "medium")
     timeout = float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800)
+
     intended_branch = str(data.get("branch") or cond_get(request, "branch", "prepare_worktree") or cond_get(request, "branch", "parse_issue_ref") or "")
     clone_path = str(data.get("clone_path") or cond_get(request, "clone_path", "refresh_clone_base", "prepare_worktree") or cfg.get("clone_path") or "")
     base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
@@ -528,7 +551,16 @@ def run_omp_worker(request: EffectorRunRequest) -> EffectorRunResult:
         except CommandError as exc:
             return fail("omp_worktree_invalid", failure_class="terminal", retry_safe=False, error=str(exc))
     try:
-        out = run_omp(prompt=prompt, cwd=worktree_path, model=model, timeout=timeout, dry_run=dry)
+        out = run_omp(
+            prompt=prompt,
+            cwd=worktree_path,
+            command=command,
+            model=model,
+            thinking=thinking,
+            timeout=timeout,
+            dry_run=dry,
+        )
+
     except CommandError as exc:
         return fail("omp_failed", failure_class="terminal", retry_safe=False, error=str(exc), stderr=exc.stderr[-500:], mutated=True)
     if dry:
@@ -555,7 +587,7 @@ def run_omp_worker(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="omp_finished", worktree_path=worktree_path, model=model, omp=out, pre_head=pre_head, head=post_head, base=base, branch=post_branch, mutated=True)
 
 
-def verify_branch_has_commits(request: EffectorRunRequest) -> EffectorRunResult:
+def verify_branch_has_commits(request: Request) -> Result:
     """Check worktree HEAD differs from base_branch without reading planned paths."""
     upstream = upstream_noop(request, "prepare_worktree", "run_omp")
     if upstream:
@@ -587,7 +619,7 @@ def verify_branch_has_commits(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="has_commits", head=head, base=base)
 
 
-def open_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
+def open_pull_request(request: Request) -> Result:
     """Open one PR for branch → base (gh pr create)."""
     import json
 
@@ -673,7 +705,7 @@ def open_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="created", repo=repo, branch=branch, base=base, number=number, url=pr.get("url"), idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", mutated=True)
 
 
-def apply_pr_labels(request: EffectorRunRequest) -> EffectorRunResult:
+def apply_pr_labels(request: Request) -> Result:
     """Add labels to an existing PR (e.g. ai:generated, ai:pr-opened)."""
     data = input_of(request)
     cfg = cfg_of(request)
@@ -723,7 +755,7 @@ def apply_pr_labels(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="labeled", repo=repo, number=number, labels=list(labels), actions=applied, idempotency_key=label_key, mutated=True)
 
 
-def write_dispatch_receipt(request: EffectorRunRequest) -> EffectorRunResult:
+def write_dispatch_receipt(request: Request) -> Result:
     """Write a receipt once, using durable atomic no-clobber publication."""
     data = input_of(request)
     dry = dry_run_flag(request)
@@ -752,7 +784,7 @@ def write_dispatch_receipt(request: EffectorRunRequest) -> EffectorRunResult:
         return fail("missing_receipt_path", failure_class="terminal", retry_safe=False)
     p = Path(path)
 
-    def existing_result() -> EffectorRunResult | None:
+    def existing_result() -> Result | None:
         if not p.exists():
             return None
         try:
@@ -805,7 +837,7 @@ def write_dispatch_receipt(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="written", receipt_path=path, payload=payload, mutated=True)
 
 
-def check_worktree_dirty(request: EffectorRunRequest) -> EffectorRunResult:
+def check_worktree_dirty(request: Request) -> Result:
     """Atomic read: is worktree dirty (status --porcelain non-empty)?"""
     data = input_of(request)
     worktree_path = str(data.get("worktree_path") or "")
@@ -817,7 +849,7 @@ def check_worktree_dirty(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="checked", worktree_path=worktree_path, dirty=dirty)
 
 
-def list_controlled_worktrees(request: EffectorRunRequest) -> EffectorRunResult:
+def list_controlled_worktrees(request: Request) -> Result:
     """List git worktrees under clone; optionally filter by worktree_root prefix."""
     data = input_of(request)
     cfg = cfg_of(request)
@@ -843,13 +875,16 @@ def list_controlled_worktrees(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="listed", clone_path=clone_path, count=len(rows), worktrees=rows)
 
 
-def push_branch(request: EffectorRunRequest) -> EffectorRunResult:
+def push_branch(request: Request) -> Result:
     """Atomic push with local/remote OID reconciliation and no force push."""
     data = input_of(request)
     dry = dry_run_flag(request)
     prep = cond_blob(request, "prepare_worktree")
     parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
     worktree_path = str(data.get("worktree_path") or prep.get("worktree_path") or "")
+    gated = _repair_action_gate(request)
+    if gated is not None:
+        return gated
     upstream = upstream_noop(request, "prepare_worktree", "verify_branch", "parse_issue_ref")
     if upstream:
         return noop(str(upstream.get("reason") or "no_ready_task"))
@@ -908,7 +943,7 @@ def push_branch(request: EffectorRunRequest) -> EffectorRunResult:
     )
 
 
-def apply_issue_labels(request: EffectorRunRequest) -> EffectorRunResult:
+def apply_issue_labels(request: Request) -> Result:
     """Atomic: add labels to a GitHub issue (e.g. ai:in-progress finish/block)."""
     data = input_of(request)
     cfg = cfg_of(request)

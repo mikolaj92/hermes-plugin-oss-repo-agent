@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 from repo_agent.adapters_cli import CommandError
@@ -19,14 +20,7 @@ from repo_agent.steps.poll import poll_eligible_issues
 
 
 def req(input_data=None, config=None):
-    return SimpleNamespace(
-        input=input_data or {},
-        config=config or {},
-        process_id="t1",
-        impulse_id=None,
-        work_dir=None,
-        adapter=None,
-    )
+    return {"input": input_data or {}, "config": config or {}}
 
 
 class CatalogTests(unittest.TestCase):
@@ -86,7 +80,7 @@ class IntakeAlignedTests(unittest.TestCase):
                     {"repos": [{"repo": "o/r", "board": "b"}], "dry_run": True},
                     {"assignee": "mikolaj92", "ready_label": "ai:ready"},
                 )
-            ).output
+            )
         self.assertTrue(out["ok"])
         self.assertEqual(out["eligible_count"], 1)
         self.assertEqual(out["selected"]["number"], 1)
@@ -94,7 +88,7 @@ class IntakeAlignedTests(unittest.TestCase):
     def test_claim_dry_run_and_noop(self) -> None:
         noop = claim_github_issue(
             req({"conduction": {"poll": {"selected": None}}, "dry_run": True})
-        ).output
+        )
         self.assertEqual(noop["status"], "noop")
         planned = claim_github_issue(
             req(
@@ -113,20 +107,20 @@ class IntakeAlignedTests(unittest.TestCase):
                 },
                 {"assignee": "mikolaj92"},
             )
-        ).output
+        )
         self.assertEqual(planned["status"], "planned")
         self.assertFalse(planned["mutated"])
     def test_claim_rejects_bool_and_string_issue_values(self) -> None:
         for value in (True, "3"):
             with self.subTest(value=value):
-                out = claim_github_issue(req({"dry_run": True, "selected": {"repo": "o/r", "board": "b", "number": value}})).output
+                out = claim_github_issue(req({"dry_run": True, "selected": {"repo": "o/r", "board": "b", "number": value}}))
                 self.assertEqual(out["reason"], "invalid_selected_issue")
 
     def test_claim_rejects_malformed_unrelated_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "other.json"
             path.write_text("not json", encoding="utf-8")
-            out = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 3}}, {"active_issue_path": tmp})).output
+            out = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 3}}, {"active_issue_path": tmp}))
             self.assertEqual(out["reason"], "claim_malformed")
 
     def test_claim_rejects_invalid_existing_identity_fields(self) -> None:
@@ -141,16 +135,16 @@ class IntakeAlignedTests(unittest.TestCase):
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "claim.json"
                 path.write_text(json.dumps(payload), encoding="utf-8")
-                out = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 1}}, {"assignee": "a", "active_issue_path": path})).output
+                out = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 1}}, {"assignee": "a", "active_issue_path": path}))
                 self.assertEqual(out["reason"], "claim_malformed")
 
     def test_claim_capacity_and_same_identity_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _reserve_claim(Path(tmp) / "first.json", repo="o/r", issue=1, board="b", assignee="a")
-            out = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 2}}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1})).output
+            out = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 2}}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1}))
             self.assertEqual(out["reason"], "claim_capacity_exhausted")
             with mock.patch("repo_agent.steps.claim.run_cmd", return_value=SimpleNamespace(stdout='{"assignees": [{"login": "a"}], "labels": [{"name": "ai:ready"}, {"name": "ai:in-progress"}]}')):
-                reused = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 1}}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1})).output
+                reused = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 1}}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1}))
             self.assertTrue(reused["ok"])
             self.assertTrue(reused["reused"])
 
@@ -171,21 +165,21 @@ class IntakeAlignedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             selected = {"repo": "o/r", "board": "b", "number": 3}
             with mock.patch("repo_agent.steps.claim.run_cmd", side_effect=CommandError(["gh"], 1, "", "denied")):
-                failed = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp})).output
+                failed = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp}))
             self.assertEqual(failed["reason"], "claim_uncertain")
             self.assertTrue(failed["mutated"])
 
         with tempfile.TemporaryDirectory() as tmp:
             selected = {"repo": "o/r", "board": "b", "number": 4}
             with mock.patch("repo_agent.steps.claim.run_cmd", side_effect=subprocess.TimeoutExpired(["gh"], 1)):
-                timed = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp})).output
+                timed = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp}))
             self.assertEqual(timed["reason"], "claim_uncertain")
             self.assertEqual(timed["failure_class"], "reconcile_then_retry")
 
         with tempfile.TemporaryDirectory() as tmp:
             selected = {"repo": "o/r", "board": "b", "number": 5}
             with mock.patch("repo_agent.steps.claim.run_cmd", return_value=SimpleNamespace(stdout='{"assignees": [], "labels": []}')):
-                mismatch = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp})).output
+                mismatch = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp}))
             self.assertEqual(mismatch["reason"], "claim_readback_mismatch")
             self.assertTrue(mismatch["mutated"])
 
@@ -209,7 +203,7 @@ class IntakeAlignedTests(unittest.TestCase):
                     },
                 }
             )
-        ).output
+        )
         self.assertEqual(out["status"], "planned")
 
 
@@ -225,7 +219,7 @@ class IssueToPrTests(unittest.TestCase):
                 },
                 {"branch_prefix": "ai/fix"},
             )
-        ).output
+        )
         self.assertTrue(out["ok"])
         self.assertEqual(out["repo"], "acme/app")
         self.assertEqual(out["issue"], 42)
@@ -234,7 +228,7 @@ class IssueToPrTests(unittest.TestCase):
     def test_parse_issue_ref_failure(self) -> None:
         out = issue_to_pr.parse_issue_ref_from_task(
             req({"task": {"title": "no ref here"}})
-        ).output
+        )
         self.assertFalse(out["ok"])
         self.assertEqual(out["reason"], "unparseable_issue_ref")
 
@@ -244,7 +238,7 @@ class IssueToPrTests(unittest.TestCase):
                 {"board": "b", "repo": "o/r", "issue": 9, "title": "x", "dry_run": True},
                 {"fixer_assignee": "fixer"},
             )
-        ).output
+        )
         self.assertEqual(out["status"], "planned")
         self.assertIn("[fix-pr]", out["title"])
 
@@ -261,7 +255,7 @@ class IssueToPrTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
         self.assertTrue(out["ok"])
         self.assertEqual(out["status"], "has_commits")
 
@@ -271,7 +265,7 @@ class IssueToPrTests(unittest.TestCase):
         ):
             out = issue_to_pr.verify_branch_has_commits(
                 req({"worktree_path": "/wt", "clone_path": "/c", "dry_run": False})
-            ).output
+            )
         self.assertFalse(out["ok"])
         self.assertEqual(out["reason"], "no_new_commits")
 
@@ -285,7 +279,7 @@ class IssueToPrTests(unittest.TestCase):
                     "dry_run": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["status"], "planned")
 
     def test_write_dispatch_receipt(self) -> None:
@@ -299,7 +293,7 @@ class IssueToPrTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
             self.assertTrue(out["ok"])
             self.assertTrue(out["mutated"])
             self.assertEqual(json.loads(Path(path).read_text())["phase"], "CLAIMED")
@@ -314,9 +308,20 @@ class IssueToPrTests(unittest.TestCase):
                 },
                 {"model": "omniroute/omp/default"},
             )
-        ).output
+        )
         self.assertEqual(out["status"], "planned")
         self.assertFalse(out["mutated"])
+
+    def test_run_omp_uses_executor_command(self) -> None:
+        with mock.patch("repo_agent.steps.issue_to_pr.run_omp", return_value={"status": "planned", "prompt_len": 6}) as runner:
+            out = issue_to_pr.run_omp_worker(
+                req(
+                    {"worktree_path": "/wt", "prompt": "fix it", "dry_run": True},
+                    {"executor_command": "custom-omp", "model": "model"},
+                )
+            )
+        self.assertEqual(out["status"], "planned")
+        self.assertEqual(runner.call_args.kwargs["command"], "custom-omp")
 
     def test_run_omp_success_and_failure(self) -> None:
         def git_side_effect(cmd, cwd=None, **_kwargs):
@@ -359,7 +364,7 @@ class IssueToPrTests(unittest.TestCase):
                             "dry_run": False,
                         }
                     )
-                ).output
+                )
         self.assertTrue(ok_out["ok"])
         self.assertEqual(ok_out["status"], "omp_finished")
         self.assertTrue(ok_out["mutated"])
@@ -382,7 +387,7 @@ class IssueToPrTests(unittest.TestCase):
                             "dry_run": False,
                         }
                     )
-                ).output
+                )
         self.assertFalse(bad["ok"])
         self.assertEqual(bad["reason"], "omp_failed")
 
@@ -421,7 +426,7 @@ class IssueToPrTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
         self.assertTrue(out["ok"])
         self.assertEqual(out["status"], "created")
         self.assertTrue(out["mutated"])
@@ -432,13 +437,13 @@ class IssueToPrTests(unittest.TestCase):
         ):
             bad = issue_to_pr.create_fix_pr_task(
                 req({"board": "b", "repo": "o/r", "issue": 1, "dry_run": False})
-            ).output
+            )
         self.assertEqual(bad["reason"], "kanban_list_failed")
 
     def test_complete_kanban_task_paths(self) -> None:
         dry = issue_to_pr.complete_kanban_task(
             req({"board": "b", "task_id": "t1", "result": "done", "dry_run": True})
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
             "repo_agent.steps.issue_to_pr.hermes_kanban_json",
@@ -449,7 +454,7 @@ class IssueToPrTests(unittest.TestCase):
         ):
             ok_out = issue_to_pr.complete_kanban_task(
                 req({"board": "b", "task_id": "t1", "dry_run": False})
-            ).output
+            )
         self.assertEqual(ok_out["status"], "completed")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
@@ -461,15 +466,15 @@ class IssueToPrTests(unittest.TestCase):
         ):
             bad = issue_to_pr.complete_kanban_task(
                 req({"board": "b", "task_id": "t1", "dry_run": False})
-            ).output
+            )
         self.assertEqual(bad["reason"], "complete_failed")
-        miss = issue_to_pr.complete_kanban_task(req({"board": "b"})).output
+        miss = issue_to_pr.complete_kanban_task(req({"board": "b"}))
         self.assertEqual(miss["reason"], "missing_board_or_task_id")
 
     def test_refresh_clone_base_paths(self) -> None:
         dry = issue_to_pr.refresh_clone_base(
             req({"clone_path": "/c", "base_branch": "main", "dry_run": True})
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, ".git").mkdir()
@@ -478,7 +483,7 @@ class IssueToPrTests(unittest.TestCase):
             ):
                 ok_out = issue_to_pr.refresh_clone_base(
                     req({"clone_path": tmp, "base_branch": "main", "dry_run": False})
-                ).output
+                )
             self.assertEqual(ok_out["status"], "refreshed")
         with mock.patch(
             "repo_agent.steps.issue_to_pr.git",
@@ -488,7 +493,7 @@ class IssueToPrTests(unittest.TestCase):
                 Path(tmp, ".git").mkdir()
                 bad = issue_to_pr.refresh_clone_base(
                     req({"clone_path": tmp, "dry_run": False})
-                ).output
+                )
         self.assertEqual(bad["reason"], "refresh_fetch_failed")
 
     def test_prepare_worktree_paths(self) -> None:
@@ -501,7 +506,7 @@ class IssueToPrTests(unittest.TestCase):
                     "dry_run": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         self.assertIn("worktree_path", dry)
         with mock.patch(
@@ -524,7 +529,7 @@ class IssueToPrTests(unittest.TestCase):
                             "dry_run": False,
                         }
                     )
-                ).output
+                )
         self.assertEqual(out["status"], "prepared")
         self.assertEqual(out["head"], "deadbeef")
         with mock.patch(
@@ -543,7 +548,7 @@ class IssueToPrTests(unittest.TestCase):
                             "dry_run": False,
                         }
                     )
-                ).output
+                )
         self.assertEqual(bad["reason"], "worktree_prepare_failed")
 
     def test_open_pull_request_success_structured_and_failure(self) -> None:
@@ -598,7 +603,7 @@ class IssueToPrTests(unittest.TestCase):
                             "dry_run": False,
                         }
                     )
-                ).output
+                )
         self.assertTrue(out["ok"])
         self.assertEqual(out["status"], "created")
         self.assertEqual(out["number"], 42)
@@ -609,13 +614,13 @@ class IssueToPrTests(unittest.TestCase):
         ):
             bad = issue_to_pr.open_pull_request(
                 req({"repo": "o/r", "branch": "ai/fix/1", "dry_run": False})
-            ).output
+            )
         self.assertEqual(bad["reason"], "pr_create_failed")
 
     def test_apply_pr_labels_paths(self) -> None:
         dry = issue_to_pr.apply_pr_labels(
             req({"repo": "o/r", "number": 3, "labels": ["ai:generated"], "dry_run": True})
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
             "repo_agent.steps.issue_to_pr.run_cmd",
@@ -630,7 +635,7 @@ class IssueToPrTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
         self.assertEqual(ok_out["status"], "labeled")
         with mock.patch(
             "repo_agent.steps.issue_to_pr.run_cmd",
@@ -645,14 +650,14 @@ class IssueToPrTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
         self.assertEqual(bad["reason"], "all_labels_failed")
 
     def test_check_worktree_dirty_and_list_and_push(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             miss = issue_to_pr.check_worktree_dirty(
                 req({"worktree_path": str(Path(tmp) / "nope")})
-            ).output
+            )
             self.assertEqual(miss["reason"], "worktree_missing")
             Path(tmp, "f").write_text("x")
             with mock.patch(
@@ -660,7 +665,7 @@ class IssueToPrTests(unittest.TestCase):
             ):
                 dirty = issue_to_pr.check_worktree_dirty(
                     req({"worktree_path": tmp})
-                ).output
+                )
             self.assertTrue(dirty["dirty"])
         with mock.patch(
             "repo_agent.steps.issue_to_pr.worktree_list",
@@ -669,12 +674,12 @@ class IssueToPrTests(unittest.TestCase):
         ):
             listed = issue_to_pr.list_controlled_worktrees(
                 req({"clone_path": "/c", "worktree_root": "/c/wts"})
-            ).output
+            )
         self.assertEqual(listed["status"], "listed")
         self.assertEqual(listed["count"], 1)
         dry = issue_to_pr.push_branch(
             req({"worktree_path": "/wt", "branch": "ai/fix/1", "dry_run": True})
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch(
@@ -693,7 +698,7 @@ class IssueToPrTests(unittest.TestCase):
                             "dry_run": False,
                         }
                     )
-                ).output
+                )
             self.assertEqual(pushed["status"], "pushed")
             self.assertTrue(pushed["mutated"])
             with mock.patch(
@@ -704,7 +709,7 @@ class IssueToPrTests(unittest.TestCase):
             ):
                 bad = issue_to_pr.push_branch(
                     req({"worktree_path": tmp, "branch": "b", "dry_run": False})
-                ).output
+                )
             self.assertEqual(bad["reason"], "push_failed")
 
     def test_apply_issue_labels_paths(self) -> None:
@@ -717,7 +722,7 @@ class IssueToPrTests(unittest.TestCase):
                     "dry_run": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
             "repo_agent.steps.issue_to_pr.run_cmd",
@@ -732,9 +737,9 @@ class IssueToPrTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
         self.assertEqual(ok_out["status"], "labeled")
-        miss = issue_to_pr.apply_issue_labels(req({"repo": "o/r", "issue": 1})).output
+        miss = issue_to_pr.apply_issue_labels(req({"repo": "o/r", "issue": 1}))
         self.assertEqual(miss["reason"], "missing_labels")
 
 
@@ -750,7 +755,7 @@ class TriageTests(unittest.TestCase):
                     }
                 }
             )
-        ).output
+        )
         self.assertTrue(good["pass_"])
         bad = triage.evaluate_checks(
             req(
@@ -762,18 +767,18 @@ class TriageTests(unittest.TestCase):
                     }
                 }
             )
-        ).output
+        )
         self.assertFalse(bad["pass_"])
         self.assertEqual(bad["status"], "checks_failed")
 
     def test_evaluate_test_evidence(self) -> None:
         miss = triage.evaluate_test_evidence(
             req({"pr": {"body": "no plan"}, "require_test_evidence": True})
-        ).output
+        )
         self.assertFalse(miss["pass_"])
         hit = triage.evaluate_test_evidence(
             req({"pr": {"body": "Test plan: ran pytest"}, "require_test_evidence": True})
-        ).output
+        )
         self.assertTrue(hit["pass_"])
 
     def test_decide_triage_action_routes(self) -> None:
@@ -786,7 +791,7 @@ class TriageTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(merge["action"], "merge")
         repair = triage.decide_triage_action(
             req(
@@ -797,7 +802,7 @@ class TriageTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(repair["action"], "repair")
         block = triage.decide_triage_action(
             req(
@@ -808,7 +813,7 @@ class TriageTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(block["action"], "comment_block")
 
     def test_comment_pr_dry_run_success_failure(self) -> None:
@@ -821,7 +826,7 @@ class TriageTests(unittest.TestCase):
                     "dry_run": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
@@ -840,7 +845,7 @@ class TriageTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
         self.assertEqual(ok_out["status"], "commented")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
@@ -849,7 +854,7 @@ class TriageTests(unittest.TestCase):
         ):
             bad = triage.comment_pr_once(
                 req({"repo": "o/r", "number": 5, "body": "x", "dry_run": False})
-            ).output
+            )
         self.assertEqual(bad["reason"], "comment_read_failed")
 
     def test_merge_success_and_failure(self) -> None:
@@ -862,7 +867,7 @@ class TriageTests(unittest.TestCase):
                     "dry_run": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
@@ -881,7 +886,7 @@ class TriageTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
         self.assertEqual(ok_out["status"], "merged")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
@@ -894,7 +899,7 @@ class TriageTests(unittest.TestCase):
         ):
             bad = triage.merge_pull_request(
                 req({"repo": "o/r", "number": 5, "head_oid": "abc", "dry_run": False})
-            ).output
+            )
         self.assertEqual(bad["reason"], "merge_failed")
 
     def test_list_ai_fix_prs_and_load_pr_fields(self) -> None:
@@ -922,7 +927,7 @@ class TriageTests(unittest.TestCase):
                 stdout=json.dumps(prs), stderr="", returncode=0
             ),
         ):
-            listed = triage.list_ai_fix_prs(req({"repo": "o/r"})).output
+            listed = triage.list_ai_fix_prs(req({"repo": "o/r"}))
         self.assertEqual(listed["count"], 1)
         self.assertEqual(listed["prs"][0]["number"], 1)
         with mock.patch(
@@ -935,20 +940,20 @@ class TriageTests(unittest.TestCase):
         ):
             loaded = triage.load_pr_fields(
                 req({"repo": "o/r", "number": 9})
-            ).output
+            )
         self.assertEqual(loaded["status"], "loaded")
         self.assertEqual(loaded["pr"]["number"], 9)
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
             side_effect=CommandError(["gh"], 1, "", "404"),
         ):
-            bad = triage.load_pr_fields(req({"repo": "o/r", "number": 9})).output
+            bad = triage.load_pr_fields(req({"repo": "o/r", "number": 9}))
         self.assertEqual(bad["reason"], "pr_view_failed")
 
     def test_claim_pr_close_issue_merge_receipt(self) -> None:
         dry = triage.claim_pr_assignee(
             req({"repo": "o/r", "number": 3, "dry_run": True}, {"assignee": "me"})
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
@@ -960,7 +965,7 @@ class TriageTests(unittest.TestCase):
         ):
             claimed = triage.claim_pr_assignee(
                 req({"repo": "o/r", "number": 3, "dry_run": False}, {"assignee": "me"})
-            ).output
+            )
         self.assertEqual(claimed["status"], "claimed")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
@@ -971,7 +976,7 @@ class TriageTests(unittest.TestCase):
         ):
             bad_claim = triage.claim_pr_assignee(
                 req({"repo": "o/r", "number": 3, "dry_run": False})
-            ).output
+            )
         self.assertEqual(bad_claim["reason"], "claim_failed")
 
         provenance = {
@@ -980,7 +985,7 @@ class TriageTests(unittest.TestCase):
         }
         dry_c = triage.close_linked_issue(
             req({"repo": "o/r", "issue": 7, "dry_run": True})
-        ).output
+        )
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
             side_effect=[
@@ -992,7 +997,7 @@ class TriageTests(unittest.TestCase):
         ):
             closed = triage.close_linked_issue(
                 req({"repo": "o/r", "issue": 7, "dry_run": False, "verified_provenance": provenance})
-            ).output
+            )
         self.assertEqual(closed["status"], "closed")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
@@ -1005,7 +1010,7 @@ class TriageTests(unittest.TestCase):
         ):
             bad_close = triage.close_linked_issue(
                 req({"repo": "o/r", "issue": 7, "dry_run": False, "verified_provenance": provenance})
-            ).output
+            )
         self.assertEqual(bad_close["reason"], "close_failed")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1027,7 +1032,7 @@ class TriageTests(unittest.TestCase):
                             "dry_run": False,
                         }
                     )
-                ).output
+                )
             self.assertEqual(written["status"], "written")
             self.assertEqual(json.loads(Path(path).read_text())["phase"], "MERGED")
     def test_merge_preconditions_and_provenance_fail_closed(self) -> None:
@@ -1043,7 +1048,7 @@ class TriageTests(unittest.TestCase):
                     "repo_agent.steps.triage.run_cmd",
                     return_value=SimpleNamespace(stdout=stdout, stderr="", returncode=0),
                 ):
-                    out = triage.merge_pull_request(req(base)).output
+                    out = triage.merge_pull_request(req(base))
                 self.assertEqual(out["reason"], expected)
         already = {
             "state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z", "headRefOid": "head-4",
@@ -1053,14 +1058,14 @@ class TriageTests(unittest.TestCase):
             "repo_agent.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps(already), stderr="", returncode=0),
         ):
-            out = triage.merge_pull_request(req(base)).output
+            out = triage.merge_pull_request(req(base))
         self.assertEqual(out["status"], "already_merged")
         self.assertFalse(out["mutated"])
         for provenance in ({}, {"source": "forged", "repo": "o/r", "number": 4}):
             with self.subTest(provenance=provenance):
                 out = triage.close_linked_issue(
                     req({"repo": "o/r", "issue": 4, "dry_run": False, "verified_provenance": provenance})
-                ).output
+                )
                 self.assertEqual(out["reason"], "merge_provenance_unverified")
         valid = {
             "source": "github_pr_readback", "state": "MERGED", "repo": "o/r", "number": 4,
@@ -1073,7 +1078,7 @@ class TriageTests(unittest.TestCase):
         ):
             out = triage.close_linked_issue(
                 req({"repo": "o/r", "issue": 4, "dry_run": False, "verified_provenance": mismatched})
-            ).output
+            )
         self.assertEqual(out["reason"], "merge_provenance_unverified")
     def test_assignee_post_readback_absent_and_already_claimed(self) -> None:
         base = {"repo": "o/r", "number": 4, "assignee": "agent", "dry_run": False}
@@ -1085,13 +1090,13 @@ class TriageTests(unittest.TestCase):
                 SimpleNamespace(stdout=json.dumps({"assignees": []}), stderr="", returncode=0),
             ],
         ):
-            out = triage.claim_pr_assignee(req(base)).output
+            out = triage.claim_pr_assignee(req(base))
         self.assertEqual(out["reason"], "assignee_readback_mismatch")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps({"assignees": [{"login": "agent"}]}), stderr="", returncode=0),
         ):
-            out = triage.claim_pr_assignee(req(base)).output
+            out = triage.claim_pr_assignee(req(base))
         self.assertEqual(out["status"], "already_claimed")
 
     def test_comment_post_readback_absent_and_marker_idempotency(self) -> None:
@@ -1104,13 +1109,13 @@ class TriageTests(unittest.TestCase):
                 SimpleNamespace(stdout=json.dumps({"comments": []}), stderr="", returncode=0),
             ],
         ):
-            out = triage.comment_pr_once(req({"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False})).output
+            out = triage.comment_pr_once(req({"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False}))
         self.assertEqual(out["reason"], "comment_readback_mismatch")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps({"comments": [{"body": f"blocked\\n\\n{marker}"}]}), stderr="", returncode=0),
         ):
-            out = triage.comment_pr_once(req({"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False})).output
+            out = triage.comment_pr_once(req({"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False}))
         self.assertTrue(out["reconciled"])
 
     def test_assignee_and_comment_blank_or_malformed_readback_fail_closed(self) -> None:
@@ -1130,13 +1135,13 @@ class TriageTests(unittest.TestCase):
                         data["assignee"] = "agent"
                     else:
                         data["body"] = "blocked"
-                    out = handler(req(data)).output
+                    out = handler(req(data))
                 self.assertEqual(out["reason"], reason)
         dry_r = triage.write_merge_receipt(
             req({"receipt_path": "/tmp/x", "payload": {}, "dry_run": True})
-        ).output
+        )
         self.assertEqual(dry_r["status"], "planned")
-        miss = triage.write_merge_receipt(req({"payload": {}})).output
+        miss = triage.write_merge_receipt(req({"payload": {}}))
         self.assertEqual(miss["reason"], "missing_receipt_path")
 
 
@@ -1150,7 +1155,7 @@ class RepairTests(unittest.TestCase):
                     "reason": "checks_failed",
                 }
             )
-        ).output
+        )
         self.assertTrue(out["ok"])
         self.assertIn("PR #8", out["prompt"])
         self.assertIn("ci", out["prompt"])
@@ -1166,7 +1171,7 @@ class RepairTests(unittest.TestCase):
                     "dry_run": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["status"], "planned")
         self.assertIn("[fix-pr-review]", out["title"])
 
@@ -1210,7 +1215,7 @@ class RepairTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
         self.assertTrue(out["ok"])
         self.assertEqual(out["status"], "created")
         self.assertEqual(out["task_id"], "t_rev_2")
@@ -1219,7 +1224,7 @@ class RepairTests(unittest.TestCase):
     def test_block_kanban_task_paths(self) -> None:
         dry = repair.block_kanban_task(
             req({"board": "b", "task_id": "t1", "reason": "stuck", "dry_run": True})
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
             "repo_agent.steps.repair.hermes_kanban_json",
@@ -1240,7 +1245,7 @@ class RepairTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
         self.assertEqual(ok_out["status"], "blocked")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
@@ -1255,9 +1260,9 @@ class RepairTests(unittest.TestCase):
         ):
             bad = repair.block_kanban_task(
                 req({"board": "b", "task_id": "t1", "dry_run": False})
-            ).output
+            )
         self.assertEqual(bad["reason"], "block_failed")
-        miss = repair.block_kanban_task(req({"board": "b"})).output
+        miss = repair.block_kanban_task(req({"board": "b"}))
         self.assertEqual(miss["reason"], "missing_board_or_task_id")
 
 
@@ -1265,11 +1270,11 @@ class CleanupTests(unittest.TestCase):
     def test_parse_issue_from_branch(self) -> None:
         out = cleanup.parse_issue_from_branch(
             req({"branch": "ai/fix/17-fix-login"})
-        ).output
+        )
         self.assertEqual(out["issue"], 17)
 
     def test_parse_issue_fail(self) -> None:
-        out = cleanup.parse_issue_from_branch(req({"branch": "feature/foo"})).output
+        out = cleanup.parse_issue_from_branch(req({"branch": "feature/foo"}))
         self.assertFalse(out["ok"])
 
     def test_check_no_open_pr(self) -> None:
@@ -1279,7 +1284,7 @@ class CleanupTests(unittest.TestCase):
         ):
             out = cleanup.check_no_open_pr_for_branch(
                 req({"repo": "o/r", "branch": "ai/fix/1-x"})
-            ).output
+            )
         self.assertTrue(out["safe_to_cleanup"])
 
     def test_remove_worktree_dry_and_absent(self) -> None:
@@ -1295,7 +1300,7 @@ class CleanupTests(unittest.TestCase):
                     },
                 }
             )
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         with tempfile.TemporaryDirectory() as tmp:
             # path does not exist
@@ -1311,7 +1316,7 @@ class CleanupTests(unittest.TestCase):
                         },
                     }
                 )
-            ).output
+            )
         self.assertEqual(out["reason"], "worktree_missing")
 
     def test_release_active_claim(self) -> None:
@@ -1333,7 +1338,7 @@ class CleanupTests(unittest.TestCase):
                         },
                     }
                 )
-            ).output
+            )
             self.assertEqual(out["status"], "released")
             self.assertTrue(out["mutated"])
             self.assertFalse(path.exists())
@@ -1348,7 +1353,7 @@ class CleanupTests(unittest.TestCase):
                     },
                 }
             )
-        ).output
+        )
         self.assertEqual(out["status"], "noop")
         self.assertEqual(out["reason"], "no_branch")
 
@@ -1362,7 +1367,7 @@ class CleanupTests(unittest.TestCase):
                     "dry_run": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["status"], "planned")
 
     def test_check_issue_closed_paths(self) -> None:
@@ -1374,7 +1379,7 @@ class CleanupTests(unittest.TestCase):
         ):
             closed = cleanup.check_issue_closed(
                 req({"repo": "o/r", "issue": 3})
-            ).output
+            )
         self.assertTrue(closed["closed"])
         self.assertEqual(closed["state"], "CLOSED")
         with mock.patch(
@@ -1385,19 +1390,19 @@ class CleanupTests(unittest.TestCase):
         ):
             open_ = cleanup.check_issue_closed(
                 req({"repo": "o/r", "issue": 3})
-            ).output
+            )
         self.assertFalse(open_["closed"])
         with mock.patch(
             "repo_agent.steps.cleanup.run_cmd",
             side_effect=CommandError(["gh"], 1, "", "404"),
         ):
-            bad = cleanup.check_issue_closed(req({"repo": "o/r", "issue": 3})).output
+            bad = cleanup.check_issue_closed(req({"repo": "o/r", "issue": 3}))
         self.assertEqual(bad["reason"], "issue_view_failed")
 
     def test_delete_local_fix_branch_paths(self) -> None:
         dry = cleanup.delete_local_fix_branch(
             req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": True})
-        ).output
+        )
         self.assertEqual(dry["status"], "planned")
         with mock.patch("repo_agent.steps.cleanup.delete_local_branch"):
             ok_out = cleanup.delete_local_fix_branch(
@@ -1408,7 +1413,7 @@ class CleanupTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
         self.assertEqual(ok_out["status"], "deleted")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
@@ -1417,7 +1422,7 @@ class CleanupTests(unittest.TestCase):
         ):
             bad = cleanup.delete_local_fix_branch(
                 req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": False})
-            ).output
+            )
         self.assertEqual(bad["reason"], "delete_failed")
 
 
@@ -1427,7 +1432,7 @@ class AdapterFailurePathTests(unittest.TestCase):
             "repo_agent.steps.issue_to_pr.hermes_kanban_json",
             side_effect=CommandError(["hermes"], 1, "", "boom"),
         ):
-            out = issue_to_pr.load_kanban_task(req({"board": "b"})).output
+            out = issue_to_pr.load_kanban_task(req({"board": "b"}))
         self.assertFalse(out["ok"])
         self.assertEqual(out["reason"], "kanban_list_failed")
 

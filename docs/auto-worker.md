@@ -1,20 +1,21 @@
-# Auto-worker (Fala 0.2.x)
+# Auto-worker (Fala 0.7.6 package host)
 
-Mega-atomic effectors are composed into correlation paths. Ticks are CLI entrypoints
-for launchd / manual ops.
+Mega-atomic effectors are composed into correlation paths. `auto_worker`,
+invoked by `repo-agent-tick-all`, is the sole scheduled mutator. Individual
+ticks are CLI entrypoints for manual diagnostics only.
 
 ## Paths
 
-| Path id | CLI | Effectors (high level) |
-|---------|-----|-------------------------|
+| Path id | Diagnostic CLI | Effectors (high level) |
+|---------|----------------|-------------------------|
 | `issue_intake` | `repo-agent-tick-intake` | poll → direction → comment → claim → kanban |
 | `issue_to_pr` | `repo-agent-tick-dispatch` | load → parse → worktree → omp → push → pr → labels → receipt → complete |
 | `pr_triage` | `repo-agent-tick-triage` | load PR → checks → evidence → decide → apply (merge/comment/repair) |
-| `cleanup_worktrees` | `repo-agent-tick-cleanup` | list worktrees → cleanup safe ones |
-| all | `repo-agent-tick-all` | runs the four paths in sequence |
+| `cleanup` | `repo-agent-tick-cleanup` | parse branch → verify closed/no PR → remove worktree → delete branch → release claim |
+| `auto_worker` | `repo-agent-tick-all` | one package-host run containing the prefixed intake, dispatch, triage, and cleanup graph |
 
-Bridges in `repo_agent.flows.bridges` remap `conduction` into atomic effectors
-without embedding multi-stage logic inside atomics.
+Fala 0.7.6 package-host conduction passes each upstream effector result directly
+to the next prefixed handler; effectors remain single-purpose subprocess adapters.
 
 ## Usage (mini-m4-0)
 
@@ -25,15 +26,16 @@ uv run repo-agent-tick-all --dry-run
 uv run repo-agent-tick-all --live   # only after dry-run looks good
 ```
 
-Default is **dry-run** unless `--live` is passed.
+Default is **dry-run** unless `--live` is passed. Schedule only
+`repo-agent-tick-all`; run the individual ticks above manually when diagnosing
+one path. Legacy shell intake/dispatch/triage/cleanup, backfill, webhook, cron,
+and separate launchd jobs are removed and must not be restored as operational
+paths.
 
 ## Launchd
 
 Template: `templates/launchd/oss-repo-agent-fala-tick-all.plist.template`.
 
-Fala and legacy shell mutators MUST NOT run in parallel. Before live
-promotion, unload/bootout legacy intake, dispatch, triage, cleanup, and
-repair/health mutators; confirm their labels are absent, then validate and
-promote one immutable Fala candidate. Keep legacy plists only as rollback
-artifacts. Dry-run Fala may be observed while legacy jobs remain loaded because
-it must not mutate external state; live Fala requires the single-mutator gate.
+Promote one immutable Fala candidate and verify that the auto-worker is the
+only loaded mutator. Health/status checks may report historical legacy labels
+to enforce their absence; those labels are not runnable deployment paths.

@@ -2,18 +2,60 @@
 
 from __future__ import annotations
 
-from fala.adapters import EffectorRunRequest, EffectorRunResult
-
 from repo_agent.adapters_cli import CommandError, hermes_kanban_json, run_cmd
 from repo_agent.envelope import (
+    Request,
+    Result,
     cfg_of,
     cond_blob,
     dry_run_flag,
     fail,
     input_of,
+    noop,
     ok,
     planned,
 )
+
+
+def _repair_decision_gate(request: Request) -> Result | None:
+    """No-op unless decide_triage_action selected repair."""
+    decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
+    if not decide and "action" not in input_of(request):
+        return None
+    if decide.get("ok") is False or str(decide.get("status") or "") in {
+        "failed",
+        "cancelled",
+        "timed_out",
+    }:
+        return fail(
+            "upstream_failed",
+            failure_class="terminal",
+            retry_safe=False,
+            upstream=decide,
+            worked=False,
+        )
+    if decide.get("status") == "noop":
+        return noop(
+            str(decide.get("reason") or "no_selected_pr"),
+            action=decide.get("action"),
+            worked=False,
+        )
+    action = str(input_of(request).get("action") or decide.get("action") or "")
+    if action == "repair":
+        return None
+    if not action or action == "skip":
+        return noop(
+            str(decide.get("reason") or "not_selected"),
+            action=action or "skip",
+            worked=False,
+        )
+    return noop(
+        "not_selected",
+        action=action,
+        expected=["repair"],
+        decide_reason=decide.get("reason"),
+        worked=False,
+    )
 
 
 _COMPLETED_TASK_STATUSES = {"done", "completed", "archived"}
@@ -77,7 +119,7 @@ def _reconcile_marker_read(
 
 def _existing_task_result(
     *, board: str, marker: str, task: dict[str, object], title: str
-) -> EffectorRunResult:
+) -> Result:
     task_id = _task_id(task)
     if task_id is None or not str(task_id).strip():
         return fail(
@@ -97,12 +139,15 @@ def _existing_task_result(
         mutated=False,
     )
 
-def build_repair_prompt(request: EffectorRunRequest) -> EffectorRunResult:
+def build_repair_prompt(request: Request) -> Result:
     """Pure: build OMP prompt from PR checks/review context."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
     data = input_of(request)
-    loaded = cond_blob(request, "load_pr_fields")
-    decide = cond_blob(request, "decide_triage_action", "decide")
-    checks = cond_blob(request, "evaluate_checks", "checks")
+    loaded = cond_blob(request, "load_pr_fields", "triage_load_pr_fields")
+    decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
+    checks = cond_blob(request, "evaluate_checks", "checks", "triage_evaluate_checks")
     pr = data.get("pr") or loaded.get("pr") or {}
     failures = data.get("failures") or checks.get("failures") or []
     reason = str(data.get("reason") or decide.get("reason") or "repair")
@@ -124,13 +169,16 @@ def build_repair_prompt(request: EffectorRunRequest) -> EffectorRunResult:
     )
 
 
-def create_review_fix_task(request: EffectorRunRequest) -> EffectorRunResult:
+def create_review_fix_task(request: Request) -> Result:
     """Create Kanban [fix-pr-review] task for a PR."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
-    loaded = cond_blob(request, "load_pr_fields", "decide_triage_action")
-    decide = cond_blob(request, "decide_triage_action", "decide")
+    loaded = cond_blob(request, "load_pr_fields", "decide_triage_action", "triage_load_pr_fields", "triage_decide_triage_action")
+    decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
     pr = data.get("pr") or loaded.get("pr") or {}
     board = str(data.get("board") or cfg.get("board") or "")
     repo = str(data.get("repo") or loaded.get("repo") or cfg.get("repo") or "")
@@ -215,12 +263,12 @@ def create_review_fix_task(request: EffectorRunRequest) -> EffectorRunResult:
         state, existing, error = _reconcile_marker_read(board=board, marker=marker, title=title)
         if state == "found" and existing is not None:
             existing_result = _existing_task_result(board=board, marker=marker, task=existing, title=title)
-            reconciled_output = dict(existing_result.output)
+            reconciled_output = dict(existing_result)
             reconciled_output["reconciled"] = True
             reconciled_output["mutated"] = True
             if reconciled_output.get("ok") is not False:
                 reconciled_output["status"] = "reconciled"
-            return EffectorRunResult(output=reconciled_output)
+            return reconciled_output
         return fail(
             "create_reconciliation_failed",
             failure_class="terminal",
@@ -266,7 +314,7 @@ def create_review_fix_task(request: EffectorRunRequest) -> EffectorRunResult:
     )
 
 
-def block_kanban_task(request: EffectorRunRequest) -> EffectorRunResult:
+def block_kanban_task(request: Request) -> Result:
     """Mark a task blocked, reconciling authoritative state before and after."""
     data = input_of(request)
     dry = dry_run_flag(request)

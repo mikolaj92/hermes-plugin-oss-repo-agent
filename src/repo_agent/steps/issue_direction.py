@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from fala.adapters import EffectorRunRequest, EffectorRunResult
+from repo_agent.envelope import Request, Result
 
 from repo_agent.adapters_cli import CommandError, run_cmd
 from repo_agent.envelope import (
@@ -80,7 +80,7 @@ def _issue_text(issue: dict[str, Any]) -> str:
     )
 
 
-def decide_issue_action(request: EffectorRunRequest) -> EffectorRunResult:
+def decide_issue_action(request: Request) -> Result:
     """Pure router: accept | reject_comment | skip for one selected issue.
 
     Alignment rules (first match wins after empty/noop checks):
@@ -93,10 +93,10 @@ def decide_issue_action(request: EffectorRunRequest) -> EffectorRunResult:
     """
     data = input_of(request)
     cfg = cfg_of(request)
-    upstream = upstream_noop(request, "poll", "poll_eligible_issues")
+    upstream = upstream_noop(request, "poll", "poll_eligible_issues", "intake_poll")
     if upstream:
         return noop(str(upstream.get("reason") or "no_selected_issue"))
-    poll = cond_blob(request, "poll", "poll_eligible_issues")
+    poll = cond_blob(request, "poll", "poll_eligible_issues", "intake_poll")
     selected = data.get("selected") or poll.get("selected")
     if not selected:
         return noop("no_selected_issue", action="skip")
@@ -231,7 +231,7 @@ def decide_issue_action(request: EffectorRunRequest) -> EffectorRunResult:
     )
 
 
-def comment_issue_once(request: EffectorRunRequest) -> EffectorRunResult:
+def comment_issue_once(request: Request) -> Result:
     """Post one durable reject/triage comment on an issue (idempotent marker).
 
     No-ops unless decide_issue_action (or input) says action=reject_comment.
@@ -239,8 +239,8 @@ def comment_issue_once(request: EffectorRunRequest) -> EffectorRunResult:
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
-    decide = cond_blob(request, "decide_issue_action", "decide")
-    poll = cond_blob(request, "poll", "poll_eligible_issues")
+    decide = cond_blob(request, "decide_issue_action", "decide", "intake_decide_issue_action")
+    poll = cond_blob(request, "poll", "poll_eligible_issues", "intake_poll")
     action = str(data.get("action") or decide.get("action") or "")
     if action and action != "reject_comment":
         return noop(

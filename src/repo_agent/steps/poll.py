@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fala.adapters import EffectorRunRequest, EffectorRunResult
+from repo_agent.envelope import Request, Result
 
 from repo_agent.adapters_cli import CommandError, gh_json
 from repo_agent.envelope import cfg_of, dry_run_flag, fail, input_of, ok
@@ -35,7 +35,7 @@ def _issue_eligible(issue: dict[str, Any], *, ready_label: str, assignee: str) -
     return True, "ok"
 
 
-def poll_eligible_issues(request: EffectorRunRequest) -> EffectorRunResult:
+def poll_eligible_issues(request: Request) -> Result:
     """Atomic: read eligible GitHub issues (gh only)."""
     cfg = cfg_of(request)
     data = input_of(request)

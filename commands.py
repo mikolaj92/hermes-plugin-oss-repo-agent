@@ -28,7 +28,8 @@ from .config import ConfigError, OssRepoAgentConfig, default_config_path, load_c
 from .executor import CommandSpec, Runner, planned_command
 
 INTAKE_ASSIGNEE = "repo-agent-intake"
-FALA_PINNED_COMMIT = "9c5f419abe63c4683ad3e17ff708200c3c83d9e9"
+FALA_PINNED_COMMIT = "9f10d58462b4e134d5b1cffe8ff9172909df70ea"
+FALA_PINNED_VERSION = "0.7.6"
 
 
 def setup_parser(parser: ArgumentParser) -> None:
@@ -691,7 +692,7 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
     """Copy the runnable plugin and the complete pinned local Fala dependency."""
     project = destination / "project"
     project.mkdir(parents=True)
-    for relative in ("src", "fala", "templates", "pyproject.toml", "README.md", "LICENSE"):
+    for relative in ("src", "templates", "fala-package.toml", "pyproject.toml", "README.md", "LICENSE"):
         source = project_root / relative
         target = project / relative
         if source.is_dir():
@@ -701,7 +702,7 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
         else:
             raise ConfigError(f"Fala candidate source is missing: {source}")
     fala_root = (project_root.parent / "Fala").resolve()
-    if not (fala_root / "src").is_dir() or not (fala_root / "pyproject.toml").is_file():
+    if not (fala_root / "python" / "fala").is_dir() or not (fala_root / "pyproject.toml").is_file():
         raise ConfigError(f"pinned Fala source is missing: {fala_root}")
     try:
         status = subprocess.run(
@@ -739,8 +740,8 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
     shutil.copy2(config, destination / "config.toml")
     pyproject = (project / "pyproject.toml").read_text(encoding="utf-8")
     pyproject = pyproject.replace(
-        'fala-runtime = { path = "../Fala", editable = true }',
-        'fala-runtime = { path = "Fala", editable = true }',
+        'fala = { path = "../Fala", editable = true }',
+        'fala = { path = "Fala", editable = true }',
     )
     (project / "pyproject.toml").write_text(pyproject, encoding="utf-8")
     lock_data = lock.read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
@@ -806,9 +807,22 @@ def render_launchd(
             text=True,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
-        raise ConfigError("Fala candidate source does not contain the pinned 0.2.1 maintenance commit") from exc
+        raise ConfigError("Fala candidate source does not contain the pinned 0.7.6 commit") from exc
     if pinned_present.returncode != 0:
-        raise ConfigError("Fala candidate source does not contain the pinned 0.2.1 maintenance commit")
+        raise ConfigError("Fala candidate source does not contain the pinned 0.7.6 commit")
+    try:
+        pinned_pyproject = subprocess.run(
+            ["git", "-C", str(fala_root), "show", f"{FALA_PINNED_COMMIT}:pyproject.toml"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        pinned_metadata = tomllib.loads(pinned_pyproject.stdout)
+        pinned_version = pinned_metadata.get("project", {}).get("version")
+    except (OSError, subprocess.CalledProcessError, tomllib.TOMLDecodeError, AttributeError) as exc:
+        raise ConfigError("unable to verify pinned Fala version") from exc
+    if pinned_version != FALA_PINNED_VERSION:
+        raise ConfigError(f"pinned Fala commit version must be {FALA_PINNED_VERSION}")
     fala_revision = FALA_PINNED_COMMIT
     lock_data = lock.read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
     lock_hash = _sha256_bytes(lock_data)
@@ -823,7 +837,7 @@ def render_launchd(
         "schema": 1,
         "mode": mode,
         "plugin_commit": revision,
-        "fala_tag": "0.2.1",
+        "fala_tag": FALA_PINNED_VERSION,
         "fala_commit": fala_revision,
         "lock_hash": lock_hash,
         "config_path": str(config),
@@ -838,7 +852,7 @@ def render_launchd(
     candidate_id = _sha256_bytes(_canonical_json(identity))
     if candidate.name != candidate_id:
         raise ConfigError(f"candidate output directory must be named {candidate_id}")
-    metadata = {"plugin_commit": revision, "fala_tag": "0.2.1", "fala_commit": fala_revision, "lock_hash": lock_hash}
+    metadata = {"plugin_commit": revision, "fala_tag": FALA_PINNED_VERSION, "fala_commit": fala_revision, "lock_hash": lock_hash}
     source_data = _canonical_json(metadata)
     if candidate.exists():
         existing = candidate / "manifest.json"

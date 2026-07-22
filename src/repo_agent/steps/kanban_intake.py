@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from fala.adapters import EffectorRunRequest, EffectorRunResult
+from repo_agent.envelope import Request, Result
 
 from repo_agent.adapters_cli import CommandError, hermes_kanban_json, run_cmd
 from repo_agent.envelope import (
@@ -11,6 +11,7 @@ from repo_agent.envelope import (
     conduction_of,
     dry_run_flag,
     fail,
+    input_of,
     noop,
     ok,
     planned,
@@ -37,14 +38,15 @@ def _task_id(task: dict[str, Any]) -> object:
     return task.get("id") or task.get("task_id")
 
 
-def ensure_kanban_intake(request: EffectorRunRequest) -> EffectorRunResult:
+def ensure_kanban_intake(request: Request) -> Result:
     """Atomic: ensure one Kanban [issue] task for claimed issue."""
+    data = input_of(request)
     cond = conduction_of(request)
-    claim = dict(cond.get("claim") or cond.get("claim_github_issue") or {})
-    poll = dict(cond.get("poll") or {})
-    decide = dict(cond.get("decide_issue_action") or cond.get("decide") or {})
-    decide_action = str(decide.get("action") or "")
-    selected = claim.get("selected") or poll.get("selected")
+    claim = dict(data.get("claim") or cond.get("claim") or cond.get("claim_github_issue") or cond.get("intake_claim") or {})
+    poll = dict(data.get("poll") or cond.get("poll") or cond.get("intake_poll") or {})
+    decide = dict(data.get("decide_issue_action") or data.get("decide") or cond.get("decide_issue_action") or cond.get("decide") or cond.get("intake_decide_issue_action") or {})
+    decide_action = str(data.get("action") or decide.get("action") or "")
+    selected = data.get("selected") if "selected" in data else (claim.get("selected") or poll.get("selected"))
     dry_run = dry_run_flag(request, default=bool(claim.get("dry_run", True)))
     cfg = cfg_of(request)
     assignee = str(cfg.get("kanban_intake_assignee") or "repo-agent-intake")

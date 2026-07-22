@@ -56,13 +56,18 @@ agent work. The adapter reconciles the two without inventing a second workflow.
 | Review not approved and approval required | Block/comment only; no repair task is useful. |
 | Clean, checks passing, approval satisfied, automerge enabled | Merge through GitHub gate. |
 
-## Reconciliation Commands
+## Reconciliation
 
-| Command | Purpose |
-| --- | --- |
-| `repo_issue_intake.sh --live` | GitHub issues to Kanban intake tasks. |
-| `repo_issue_to_pr_dispatch.sh --live` | Kanban issue/fix tasks to PR work decisions. |
-| `repo_pr_triage.sh --live --comment` | GitHub PR state to Kanban repair tasks/comments. |
-| `repo_agent_cleanup.sh --live` | Closed GitHub issues to local worktree cleanup or maintenance tasks. |
-| `repo_agent_backfill.sh --live` | Run reconciliation without workers to repair drift. |
-| `repo_agent_webhook.sh --event <event> --live` | Optional webhook entrypoint that triggers the same reconciliation paths. |
+The GitHub/Kanban mapping is executed by the composed Fala `auto_worker` path.
+Schedule only `repo-agent-tick-all`; individual path ticks are manual
+diagnostics and are not operational schedulers.
+
+```bash
+uv run repo-agent-tick-all --dry-run
+uv run repo-agent-tick-all --live
+```
+
+Use `repo-agent-tick-intake`, `repo-agent-tick-dispatch`,
+`repo-agent-tick-triage`, or `repo-agent-tick-cleanup` only to inspect one
+correlation path manually. Legacy shell intake/dispatch/triage/cleanup,
+backfill, webhook, and cron entrypoints are removed.

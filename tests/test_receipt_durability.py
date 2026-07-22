@@ -2,25 +2,22 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 from repo_agent.steps import issue_to_pr, triage
 
 
-def request(data: dict) -> SimpleNamespace:
-    return SimpleNamespace(
-        input=data,
-        config={},
-        process_id="receipt-test",
-        impulse_id=None,
-        work_dir=None,
-        adapter=None,
-    )
+def request(data: dict) -> dict:
+    return {
+        "input": data,
+        "config": {},
+    }
 
 
 PROVENANCE = {
@@ -46,7 +43,7 @@ class ReceiptDurabilityTests(unittest.TestCase):
     def _dispatch(self, path: Path, payload: dict) -> dict:
         return issue_to_pr.write_dispatch_receipt(
             request({"receipt_path": str(path), "payload": payload, "dry_run": False})
-        ).output
+        )
 
     def _merge(self, path: Path, payload: dict) -> dict:
         with mock.patch(
@@ -62,7 +59,7 @@ class ReceiptDurabilityTests(unittest.TestCase):
                         "dry_run": False,
                     }
                 )
-            ).output
+            )
 
     def test_directory_fsync_failure_fails_closed_and_cleans_temp_for_both_writers(self) -> None:
         writers = (
@@ -118,14 +115,14 @@ class ReceiptDurabilityTests(unittest.TestCase):
             dispatch_path = Path(tmp) / "dispatch.json"
             dispatch = issue_to_pr.write_dispatch_receipt(
                 request({"receipt_path": str(dispatch_path), "payload": {"phase": "DISPATCHED"}, "dry_run": True})
-            ).output
+            )
             self.assertEqual(dispatch["status"], "planned")
             self.assertFalse(dispatch_path.exists())
 
             merge_path = Path(tmp) / "merge.json"
             merge = triage.write_merge_receipt(
                 request({"receipt_path": str(merge_path), "payload": {"phase": "MERGED"}, "dry_run": True})
-            ).output
+            )
             self.assertEqual(merge["status"], "planned")
             self.assertFalse(merge_path.exists())
 

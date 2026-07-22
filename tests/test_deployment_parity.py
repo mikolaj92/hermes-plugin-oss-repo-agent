@@ -82,17 +82,6 @@ class DeploymentParityTests(unittest.TestCase):
             validate(source, active, [templates / "launchd"])
         self.assertTrue(any("hash mismatch" in error for error in raised.exception.result["errors"]))
 
-    def test_launchd_argument_drift_fails_closed(self):
-        holder, source, active, templates = self.make_deployment()
-        self.addCleanup(holder.cleanup)
-        template = templates / "launchd" / "oss-repo-agent-dispatch.plist.template"
-        text = template.read_text(encoding="utf-8").replace(
-            str(active / "repo_issue_to_pr_dispatch.sh"), str(active / "repo_agent_health.sh")
-        )
-        template.write_text(text, encoding="utf-8")
-        with self.assertRaises(DeploymentParityError) as raised:
-            validate(source, active, [templates / "launchd"])
-        self.assertTrue(any("entrypoint mismatch" in error for error in raised.exception.result["errors"]))
     def test_fala_template_requires_absolute_uv_and_canonical_arguments(self):
         holder, source, active, templates = self.make_deployment()
         self.addCleanup(holder.cleanup)

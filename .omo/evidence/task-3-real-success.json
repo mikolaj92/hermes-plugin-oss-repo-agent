@@ -1,0 +1,88 @@
+{
+  "processes": [
+    {
+      "attempt": 1,
+      "error": {},
+      "id": "runtime-success-smoke:success_path:failure",
+      "max_attempts": 1,
+      "output": {
+        "adapter": {
+          "metadata": {
+            "pid": 17751,
+            "signal": 0
+          },
+          "returncode": 0,
+          "stderr": "",
+          "stdout": ""
+        },
+        "associations": [],
+        "metadata": {},
+        "reactions": [],
+        "values": {
+          "marker": "second",
+          "ok": true,
+          "status": "ok"
+        }
+      },
+      "status": "succeeded",
+      "step_id": "failure"
+    },
+    {
+      "attempt": 1,
+      "error": {},
+      "id": "runtime-success-smoke:success_path:sentinel",
+      "max_attempts": 1,
+      "output": {
+        "adapter": {
+          "metadata": {
+            "pid": 17752,
+            "signal": 0
+          },
+          "returncode": 0,
+          "stderr": "",
+          "stdout": ""
+        },
+        "associations": [],
+        "metadata": {},
+        "reactions": [],
+        "values": {
+          "marker": "must-not-run",
+          "ok": true,
+          "status": "ok"
+        }
+      },
+      "status": "succeeded",
+      "step_id": "sentinel"
+    },
+    {
+      "attempt": 1,
+      "error": {},
+      "id": "runtime-success-smoke:success_path:success",
+      "max_attempts": 1,
+      "output": {
+        "adapter": {
+          "metadata": {
+            "pid": 17718,
+            "signal": 0
+          },
+          "returncode": 0,
+          "stderr": "",
+          "stdout": ""
+        },
+        "associations": [],
+        "metadata": {},
+        "reactions": [],
+        "values": {
+          "marker": "ran",
+          "ok": true,
+          "status": "ok"
+        }
+      },
+      "status": "succeeded",
+      "step_id": "success"
+    }
+  ],
+  "run_id": "runtime-success-smoke",
+  "run_status": "completed",
+  "ticks": 3
+}

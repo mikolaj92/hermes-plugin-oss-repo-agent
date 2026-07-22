@@ -28,7 +28,9 @@ class AdapterCwdTests(unittest.TestCase):
                 result = run_omp(
                     prompt="fix",
                     cwd=worktree,
+                    command="omp",
                     model="test-model",
+                    thinking="medium",
                     timeout=12.0,
                     dry_run=False,
                 )
@@ -36,20 +38,40 @@ class AdapterCwdTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(run.call_args.kwargs["cwd"], worktree.resolve())
         self.assertEqual(run.call_args.kwargs["timeout"], 12.0)
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "omp",
+                "--cwd",
+                str(worktree.resolve()),
+                "--model",
+                "test-model",
+                "--thinking",
+                "medium",
+                "--approval-mode",
+                "yolo",
+                "--no-session",
+                "-p",
+                "fix",
+            ],
+        )
 
     def test_run_omp_dry_run_does_not_invoke_subprocess(self) -> None:
         with mock.patch("repo_agent.adapters_omp.run_cmd") as run:
             result = run_omp(
                 prompt="fix",
                 cwd="relative/worktree",
+                command="omp",
                 model="test-model",
+                thinking="medium",
                 timeout=12.0,
                 dry_run=True,
             )
 
         run.assert_not_called()
         self.assertEqual(result["status"], "planned")
-        self.assertEqual(result["command"][-1], "relative/worktree")
+        self.assertIn(str(Path("relative/worktree").resolve()), result["command"])
+
 
 
 if __name__ == "__main__":

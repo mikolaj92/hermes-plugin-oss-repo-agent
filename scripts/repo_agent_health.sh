@@ -39,7 +39,7 @@ require_live = sys.argv[3] == "1"
 deployment_root = pathlib.Path(sys.argv[4]).expanduser().resolve()
 errors = []
 plist_relative = "launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
-pinned_commit = "9c5f419abe63c4683ad3e17ff708200c3c83d9e9"
+pinned_commit = "9f10d58462b4e134d5b1cffe8ff9172909df70ea"
 
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
@@ -110,7 +110,7 @@ try:
     for relative, expected in artifacts.items():
         if (not isinstance(relative, str) or not relative or not isinstance(expected, dict) or set(expected) != {"sha256", "bytes"} or not isinstance(expected.get("sha256"), str) or len(expected["sha256"]) != 64 or not isinstance(expected.get("bytes"), int) or expected["bytes"] < 0):
             errors.append(f"identity-artifact-mismatch:{relative}")
-    if manifest.get("fala_tag") != "0.2.1" or manifest.get("fala_commit") != pinned_commit:
+    if manifest.get("fala_tag") != "0.7.6" or manifest.get("fala_commit") != pinned_commit:
         errors.append("fala-provenance-invalid")
     candidate_plist = candidate / plist_relative
     candidate_bytes = candidate_plist.read_bytes()
@@ -145,6 +145,10 @@ try:
             errors.append(f"runtime-identity-{key}-invalid")
     if runtime.get("start_interval") != 600 or runtime.get("run_at_load") is not False or runtime.get("process_type") != "Background" or runtime.get("limit_load_to_session_type") not in (None, "Background"):
         errors.append("runtime-identity-schedule-invalid")
+    for required_relative in ("fala-package.toml", "src/repo_agent/effector.py"):
+        required_file = candidate / "source" / "project" / required_relative
+        if not required_file.is_file() or required_file.is_symlink():
+            errors.append(f"required-package-artifact-missing:{required_relative}")
     plistlib.loads(installed_bytes)
     declared_plist = artifacts.get(plist_relative, {})
     expected_plist_hash = declared_plist.get("sha256") if isinstance(declared_plist, dict) else declared_plist

@@ -1,0 +1,3 @@
+Temporary package changed decide_issue_action conduction to missing_effector.
+Observed expected Fala parser rejection:
+Exception: manifest.dangling_reference at /correlation_paths/0/effectors/decide_issue_action/conduction: unknown effector 'missing_effector'

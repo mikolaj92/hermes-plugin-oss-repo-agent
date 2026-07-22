@@ -1,10 +1,10 @@
 # Mega-atomic Fala effectors (composition inventory)
 
 These are **bricks only**. Correlation paths that wire them via `conduction`
-come later. Every effector is a Fala 0.2.x `python_function` with:
+come later. Every effector is an allowlisted subprocess adapter with:
 
-- inputs in `request.input` (never reserved keys `config`/`adapter`/`conduction`)
-- agent settings in `request.config` (`effector_configs`)
+- inputs in the package-host request input
+- agent settings in the package-host effector configuration
 - upstream outputs under `request.input["conduction"][<effector_id>]`
 - output envelope: `{status, ok, mutated, dry_run, reason? , ...}`
 
@@ -53,7 +53,16 @@ Machine-readable: `repo_agent.catalog.EFFECTORS` / `list_effectors()`.
 
 ## Composition (correlation paths)
 
-Defined in `repo_agent.flows.*` / `ALL_PATHS`. Ticks:
+Defined declaratively in `fala-package.toml`; every edge is explicit
+`conduction` between subprocess effectors. `auto_worker` is the sole scheduled
+path and is invoked through `repo-agent-tick-all`:
+
+```bash
+uv run repo-agent-tick-all --dry-run
+uv run repo-agent-tick-all --live
+```
+
+Individual ticks are manual diagnostics only:
 
 ```bash
 uv run repo-agent-tick-intake --dry-run
@@ -64,7 +73,7 @@ uv run repo-agent-tick-cleanup --branch 'ai/fix/N-slug' --dry-run
 
 - `issue_intake`: poll → direction decide → reject comment → claim → kanban
 - `issue_to_pr`: load → parse → worktree → omp → verify → push → open_pr → labels → receipt → complete
-- `pr_triage`: list → load → checks → evidence → **decide** → router → (`pr_merge` | `pr_comment_block` | `pr_repair`)
+- `pr_triage`: list → load → checks → evidence → **decide** → gated (`pr_merge` | `pr_comment_block` | `pr_repair`)
 - `pr_merge`: claim_pr → merge → receipt → close_issue
 - `pr_repair`: review_task → prompt → worktree → omp → push
 - `cleanup`: parse → issue_closed → no_open_pr → remove_worktree → delete_branch → release_claim

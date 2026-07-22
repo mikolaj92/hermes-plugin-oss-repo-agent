@@ -35,7 +35,6 @@ jobs:
             tests.test_decide_matrix \
             tests.test_issue_direction_intake \
             tests.test_path_composition \
-            tests.test_paths_composition \
             tests.test_fala_triage_router \
             tests.test_atomic_effectors.TriageTests \
             tests.test_atomic_effectors.CatalogTests \

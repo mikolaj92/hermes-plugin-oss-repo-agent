@@ -1,0 +1,61 @@
+{
+  "processes": [
+    {
+      "attempt": 1,
+      "error": {
+        "code": "adapter_failed",
+        "message": "subprocess adapter failed: exit 1"
+      },
+      "id": "runtime-failure-smoke:failure_path:failure",
+      "max_attempts": 1,
+      "output": {},
+      "status": "failed",
+      "step_id": "failure"
+    },
+    {
+      "attempt": 0,
+      "error": {
+        "code": "dead_upstream",
+        "dead_upstreams": [
+          "failure"
+        ],
+        "reason": "dead_upstream"
+      },
+      "id": "runtime-failure-smoke:failure_path:sentinel",
+      "max_attempts": 1,
+      "output": {},
+      "status": "cancelled",
+      "step_id": "sentinel"
+    },
+    {
+      "attempt": 1,
+      "error": {},
+      "id": "runtime-failure-smoke:failure_path:success",
+      "max_attempts": 1,
+      "output": {
+        "adapter": {
+          "metadata": {
+            "pid": 18281,
+            "signal": 0
+          },
+          "returncode": 0,
+          "stderr": "",
+          "stdout": ""
+        },
+        "associations": [],
+        "metadata": {},
+        "reactions": [],
+        "values": {
+          "marker": "ran",
+          "ok": true,
+          "status": "ok"
+        }
+      },
+      "status": "succeeded",
+      "step_id": "success"
+    }
+  ],
+  "run_id": "runtime-failure-smoke",
+  "run_status": "failed",
+  "ticks": 2
+}

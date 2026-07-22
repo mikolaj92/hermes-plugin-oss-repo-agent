@@ -11,24 +11,40 @@ def run_omp(
     *,
     prompt: str,
     cwd: str | Path,
+    command: str,
     model: str,
+    thinking: str,
     timeout: float,
     dry_run: bool,
 ) -> dict:
+    worktree = Path(cwd).resolve()
+    args = [
+        command,
+        "--cwd",
+        str(worktree),
+        "--model",
+        model,
+        "--thinking",
+        thinking,
+        "--approval-mode",
+        "yolo",
+        "--no-session",
+        "-p",
+        prompt,
+    ]
     if dry_run:
         return {
             "status": "planned",
-            "command": ["omp", "run", "--model", model, "--cwd", str(cwd)],
+            "command": args[:-1],
             "prompt_len": len(prompt),
         }
     proc = run_cmd(
-        ["omp", "run", "--model", model, "--prompt", prompt],
+        args,
         timeout=timeout,
         env=None,
         check=True,
-        cwd=Path(cwd).resolve(),
+        cwd=worktree,
     )
-    # Note: real omp flags may differ; this is the atomic adapter boundary.
     return {
         "status": "completed",
         "returncode": proc.returncode,

@@ -1,0 +1,9 @@
+Code safety review disposition after corrections
+
+PASS: configured executor command. run_omp_worker now reads the shared executor_command key; regression test verifies the executable passed to run_omp.
+PASS: in-process Fala host cwd safety. A process-wide lock serializes host_run_package around Fala's temporary global cwd change.
+PASS: SQL reads in the new runtime facade use parameterized run_id lookup and a closing sqlite3 connection.
+PASS: journal JSON and host summaries fail closed; diagnostics are recursively redacted.
+PASS: mutation gates and durable receipt tests remain part of focused verification.
+
+Reviewer retry proposal deliberately rejected: the approved migration contract requires Fala-native default max_attempts=1 for every process. Fala 0.7.6's package host does not expose per-effector max-attempt overrides through its Python request, and its subprocess adapter maps nonzero exits to adapter failures without the structured Result classification. Raising attempts would therefore retry terminal and possibly mutating failures indiscriminately. Keeping one attempt is the only fail-closed policy supported by the pinned runtime and matches the plan acceptance criterion.

@@ -10,7 +10,7 @@ from typing import Callable
 class EffectorEntry:
     id: str
     domain: str  # intake | issue_to_pr | triage | repair | cleanup
-    ref: str  # python_function import ref
+    ref: str
     intent: str
     mutates: bool  # may perform external writes when dry_run=false
 

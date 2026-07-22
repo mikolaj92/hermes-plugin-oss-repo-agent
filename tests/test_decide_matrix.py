@@ -5,23 +5,17 @@ Drives the real shipped decide functions (not reimplemented stubs).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import json
 import unittest
-from types import SimpleNamespace
 from unittest import mock
 
 from repo_agent.steps import issue_direction, triage
 
 
 def req(input_data=None, config=None):
-    return SimpleNamespace(
-        input=input_data or {},
-        config=config or {},
-        process_id="t1",
-        impulse_id=None,
-        work_dir=None,
-        adapter=None,
-    )
+    return {"input": input_data or {}, "config": config or {}}
 
 
 class IssueDecideMatrixTests(unittest.TestCase):
@@ -40,14 +34,14 @@ class IssueDecideMatrixTests(unittest.TestCase):
     def test_accept_when_direction_not_configured(self) -> None:
         out = issue_direction.decide_issue_action(
             req({"selected": self._selected()})
-        ).output
+        )
         self.assertEqual(out["action"], "accept")
         self.assertEqual(out["reason"], "direction_not_configured")
 
     def test_reject_out_of_scope_label(self) -> None:
         out = issue_direction.decide_issue_action(
             req({"selected": self._selected(labels=["ai:ready", "ai:out-of-scope"])})
-        ).output
+        )
         self.assertEqual(out["action"], "reject_comment")
         self.assertEqual(out["reason"], "out_of_direction_label")
 
@@ -59,7 +53,7 @@ class IssueDecideMatrixTests(unittest.TestCase):
                     "direction_deny_keywords": ["redesign", "rewrite-all"],
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "reject_comment")
         self.assertEqual(out["reason"], "deny_keyword")
         self.assertEqual(out["keyword"], "redesign")
@@ -75,7 +69,7 @@ class IssueDecideMatrixTests(unittest.TestCase):
                     "direction_require_keywords": ["dispatcher", "omp"],
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "reject_comment")
         self.assertEqual(out["reason"], "missing_require_keyword")
 
@@ -87,7 +81,7 @@ class IssueDecideMatrixTests(unittest.TestCase):
                     "direction_require_keywords": ["dispatcher", "omp"],
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "accept")
         self.assertIn(out["reason"], {"direction_ok", "goal_aligned"})
 
@@ -102,7 +96,7 @@ class IssueDecideMatrixTests(unittest.TestCase):
                     "repo_goal": "automate GitHub issue to PR merge lifecycle for hermes repo-agent",
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "reject_comment")
         self.assertEqual(out["reason"], "out_of_direction_goal")
 
@@ -117,13 +111,13 @@ class IssueDecideMatrixTests(unittest.TestCase):
                     "repo_goal": "automate GitHub issue PR merge lifecycle for hermes repo-agent",
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "accept")
         self.assertEqual(out["reason"], "goal_aligned")
         self.assertTrue(out.get("overlap"))
 
     def test_noop_without_selected(self) -> None:
-        out = issue_direction.decide_issue_action(req({})).output
+        out = issue_direction.decide_issue_action(req({}))
         self.assertEqual(out["status"], "noop")
         self.assertEqual(out["action"], "skip")
 
@@ -153,7 +147,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "merge")
         self.assertEqual(out["reason"], "ready")
 
@@ -168,7 +162,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "repair")
         self.assertEqual(out["reason"], "checks_not_green")
 
@@ -183,7 +177,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "comment_block")
         self.assertEqual(out["reason"], "missing_test_evidence")
 
@@ -198,7 +192,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "repair")
         self.assertEqual(out["reason"], "merge_conflict")
 
@@ -213,7 +207,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "skip")
         self.assertEqual(out["reason"], "external_author")
 
@@ -228,7 +222,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "skip")
         self.assertEqual(out["reason"], "non_ai_fix_branch")
 
@@ -243,7 +237,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "skip")
         self.assertEqual(out["reason"], "wrong_base")
 
@@ -258,7 +252,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "skip")
         self.assertEqual(out["reason"], "draft_pr")
 
@@ -273,7 +267,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                     "automerge": False,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "comment_block")
         self.assertEqual(out["reason"], "automerge_disabled")
 
@@ -288,7 +282,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                     "automerge": True,
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "skip")
         self.assertEqual(out["reason"], "ai_blocked_label")
 
@@ -320,7 +314,7 @@ class PrDecideMatrixTests(unittest.TestCase):
         with mock.patch("repo_agent.steps.triage.run_cmd", side_effect=fake_run):
             loaded = triage.load_pr_fields(
                 req({"repo": "owner/repo", "number": 8})
-            ).output
+            )
         self.assertEqual(loaded["status"], "loaded")
         self.assertTrue(captured, "expected gh pr view call")
         fields_arg = ""
@@ -347,7 +341,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                     },
                 }
             )
-        ).output
+        )
         self.assertEqual(out["action"], "skip")
         self.assertEqual(out["reason"], "draft_pr")
         self.assertTrue(loaded["pr"].get("isDraft"))

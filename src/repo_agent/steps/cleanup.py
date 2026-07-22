@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fala.adapters import EffectorRunRequest, EffectorRunResult
+from repo_agent.envelope import Request, Result
 
 from repo_agent.adapters_cli import CommandError, hermes_kanban_json, run_cmd
 from repo_agent.adapters_git import (
@@ -27,6 +27,8 @@ from repo_agent.envelope import (
     planned,
     upstream_noop,
 )
+_TERMINAL_PROCESS_STATUSES = {"failed", "cancelled", "timed_out"}
+
 
 
 def _task_marker_matches(task: object, marker: str) -> bool:
@@ -40,10 +42,15 @@ def _task_id(task: dict[str, object]) -> object:
     return task.get("id") or task.get("task_id")
 
 
-def parse_issue_from_branch(request: EffectorRunRequest) -> EffectorRunResult:
+def parse_issue_from_branch(request: Request) -> Result:
     """Pure: extract issue number from ai/fix/<n>-... branch name."""
     data = input_of(request)
-    branch = str(data.get("branch") or cfg_of(request).get("branch") or "")
+    branch = str(
+        data.get("branch")
+        or cfg_of(request).get("branch")
+        or cond_get(request, "branch", "repair_push_branch", "write_merge_receipt", "comment_pr")
+        or ""
+    )
     if not branch:
         return noop("no_branch", branch=branch)
     m = re.search(r"(?:^|/)ai/fix/(\d+)", branch)
@@ -54,14 +61,14 @@ def parse_issue_from_branch(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="parsed", issue=int(m.group(1)), branch=branch)
 
 
-def check_issue_closed(request: EffectorRunRequest) -> EffectorRunResult:
+def check_issue_closed(request: Request) -> Result:
     """Read GitHub issue state."""
     import json
 
     data = input_of(request)
     cfg = cfg_of(request)
-    parsed = cond_blob(request, "parse_issue_from_branch", "parse")
-    upstream = upstream_noop(request, "parse_issue_from_branch")
+    parsed = cond_blob(request, "parse_issue_from_branch", "parse", "cleanup_parse_issue_from_branch")
+    upstream = upstream_noop(request, "parse_issue_from_branch", "cleanup_parse_issue_from_branch")
     if upstream:
         return noop(str(upstream.get("reason") or "no_branch"), **{k: v for k, v in upstream.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}})
     repo = str(data.get("repo") or cfg.get("repo") or "")
@@ -88,16 +95,16 @@ def check_issue_closed(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="checked", state=state, closed=state == "CLOSED", repo=repo, issue=issue)
 
 
-def check_no_open_pr_for_branch(request: EffectorRunRequest) -> EffectorRunResult:
+def check_no_open_pr_for_branch(request: Request) -> Result:
     """True when no open PR exists for head branch."""
     import json
 
     data = input_of(request)
     cfg = cfg_of(request)
-    upstream = upstream_noop(request, "parse_issue_from_branch")
+    upstream = upstream_noop(request, "parse_issue_from_branch", "cleanup_parse_issue_from_branch")
     if upstream:
         return noop(str(upstream.get("reason") or "no_branch"), **{k: v for k, v in upstream.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}})
-    parsed = cond_blob(request, "parse_issue_from_branch", "parse")
+    parsed = cond_blob(request, "parse_issue_from_branch", "parse", "cleanup_parse_issue_from_branch")
     repo = str(data.get("repo") or cfg.get("repo") or "")
     branch = str(data.get("branch") or parsed.get("branch") or cfg.get("branch") or "")
     gh = str(cfg.get("gh_cli") or "gh")
@@ -121,21 +128,21 @@ def check_no_open_pr_for_branch(request: EffectorRunRequest) -> EffectorRunResul
     return ok(status="checked", open_count=len(prs), safe_to_cleanup=len(prs) == 0, prs=prs)
 
 
-def remove_worktree(request: EffectorRunRequest) -> EffectorRunResult:
+def remove_worktree(request: Request) -> Result:
     """Remove one git worktree path (force optional)."""
     data = input_of(request)
     dry = dry_run_flag(request)
     cfg = cfg_of(request)
-    closed_blob = cond_blob(request, "check_issue_closed")
-    open_pr_blob = cond_blob(request, "check_no_open_pr", "check_no_open_pr_for_branch")
+    closed_blob = cond_blob(request, "check_issue_closed", "cleanup_check_issue_closed")
+    open_pr_blob = cond_blob(request, "check_no_open_pr", "check_no_open_pr_for_branch", "cleanup_check_no_open_pr")
     require_safe = bool(data.get("require_safe", cfg.get("require_safe", True)))
     cleanup_key = f"cleanup:worktree:{data.get('clone_path') or cfg.get('clone_path') or ''}:{data.get('worktree_path') or cfg.get('worktree_path') or ''}:remove"
     for guard_name, guard in (("check_issue_closed", closed_blob), ("check_no_open_pr", open_pr_blob)):
-        if not guard or guard.get("status") == "failed":
+        if not guard or guard.get("status") in _TERMINAL_PROCESS_STATUSES:
             guard_class = str(guard.get("failure_class") or "terminal") if isinstance(guard, dict) else "terminal"
             guard_retry_safe = bool(guard.get("retry_safe", False)) if isinstance(guard, dict) else False
             return fail("cleanup_guard_failed", failure_class=guard_class, retry_safe=guard_retry_safe, guard=guard_name, guard_output=guard, clone_path=str(data.get("clone_path") or cfg.get("clone_path") or ""), worktree_path=str(data.get("worktree_path") or cfg.get("worktree_path") or ""), idempotency_key=cleanup_key)
-    upstream = upstream_noop(request, "check_issue_closed", "check_no_open_pr", "parse_issue_from_branch")
+    upstream = upstream_noop(request, "check_issue_closed", "check_no_open_pr", "parse_issue_from_branch", "cleanup_check_issue_closed", "cleanup_check_no_open_pr", "cleanup_parse_issue_from_branch")
     if upstream:
         return noop(str(upstream.get("reason") or "cleanup_not_ready"))
     if require_safe and (closed_blob or open_pr_blob):
@@ -174,14 +181,14 @@ def remove_worktree(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="removed", clone_path=clone_path, worktree_path=worktree_path, branch=expected_branch, idempotency_key=f"cleanup:worktree:{clone_path}:{worktree_path}:remove", mutated=True, retry_safe=True)
 
 
-def delete_local_fix_branch(request: EffectorRunRequest) -> EffectorRunResult:
+def delete_local_fix_branch(request: Request) -> Result:
     """Delete local branch only (never remote)."""
     data = input_of(request)
     dry = dry_run_flag(request)
     cfg = cfg_of(request)
-    parsed = cond_blob(request, "parse_issue_from_branch", "parse")
-    removed = cond_blob(request, "remove_worktree")
-    if removed.get("status") in {"noop", "failed"}:
+    parsed = cond_blob(request, "parse_issue_from_branch", "parse", "cleanup_parse_issue_from_branch")
+    removed = cond_blob(request, "remove_worktree", "cleanup_remove_worktree")
+    if removed.get("status") in {"noop", *_TERMINAL_PROCESS_STATUSES}:
         return noop("skipped_after_remove_guard", upstream_reason=removed.get("reason"), upstream_status=removed.get("status"))
     clone_path = str(data.get("clone_path") or cfg.get("clone_path") or "")
     branch = str(data.get("branch") or parsed.get("branch") or cfg.get("branch") or "")
@@ -203,7 +210,7 @@ def delete_local_fix_branch(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="deleted", branch=branch, idempotency_key=key, mutated=True, retry_safe=True)
 
 
-def release_active_issue_claim(request: EffectorRunRequest) -> EffectorRunResult:
+def release_active_issue_claim(request: Request) -> Result:
     """Remove an active-issue claim only after every cleanup guard succeeds."""
     import json
 
@@ -214,19 +221,22 @@ def release_active_issue_claim(request: EffectorRunRequest) -> EffectorRunResult
     if not isinstance(raw_conduction, dict) or not raw_conduction:
         return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False)
 
-    def evidence(name: str) -> dict[str, object] | None:
-        blob = raw_conduction.get(name)
-        return blob if isinstance(blob, dict) else None
+    def evidence(*names: str) -> dict[str, object] | None:
+        for name in names:
+            blob = raw_conduction.get(name)
+            if isinstance(blob, dict):
+                return blob
+        return None
 
-    parsed = evidence("parse_issue_from_branch")
+    parsed = evidence("parse_issue_from_branch", "cleanup_parse_issue_from_branch")
     if parsed is not None and parsed.get("ok") is True and parsed.get("reason") == "no_branch":
         return noop("no_branch")
-    removed = evidence("remove_worktree")
-    closed = evidence("check_issue_closed")
-    no_open_pr = evidence("check_no_open_pr")
-    deleted = evidence("delete_local_fix_branch")
+    removed = evidence("remove_worktree", "cleanup_remove_worktree")
+    closed = evidence("check_issue_closed", "cleanup_check_issue_closed")
+    no_open_pr = evidence("check_no_open_pr", "cleanup_check_no_open_pr")
+    deleted = evidence("delete_local_fix_branch", "cleanup_delete_local_fix_branch")
     if dry:
-        for name in ("parse_issue_from_branch", "remove_worktree", "check_issue_closed", "check_no_open_pr", "delete_local_fix_branch"):
+        for name in ("parse_issue_from_branch", "cleanup_parse_issue_from_branch", "remove_worktree", "cleanup_remove_worktree", "check_issue_closed", "cleanup_check_issue_closed", "check_no_open_pr", "cleanup_check_no_open_pr", "delete_local_fix_branch", "cleanup_delete_local_fix_branch"):
             blob = evidence(name)
             if blob is not None and blob.get("status") in {"noop", "planned"}:
                 details = {k: v for k, v in blob.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}}
@@ -287,7 +297,7 @@ def release_active_issue_claim(request: EffectorRunRequest) -> EffectorRunResult
     return ok(status="released", claim_path=str(path), repo=repo, issue=issue, mutated=True)
 
 
-def create_maintenance_task(request: EffectorRunRequest) -> EffectorRunResult:
+def create_maintenance_task(request: Request) -> Result:
     """Create one Kanban maintenance task per deterministic repo/PR marker."""
     data = input_of(request)
     cfg = cfg_of(request)

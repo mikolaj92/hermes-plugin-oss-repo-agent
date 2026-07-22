@@ -8,7 +8,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any
-from fala.adapters import EffectorRunRequest, EffectorRunResult
+from repo_agent.envelope import Request, Result
 
 from repo_agent.adapters_cli import CommandError, run_cmd
 from repo_agent.envelope import (
@@ -23,6 +23,47 @@ from repo_agent.envelope import (
     planned,
     upstream_noop,
 )
+
+def _decision_gate(request: Request, *, allowed: str | set[str]) -> Result | None:
+    """No-op unless decide_triage_action selected the allowed action."""
+    decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
+    if not decide and "action" not in input_of(request):
+        return None
+    if decide.get("ok") is False or str(decide.get("status") or "") in {
+        "failed",
+        "cancelled",
+        "timed_out",
+    }:
+        return fail(
+            "upstream_failed",
+            failure_class="terminal",
+            retry_safe=False,
+            upstream=decide,
+            worked=False,
+        )
+    if decide.get("status") == "noop":
+        return noop(
+            str(decide.get("reason") or "no_selected_pr"),
+            action=decide.get("action"),
+            worked=False,
+        )
+    allowed_actions = {allowed} if isinstance(allowed, str) else set(allowed)
+    action = str(input_of(request).get("action") or decide.get("action") or "")
+    if action in allowed_actions:
+        return None
+    if not action or action == "skip":
+        return noop(
+            str(decide.get("reason") or "not_selected"),
+            action=action or "skip",
+            worked=False,
+        )
+    return noop(
+        "not_selected",
+        action=action,
+        expected=sorted(allowed_actions),
+        decide_reason=decide.get("reason"),
+        worked=False,
+    )
 
 
 def _json_output(stdout: str, default: Any) -> Any:
@@ -81,7 +122,7 @@ def _provenance_from_view(payload: dict[str, Any], *, repo: str, number: int, ex
     }
 
 
-def _provided_provenance(request: EffectorRunRequest, *effector_ids: str) -> dict[str, Any]:
+def _provided_provenance(request: Request, *effector_ids: str) -> dict[str, Any]:
     data = input_of(request)
     value = data.get("verified_provenance")
     if isinstance(value, dict):
@@ -94,13 +135,13 @@ def _provided_provenance(request: EffectorRunRequest, *effector_ids: str) -> dic
 
 
 def _verify_provenance(
-    request: EffectorRunRequest,
+    request: Request,
     *,
     repo: str,
     number: int,
     expected_head: str | None = None,
 ) -> dict[str, str | int]:
-    provided = _provided_provenance(request, "merge", "merge_pull_request")
+    provided = _provided_provenance(request, "merge", "merge_pull_request", "triage_merge")
     if not provided:
         raise ValueError("verified merge provenance is required")
     if provided.get("source") != "github_pr_readback" or provided.get("repo") != repo or int(provided.get("number") or 0) != number:
@@ -121,7 +162,7 @@ def _comment_bodies(value: Any) -> list[str]:
     return [str(item.get("body") or "") for item in comments if isinstance(item, dict)]
 
 
-def list_ai_fix_prs(request: EffectorRunRequest) -> EffectorRunResult:
+def list_ai_fix_prs(request: Request) -> Result:
     """List open PRs with head branch matching ai/fix/* (or branch_prefix)."""
     data = input_of(request)
     cfg = cfg_of(request)
@@ -171,12 +212,12 @@ def list_ai_fix_prs(request: EffectorRunRequest) -> EffectorRunResult:
     )
 
 
-def load_pr_fields(request: EffectorRunRequest) -> EffectorRunResult:
+def load_pr_fields(request: Request) -> Result:
     """Load one PR JSON bundle for triage decisions."""
     data = input_of(request)
     cfg = cfg_of(request)
-    listed = cond_blob(request, "list_ai_fix_prs", "list")
-    upstream = upstream_noop(request, "list_ai_fix_prs")
+    listed = cond_blob(request, "list_ai_fix_prs", "list", "triage_list_ai_fix_prs")
+    upstream = upstream_noop(request, "list_ai_fix_prs", "triage_list_ai_fix_prs")
     if upstream:
         return noop(str(upstream.get("reason") or "no_open_prs"))
     repo = str(data.get("repo") or listed.get("repo") or cfg.get("repo") or "")
@@ -214,10 +255,10 @@ def load_pr_fields(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="loaded", repo=repo, number=number, pr=pr)
 
 
-def evaluate_checks(request: EffectorRunRequest) -> EffectorRunResult:
+def evaluate_checks(request: Request) -> Result:
     """Pure decision: do status checks pass? (from pr.statusCheckRollup)."""
     data = input_of(request)
-    pr = data["pr"] if "pr" in data else (cond_get(request, "pr", "load_pr_fields") or {})
+    pr = data["pr"] if "pr" in data else (cond_get(request, "pr", "load_pr_fields", "triage_load_pr_fields") or {})
     if not isinstance(pr, dict):
         return fail(
             "invalid_checks_read",
@@ -226,7 +267,7 @@ def evaluate_checks(request: EffectorRunRequest) -> EffectorRunResult:
             mutated=False,
             error="PR payload must be an object",
         )
-    upstream = upstream_noop(request, "load_pr_fields")
+    upstream = upstream_noop(request, "load_pr_fields", "triage_load_pr_fields")
     if upstream:
         return noop(str(upstream.get("reason") or "no_open_prs"))
     require_checks = bool(
@@ -296,11 +337,11 @@ def evaluate_checks(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="checks_passed", pass_=True)
 
 
-def evaluate_test_evidence(request: EffectorRunRequest) -> EffectorRunResult:
+def evaluate_test_evidence(request: Request) -> Result:
     """Pure: does PR body contain test evidence markers?"""
     data = input_of(request)
-    pr = data.get("pr") or cond_get(request, "pr", "load_pr_fields") or {}
-    upstream = upstream_noop(request, "load_pr_fields")
+    pr = data.get("pr") or cond_get(request, "pr", "load_pr_fields", "triage_load_pr_fields") or {}
+    upstream = upstream_noop(request, "load_pr_fields", "triage_load_pr_fields")
     if upstream:
         return noop(str(upstream.get("reason") or "no_open_prs"))
     require = bool(
@@ -324,20 +365,20 @@ def evaluate_test_evidence(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="evidence_missing", pass_=False, hits=[])
 
 
-def decide_triage_action(request: EffectorRunRequest) -> EffectorRunResult:
+def decide_triage_action(request: Request) -> Result:
     """Pure router decision: merge | comment_block | repair | skip."""
     data = input_of(request)
     cfg = cfg_of(request)
-    pr = data.get("pr") or cond_get(request, "pr", "load_pr_fields") or {}
-    checks = cond_blob(request, "evaluate_checks", "checks")
-    evidence = cond_blob(request, "evaluate_test_evidence", "evidence")
+    pr = data.get("pr") or cond_get(request, "pr", "load_pr_fields", "triage_load_pr_fields") or {}
+    checks = cond_blob(request, "evaluate_checks", "checks", "triage_evaluate_checks")
+    evidence = cond_blob(request, "evaluate_test_evidence", "evidence", "triage_evaluate_test_evidence")
     checks_pass = bool(
         data.get(
             "checks_pass",
             data.get("pass_", checks.get("pass_", checks.get("pass"))),
         )
     )
-    upstream = upstream_noop(request, "list_ai_fix_prs", "load_pr_fields", "evaluate_checks", "evaluate_test_evidence")
+    upstream = upstream_noop(request, "list_ai_fix_prs", "load_pr_fields", "evaluate_checks", "evaluate_test_evidence", "triage_list_ai_fix_prs", "triage_load_pr_fields", "triage_evaluate_checks", "triage_evaluate_test_evidence")
     if upstream:
         return noop(str(upstream.get("reason") or "no_open_prs"))
     if not isinstance(pr, dict):
@@ -406,12 +447,15 @@ def decide_triage_action(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="decided", action="skip", reason="not_mergeable", mergeable=mergeable)
 
 
-def claim_pr_assignee(request: EffectorRunRequest) -> EffectorRunResult:
+def claim_pr_assignee(request: Request) -> Result:
+    gated = _decision_gate(request, allowed="merge")
+    if gated is not None:
+        return gated
     """Assign PR to configured maintainer once, with authoritative reconciliation."""
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
-    loaded = cond_blob(request, "load_pr_fields", "list_ai_fix_prs")
+    loaded = cond_blob(request, "load_pr_fields", "list_ai_fix_prs", "triage_load_pr_fields", "triage_list_ai_fix_prs")
     pr = data.get("pr") or loaded.get("pr") or {}
     repo = str(data.get("repo") or loaded.get("repo") or cfg.get("repo") or "")
     number = int(data.get("number") or data.get("pr_number") or loaded.get("number") or (pr.get("number") if isinstance(pr, dict) else 0) or 0)
@@ -468,13 +512,16 @@ def claim_pr_assignee(request: EffectorRunRequest) -> EffectorRunResult:
     if assignee not in after:
         return fail("assignee_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, assignees=sorted(after), mutated=True, **context)
     return ok(status="claimed", assignees=sorted(after), mutated=True, **context)
-def comment_pr_once(request: EffectorRunRequest) -> EffectorRunResult:
+def comment_pr_once(request: Request) -> Result:
+    gated = _decision_gate(request, allowed="comment_block")
+    if gated is not None:
+        return gated
     """Post one PR comment, reconciling an existing stable marker first."""
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
-    loaded = cond_blob(request, "load_pr_fields", "decide_triage_action")
-    decide = cond_blob(request, "decide_triage_action", "decide")
+    loaded = cond_blob(request, "load_pr_fields", "decide_triage_action", "triage_load_pr_fields", "triage_decide_triage_action")
+    decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
     pr = data.get("pr") or loaded.get("pr") or {}
     repo = str(data.get("repo") or loaded.get("repo") or cfg.get("repo") or "")
     number = int(
@@ -548,12 +595,15 @@ def comment_pr_once(request: EffectorRunRequest) -> EffectorRunResult:
 
 
 
-def merge_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
+def merge_pull_request(request: Request) -> Result:
+    gated = _decision_gate(request, allowed="merge")
+    if gated is not None:
+        return gated
     """Merge a PR only after authoritative pre/post state verification."""
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
-    loaded = cond_blob(request, "load_pr_fields", "claim_pr", "claim_pr_assignee")
+    loaded = cond_blob(request, "load_pr_fields", "claim_pr", "claim_pr_assignee", "triage_load_pr_fields", "triage_claim_pr")
     pr = data.get("pr") or loaded.get("pr") or {}
     repo = str(data.get("repo") or loaded.get("repo") or cfg.get("repo") or "")
     number = int(
@@ -628,12 +678,15 @@ def merge_pull_request(request: EffectorRunRequest) -> EffectorRunResult:
     return ok(status="merged", merge_oid=str(provenance["merge_oid"]), mutated=True, verified_provenance=provenance, **context)
 
 
-def close_linked_issue(request: EffectorRunRequest) -> EffectorRunResult:
+def close_linked_issue(request: Request) -> Result:
     """Close an issue only after validating authoritative merged-PR provenance."""
+    gated = _decision_gate(request, allowed="merge")
+    if gated is not None:
+        return gated
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
-    loaded = cond_blob(request, "load_pr_fields", "merge", "merge_pull_request")
+    loaded = cond_blob(request, "load_pr_fields", "merge", "merge_pull_request", "triage_load_pr_fields", "triage_merge")
     pr = data.get("pr") or loaded.get("pr") or {}
     repo = str(data.get("repo") or loaded.get("repo") or cfg.get("repo") or "")
     gh = str(cfg.get("gh_cli") or "gh")
@@ -648,7 +701,7 @@ def close_linked_issue(request: EffectorRunRequest) -> EffectorRunResult:
         return fail("missing_repo_or_issue", failure_class="terminal", retry_safe=False, **context)
     if dry:
         return planned(**context)
-    provenance = _provided_provenance(request, "merge", "merge_pull_request")
+    provenance = _provided_provenance(request, "merge", "merge_pull_request", "triage_merge")
     try:
         verified = _verify_provenance(request, repo=repo, number=int(provenance.get("number") or 0))
         match = re.search(r"(?:^|/)ai/fix/(\d+)", str(verified.get("head_ref") or ""))
@@ -688,16 +741,19 @@ def close_linked_issue(request: EffectorRunRequest) -> EffectorRunResult:
             pass
         return fail("close_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, verified_provenance=verified, **context)
     return ok(status="closed", mutated=True, verified_provenance=verified, **context)
-def write_merge_receipt(request: EffectorRunRequest) -> EffectorRunResult:
+def write_merge_receipt(request: Request) -> Result:
     """Write a receipt only from a fresh authoritative merged-PR read-back."""
+    gated = _decision_gate(request, allowed="merge")
+    if gated is not None:
+        return gated
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
     path = str(data.get("receipt_path") or cfg.get("receipt_path") or "")
     payload = data.get("payload")
     if not isinstance(payload, dict) or not payload:
-        merge = cond_blob(request, "merge", "merge_pull_request")
-        claim = cond_blob(request, "claim_pr", "claim_pr_assignee")
+        merge = cond_blob(request, "merge", "merge_pull_request", "triage_merge")
+        claim = cond_blob(request, "claim_pr", "claim_pr_assignee", "triage_claim_pr")
         payload = {"phase": "MERGED", "repo": merge.get("repo") or claim.get("repo"), "number": merge.get("number") or claim.get("number"), "dry_run": dry, "merge_status": merge.get("status")}
     else:
         payload = dict(payload)
@@ -725,7 +781,7 @@ def write_merge_receipt(request: EffectorRunRequest) -> EffectorRunResult:
     )
     p = Path(path)
 
-    def existing_result() -> EffectorRunResult | None:
+    def existing_result() -> Result | None:
         if not p.exists():
             return None
         try:

@@ -14,31 +14,19 @@ from pathlib import Path
 from typing import Iterable
 
 
-FALA_PINNED_COMMIT = "9c5f419abe63c4683ad3e17ff708200c3c83d9e9"
+FALA_PINNED_COMMIT = "9f10d58462b4e134d5b1cffe8ff9172909df70ea"
 # Every shell entrypoint copied to ~/.hermes/scripts is part of the deployment
 # contract. Keeping this list explicit makes a missing deployment fail closed.
 DEPLOYED_SCRIPTS = (
-    "repo_issue_intake.sh",
-    "repo_issue_to_pr_dispatch.sh",
-    "repo_pr_triage.sh",
     "repo_agent_health.sh",
-    "repo_agent_cleanup.sh",
     "repo_agent_status.sh",
     "repo_agent_hermes_update.sh",
     "repo_agent_repos.sh",
-    "repo_agent_backfill.sh",
-    "repo_agent_webhook.sh",
-    "cron_repo_issue_to_pr_dispatch.sh",
-    "cron_repo_pr_triage.sh",
     "repo_agent_smoke.sh",
 )
 TEMPLATE_ENTRYPOINTS = {
-    "oss-repo-agent-cleanup.plist.template": "repo_agent_cleanup.sh",
-    "oss-repo-agent-dispatch.plist.template": "repo_issue_to_pr_dispatch.sh",
     "oss-repo-agent-health.plist.template": "repo_agent_health.sh",
     "oss-repo-agent-hermes-update.plist.template": "repo_agent_hermes_update.sh",
-    "oss-repo-agent-intake.plist.template": "repo_issue_intake.sh",
-    "oss-repo-agent-pr-triage.plist.template": "repo_pr_triage.sh",
 }
 
 
@@ -408,7 +396,7 @@ def _relative_candidate_path(candidate: Path, value: object, label: str, errors:
     return path
 
 
-FALA_TAG = "0.2.1"
+FALA_TAG = "0.7.6"
 
 
 
@@ -688,7 +676,7 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
     if (project / ".git").exists() or (fala_root / ".git").exists():
         errors.append("copied Fala/plugin .git metadata is forbidden")
     fala_pyproject = fala_root / "pyproject.toml"
-    fala_src = fala_root / "src" / "fala"
+    fala_src = fala_root / "python" / "fala"
     if not _regular_file(fala_pyproject) or not fala_src.is_dir() or fala_src.is_symlink():
         errors.append("bundled Fala source tree is incomplete")
     else:
@@ -703,10 +691,14 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
             lock_text = lock_path.read_text(encoding="utf-8") if lock_path and _regular_file(lock_path) else ""
         except (OSError, UnicodeDecodeError):
             pyproject = fala_project = lock_text = ""
-        if 'name = "fala-runtime"' not in fala_project or 'version = "0.2.1"' not in fala_project:
-            errors.append("bundled Fala metadata is not pinned to 0.2.1")
-        if 'path = "Fala"' not in pyproject or "../Fala" in pyproject or 'editable = "Fala"' not in lock_text or "../Fala" in lock_text:
+        if 'name = "fala"' not in fala_project or 'version = "0.7.6"' not in fala_project:
+            errors.append("bundled Fala metadata is not pinned to 0.7.6")
+        if 'fala = { path = "Fala", editable = true }' not in pyproject or "../Fala" in pyproject or 'editable = "Fala"' not in lock_text or "../Fala" in lock_text:
             errors.append("bundled Fala dependency path or lock provenance is invalid")
+    for required_relative in ("fala-package.toml", "src/repo_agent/effector.py"):
+        required_file = project / required_relative
+        if not _regular_file(required_file):
+            errors.append(f"required Fala package artifact is missing: {required_relative}")
 
     try:
         document = plistlib.loads(plist_path.read_bytes() if plist_path else b"")

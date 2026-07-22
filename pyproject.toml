@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
-  "fala-runtime==0.2.1",
+  "fala==0.7.6",
   "tomli>=2.0.1; python_version < '3.12'",
 ]
 
@@ -33,7 +33,7 @@ packages = ["src/repo_agent"]
 [tool.uv.sources]
 # Sibling checkout on mini-m4-0 / local OSS layout:
 #   Developer/Fala + Developer/hermes-plugin-oss-repo-agent
-fala-runtime = { path = "../Fala", editable = true }
+fala = { path = "../Fala", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
