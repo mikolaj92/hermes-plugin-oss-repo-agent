@@ -135,6 +135,58 @@ if path and branch:
 RECEIPT_DIR="${HERMES_REPO_AGENT_CLEANUP_RECEIPT_DIR:-${HERMES_REPO_AGENT_MERGE_RECEIPT_DIR:-}}"
 QUARANTINE_DIR="${HERMES_REPO_CLEANUP_QUARANTINE_DIR:-${RECEIPT_DIR:+$RECEIPT_DIR/quarantine}}"
 CLEANUP_OUTCOME_DIR="${HERMES_REPO_AGENT_CLEANUP_OUTCOME_DIR:-${RECEIPT_DIR:+$RECEIPT_DIR/cleanup-outcomes}}"
+CLAIM_RECEIPT_DIR="${HERMES_REPO_AGENT_CLAIM_RECEIPT_DIR:-${HOME}/.hermes/state/repo-agent-receipts}"
+ACTIVE_CLAIM_PATH="${HERMES_REPO_AGENT_ACTIVE_CLAIM_PATH:-${HOME}/.hermes/state/repo-agent-active-live/claim.json}"
+
+reconcile_receipt_identity() {
+  local repo="$1" issue="$2" branch="$3" task_id="$4" clone_path="$5"
+  RECEIPT_REPO="$repo" RECEIPT_ISSUE="$issue" RECEIPT_BRANCH="$branch" RECEIPT_TASK="$task_id" RECEIPT_CLONE="$clone_path" CLAIM_RECEIPT_DIR="$CLAIM_RECEIPT_DIR" ACTIVE_CLAIM_PATH="$ACTIVE_CLAIM_PATH" python3 - <<'PY'
+import glob
+import json
+import os
+
+repo = os.environ["RECEIPT_REPO"]
+issue = os.environ["RECEIPT_ISSUE"]
+branch = os.environ["RECEIPT_BRANCH"]
+task = os.environ["RECEIPT_TASK"]
+clone = os.path.realpath(os.environ["RECEIPT_CLONE"])
+
+active_path = os.environ["ACTIVE_CLAIM_PATH"]
+if os.path.exists(active_path):
+    with open(active_path, encoding="utf-8") as stream:
+        active = json.load(stream)
+    if str(active.get("repo", "")) == repo and str(active.get("issue", "")) == issue:
+        raise SystemExit(1)
+
+matches = []
+for path in glob.glob(os.path.join(os.environ["CLAIM_RECEIPT_DIR"], "*.json")):
+    try:
+        with open(path, encoding="utf-8") as stream:
+            candidate = json.load(stream)
+    except (OSError, json.JSONDecodeError):
+        continue
+    if (str(candidate.get("repo", "")) == repo
+            and str(candidate.get("issue", "")) == issue
+            and str(candidate.get("branch", "")) == branch):
+        matches.append(candidate)
+
+if matches:
+    identities = {
+        (str(item.get("task_id", "")), os.path.realpath(str(item.get("clone_path", ""))))
+        for item in matches
+    }
+    if len(identities) != 1:
+        raise SystemExit(1)
+    claim_task, claim_clone = identities.pop()
+    if not claim_task or claim_clone != clone or (task and task != claim_task):
+        raise SystemExit(1)
+    task = claim_task
+elif not task:
+    raise SystemExit(1)
+
+print(task)
+PY
+}
 
 write_cleanup_outcome_receipt() {
   local status="$1" repo="$2" issue="$3" branch="$4" clone_path="$5" worktree_path="$6" task_id="$7" merge_sha="$8" origin_main_sha="$9" base_sha="${10}" branch_deleted="${11}"
@@ -388,7 +440,7 @@ cleanup_receipt_worktree() {
 }
 
 process_receipts_for_repo() {
-  local repo="$1" board="$2" clone_path="$3" path payload receipt_repo issue phase branch state open_prs merge_sha origin_base_sha current_origin task_id base_sha
+  local repo="$1" board="$2" clone_path="$3" path payload receipt_repo issue phase branch state open_prs merge_sha origin_base_sha current_origin task_id base_sha reconciled_task
   [[ -n "$RECEIPT_DIR" && -d "$RECEIPT_DIR" ]] || return 0
   shopt -s nullglob
   for path in "$RECEIPT_DIR"/*.json; do
@@ -423,12 +475,19 @@ process_receipts_for_repo() {
     merge_sha="$(receipt_field "$payload" mergeSha 2>/dev/null || true)"
     origin_base_sha="$(receipt_field "$payload" originMainSha 2>/dev/null || true)"
     current_origin="$(GIT_MASTER=1 git -C "$clone_path" rev-parse "refs/remotes/origin/$BASE_BRANCH" 2>/dev/null || true)"
-    if [[ ! "$merge_sha" =~ ^[0-9a-fA-F]{40}$ || ! "$origin_base_sha" =~ ^[0-9a-fA-F]{40}$ || -z "$current_origin" || "$origin_base_sha" != "$current_origin" ]] ||
+    if [[ ! "$merge_sha" =~ ^[0-9a-fA-F]{40}$ || ! "$origin_base_sha" =~ ^[0-9a-fA-F]{40}$ || -z "$current_origin" ]] ||
+      ! GIT_MASTER=1 git -C "$clone_path" merge-base --is-ancestor "$origin_base_sha" "$current_origin" >/dev/null 2>&1 ||
       ! GIT_MASTER=1 git -C "$clone_path" merge-base --is-ancestor "$merge_sha" "$current_origin" >/dev/null 2>&1; then
       log "KEEP repo=$repo issue=$issue branch=$branch reason=merge-provenance-unverifiable base=$BASE_BRANCH"
       continue
     fi
     task_id="$(receipt_field "$payload" task_id 2>/dev/null || true)"
+    reconciled_task="$(reconcile_receipt_identity "$repo" "$issue" "$branch" "$task_id" "$clone_path" 2>/dev/null || true)"
+    if [[ -z "$reconciled_task" ]]; then
+      quarantine_receipt "$path" "claim-or-task-identity-mismatch" || failures=$((failures + 1))
+      continue
+    fi
+    task_id="$reconciled_task"
     base_sha="$(receipt_field "$payload" preMergeBaseSha 2>/dev/null || true)"
     cleanup_receipt_worktree "$repo" "$board" "$clone_path" "$branch" "$issue" "$task_id" "$merge_sha" "$origin_base_sha" "$base_sha"
   done

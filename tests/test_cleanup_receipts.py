@@ -98,12 +98,85 @@ class CleanupReceiptTests(unittest.TestCase):
                 "mergedAt": "2026-01-01T00:00:00Z",
                 "phase": "ISSUE_CLOSED_CONFIRMED",
             }), encoding="utf-8")
+            claims = receipt_dir / "claims"
+            claims.mkdir()
+            (claims / "claim.json").write_text(json.dumps({
+                "repo": "owner/repo", "issue": "123", "branch": branch,
+                "task_id": "task-123", "clone_path": str(clone),
+            }), encoding="utf-8")
             repos = root / "repos.txt"
             repos.write_text(f"owner/repo|board|{clone}|1\n", encoding="utf-8")
             log = root / "cleanup.log"
             result = subprocess.run(["bash", str(CLEANUP), "--live"], cwd=ROOT, env=self._env(root, repos, receipt_dir, log, branch=branch), text=True, capture_output=True)
             self.assertEqual(0, result.returncode, result.stderr + result.stdout)
             self.assertFalse(worktree.exists())
+    def test_claim_receipt_supplies_missing_task_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clone = self._repo(root / "clone")
+            worktree = root / "worktrees" / "board" / "task-123"
+            branch = "ai/fix/123-triage"
+            self._git(clone, "worktree", "add", "-b", branch, str(worktree))
+            receipt_dir = root / "receipts"
+            receipt_dir.mkdir()
+            self._receipt(receipt_dir / "triage.json", clone, worktree, branch, task="")
+            claims = receipt_dir / "claims"
+            claims.mkdir()
+            (claims / "claim.json").write_text(json.dumps({
+                "repo": "owner/repo", "issue": "123", "branch": branch,
+                "task_id": "task-123", "clone_path": str(clone),
+            }), encoding="utf-8")
+            repos = root / "repos.txt"
+            repos.write_text(f"owner/repo|board|{clone}|1\n", encoding="utf-8")
+            result = subprocess.run(["bash", str(CLEANUP), "--live"], cwd=ROOT, env=self._env(root, repos, receipt_dir, root / "cleanup.log", branch=branch), text=True, capture_output=True)
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            self.assertFalse(worktree.exists())
+            outcome = json.loads(next((receipt_dir / "cleanup-outcomes").glob("*.json")).read_text(encoding="utf-8"))
+            self.assertEqual("task-123", outcome["task_id"])
+
+    def test_claim_task_mismatch_quarantines_without_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clone = self._repo(root / "clone")
+            worktree = root / "worktrees" / "board" / "task-123"
+            branch = "ai/fix/123-triage"
+            self._git(clone, "worktree", "add", "-b", branch, str(worktree))
+            receipt_dir = root / "receipts"
+            receipt_dir.mkdir()
+            self._receipt(receipt_dir / "triage.json", clone, worktree, branch, task="wrong-task")
+            claims = receipt_dir / "claims"
+            claims.mkdir()
+            (claims / "claim.json").write_text(json.dumps({
+                "repo": "owner/repo", "issue": "123", "branch": branch,
+                "task_id": "task-123", "clone_path": str(clone),
+            }), encoding="utf-8")
+            repos = root / "repos.txt"
+            repos.write_text(f"owner/repo|board|{clone}|1\n", encoding="utf-8")
+            result = subprocess.run(["bash", str(CLEANUP), "--live"], cwd=ROOT, env=self._env(root, repos, receipt_dir, root / "cleanup.log", branch=branch), text=True, capture_output=True)
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            self.assertTrue(worktree.exists())
+            self.assertTrue(list((receipt_dir / "quarantine").glob("*.json")))
+
+    def test_active_matching_claim_quarantines_without_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clone = self._repo(root / "clone")
+            worktree = root / "worktrees" / "board" / "task-123"
+            branch = "ai/fix/123-terminal"
+            self._git(clone, "worktree", "add", "-b", branch, str(worktree))
+            receipt_dir = root / "receipts"
+            receipt_dir.mkdir()
+            self._receipt(receipt_dir / "terminal.json", clone, worktree, branch, task="task-123")
+            active = root / "active"
+            active.mkdir()
+            (active / "claim.json").write_text(json.dumps({"repo": "owner/repo", "issue": 123}), encoding="utf-8")
+            repos = root / "repos.txt"
+            repos.write_text(f"owner/repo|board|{clone}|1\n", encoding="utf-8")
+            result = subprocess.run(["bash", str(CLEANUP), "--live"], cwd=ROOT, env=self._env(root, repos, receipt_dir, root / "cleanup.log"), text=True, capture_output=True)
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            self.assertTrue(worktree.exists())
+            self.assertTrue(list((receipt_dir / "quarantine").glob("*.json")))
+
     def test_forged_merge_provenance_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -207,6 +280,8 @@ class CleanupReceiptTests(unittest.TestCase):
             "HERMES_REPO_AGENT_CLEANUP_RECEIPT_DIR": str(receipts),
             "HERMES_REPO_CLEANUP_QUARANTINE_DIR": str(receipts / "quarantine"),
             "HERMES_REPO_AGENT_CLEANUP_OUTCOME_DIR": str(receipts / "cleanup-outcomes"),
+            "HERMES_REPO_AGENT_CLAIM_RECEIPT_DIR": str(receipts / "claims"),
+            "HERMES_REPO_AGENT_ACTIVE_CLAIM_PATH": str(root / "active" / "claim.json"),
             "BASH_FUNC_gh%%": gh,
         }
 
