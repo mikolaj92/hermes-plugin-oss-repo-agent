@@ -33,6 +33,33 @@ class CleanupReceiptTests(unittest.TestCase):
             branches = subprocess.run(["git", "-C", str(clone), "branch", "--list", branch], text=True, capture_output=True, check=True).stdout
             self.assertNotIn(branch, branches)
             self.assertIn("WORKTREE_REMOVED", log.read_text(encoding="utf-8"))
+            outcome_path = receipt_dir / "cleanup-outcomes" / "owner_repo-123-ai_fix_123-terminal.json"
+            outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+            self.assertEqual("CLEANUP_CONFIRMED", outcome["status"])
+            self.assertEqual("task-123", outcome["task_id"])
+            self.assertEqual(worktree.resolve(), Path(outcome["worktree_path"]))
+            self.assertTrue(outcome["local_branch_deleted"])
+            self.assertFalse(outcome["remote_branch_deleted"])
+    def test_missing_target_writes_reconciled_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clone = self._repo(root / "clone")
+            branch = "ai/fix/123-terminal"
+            self._git(clone, "branch", branch)
+            receipt_dir = root / "receipts"
+            receipt_dir.mkdir()
+            self._receipt(receipt_dir / "terminal.json", clone, root / "missing", branch, task="task-123")
+            repos = root / "repos.txt"
+            repos.write_text(f"owner/repo|board|{clone}|1\n", encoding="utf-8")
+            result = subprocess.run(["bash", str(CLEANUP), "--live"], cwd=ROOT, env=self._env(root, repos, receipt_dir, root / "cleanup.log"), text=True, capture_output=True)
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            outcome_path = receipt_dir / "cleanup-outcomes" / "owner_repo-123-ai_fix_123-terminal.json"
+            outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+            self.assertEqual("NO_TARGET_RECONCILED", outcome["status"])
+            self.assertEqual("", outcome["worktree_path"])
+            self.assertFalse(outcome["local_branch_deleted"])
+            self.assertIn(branch, self._git_output(clone, "branch", "--format=%(refname:short)").splitlines())
+
     def test_board_worker_lock_preserves_matching_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -179,6 +206,7 @@ class CleanupReceiptTests(unittest.TestCase):
             "HERMES_WORKTREE_ROOT": str(root / "worktrees"),
             "HERMES_REPO_AGENT_CLEANUP_RECEIPT_DIR": str(receipts),
             "HERMES_REPO_CLEANUP_QUARANTINE_DIR": str(receipts / "quarantine"),
+            "HERMES_REPO_AGENT_CLEANUP_OUTCOME_DIR": str(receipts / "cleanup-outcomes"),
             "BASH_FUNC_gh%%": gh,
         }
 

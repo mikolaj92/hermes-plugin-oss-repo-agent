@@ -134,6 +134,83 @@ if path and branch:
 
 RECEIPT_DIR="${HERMES_REPO_AGENT_CLEANUP_RECEIPT_DIR:-${HERMES_REPO_AGENT_MERGE_RECEIPT_DIR:-}}"
 QUARANTINE_DIR="${HERMES_REPO_CLEANUP_QUARANTINE_DIR:-${RECEIPT_DIR:+$RECEIPT_DIR/quarantine}}"
+CLEANUP_OUTCOME_DIR="${HERMES_REPO_AGENT_CLEANUP_OUTCOME_DIR:-${RECEIPT_DIR:+$RECEIPT_DIR/cleanup-outcomes}}"
+
+write_cleanup_outcome_receipt() {
+  local status="$1" repo="$2" issue="$3" branch="$4" clone_path="$5" worktree_path="$6" task_id="$7" merge_sha="$8" origin_main_sha="$9" base_sha="${10}" branch_deleted="${11}"
+  local path tmp
+  [[ -n "$CLEANUP_OUTCOME_DIR" ]] || return 1
+  mkdir -p "$CLEANUP_OUTCOME_DIR" || return 1
+  path="$CLEANUP_OUTCOME_DIR/$(printf '%s' "$repo-$issue-$branch" | tr '/:' '__').json"
+  tmp="$(mktemp "$CLEANUP_OUTCOME_DIR/.cleanup.XXXXXX")" || return 1
+  if ! CLEANUP_TMP="$tmp" CLEANUP_PATH="$path" python3 - "$status" "$repo" "$issue" "$branch" "$clone_path" "$worktree_path" "$task_id" "$merge_sha" "$origin_main_sha" "$base_sha" "$branch_deleted" <<'PY'
+import datetime as dt
+import json
+import os
+import sys
+
+tmp = os.environ["CLEANUP_TMP"]
+path = os.environ["CLEANUP_PATH"]
+status, repo, issue, branch, clone_path, worktree_path, task_id, merge_sha, origin_main_sha, base_sha, branch_deleted = sys.argv[1:12]
+if status not in {"CLEANUP_CONFIRMED", "NO_TARGET_RECONCILED"}:
+    raise RuntimeError("invalid cleanup outcome")
+expected = {
+    "version": 1,
+    "status": status,
+    "repo": repo,
+    "issue": int(issue),
+    "branch": branch,
+    "clone_path": clone_path,
+    "worktree_path": worktree_path,
+    "task_id": task_id,
+    "mergeSha": merge_sha,
+    "originMainSha": origin_main_sha,
+    "baseSha": base_sha,
+    "local_branch_deleted": branch_deleted == "1",
+    "remote_branch_deleted": False,
+}
+payload = dict(expected, cleaned_at=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+try:
+    with open(tmp, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    with open(tmp, encoding="utf-8") as stream:
+        readback = json.load(stream)
+    if any(readback.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("cleanup receipt temp read-back mismatch")
+    try:
+        os.link(tmp, path)
+    except FileExistsError:
+        with open(path, encoding="utf-8") as stream:
+            existing = json.load(stream)
+        if any(existing.get(key) != value for key, value in expected.items()):
+            raise RuntimeError("conflicting cleanup receipt already exists")
+    with open(path, encoding="utf-8") as stream:
+        published = json.load(stream)
+    if any(published.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("cleanup receipt publication read-back mismatch")
+    os.unlink(tmp)
+    directory = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+  then
+    rm -f "$tmp" || true
+    log "CLEANUP_RECEIPT_WRITE_FAILED status=$status repo=$repo issue=$issue branch=$branch"
+    return 1
+  fi
+  log "CLEANUP_RECEIPT_WRITTEN status=$status repo=$repo issue=$issue branch=$branch path=$path"
+}
 
 controlled_worktree_path() {
   local clone_path="$1" path="$2" path_real root_real clone_worktrees_real
@@ -218,7 +295,8 @@ PY
 }
 
 cleanup_receipt_worktree() {
-  local repo="$1" board="$2" clone_path="$3" branch="$4" path wt_branch pid_file pid status_output status_rc branch_check_rc
+  local repo="$1" board="$2" clone_path="$3" branch="$4" issue="$5" task_id="$6" merge_sha="$7" origin_base_sha="$8" base_sha="$9"
+  local path wt_branch pid_file pid status_output status_rc branch_check_rc branch_deleted found=0
   pid_file="$WORKTREE_ROOT/$board/.agent.lock/pid"
   if [[ -f "$pid_file" ]]; then
     pid="$(cat "$pid_file" 2>/dev/null || true)"
@@ -229,6 +307,7 @@ cleanup_receipt_worktree() {
   fi
   while IFS=$'\t' read -r path wt_branch; do
     [[ "$wt_branch" == "$branch" ]] || continue
+    found=1
     controlled_worktree_path "$clone_path" "$path" || {
       log "KEEP repo=$repo branch=$branch path=$path reason=worktree-provenance-unverifiable"
       return 0
@@ -254,6 +333,7 @@ cleanup_receipt_worktree() {
     fi
     if GIT_MASTER=1 git -C "$clone_path" worktree remove "$path" >/dev/null 2>&1; then
       log "WORKTREE_REMOVED repo=$repo branch=$branch path=$path reason=terminal-receipt"
+      branch_deleted=0
       if [[ "$DELETE_LOCAL_BRANCHES" == 1 ]]; then
         branch_check_rc=0
         GIT_MASTER=1 git -C "$clone_path" show-ref --verify --quiet "refs/heads/$branch" || branch_check_rc=$?
@@ -279,19 +359,36 @@ cleanup_receipt_worktree() {
             failures=$((failures + 1))
             return 0
           fi
+          branch_deleted=1
           log "LOCAL_BRANCH_REMOVED repo=$repo branch=$branch"
         fi
       fi
+      if write_cleanup_outcome_receipt "CLEANUP_CONFIRMED" "$repo" "$issue" "$branch" "$clone_path" "$path" "$task_id" "$merge_sha" "$origin_base_sha" "$base_sha" "$branch_deleted"; then
+        removed=$((removed + 1))
+      else
+        failures=$((failures + 1))
+      fi
     else
       log "REMOVE_FAILED repo=$repo branch=$branch path=$path reason=terminal-receipt"
+      failures=$((failures + 1))
     fi
     return 0
   done < <(worktree_rows "$clone_path")
-  log "KEEP repo=$repo branch=$branch reason=worktree-not-found"
+  if [[ "$found" -eq 0 && "$DRY_RUN" == 0 ]]; then
+    if write_cleanup_outcome_receipt "NO_TARGET_RECONCILED" "$repo" "$issue" "$branch" "$clone_path" "" "$task_id" "$merge_sha" "$origin_base_sha" "$base_sha" "0"; then
+      removed=$((removed + 1))
+      log "NO_TARGET_RECONCILED repo=$repo issue=$issue branch=$branch"
+    else
+      failures=$((failures + 1))
+      log "KEEP repo=$repo branch=$branch reason=worktree-not-found-receipt-failed"
+    fi
+  else
+    log "KEEP repo=$repo branch=$branch reason=worktree-not-found"
+  fi
 }
 
 process_receipts_for_repo() {
-  local repo="$1" board="$2" clone_path="$3" path payload receipt_repo issue phase branch state open_prs merge_sha origin_base_sha current_origin
+  local repo="$1" board="$2" clone_path="$3" path payload receipt_repo issue phase branch state open_prs merge_sha origin_base_sha current_origin task_id base_sha
   [[ -n "$RECEIPT_DIR" && -d "$RECEIPT_DIR" ]] || return 0
   shopt -s nullglob
   for path in "$RECEIPT_DIR"/*.json; do
@@ -331,7 +428,9 @@ process_receipts_for_repo() {
       log "KEEP repo=$repo issue=$issue branch=$branch reason=merge-provenance-unverifiable base=$BASE_BRANCH"
       continue
     fi
-    cleanup_receipt_worktree "$repo" "$board" "$clone_path" "$branch"
+    task_id="$(receipt_field "$payload" task_id 2>/dev/null || true)"
+    base_sha="$(receipt_field "$payload" preMergeBaseSha 2>/dev/null || true)"
+    cleanup_receipt_worktree "$repo" "$board" "$clone_path" "$branch" "$issue" "$task_id" "$merge_sha" "$origin_base_sha" "$base_sha"
   done
   shopt -u nullglob
 }
