@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import ctypes
 import json
 import plistlib
 import hashlib
@@ -385,6 +386,24 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertTrue((version / "source" / "project" / "Fala" / "vendor" / "sqlite.fire" / "native" / "libsqlite_fire.dylib").is_file())
             process_host_name = "libfala_process_host.dylib" if sys.platform == "darwin" else "libfala_process_host.so"
             self.assertTrue((version / "source" / "project" / "Fala" / "mojo" / "fala" / "native" / process_host_name).is_file())
+            process_host = version / "source" / "project" / "Fala" / "mojo" / "fala" / "native" / process_host_name
+            library = ctypes.CDLL(str(process_host))
+            for symbol in (
+                "fala_process_start_blob",
+                "fala_process_destroy",
+                "fala_process_wait",
+                "fala_process_cancel",
+                "fala_process_get_status",
+                "fala_process_get_pid",
+                "fala_process_get_exit_code",
+                "fala_process_get_term_signal",
+                "fala_process_was_timed_out",
+                "fala_process_was_cancelled",
+                "fala_process_get_error_code",
+                "fala_process_get_error_message",
+                "fala_host_getenv",
+            ):
+                self.assertTrue(getattr(library, symbol))
             self.assertEqual(len(list((version / "source" / "project" / "Fala" / "python" / "fala" / "__mojocache__").glob("_native.hash-*.so"))), 1)
             self.assertNotIn(str(root / "candidates"), " ".join(arguments))
             self.assertEqual(arguments[arguments.index("--project") + 1], str((version / "source" / "project").resolve()))
