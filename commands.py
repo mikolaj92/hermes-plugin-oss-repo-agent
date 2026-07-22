@@ -76,7 +76,7 @@ def handle_cli(args: Namespace) -> int:
         print(json.dumps({"ok": False, "error": str(exc)}, indent=2, sort_keys=True))
         return 2
     except Exception as exc:
-        from tools.deployment_parity import DeploymentParityError
+        from .tools.deployment_parity import DeploymentParityError
         if isinstance(exc, DeploymentParityError):
             print(json.dumps(exc.result, indent=2, sort_keys=True))
             return 1
@@ -98,7 +98,7 @@ def run_from_args(args: Namespace, runner: Runner | None = None) -> dict[str, An
             bool(getattr(args, "force", False)),
         )
     if command == "validate-fala-candidate":
-        from tools.deployment_parity import validate_fala_candidate
+        from .tools.deployment_parity import validate_fala_candidate
 
         candidate_arg = Path(str(getattr(args, "candidate"))).expanduser()
         root_arg = getattr(args, "deployment_root", None)
@@ -784,19 +784,6 @@ def render_launchd(
     if not isinstance(config_data, dict):
         raise ConfigError("Fala candidate source config root must be a mapping")
     try:
-        from repo_agent.config import load_config as load_runtime_config
-
-        runtime_config = load_runtime_config(config)
-    except Exception as exc:
-        raise ConfigError(f"invalid Fala runtime config: {config}") from exc
-    config_mode = str(config_data.get("mode", "dry-run")).strip().lower()
-    if runtime_config.mode != config_mode:
-        raise ConfigError("Fala runtime config mode does not match TOML mode")
-    if config_mode != mode:
-        raise ConfigError(f"Fala candidate mode does not match config mode: {config_mode}")
-    if cfg.mode != config_mode:
-        raise ConfigError("Fala candidate config does not match loaded config mode")
-    try:
         plugin_status = subprocess.run(
             ["git", "-C", str(project_root), "status", "--porcelain"],
             check=True,
@@ -818,11 +805,11 @@ def render_launchd(
     lock_data = lock.read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
     lock_hash = _sha256_bytes(lock_data)
     policy = {
-        "automerge": bool(runtime_config.automerge),
-        "require_human_approval": bool(runtime_config.require_human_approval),
-        "require_checks": bool(runtime_config.require_checks),
-        "require_test_evidence": bool(runtime_config.require_test_evidence),
-        "executor_enabled": bool(runtime_config.executor.enabled),
+        "automerge": bool(cfg.automerge),
+        "require_human_approval": bool(cfg.require_human_approval),
+        "require_checks": bool(cfg.require_checks),
+        "require_test_evidence": bool(cfg.require_test_evidence),
+        "executor_enabled": bool(cfg.executor.enabled),
     }
     identity: dict[str, Any] = {
         "schema": 1,
@@ -855,7 +842,7 @@ def render_launchd(
             raise ConfigError(f"invalid existing candidate manifest: {candidate}") from exc
         if old.get("identity") != identity or old.get("candidate_id") != candidate_id:
             raise ConfigError("existing candidate does not match requested mode/config/db/revision")
-        from tools.deployment_parity import validate_fala_candidate
+        from .tools.deployment_parity import validate_fala_candidate
         validate_fala_candidate(candidate, deployment_root=root)
         return {"ok": True, "candidate": str(candidate), "candidate_id": candidate_id, "created": False, "mode": mode}
     candidate.mkdir(parents=True)
@@ -904,7 +891,7 @@ def render_launchd(
         except OSError:
             pass
         raise
-    from tools.deployment_parity import validate_fala_candidate
+    from .tools.deployment_parity import validate_fala_candidate
     validate_fala_candidate(candidate, deployment_root=root)
     return {"ok": True, "candidate": str(candidate), "candidate_id": candidate_id, "created": True, "mode": mode}
 
@@ -1111,7 +1098,7 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
         candidate.resolve().relative_to(candidates_root)
     except ValueError as exc:
         raise ConfigError(f"candidate must be inside deployment candidates root: {candidate}") from exc
-    from tools.deployment_parity import validate_fala_candidate
+    from .tools.deployment_parity import validate_fala_candidate
     parity = validate_fala_candidate(candidate, deployment_root=root)
     result: dict[str, Any] = {"ok": True, "candidate": str(candidate), "candidate_id": parity["candidate_id"], "promoted": False, "parity": parity}
     if not promote:

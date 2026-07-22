@@ -645,19 +645,24 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
             errors.append("Fala identity policy is unsafe for promotion")
     if config_artifact_path and _regular_file(config_artifact_path) and isinstance(policy, dict) and set(policy) == policy_keys:
         try:
-            from repo_agent.config import load_config as load_runtime_config
+            try:
+                import tomllib
+            except ModuleNotFoundError:
+                import tomli as tomllib
 
-            embedded = load_runtime_config(config_artifact_path)
+            embedded = tomllib.loads(config_artifact_path.read_text(encoding="utf-8"))
+            automation = embedded.get("automation") or {}
+            executor = embedded.get("executor") or {}
             expected_policy = {
-                "automerge": bool(embedded.automerge),
-                "require_human_approval": bool(embedded.require_human_approval),
-                "require_checks": bool(embedded.require_checks),
-                "require_test_evidence": bool(embedded.require_test_evidence),
-                "executor_enabled": bool(embedded.executor.enabled),
+                "automerge": bool(automation.get("automerge", False)),
+                "require_human_approval": bool(automation.get("require_human_approval", True)),
+                "require_checks": bool(automation.get("require_checks", True)),
+                "require_test_evidence": bool(automation.get("require_test_evidence", True)),
+                "executor_enabled": bool(executor.get("enabled", False)),
             }
             if policy != expected_policy:
                 errors.append("Fala identity policy does not match embedded config")
-        except Exception as exc:
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
             errors.append(f"Fala embedded config policy is unreadable: {exc}")
     metadata: dict[str, object] | None = None
     if metadata_path and _regular_file(metadata_path):
