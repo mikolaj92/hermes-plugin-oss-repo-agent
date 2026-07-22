@@ -114,7 +114,7 @@ else
   fala_check=""
   if fala_check="$(python3 - "$current_target" "$FALA_PLIST" "$FALA_REQUIRE_LIVE" "$DEPLOYMENT_ROOT" <<'PY'
 import hashlib, json, pathlib, plistlib, sys
-cand=pathlib.Path(sys.argv[1]).resolve(); installed=pathlib.Path(sys.argv[2]).expanduser(); require_live=sys.argv[3]=="1"; root=pathlib.Path(sys.argv[4]).expanduser().resolve(); errors=[]; plist_relative="launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"; pinned="b5f8085f418010a9290613b86671d435551411a9"
+cand=pathlib.Path(sys.argv[1]).resolve(); installed=pathlib.Path(sys.argv[2]).expanduser(); require_live=sys.argv[3]=="1"; root=pathlib.Path(sys.argv[4]).expanduser().resolve(); errors=[]; plist_relative="launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"; pinned="9c5f419abe63c4683ad3e17ff708200c3c83d9e9"
 sha=lambda data: hashlib.sha256(data).hexdigest()
 def artifact_path(relative):
     if not isinstance(relative,str) or not relative or "\x00" in relative or pathlib.Path(relative).is_absolute() or ".." in pathlib.Path(relative).parts:

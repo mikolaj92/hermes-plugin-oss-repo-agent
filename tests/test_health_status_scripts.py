@@ -55,7 +55,7 @@ class HealthStatusScriptTests(unittest.TestCase):
             "mode": "dry-run",
             "plugin_commit": "plugin-commit",
             "fala_tag": "0.2.1",
-            "fala_commit": "b5f8085f418010a9290613b86671d435551411a9",
+            "fala_commit": "9c5f419abe63c4683ad3e17ff708200c3c83d9e9",
             "lock_hash": hashlib.sha256(lock_data).hexdigest(),
             "config_path": str(cls.config.absolute()),
             "config_hash": hashlib.sha256(cls.config.read_bytes()).hexdigest(),

@@ -28,7 +28,7 @@ from .config import ConfigError, OssRepoAgentConfig, default_config_path, load_c
 from .executor import CommandSpec, Runner, planned_command
 
 INTAKE_ASSIGNEE = "repo-agent-intake"
-FALA_PINNED_COMMIT = "b5f8085f418010a9290613b86671d435551411a9"
+FALA_PINNED_COMMIT = "9c5f419abe63c4683ad3e17ff708200c3c83d9e9"
 
 
 def setup_parser(parser: ArgumentParser) -> None:
@@ -800,7 +800,7 @@ def render_launchd(
         fala_revision = subprocess.run(["git", "-C", str(fala_root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         fala_revision = ""
-    if fala_revision != "b5f8085f418010a9290613b86671d435551411a9":
+    if fala_revision != "9c5f419abe63c4683ad3e17ff708200c3c83d9e9":
         raise ConfigError("Fala candidate source is not pinned to 0.2.1 commit")
     lock_data = lock.read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
     lock_hash = _sha256_bytes(lock_data)

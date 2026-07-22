@@ -39,7 +39,7 @@ require_live = sys.argv[3] == "1"
 deployment_root = pathlib.Path(sys.argv[4]).expanduser().resolve()
 errors = []
 plist_relative = "launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
-pinned_commit = "b5f8085f418010a9290613b86671d435551411a9"
+pinned_commit = "9c5f419abe63c4683ad3e17ff708200c3c83d9e9"
 
 def sha256(data):
     return hashlib.sha256(data).hexdigest()

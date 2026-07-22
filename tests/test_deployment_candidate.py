@@ -43,7 +43,7 @@ class DeploymentCandidateTests(unittest.TestCase):
     def _fala_git_clean(self):
         project_root = ROOT.resolve()
         fala_root = (ROOT.parent / "Fala").resolve()
-        pinned = "b5f8085f418010a9290613b86671d435551411a9"
+        pinned = "9c5f419abe63c4683ad3e17ff708200c3c83d9e9"
         real_run = self.commands.subprocess.run
 
         def fake_run(argv, *args, **kwargs):
@@ -87,7 +87,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             "mode": mode,
             "plugin_commit": "plugin-commit",
             "fala_tag": "0.2.1",
-            "fala_commit": "b5f8085f418010a9290613b86671d435551411a9",
+            "fala_commit": "9c5f419abe63c4683ad3e17ff708200c3c83d9e9",
             "lock_hash": hashlib.sha256(lock_data).hexdigest(),
             "config_path": str(config.absolute()),
             "config_hash": hashlib.sha256(config.read_bytes()).hexdigest(),
