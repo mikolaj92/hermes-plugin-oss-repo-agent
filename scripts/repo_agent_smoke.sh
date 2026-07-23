@@ -30,7 +30,7 @@ python3 -m py_compile \
   "$ROOT/src/repo_agent/tick_all.py"
 
 grep -Fq 'repo-agent-tick-all' "$ROOT/pyproject.toml"
-grep -Fq 'Fala gate' "$ROOT/scripts/repo_agent_health.sh"
+grep -Fq 'fala-deployment' "$ROOT/scripts/repo_agent_health.sh"
 grep -Fq 'Fala gate' "$ROOT/scripts/repo_agent_status.sh"
 grep -Fq 'Recent Decisions' "$ROOT/scripts/repo_agent_status.sh"
 grep -Fq 'hermes update --backup --yes' "$ROOT/scripts/repo_agent_hermes_update.sh"
