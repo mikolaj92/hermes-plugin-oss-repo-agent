@@ -334,6 +334,42 @@ else
   done <<<"$repo_data"
 fi
 
+printf '\nRecent Fala Runs\n'
+if [[ -f "$FALA_DB" ]]; then
+  python3 - "$FALA_DB" <<'PY' || status_failures=$((status_failures + 1))
+import json, sqlite3, sys
+
+try:
+    with sqlite3.connect(sys.argv[1]) as db:
+        runs = db.execute(
+            "SELECT id,status,created_at,metadata FROM runs ORDER BY created_at DESC LIMIT 8"
+        ).fetchall()
+        for run_id, status, created_at, metadata_raw in runs:
+            metadata = json.loads(metadata_raw or "{}")
+            outputs = db.execute(
+                "SELECT status,output_json FROM processes WHERE run_id=?", (run_id,)
+            ).fetchall()
+            failed = sum(item_status in {"failed", "cancelled", "timed_out"} for item_status, _ in outputs)
+            waiting = sum(item_status in {"waiting", "retry_wait", "running", "pending"} for item_status, _ in outputs)
+            worked = False
+            for _, raw in outputs:
+                output = json.loads(raw or "{}")
+                values = output.get("values", output)
+                if not isinstance(values, dict):
+                    continue
+                worked = worked or bool(values.get("mutated") or values.get("selected"))
+
+            activity = "worked" if worked else "noop"
+            mode = metadata.get("mode", "unknown")
+            print(f"  {created_at} run_id={run_id} mode={mode} status={status} activity={activity} failed={failed} waiting={waiting}")
+except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+    print(f"  ERROR fala-run-history {type(exc).__name__}:{exc}")
+    raise SystemExit(1)
+PY
+else
+  printf '  unavailable db=%s\n' "$FALA_DB"
+fi
+
 printf '\nRecent Decisions\n'
 RECENT_SIGNAL_PATTERN='DECISION|CLAUDE_|WORKTREE_|LOCAL_BRANCH_|DONE|WARN|ERROR|ASSIGN_FAILED|PR_ASSIGNED|FIX_TASK_CREATED|FIX_TASK_FAILED|LOCK_HELD|KANBAN_LIST_FAILED|PR_LIST_FAILED|MERGE_FAILED|watchdog-worker-'
 for log in "$LOG_DIR/repo-issue-to-pr-dispatch.log" "$LOG_DIR/repo-pr-triage.log" "$LOG_DIR/repo-agent-cleanup.log" "$LOG_DIR/repo-agent-hermes-update.log" "$LOG_DIR/repo-agent-health.log"; do

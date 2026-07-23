@@ -6,6 +6,9 @@ import asyncio
 import json
 import re
 import sqlite3
+import sys
+import tomllib
+
 import threading
 from contextlib import closing
 from collections.abc import Mapping, Sequence
@@ -250,6 +253,39 @@ def _write_run_metadata(
         raise RuntimeFacadeError(f"unable to persist Fala run metadata: {_redact(str(exc))}") from exc
 
 
+def _host_python_overrides(package_path: str | Path) -> dict[str, tuple[str, ...]]:
+    """Run repo-agent Python effectors with the interpreter hosting Fala."""
+    path = Path(package_path)
+    if not path.is_file():
+        return {}
+    try:
+        package = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    paths = package.get("correlation_paths")
+    if not isinstance(paths, list):
+        return {}
+    overrides: dict[str, tuple[str, ...]] = {}
+    for path_spec in paths:
+        if not isinstance(path_spec, dict):
+            continue
+        effectors = path_spec.get("effectors")
+        if not isinstance(effectors, list):
+            continue
+        for effector in effectors:
+            if not isinstance(effector, dict) or not isinstance(effector.get("id"), str):
+                continue
+            adapter = effector.get("adapter")
+            command = adapter.get("command") if isinstance(adapter, dict) else None
+            if (
+                isinstance(command, list)
+                and command[:3] == ["python3", "-m", "repo_agent.effector"]
+                and all(isinstance(part, str) for part in command)
+            ):
+                overrides[effector["id"]] = (sys.executable, *command[1:])
+    return overrides
+
+
 def run_package_path(
     *,
     db_path: str | Path,
@@ -267,6 +303,9 @@ def run_package_path(
     """Run one package path and normalize evidence from its SQLite journal."""
     # Fala's in-process Mojo bridge temporarily changes the process-wide cwd.
     # Serialize host calls so concurrent async tick callers cannot race it.
+    resolved_overrides = _host_python_overrides(package_path)
+    if command_overrides:
+        resolved_overrides.update(command_overrides)
     with _HOST_RUN_LOCK:
         raw = host_run_package(
             db_path=db_path,
@@ -276,7 +315,7 @@ def run_package_path(
             inputs=inputs,
             effector_inputs=effector_inputs,
             effector_configs=effector_configs,
-            command_overrides=command_overrides,
+            command_overrides=resolved_overrides or None,
             max_ticks=max_ticks,
             worker_id=worker_id,
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -81,6 +82,55 @@ class RuntimeFacadeTests(unittest.TestCase):
         self.assertEqual(failed.max_attempts, 1)
         self.assertEqual(failed.error, {"reason": "semantic failure"})
         runner.assert_called_once()
+
+    def test_repo_agent_effectors_use_host_python_without_overriding_custom_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package = root / "package.toml"
+            package.write_text(
+                """
+[[correlation_paths]]
+id = "path"
+
+[[correlation_paths.effectors]]
+id = "repo_step"
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector", "extra"] }
+
+[[correlation_paths.effectors]]
+id = "repo_step_auto"
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"] }
+
+[[correlation_paths.effectors]]
+id = "custom"
+adapter = { kind = "subprocess", command = ["python3", "custom.py"] }
+""",
+                encoding="utf-8",
+            )
+            db = self._db(root, [("run-1", "run-1:path:repo_step", "succeeded", 1, 1, "{}", "{}")])
+            host = {
+                "ok": True,
+                "run_id": "run-1",
+                "run_status": "completed",
+                "replayed": False,
+                "ticks": 1,
+                "processes": [{"id": "run-1:path:repo_step", "status": "succeeded"}],
+            }
+            with patch("repo_agent.flows.runtime.host_run_package", return_value=host) as runner:
+                run_package_path(
+                    db_path=db,
+                    package_path=package,
+                    path_id="path",
+                    run_id="run-1",
+                    command_overrides={"repo_step": ("explicit-python", "worker.py")},
+                )
+
+        self.assertEqual(
+            runner.call_args.kwargs["command_overrides"],
+            {
+                "repo_step": ("explicit-python", "worker.py"),
+                "repo_step_auto": (sys.executable, "-m", "repo_agent.effector"),
+            },
+        )
 
     def test_persists_run_mode_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

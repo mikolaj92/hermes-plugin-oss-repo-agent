@@ -127,12 +127,8 @@ async def run_all(*, db_path: Path, config: Any, dry_run: bool, limit: int = 10)
     failed = [item for item in processes if item.get("status") in _TERMINAL_FAILURES]
     waiting = [item for item in processes if item.get("status") in _WAITING]
     outputs = [process_values(item) for item in processes]
-    worked = any(
-        bool(output.get("mutated") or output.get("selected"))
-        or output.get("status") == "planned"
-        or output.get("action") not in {None, "", "skip"}
-        for output in outputs
-    )
+    worked = any(bool(output.get("mutated") or output.get("selected")) for output in outputs)
+
     status = "idle" if host.run_status == "completed" and not failed and not waiting and not worked else host.run_status
     result = PathRunResult(
         run_id=host.run_id,

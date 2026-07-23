@@ -290,9 +290,21 @@ launchctl_label_query() {
   printf '%s\n' "$found"
 }
 
+FALA_RUNTIME_LOG="$(python3 - "$FALA_PLIST" <<'PY' 2>/dev/null || true
+import plistlib, sys
+try:
+    with open(sys.argv[1], "rb") as stream:
+        value = plistlib.load(stream).get("StandardOutPath", "")
+    if isinstance(value, str):
+        print(value)
+except (OSError, plistlib.InvalidFileException):
+    pass
+PY
+)"
+
 uid="$(id -u)"
 jobs=(
-  "com.mikolaj92.hermes.repo-agent-fala-tick-all|$FALA_PLIST|$HOME/.hermes/logs/repo-agent-fala-tick-all.log"
+  "com.mikolaj92.hermes.repo-agent-fala-tick-all|$FALA_PLIST|$FALA_RUNTIME_LOG"
   "com.mikolaj92.hermes.repo-agent-hermes-update|$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-hermes-update.plist|$HOME/.hermes/logs/repo-agent-hermes-update.log"
 )
 repo_data=""
@@ -491,12 +503,16 @@ for item in "${jobs[@]}"; do
   else
     log ERROR "launchd-query-failed label=$label details=$(printf '%q' "$launch_info")"; failures=$((failures + 1))
   fi
-  if [[ -f "$runtime_log" ]]; then
+  if [[ -z "$runtime_log" ]]; then
+    log ERROR "launchd-log-path-missing label=$label plist=$plist"
+    failures=$((failures + 1))
+  elif [[ -f "$runtime_log" ]]; then
     mtime="$(stat -f %m "$runtime_log")"; age=$((now - mtime))
-    if [[ "$age" -gt "$MAX_LOG_AGE_SECONDS" ]]; then log WARN "stale-log label=$label age_seconds=$age path=$runtime_log"; warnings=$((warnings + 1)); else log OK "recent-log label=$label age_seconds=$age"; fi
+    if [[ "$age" -gt "$MAX_LOG_AGE_SECONDS" ]]; then log WARN "stale-log label=$label age_seconds=$age path=$runtime_log"; warnings=$((warnings + 1)); else log OK "recent-log label=$label age_seconds=$age path=$runtime_log"; fi
   else
     log WARN "missing-log label=$label path=$runtime_log"; warnings=$((warnings + 1))
   fi
+
 done
 
 while IFS= read -r lock; do

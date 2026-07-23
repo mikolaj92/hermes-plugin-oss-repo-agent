@@ -386,5 +386,60 @@ exit 0
         self.assertNotEqual(repair.returncode, 0)
         self.assertIn("repair-blocked active-mutator", repair.stdout + repair.stderr)
 
+    def test_status_reports_fala_noop_activity(self):
+        completed = self._run("repo_agent_status.sh", db=self.base_db)
+        self.assertIn("Recent Fala Runs", completed.stdout)
+        self.assertIn("run_id=latest", completed.stdout)
+        self.assertIn("activity=noop", completed.stdout)
+
+    def test_status_reports_fala_worked_activity(self):
+        db = self.root / "worked.sqlite"
+        self._write_db(db, mode="live")
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        with sqlite3.connect(db) as connection:
+            connection.execute(
+                "INSERT INTO processes "
+                "(run_id,id,process_type,status,priority,attempt,max_attempts,available_at,input_json,output_json,error_json,metadata,created_at,updated_at,output_schema_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "latest", "latest:auto_worker:intake_claim", "correlation.effector", "succeeded",
+                    0, 1, 1, now, "{}", '{"values":{"mutated":true,"status":"claimed"}}',
+                    "{}", "{}", now, now, "{}",
+                ),
+            )
+        completed = self._run("repo_agent_status.sh", db=db)
+        self.assertIn("run_id=latest", completed.stdout)
+        self.assertIn("activity=worked", completed.stdout)
+
+    def test_status_does_not_treat_action_without_mutation_as_worked(self):
+        db = self.root / "action-only.sqlite"
+        self._write_db(db, mode="live")
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        with sqlite3.connect(db) as connection:
+            connection.execute(
+                "INSERT INTO processes "
+                "(run_id,id,process_type,status,priority,attempt,max_attempts,available_at,input_json,output_json,error_json,metadata,created_at,updated_at,output_schema_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "latest", "latest:auto_worker:inspect", "correlation.effector", "succeeded",
+                    0, 1, 1, now, "{}", '{"values":{"action":"inspect","mutated":false,"status":"ok"}}',
+                    "{}", "{}", now, now, "{}",
+                ),
+            )
+        completed = self._run("repo_agent_status.sh", db=db)
+        self.assertIn("run_id=latest", completed.stdout)
+        self.assertIn("activity=noop", completed.stdout)
+
+    def test_health_uses_fala_plist_stdout_path(self):
+        db = self.root / "runtime-log.sqlite"
+        self._write_db(db, mode="dry-run")
+        layout = self._layout(db=db)
+        installed = layout / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+        import plistlib
+        with installed.open("rb") as stream:
+            runtime_log = plistlib.load(stream)["StandardOutPath"]
+        completed = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        self.assertIn(f"missing-log label=com.mikolaj92.hermes.repo-agent-fala-tick-all path={runtime_log}", completed.stdout)
+
 if __name__ == "__main__":
     unittest.main()
