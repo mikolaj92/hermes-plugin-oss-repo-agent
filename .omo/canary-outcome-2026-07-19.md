@@ -158,12 +158,13 @@ The source changes may be committed and pushed to `main` under the operator's ex
 
 This section supersedes every earlier disposition and blocker statement in this historical record.
 
-- Source `main` and `origin/main` are clean and aligned at `e8668d8c44adae5f7be99ad87886a899e8c77a09`; sibling Fala `main` is clean at pinned commit `69bc2ec9d4cdf61773114847c0c582fb2652296d`.
+- Deployed plugin revision `c3974728ebc792035bb6942f0ad3cab1e8f92634` was the clean, pushed `main`/`origin/main` input to the final immutable candidate; sibling Fala `main` was clean at pinned commit `69bc2ec9d4cdf61773114847c0c582fb2652296d`. The later commit containing this evidence section is documentation-only and is not the deployed plugin revision.
 - Cleanup receipt `~/.hermes/state/repo-agent-merge-live/cleanup-outcomes/mikolaj92_hermes-plugin-oss-repo-agent-8-ai_fix_8-mikolaj92-hermes-plugin-oss-repo-agent-8-issue-mikolaj92-hermes-plugin-oss-repo-.json` records `NO_TARGET_RECONCILED` for issue `#8`, PR `#9`, task `t_ef58d201`, merge/origin-main SHA `49d21868ebd0f1ea3913efdcba6582a14e39f900`. GitHub confirms issue `#8` closed and PR `#9` merged; the exact remote branch is absent.
-- Immutable candidate `914f121a2bbb97920ff3328dee059e4a981834e3582e001e8ea2ca08f9baf823` validates with no errors and binds plugin/Fala provenance plus the safe policy: automerge and executor disabled; human approval, checks, and test evidence required.
-- `deployment/current` resolves to that immutable version. Active script/config/template parity reports `ok=true` with no errors.
-- Launchd topology contains exactly one repo-agent mutator: `com.mikolaj92.hermes.repo-agent-fala-tick-all` in `user/501`; all legacy mutator labels are absent. The latest Fala run is completed/live with zero unresolved runs and zero failed or waiting processes.
+- Immutable candidate `6e2a096ac0a2c3ef11f7ad6714c69f014505ba264c086fef525edc6ce83e7aa6` validates with no errors and binds plugin commit `c3974728ebc792035bb6942f0ad3cab1e8f92634`, pinned Fala, and the safe policy: automerge and executor disabled; human approval, checks, and test evidence required.
+- `deployment/current` resolves to that immutable version. The managed active smoke script was updated from the same committed source after the pre-update smoke failed on that sole hash mismatch; full five-script/config/template parity then reported `ok=true` with no errors.
+- The unoverridden committed command `bash scripts/repo_agent_smoke.sh` completed successfully and printed `repo-agent smoke ok`.
+- Launchd topology contains exactly one repo-agent mutator: `com.mikolaj92.hermes.repo-agent-fala-tick-all` in `user/501`; all legacy mutator labels are absent. Its post-promotion run exited `0`; the journal reports a completed live run with zero unresolved runs and zero failed or waiting processes.
 - Final observational health and status both exit `0`. Health reports `failures=0`; status reports `Gate summary failures=0`.
 - Focused deployment, parity, health/status, and receipt verification passed: `58` tests. The prior full Fala-environment verification passed `207` tests.
 
-One health warning remains non-blocking: the configured Fala log file has not yet been created. No acceptance failure remains.
+One health warning remains non-blocking: the legacy configured Fala log path has not been created because the immutable launch agent writes to its candidate-local deployment log directory. No acceptance failure remains.
