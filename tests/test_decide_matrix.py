@@ -131,6 +131,7 @@ class PrDecideMatrixTests(unittest.TestCase):
             "baseRefName": "main",
             "isDraft": False,
             "author": {"login": "owner"},
+            "reviewDecision": "APPROVED",
             "labels": [{"name": "ai:generated"}, {"name": "ai:pr-opened"}],
         }
         base.update(overrides)
@@ -150,6 +151,57 @@ class PrDecideMatrixTests(unittest.TestCase):
         )
         self.assertEqual(out["action"], "merge")
         self.assertEqual(out["reason"], "ready")
+    def test_approval_and_mergeability_matrix(self) -> None:
+        cases = (
+            (True, "APPROVED", "MERGEABLE", "merge"),
+            (True, None, "MERGEABLE", "comment_block"),
+            (True, "CHANGES_REQUESTED", "MERGEABLE", "comment_block"),
+            (True, "APPROVED", "UNKNOWN", "skip"),
+            (True, "APPROVED", "CONFLICTING", "repair"),
+            (False, "APPROVED", "MERGEABLE", "merge"),
+            (False, None, "MERGEABLE", "merge"),
+            (False, "CHANGES_REQUESTED", "MERGEABLE", "merge"),
+            (False, None, "UNKNOWN", "skip"),
+            (False, None, "CONFLICTING", "repair"),
+        )
+        for require_approval, review, mergeable, action in cases:
+            with self.subTest(
+                require_approval=require_approval,
+                review=review,
+                mergeable=mergeable,
+            ):
+                out = triage.decide_triage_action(
+                    req(
+                        {
+                            "pr": self._pr(
+                                reviewDecision=review,
+                                mergeable=mergeable,
+                            ),
+                            "repo": "owner/repo",
+                            "checks_pass": True,
+                            "evidence_pass": True,
+                            "automerge": True,
+                            "require_human_approval": require_approval,
+                        }
+                    )
+                )
+                self.assertEqual(out["action"], action, out)
+
+    def test_malformed_required_approval_blocks_merge(self) -> None:
+        out = triage.decide_triage_action(
+            req(
+                {
+                    "pr": self._pr(reviewDecision={"state": "APPROVED"}),
+                    "repo": "owner/repo",
+                    "checks_pass": True,
+                    "evidence_pass": True,
+                    "automerge": True,
+                    "require_human_approval": True,
+                }
+            )
+        )
+        self.assertEqual(out["action"], "comment_block")
+        self.assertEqual(out["reason"], "approval_required")
 
     def test_repair_when_checks_fail(self) -> None:
         out = triage.decide_triage_action(

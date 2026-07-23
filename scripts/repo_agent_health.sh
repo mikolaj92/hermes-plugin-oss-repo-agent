@@ -396,6 +396,7 @@ try:
         version = db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] if "schema_migrations" in tables else None
         runs = db.execute("SELECT id,status,updated_at,metadata FROM runs ORDER BY updated_at DESC").fetchall() if "runs" in tables else []
         if not runs: raise ValueError("runs-missing")
+        safe_terminal_statuses = {"completed"}
         unsafe_statuses = {"created", "active", "waiting", "retry_wait", "cancel_requested", "failed", "cancelled", "timed_out"}
         latest = runs[0]
         unresolved = []
@@ -412,7 +413,7 @@ try:
         age = max(0, int((datetime.now(timezone.utc) - stamp).total_seconds()))
         if age > max_age: raise ValueError(f"latest-run-stale:{age}")
         status = str(latest[1])
-        if status != "completed": raise ValueError(f"latest-run-not-completed:{status}")
+        if status not in safe_terminal_statuses: raise ValueError(f"latest-run-not-completed:{status}")
         delta = (datetime.now(timezone.utc) - stamp).total_seconds()
         if delta < 0: raise ValueError("future-run-timestamp")
         age = int(delta)

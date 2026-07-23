@@ -296,6 +296,13 @@ EFFECTORS: tuple[EffectorEntry, ...] = (
         True,
     ),
     EffectorEntry(
+        "write_cleanup_receipt",
+        "cleanup",
+        "repo_agent.steps.cleanup.write_cleanup_receipt",
+        "Atomic terminal cleanup receipt JSON write.",
+        True,
+    ),
+    EffectorEntry(
         "create_maintenance_task",
         "cleanup",
         "repo_agent.steps.cleanup.create_maintenance_task",

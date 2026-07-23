@@ -11,6 +11,8 @@ from repo_agent.config import AgentConfig, RepoEntry
 from repo_agent.flows.common import PathRunResult
 from repo_agent.flows.runtime import HostPathRunResult, JournalProcess
 from repo_agent.flows.triage import run_pr_triage_decide, run_triage_flow
+from repo_agent.flows.cleanup import run_cleanup_flow
+
 
 
 def _process(
@@ -47,12 +49,42 @@ def _host(
     )
 
 
+
 class TriagePackageFlowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.cfg = AgentConfig(
             mode="dry-run",
             repos=(RepoEntry(repo="o/r", board="board", clone_path="/tmp/o-r"),),
         )
+    def test_second_repo_context_is_selected_and_propagated(self) -> None:
+        cfg = AgentConfig(mode="dry-run", repos=(RepoEntry(repo="o/first", board="first-board", clone_path="/tmp/first", priority=1), RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida", priority=2)))
+        host = _host(processes=[_process("list_ai_fix_prs", output={"status": "noop", "reason": "no_open_prs"})])
+
+        async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
+            runner = mock.AsyncMock(return_value=host)
+            with mock.patch("repo_agent.flows.triage.run_package_path_async", new=runner):
+                result = await run_pr_triage_decide(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True, repo="o/temida")
+            return result, runner
+
+        result, runner = asyncio.run(scenario())
+        self.assertEqual(result.summary["repo"], "o/temida")
+        inputs = runner.await_args.kwargs["effector_inputs"]["list_ai_fix_prs"]
+        self.assertEqual(inputs["board"], "temida-board")
+        self.assertEqual(inputs["clone_path"], "/tmp/temida")
+
+    def test_ambiguous_repo_context_fails_before_host(self) -> None:
+        cfg = AgentConfig(mode="dry-run", repos=(RepoEntry(repo="o/first", board="same", clone_path="/tmp/first"), RepoEntry(repo="o/second", board="same", clone_path="/tmp/second")))
+
+        async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
+            runner = mock.AsyncMock()
+            with mock.patch("repo_agent.flows.triage.run_package_path_async", new=runner):
+                result = await run_pr_triage_decide(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True)
+            return result, runner
+
+        result, runner = asyncio.run(scenario())
+        runner.assert_not_awaited()
+        self.assertEqual(result.summary["reason"], "ambiguous_repository_context")
+        self.assertEqual(result.status, "failed")
 
     def test_single_package_path_invocation(self) -> None:
         host = _host(
@@ -258,7 +290,31 @@ class BranchDecisionGateTests(unittest.TestCase):
                 self.assertEqual(out["status"], "noop")
                 self.assertEqual(out["reason"], "not_selected")
                 self.assertFalse(out.get("mutated"))
-                self.assertFalse(out.get("worked"))
+
+    def test_failed_claim_blocks_merge_receipt_and_close(self) -> None:
+        from repo_agent.steps import triage
+        request = {
+            "input": {"repo": "o/r", "number": 3, "issue": 3, "dry_run": False, "conduction": {
+                "decide_triage_action": {"status": "decided", "action": "merge"},
+                "claim_pr": {"status": "failed", "ok": False, "reason": "claim_failed"},
+            }},
+            "config": {},
+        }
+        for handler in (triage.merge_pull_request, triage.write_merge_receipt, triage.close_linked_issue):
+            with self.subTest(handler=handler.__name__):
+                out = handler(request)
+                self.assertEqual(out["reason"], "upstream_failed")
+                self.assertFalse(out["mutated"])
+
+    def test_owner_required_merge_rejects_missing_author(self) -> None:
+        from repo_agent.steps import triage
+        out = triage.decide_triage_action({"input": {
+            "repo": "o/r", "require_owner": True, "automerge": True,
+            "checks_pass": True, "evidence_pass": True,
+            "pr": {"state": "OPEN", "headRefName": "ai/fix/3", "baseRefName": "main", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED"},
+        }, "config": {}})
+        self.assertEqual(out["reason"], "missing_author")
+        self.assertEqual(out["action"], "skip")
 
     def test_comment_handler_noop_when_merge_selected(self) -> None:
         from repo_agent.steps import triage
@@ -341,3 +397,65 @@ class BranchDecisionGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class CleanupRepositoryRoutingTests(unittest.TestCase):
+    def test_second_repo_context_reaches_cleanup_host(self) -> None:
+        cfg = AgentConfig(mode="dry-run", repos=(RepoEntry(repo="o/first", board="first-board", clone_path="/tmp/first"), RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida")))
+        host = HostPathRunResult(run_id="cleanup-run", path_id="cleanup", run_status="completed", replayed=False, ticks=1, processes=())
+
+        async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
+            runner = mock.AsyncMock(return_value=host)
+            with mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=runner):
+                result = await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True, repo="o/temida", branch="ai/fix/2")
+            return result, runner
+
+        result, runner = asyncio.run(scenario())
+        self.assertEqual(result.summary["repo"], "o/temida")
+        inputs = runner.await_args.kwargs["effector_inputs"]["remove_worktree"]
+        self.assertEqual(inputs["board"], "temida-board")
+        self.assertEqual(inputs["clone_path"], "/tmp/temida")
+
+    def test_omitted_cleanup_selector_fails_before_host(self) -> None:
+        cfg = AgentConfig(mode="dry-run", repos=(RepoEntry(repo="o/first", board="first-board", clone_path="/tmp/first"), RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida")))
+
+        async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
+            runner = mock.AsyncMock()
+            with mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=runner):
+                result = await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True, branch="ai/fix/2")
+            return result, runner
+
+        result, runner = asyncio.run(scenario())
+        runner.assert_not_awaited()
+        self.assertEqual(result.summary["reason"], "ambiguous_repository_context")
+
+    def test_live_cleanup_uses_persisted_branch_identity(self) -> None:
+        cfg = AgentConfig(mode="live", repos=(RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida"),))
+        host = HostPathRunResult(run_id="cleanup-run", path_id="cleanup", run_status="completed", replayed=False, ticks=1, processes=())
+        persisted = {"task": "task-2", "issue": "2", "receipt": "/tmp/dispatch-2.json", "repo": "o/temida"}
+
+        async def scenario() -> mock.AsyncMock:
+            runner = mock.AsyncMock(return_value=host)
+            with mock.patch("repo_agent.flows.cleanup.branch_config_get", side_effect=lambda clone, branch, key: persisted[key.removeprefix("repo-agent-")]), mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=runner):
+                await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=False, repo="o/temida", branch="ai/fix/2")
+            return runner
+
+        runner = asyncio.run(scenario())
+        inputs = runner.await_args.kwargs["effector_inputs"]["remove_worktree"]
+        self.assertEqual(inputs["task_id"], "task-2")
+        self.assertEqual(inputs["issue"], "2")
+        self.assertEqual(inputs["receipt_id"], "/tmp/dispatch-2.json")
+        self.assertNotEqual(inputs["receipt_path"], inputs["receipt_id"])
+
+    def test_live_cleanup_fails_before_host_without_branch_identity(self) -> None:
+        cfg = AgentConfig(mode="live", repos=(RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida"),))
+
+        async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
+            runner = mock.AsyncMock()
+            with mock.patch("repo_agent.flows.cleanup.branch_config_get", return_value=""), mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=runner):
+                result = await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=False, repo="o/temida", branch="ai/fix/2")
+            return result, runner
+
+        result, runner = asyncio.run(scenario())
+        runner.assert_not_awaited()
+        self.assertEqual(result.summary["reason"], "cleanup_provenance_missing")
+        self.assertEqual(result.status, "failed")

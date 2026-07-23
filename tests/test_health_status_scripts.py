@@ -295,6 +295,21 @@ exit 0
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("latest-run-not-completed:active", completed.stdout)
+    def test_health_rejects_every_unsafe_latest_status_without_process_failures(self):
+        for status in ("waiting", "cancel_requested", "failed", "cancelled", "timed_out"):
+            db = self.root / f"latest-{status}.sqlite"
+            self._write_db(db, mode="live")
+            with sqlite3.connect(db) as connection:
+                connection.execute("UPDATE runs SET status=? WHERE id='latest'", (status,))
+            layout = self._layout(db=db)
+            completed = self._run(
+                "repo_agent_health.sh",
+                db=db,
+                deployment=layout / "deployment",
+                extra={"HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "1"},
+            )
+            self.assertNotEqual(completed.returncode, 0, status)
+            self.assertIn(f"latest-run-not-completed:{status}", completed.stdout)
 
     def test_health_marks_non_live_production_gate(self):
         db = self.root / "non-live.sqlite"

@@ -25,6 +25,32 @@ _IDLE_REASONS = frozenset(
 )
 
 
+def _policy(cfg: AgentConfig) -> dict[str, Any]:
+    return {
+        "automerge": cfg.automation.automerge,
+        "require_human_approval": cfg.automation.require_human_approval,
+        "require_checks": cfg.automation.require_checks,
+        "require_test_evidence": cfg.automation.require_test_evidence,
+        "merge_method": cfg.automation.merge_method,
+    }
+
+
+def _resolve_repo_context(cfg: AgentConfig, repo: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    candidates = [entry for entry in cfg.repos if not repo or entry.repo == repo]
+    if not candidates:
+        return None, "repository_context_not_found"
+    if len(candidates) != 1:
+        return None, "ambiguous_repository_context"
+    entry = candidates[0]
+    return {
+        "repo": entry.repo,
+        "board": entry.board,
+        "clone_path": entry.clone_path,
+        "priority": entry.priority,
+        "policy": _policy(cfg),
+    }, None
+
+
 def _step_config(cfg: AgentConfig, *, is_dry: bool, **extra: Any) -> dict[str, Any]:
     return {
         "assignee": cfg.assignee,
@@ -97,22 +123,14 @@ def _normalize_status(
     status = str(run_status or "")
     failed = _failed_steps(summaries)
     if failed:
-        # Preserve exact terminal failure labels from process evidence when the host
-        # already reported one; otherwise promote to failed.
         if status in _TERMINAL_FAILURES:
             return status, status
         return "failed", "failed"
-
     list_status = str(list_out.get("status") or "")
     decide_status = str(decide_out.get("status") or "")
     action = str(decide_out.get("action") or "")
     reason = str(decide_out.get("reason") or list_out.get("reason") or "")
-    idle = (
-        list_status == "noop"
-        or decide_status == "noop"
-        or action in {"", "skip"}
-        or reason in _IDLE_REASONS
-    )
+    idle = list_status == "noop" or decide_status == "noop" or action in {"", "skip"} or reason in _IDLE_REASONS
     if idle and status in {"", "completed", "succeeded"}:
         return "idle", reason or "idle"
     return status or "completed", status or "completed"
@@ -133,66 +151,31 @@ async def run_pr_triage_decide(
     """Run the pr_triage package path once (decide + gated branch effectors)."""
     cfg = config or load_config()
     is_dry = _resolve_dry_run(cfg, dry_run)
-
-    if not cfg.repos and not repo and not pr_number:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        return PathRunResult(
-            run_id=run_id or f"pr-triage-empty-{stamp}",
-            path_id=PATH_ID,
-            dry_run=is_dry,
-            ticks=0,
-            stopped_reason="no_repositories",
-            summary={
-                "run_status": "idle",
-                "repo": "",
-                "pr_number": None,
-                "action": "skip",
-                "reason": "no_repositories",
-                "failed_steps": [],
-                "worked": False,
-            },
-            status="idle",
-            action="skip",
-        )
-
-    resolved_repo = repo or (cfg.repos[0].repo if cfg.repos else "")
-    board = cfg.repos[0].board if cfg.repos else ""
-    clone_path = cfg.repos[0].clone_path if cfg.repos else ""
-    for entry in cfg.repos:
-        if entry.repo == resolved_repo:
-            board = entry.board
-            clone_path = entry.clone_path
-            break
-
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rid = run_id or f"pr-triage-{stamp}-{uuid.uuid4().hex[:8]}"
-    receipt = str(
-        Path(cfg.paths.merge_receipts)
-        / f"merge-{resolved_repo.replace('/', '_')}-{pr_number or 'auto'}-{rid}.json"
-    )
-    step_config = _step_config(
-        cfg,
-        is_dry=is_dry,
-        repo=resolved_repo,
-        board=board,
-        clone_path=clone_path,
-        worktree_root=cfg.paths.worktree_root,
-        receipt_path=receipt,
-    )
+    context, context_error = _resolve_repo_context(cfg, repo)
+    if context is None:
+        reason = "no_repositories" if not cfg.repos else (context_error or "repository_context_not_found")
+        return PathRunResult(
+            run_id=rid, path_id=PATH_ID, dry_run=is_dry, ticks=0,
+            stopped_reason=reason,
+            summary={"run_status": "failed" if cfg.repos else "idle", "repo": repo or "", "pr_number": pr_number, "action": "skip", "reason": reason, "failed_steps": [], "worked": False},
+            status="failed" if cfg.repos else "idle", action="skip",
+        )
+    resolved_repo = str(context["repo"])
+    board = str(context["board"])
+    clone_path = str(context["clone_path"])
+    receipt = str(Path(cfg.paths.merge_receipts) / f"merge-{resolved_repo.replace('/', '_')}-{pr_number or 'auto'}-{rid}.json")
+    step_config = _step_config(cfg, is_dry=is_dry, **context, worktree_root=cfg.paths.worktree_root, receipt_path=receipt)
 
-    dry_input = {"dry_run": is_dry}
+
+    candidate = str(cfg.raw.get("candidate") or "")
+    dry_input = {"dry_run": is_dry, "run_id": rid, "path_id": PATH_ID, **({"candidate": candidate} if candidate else {}), **context}
     list_input: dict[str, Any] = {
-        "repo": resolved_repo,
-        "dry_run": is_dry,
+        **dry_input,
         "limit": limit,
     }
-    load_input: dict[str, Any] = {
-        "repo": resolved_repo,
-        "dry_run": is_dry,
-    }
-    if pr_number:
-        load_input["number"] = pr_number
-
+    load_input: dict[str, Any] = dict(dry_input)
     effector_inputs: dict[str, dict[str, Any]] = {
         "list_ai_fix_prs": list_input,
         "load_pr_fields": load_input,
@@ -209,6 +192,7 @@ async def run_pr_triage_decide(
             "automerge": step_config["automerge"],
             "branch_prefix": step_config["branch_prefix"],
             "base_branch": step_config["base_branch"],
+            "require_human_approval": step_config["require_human_approval"],
         },
         "claim_pr": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
         "merge": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},

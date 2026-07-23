@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import tempfile
 from pathlib import Path
-
 from repo_agent.envelope import Request, Result
 
 from repo_agent.adapters_cli import CommandError, hermes_kanban_json, run_cmd
 from repo_agent.adapters_git import (
+    branch_config_get,
     branch_exists,
     delete_local_branch,
+    is_dirty,
+    local_branch_head,
     parse_worktree_porcelain,
+    status_porcelain,
     worktree_list,
     worktree_remove,
 )
@@ -36,7 +42,33 @@ def _task_marker_matches(task: object, marker: str) -> bool:
     if not isinstance(task, dict):
         return False
     body = str(task.get("body") or task.get("description") or "")
-    return bool(re.search(r"(?m)^Idempotency-Key:\s*" + re.escape(marker) + r"\s*$", body))
+    return bool(re.search(r"(?m)^Idempotency-Key:\s*" + re.escape(marker) + r"$", body))
+
+
+def _cleanup_provenance(data: dict[str, object], cfg: dict[str, object], branch: str, conduction: dict[str, object] | None = None) -> dict[str, str]:
+    conduction = conduction or {}
+    parsed = next((conduction[key] for key in ("dispatch_parse_issue_ref", "parse_issue_ref") if isinstance(conduction.get(key), dict)), {})
+    receipt = next((conduction[key] for key in ("dispatch_write_dispatch_receipt", "write_dispatch_receipt") if isinstance(conduction.get(key), dict)), {})
+    return {
+        "task": str(data.get("task_id") or cfg.get("task_id") or parsed.get("task_id") or "").strip(),
+        "issue": str(data.get("issue") or cfg.get("issue") or parsed.get("issue") or "").strip(),
+        "receipt": str(data.get("receipt_id") or cfg.get("receipt_id") or receipt.get("receipt_path") or data.get("receipt_path") or cfg.get("receipt_path") or "").strip(),
+        "repo": str(data.get("repo") or cfg.get("repo") or parsed.get("repo") or "").strip(),
+        "branch": branch,
+    }
+
+
+def _cleanup_owner_matches(clone_path: str, branch: str, expected: dict[str, str]) -> bool:
+    keys = ("task", "issue", "receipt", "repo")
+    if not all(expected.get(key) for key in keys):
+        return False
+    for key in keys:
+        try:
+            if branch_config_get(clone_path, branch, f"repo-agent-{key}").strip() != expected[key]:
+                return False
+        except CommandError:
+            return False
+    return True
 
 
 def _task_id(task: dict[str, object]) -> object:
@@ -46,12 +78,8 @@ def _task_id(task: dict[str, object]) -> object:
 def parse_issue_from_branch(request: Request) -> Result:
     """Pure: extract issue number from ai/fix/<n>-... branch name."""
     data = input_of(request)
-    branch = str(
-        data.get("branch")
-        or cfg_of(request).get("branch")
-        or cond_get(request, "branch", "repair_push_branch", "write_merge_receipt", "comment_pr")
-        or ""
-    )
+    context = cond_blob(request, "dispatch_parse_issue_ref", "dispatch_prepare_worktree", "dispatch_write_dispatch_receipt", "triage_load_pr_fields", "triage_repair_prepare_worktree", "triage_repair_push_branch", "repair_push_branch", "write_merge_receipt", "comment_pr")
+    branch = str(data.get("branch") or cfg_of(request).get("branch") or context.get("branch") or "")
     if not branch:
         return noop("no_branch", branch=branch)
     m = re.search(r"(?:^|/)ai/fix/(\d+)", branch)
@@ -59,7 +87,7 @@ def parse_issue_from_branch(request: Request) -> Result:
         m = re.search(r"/(\d+)(?:-|$)", branch)
     if not m:
         return fail("unparseable_branch", failure_class="terminal", retry_safe=False, branch=branch, idempotency_key=f"cleanup:branch:{branch}:parse")
-    return ok(status="parsed", issue=int(m.group(1)), branch=branch)
+    return ok(status="parsed", issue=int(m.group(1)), branch=branch, **{key: context[key] for key in ("repo", "clone_path", "worktree_path", "task_id", "receipt_path") if context.get(key) not in (None, "")})
 
 
 def check_issue_closed(request: Request) -> Result:
@@ -72,7 +100,7 @@ def check_issue_closed(request: Request) -> Result:
     upstream = upstream_noop(request, "parse_issue_from_branch", "cleanup_parse_issue_from_branch")
     if upstream:
         return noop(str(upstream.get("reason") or "no_branch"), **{k: v for k, v in upstream.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}})
-    repo = str(data.get("repo") or cfg.get("repo") or "")
+    repo = str(data.get("repo") or parsed.get("repo") or cfg.get("repo") or "")
     issue = int(data.get("issue") or parsed.get("issue") or 0)
     gh = str(cfg.get("gh_cli") or "gh")
     if not repo or not issue:
@@ -106,7 +134,7 @@ def check_no_open_pr_for_branch(request: Request) -> Result:
     if upstream:
         return noop(str(upstream.get("reason") or "no_branch"), **{k: v for k, v in upstream.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}})
     parsed = cond_blob(request, "parse_issue_from_branch", "parse", "cleanup_parse_issue_from_branch")
-    repo = str(data.get("repo") or cfg.get("repo") or "")
+    repo = str(data.get("repo") or parsed.get("repo") or cfg.get("repo") or "")
     branch = str(data.get("branch") or parsed.get("branch") or cfg.get("branch") or "")
     gh = str(cfg.get("gh_cli") or "gh")
     if not repo or not branch:
@@ -151,35 +179,52 @@ def remove_worktree(request: Request) -> Result:
             return noop("issue_still_open", closed=False, issue=closed_blob.get("issue"))
         if open_pr_blob and open_pr_blob.get("safe_to_cleanup") is False:
             return noop("open_pr_exists", safe_to_cleanup=False, open_count=open_pr_blob.get("open_count"))
-    clone_path = str(data.get("clone_path") or cfg.get("clone_path") or "")
-    worktree_path = str(data.get("worktree_path") or cfg.get("worktree_path") or "")
+    prepared = cond_blob(request, "dispatch_prepare_worktree", "prepare_worktree", "triage_repair_prepare_worktree")
+    parsed = cond_blob(request, "dispatch_parse_issue_ref", "parse_issue_from_branch", "cleanup_parse_issue_from_branch")
+    clone_path = str(data.get("clone_path") or cfg.get("clone_path") or prepared.get("clone_path") or parsed.get("clone_path") or "")
+    worktree_path = str(data.get("worktree_path") or cfg.get("worktree_path") or prepared.get("worktree_path") or "")
     force = bool(data.get("force", False))
     if not clone_path or not worktree_path:
-        return fail("missing_clone_or_worktree", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=worktree_path, idempotency_key=f"cleanup:worktree:{clone_path}:{worktree_path}:remove")
-    worktree = Path(worktree_path)
+        return fail("missing_clone_or_worktree", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=worktree_path, idempotency_key=cleanup_key)
+    worktree = Path(worktree_path).resolve()
     if dry:
-        return planned(clone_path=clone_path, worktree_path=worktree_path, force=force)
+        return planned(clone_path=clone_path, worktree_path=str(worktree), force=force)
     if not worktree.exists():
-        return fail("worktree_missing", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=worktree_path, branch=str(data.get("branch") or cfg.get("branch") or ""), idempotency_key=f"cleanup:worktree:{clone_path}:{worktree_path}:remove")
-    expected_branch = str(data.get("branch") or cfg.get("branch") or "")
+        expected_branch = str(data.get("branch") or cfg.get("branch") or parsed.get("branch") or prepared.get("branch") or "")
+        if not expected_branch:
+            return fail("worktree_missing", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, idempotency_key=cleanup_key)
+        expected = _cleanup_provenance(data, cfg, expected_branch, data.get("conduction") if isinstance(data.get("conduction"), dict) else None)
+        try:
+            if status_porcelain(clone_path).strip():
+                return fail("clone_dirty", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), mutated=False)
+            if not branch_exists(clone_path, expected_branch) or not _cleanup_owner_matches(clone_path, expected_branch, expected):
+                return fail("worktree_provenance_unavailable", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
+        except CommandError as exc:
+            return fail("worktree_provenance_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
+        return ok(status="already_absent", clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, idempotency_key=cleanup_key, mutated=False, retry_safe=True)
+    expected_branch = str(data.get("branch") or cfg.get("branch") or parsed.get("branch") or prepared.get("branch") or "")
+    expected = _cleanup_provenance(data, cfg, expected_branch, data.get("conduction") if isinstance(data.get("conduction"), dict) else None)
     try:
+        if status_porcelain(clone_path).strip():
+            return fail("clone_dirty", failure_class="terminal", retry_safe=False, clone_path=clone_path, mutated=False)
         rows = parse_worktree_porcelain(worktree_list(clone_path))
     except CommandError as exc:
-        return fail("worktree_provenance_read_failed", failure_class="retryable_read", retry_safe=True, mutated=False, error=str(exc), clone_path=clone_path, worktree_path=worktree_path, branch=expected_branch, idempotency_key=cleanup_key)
-    matches = [row for row in rows if str(Path(row.get("path") or "")).resolve() == str(worktree.resolve())]
-    if not matches or (expected_branch and matches[0].get("branch") != expected_branch):
-        return fail("worktree_provenance_mismatch", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=worktree_path, branch=expected_branch, actual_branch=(matches[0].get("branch") if matches else ""), idempotency_key=cleanup_key)
+        return fail("worktree_provenance_read_failed", failure_class="retryable_read", retry_safe=True, mutated=False, error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, idempotency_key=cleanup_key)
+    matches = [row for row in rows if str(Path(row.get("path") or "").resolve()) == str(worktree)]
+    if not matches:
+        return fail("worktree_provenance_mismatch", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
+    row = matches[0]
+    if row.get("locked") or str(row.get("branch") or "") != expected_branch:
+        return fail("foreign_worktree_ownership", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, actual_branch=row.get("branch"), locked=bool(row.get("locked")), mutated=False, idempotency_key=cleanup_key)
+    if not _cleanup_owner_matches(clone_path, expected_branch, expected):
+        return fail("foreign_worktree_ownership", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
+    if is_dirty(str(worktree)):
+        return fail("worktree_dirty", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
     try:
-        worktree_remove(clone_path, worktree_path, force=force)
+        worktree_remove(clone_path, str(worktree), force=force)
     except CommandError as exc:
-        try:
-            remaining = parse_worktree_porcelain(worktree_list(clone_path))
-        except CommandError:
-            remaining = matches
-        if not any(str(Path(row.get("path") or "")).resolve() == str(worktree.resolve()) for row in remaining):
-            return ok(status="already_absent", clone_path=clone_path, worktree_path=worktree_path, branch=expected_branch, idempotency_key=f"cleanup:worktree:{clone_path}:{worktree_path}:remove", mutated=True, reconciled=True)
-        return fail("remove_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), clone_path=clone_path, worktree_path=worktree_path, branch=expected_branch, idempotency_key=f"cleanup:worktree:{clone_path}:{worktree_path}:remove", mutated=True)
-    return ok(status="removed", clone_path=clone_path, worktree_path=worktree_path, branch=expected_branch, idempotency_key=f"cleanup:worktree:{clone_path}:{worktree_path}:remove", mutated=True, retry_safe=True)
+        return fail("remove_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
+    return ok(status="removed", clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, idempotency_key=cleanup_key, mutated=True, retry_safe=True)
 
 
 def delete_local_fix_branch(request: Request) -> Result:
@@ -189,20 +234,32 @@ def delete_local_fix_branch(request: Request) -> Result:
     cfg = cfg_of(request)
     parsed = cond_blob(request, "parse_issue_from_branch", "parse", "cleanup_parse_issue_from_branch")
     removed = cond_blob(request, "remove_worktree", "cleanup_remove_worktree")
-    if removed.get("status") in {"noop", *_TERMINAL_PROCESS_STATUSES}:
-        return noop("skipped_after_remove_guard", upstream_reason=removed.get("reason"), upstream_status=removed.get("status"))
-    clone_path = str(data.get("clone_path") or cfg.get("clone_path") or "")
+    clone_path = str(data.get("clone_path") or parsed.get("clone_path") or cfg.get("clone_path") or "")
     branch = str(data.get("branch") or parsed.get("branch") or cfg.get("branch") or "")
     force = bool(data.get("force", True))
-    if not clone_path or not branch:
-        return fail("missing_clone_or_branch", failure_class="terminal", retry_safe=False, clone_path=clone_path, branch=branch, idempotency_key=f"cleanup:branch:{clone_path}:{branch}:delete")
     if dry:
         return planned(clone_path=clone_path, branch=branch, force=force)
+    if removed and removed.get("status") in {"noop", *_TERMINAL_PROCESS_STATUSES}:
+        return noop("skipped_after_remove_guard", upstream_reason=removed.get("reason"), upstream_status=removed.get("status"))
+    if removed and (removed.get("ok") is not True or removed.get("status") not in {"removed", "already_absent"}):
+        return fail("remove_worktree_evidence_missing", failure_class="terminal", retry_safe=False, evidence=removed)
+    if not removed and not all(data.get(key) for key in ("task_id", "issue", "receipt_path", "repo")):
+        return fail("remove_worktree_evidence_missing", failure_class="terminal", retry_safe=False, evidence=removed)
+    if not clone_path or not branch:
+        return fail("missing_clone_or_branch", failure_class="terminal", retry_safe=False, clone_path=clone_path, branch=branch, idempotency_key=f"cleanup:branch:{clone_path}:{branch}:delete")
     key = f"branch:{clone_path}:{branch}:delete"
+    expected = _cleanup_provenance(data, cfg, branch, data.get("conduction") if isinstance(data.get("conduction"), dict) else None)
+    try:
+        if not branch_exists(clone_path, branch):
+            return ok(status="already_absent", clone_path=clone_path, branch=branch, idempotency_key=key, mutated=False)
+        if not _cleanup_owner_matches(clone_path, branch, expected):
+            return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, clone_path=clone_path, branch=branch, mutated=False, idempotency_key=key)
+    except CommandError as exc:
+        return fail("branch_provenance_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone_path, branch=branch, mutated=False, idempotency_key=key)
     try:
         delete_local_branch(clone_path, branch, force=force)
     except CommandError as exc:
-        return fail("delete_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), idempotency_key=key, mutated=True)
+        return fail("delete_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), idempotency_key=key, mutated=False)
     try:
         if branch_exists(clone_path, branch):
             return fail("delete_not_confirmed", failure_class="reconcile_then_retry", retry_safe=False, branch=branch, idempotency_key=key, mutated=True)
@@ -262,10 +319,13 @@ def release_active_issue_claim(request: Request) -> Result:
     claim_path = str(data.get("claim_path") or cfg.get("active_issue_path") or "").strip()
     repo = str(data.get("repo") or closed.get("repo") or "").strip()
     raw_issue = data.get("issue") or (parsed or {}).get("issue") or closed.get("issue")
-    try:
-        issue = int(raw_issue)
-    except (TypeError, ValueError):
+    if isinstance(raw_issue, bool):
         issue = 0
+    else:
+        try:
+            issue = int(raw_issue)
+        except (TypeError, ValueError):
+            issue = 0
     if not claim_path:
         return fail("missing_claim_path", failure_class="terminal", retry_safe=False)
     if not repo or issue <= 0:
@@ -283,6 +343,10 @@ def release_active_issue_claim(request: Request) -> Result:
     claim_board = str(payload.get("board") or "").strip()
     claim_at = str(payload.get("claimedAt") or "").strip()
     claim_issue = payload.get("issue")
+
+
+
+
     if payload.get("version") != 1 or not claim_repo or not claim_board or not claim_at or isinstance(claim_issue, bool) or not isinstance(claim_issue, int) or claim_issue <= 0:
         return fail("claim_malformed", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload)
     if claim_repo != repo:
@@ -297,6 +361,59 @@ def release_active_issue_claim(request: Request) -> Result:
         return fail("unlink_failed", failure_class="reconcile_then_retry", retry_safe=False, claim_path=str(path), error=str(exc), mutated=True)
     return ok(status="released", claim_path=str(path), repo=repo, issue=issue, mutated=True)
 
+
+def write_cleanup_receipt(request: Request) -> Result:
+    data = input_of(request)
+    cfg = cfg_of(request)
+    path = str(data.get("receipt_path") or cfg.get("receipt_path") or "").strip()
+    if not path:
+        return fail("missing_receipt_path", failure_class="terminal", retry_safe=False)
+    conduction = data.get("conduction")
+    required = {
+        "parse_issue_from_branch": ("parse_issue_from_branch", "cleanup_parse_issue_from_branch"),
+        "check_issue_closed": ("check_issue_closed", "cleanup_check_issue_closed"),
+        "check_no_open_pr": ("check_no_open_pr", "cleanup_check_no_open_pr"),
+        "remove_worktree": ("remove_worktree", "cleanup_remove_worktree"),
+        "delete_local_fix_branch": ("delete_local_fix_branch", "cleanup_delete_local_fix_branch"),
+        "release_active_issue_claim": ("release_active_issue_claim", "cleanup_release_active_issue_claim"),
+    }
+    if not isinstance(conduction, dict):
+        return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False, receipt_path=path)
+    evidence = {
+        name: next((conduction[key] for key in aliases if isinstance(conduction.get(key), dict)), None)
+        for name, aliases in required.items()
+    }
+    if any(blob is None for blob in evidence.values()):
+        return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False, receipt_path=path)
+    steps = {name: {"status": blob.get("status"), "mutated": bool(blob.get("mutated", False)), "reason": blob.get("reason"), "failure": blob.get("failure_class") or blob.get("error")} for name, blob in evidence.items()}
+    cancelled = any(blob.get("status") in {"cancelled", "timed_out"} for blob in evidence.values())
+    failed = any(blob.get("ok") is False for blob in evidence.values())
+    if cancelled:
+        outcome = "cancelled"
+    elif failed:
+        outcome = "partial" if any(item["mutated"] for item in steps.values()) else "failure"
+    elif all(blob.get("ok") is True for blob in evidence.values()):
+        outcome = "noop" if all(blob.get("status") in {"noop", "already_absent"} for blob in evidence.values()) else "success"
+    else:
+        return fail("cleanup_evidence_inconclusive", failure_class="terminal", retry_safe=False, receipt_path=path, steps=steps)
+    payload = dict(data.get("payload") or {})
+    payload.update({"phase": "CLEANUP_TERMINAL", "outcome": outcome, "run_id": data.get("run_id") or cfg.get("run_id") or "", "path_id": data.get("path_id") or cfg.get("path_id") or "cleanup", "process_id": data.get("process_id") or cfg.get("process_id") or "", "entity": {"task": data.get("task_id") or cfg.get("task_id") or "", "repo": data.get("repo") or cfg.get("repo") or "", "issue": data.get("issue") or cfg.get("issue") or "", "receipt": data.get("receipt_id") or path, "branch": data.get("branch") or cfg.get("branch") or "", "clone_path": data.get("clone_path") or cfg.get("clone_path") or "", "worktree_path": data.get("worktree_path") or cfg.get("worktree_path") or ""}, "steps": steps})
+    if dry_run_flag(request):
+        return planned(receipt_path=path, payload=payload)
+    p = Path(path)
+    try:
+        if p.exists():
+            existing = json.loads(p.read_text(encoding="utf-8"))
+            if existing == payload:
+                return ok(status="exists", receipt_path=path, payload=payload)
+            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if json.loads(p.read_text(encoding="utf-8")) != payload:
+            raise ValueError("receipt read-back mismatch")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, receipt_path=path, error=str(exc))
+    return ok(status="written", receipt_path=path, payload=payload, mutated=True)
 
 def create_maintenance_task(request: Request) -> Result:
     """Create one Kanban maintenance task per deterministic repo/PR marker."""

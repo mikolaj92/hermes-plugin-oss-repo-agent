@@ -471,6 +471,14 @@ class IssueToPrTests(unittest.TestCase):
         miss = issue_to_pr.complete_kanban_task(req({"board": "b"}))
         self.assertEqual(miss["reason"], "missing_board_or_task_id")
 
+    def test_complete_kanban_task_blocks_failed_dispatch_receipt(self) -> None:
+        out = issue_to_pr.complete_kanban_task(req({
+            "board": "b", "task_id": "t1", "dry_run": False,
+            "conduction": {"write_dispatch_receipt": {"status": "failed", "ok": False, "reason": "receipt_write_failed"}},
+        }))
+        self.assertEqual(out["reason"], "upstream_failed")
+        self.assertFalse(out["mutated"])
+
     def test_refresh_clone_base_paths(self) -> None:
         dry = issue_to_pr.refresh_clone_base(
             req({"clone_path": "/c", "base_branch": "main", "dry_run": True})
@@ -479,13 +487,21 @@ class IssueToPrTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, ".git").mkdir()
             with mock.patch(
-                "repo_agent.steps.issue_to_pr.git", return_value="ok"
-            ):
+                "repo_agent.steps.issue_to_pr.status_porcelain", return_value=""
+            ), mock.patch(
+                "repo_agent.steps.issue_to_pr.remote_url", return_value="origin"
+            ), mock.patch(
+                "repo_agent.steps.issue_to_pr.remote_ref", return_value="deadbeef"
+            ), mock.patch("repo_agent.steps.issue_to_pr.git"):
                 ok_out = issue_to_pr.refresh_clone_base(
                     req({"clone_path": tmp, "base_branch": "main", "dry_run": False})
                 )
             self.assertEqual(ok_out["status"], "refreshed")
         with mock.patch(
+            "repo_agent.steps.issue_to_pr.status_porcelain", return_value=""
+        ), mock.patch(
+            "repo_agent.steps.issue_to_pr.remote_url", return_value="origin"
+        ), mock.patch(
             "repo_agent.steps.issue_to_pr.git",
             side_effect=CommandError(["git"], 1, "", "fetch fail"),
         ):
@@ -494,7 +510,7 @@ class IssueToPrTests(unittest.TestCase):
                 bad = issue_to_pr.refresh_clone_base(
                     req({"clone_path": tmp, "dry_run": False})
                 )
-        self.assertEqual(bad["reason"], "refresh_fetch_failed")
+        self.assertEqual(bad["reason"], "refresh_clone_check_failed")
 
     def test_prepare_worktree_paths(self) -> None:
         dry = issue_to_pr.prepare_worktree(
@@ -510,15 +526,26 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(dry["status"], "planned")
         self.assertIn("worktree_path", dry)
         with mock.patch(
+            "repo_agent.steps.issue_to_pr.status_porcelain", return_value=""
+        ), mock.patch(
+            "repo_agent.steps.issue_to_pr.remote_url", return_value="origin"
+        ), mock.patch(
+            "repo_agent.steps.issue_to_pr.remote_ref", return_value="deadbeef"
+        ), mock.patch(
+            "repo_agent.steps.issue_to_pr.worktree_list", return_value=""
+        ), mock.patch(
             "repo_agent.steps.issue_to_pr.branch_exists", return_value=False
         ), mock.patch(
             "repo_agent.steps.issue_to_pr.git"
         ), mock.patch(
             "repo_agent.steps.issue_to_pr.worktree_add"
         ), mock.patch(
+            "repo_agent.steps.issue_to_pr.branch_config_set"
+        ), mock.patch(
             "repo_agent.steps.issue_to_pr.rev_parse", return_value="deadbeef"
         ):
             with tempfile.TemporaryDirectory() as tmp:
+                Path(tmp, ".git").mkdir()
                 out = issue_to_pr.prepare_worktree(
                     req(
                         {
@@ -533,12 +560,15 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(out["status"], "prepared")
         self.assertEqual(out["head"], "deadbeef")
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.branch_exists", return_value=False
+            "repo_agent.steps.issue_to_pr.status_porcelain", return_value=""
+        ), mock.patch(
+            "repo_agent.steps.issue_to_pr.remote_url", return_value="origin"
         ), mock.patch(
             "repo_agent.steps.issue_to_pr.git",
             side_effect=CommandError(["git"], 1, "", "no base"),
         ):
             with tempfile.TemporaryDirectory() as tmp:
+                Path(tmp, ".git").mkdir()
                 bad = issue_to_pr.prepare_worktree(
                     req(
                         {
@@ -549,7 +579,7 @@ class IssueToPrTests(unittest.TestCase):
                         }
                     )
                 )
-        self.assertEqual(bad["reason"], "worktree_prepare_failed")
+        self.assertEqual(bad["reason"], "clone_ref_check_failed")
 
     def test_open_pull_request_success_structured_and_failure(self) -> None:
         def fake_run(cmd, **kwargs):
@@ -785,7 +815,7 @@ class TriageTests(unittest.TestCase):
         merge = triage.decide_triage_action(
             req(
                 {
-                    "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "labels": []},
+                    "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "labels": [], "author": {"login": "o"}},
                     "checks_pass": True,
                     "evidence_pass": True,
                     "automerge": True,
@@ -796,7 +826,7 @@ class TriageTests(unittest.TestCase):
         repair = triage.decide_triage_action(
             req(
                 {
-                    "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "labels": []},
+                    "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "labels": [], "author": {"login": "o"}},
                     "checks_pass": False,
                     "evidence_pass": True,
                     "automerge": True,
@@ -807,7 +837,7 @@ class TriageTests(unittest.TestCase):
         block = triage.decide_triage_action(
             req(
                 {
-                    "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "labels": []},
+                    "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "labels": [], "author": {"login": "o"}},
                     "checks_pass": True,
                     "evidence_pass": False,
                     "automerge": True,
@@ -930,6 +960,23 @@ class TriageTests(unittest.TestCase):
             listed = triage.list_ai_fix_prs(req({"repo": "o/r"}))
         self.assertEqual(listed["count"], 1)
         self.assertEqual(listed["prs"][0]["number"], 1)
+        with mock.patch(
+            "repo_agent.steps.triage.run_cmd",
+            side_effect=[
+                SimpleNamespace(stdout="[]", stderr="", returncode=0),
+                SimpleNamespace(stdout=json.dumps([{"number": 7, "headRefName": "ai/fix/7-x"}]), stderr="", returncode=0),
+            ],
+        ):
+            multi = triage.list_ai_fix_prs(req({"repos": [{"repo": "o/first"}, {"repo": "o/second"}]}))
+        self.assertEqual(multi["repo"], "o/second")
+        self.assertEqual(multi["prs"][0]["repo"], "o/second")
+        with mock.patch(
+            "repo_agent.steps.triage.run_cmd",
+            return_value=SimpleNamespace(stdout=json.dumps({"number": 7, "title": "t", "state": "OPEN"}), stderr="", returncode=0),
+        ) as view:
+            loaded_multi = triage.load_pr_fields(req({"conduction": {"triage_list_ai_fix_prs": multi}}))
+        self.assertEqual(loaded_multi["repo"], "o/second")
+        self.assertIn("o/second", view.call_args.args[0])
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
             return_value=SimpleNamespace(
@@ -1347,6 +1394,29 @@ class CleanupTests(unittest.TestCase):
             self.assertTrue(out["mutated"])
             self.assertFalse(path.exists())
 
+    def test_release_active_claim_rejects_boolean_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "claim.json"
+            path.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": True, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
+            out = cleanup.release_active_issue_claim(
+                req(
+                    {
+                        "claim_path": str(path),
+                        "repo": "o/r",
+                        "issue": 1,
+                        "dry_run": False,
+                        "conduction": {
+                            "remove_worktree": {"status": "already_absent", "ok": True},
+                            "check_issue_closed": {"closed": True, "ok": True},
+                            "check_no_open_pr": {"safe_to_cleanup": True, "ok": True},
+                            "delete_local_fix_branch": {"status": "already_absent", "ok": True},
+                        },
+                    }
+                )
+            )
+            self.assertEqual(out["reason"], "claim_malformed")
+            self.assertTrue(path.exists())
+
     def test_release_active_claim_noops_without_branch(self) -> None:
         out = cleanup.release_active_issue_claim(
             req(
@@ -1408,24 +1478,33 @@ class CleanupTests(unittest.TestCase):
             req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": True})
         )
         self.assertEqual(dry["status"], "planned")
-        with mock.patch("repo_agent.steps.cleanup.delete_local_branch"):
+        with mock.patch(
+            "repo_agent.steps.cleanup.branch_exists", side_effect=[True, False]
+        ), mock.patch(
+            "repo_agent.steps.cleanup._cleanup_owner_matches", return_value=True
+        ), mock.patch("repo_agent.steps.cleanup.delete_local_branch"):
             ok_out = cleanup.delete_local_fix_branch(
                 req(
                     {
                         "clone_path": "/c",
                         "branch": "ai/fix/1",
                         "dry_run": False,
+                        "conduction": {"cleanup_remove_worktree": {"ok": True, "status": "removed"}},
                     }
                 )
             )
         self.assertEqual(ok_out["status"], "deleted")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
+            "repo_agent.steps.cleanup.branch_exists", return_value=True
+        ), mock.patch(
+            "repo_agent.steps.cleanup._cleanup_owner_matches", return_value=True
+        ), mock.patch(
             "repo_agent.steps.cleanup.delete_local_branch",
             side_effect=CommandError(["git"], 1, "", "not found"),
         ):
             bad = cleanup.delete_local_fix_branch(
-                req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": False})
+                req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": False, "conduction": {"cleanup_remove_worktree": {"ok": True, "status": "removed"}}})
             )
         self.assertEqual(bad["reason"], "delete_failed")
 

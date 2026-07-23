@@ -270,6 +270,12 @@ capability = "repo_agent_step"
 conduction = ["remove_worktree", "parse_issue_from_branch", "check_issue_closed", "check_no_open_pr", "delete_local_fix_branch"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "repo_agent.steps.cleanup.release_active_issue_claim" }
+[[correlation_paths.effectors]]
+id = "write_cleanup_receipt"
+capability = "repo_agent_step"
+conduction = ["parse_issue_from_branch", "check_issue_closed", "check_no_open_pr", "remove_worktree", "delete_local_fix_branch", "release_active_issue_claim"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.write_cleanup_receipt" }
 
 # The full worker is one Fala run. Prefixes keep process IDs unique while
 # preserving each domain handler's stable operation name in config.
@@ -384,7 +390,7 @@ config = { handler = "repo_agent.steps.issue_to_pr.complete_kanban_task" }
 [[correlation_paths.effectors]]
 id = "triage_list_ai_fix_prs"
 capability = "repo_agent_step"
-conduction = ["dispatch_complete_kanban_task"]
+conduction = ["intake_poll"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "repo_agent.steps.triage.list_ai_fix_prs" }
 
@@ -489,9 +495,9 @@ config = { handler = "repo_agent.steps.issue_to_pr.push_branch" }
 [[correlation_paths.effectors]]
 id = "cleanup_parse_issue_from_branch"
 capability = "repo_agent_step"
-conduction = ["triage_write_merge_receipt", "triage_close_linked_issue", "triage_comment_pr", "triage_repair_push_branch"]
-adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+conduction = ["triage_write_merge_receipt", "triage_close_linked_issue", "triage_comment_pr", "triage_repair_push_branch", "dispatch_parse_issue_ref", "dispatch_prepare_worktree", "dispatch_write_dispatch_receipt"]
 config = { handler = "repo_agent.steps.cleanup.parse_issue_from_branch" }
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
 
 [[correlation_paths.effectors]]
 id = "cleanup_check_issue_closed"
@@ -527,6 +533,14 @@ capability = "repo_agent_step"
 conduction = ["cleanup_remove_worktree", "cleanup_parse_issue_from_branch", "cleanup_check_issue_closed", "cleanup_check_no_open_pr", "cleanup_delete_local_fix_branch"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "repo_agent.steps.cleanup.release_active_issue_claim" }
+
+
+[[correlation_paths.effectors]]
+id = "cleanup_write_cleanup_receipt"
+capability = "repo_agent_step"
+conduction = ["cleanup_parse_issue_from_branch", "cleanup_check_issue_closed", "cleanup_check_no_open_pr", "cleanup_remove_worktree", "cleanup_delete_local_fix_branch", "cleanup_release_active_issue_claim"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup.write_cleanup_receipt" }
 
 [runtime.backend]
 kind = "sqlite"

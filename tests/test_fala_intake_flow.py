@@ -166,11 +166,31 @@ class TickAllHostPathTests(unittest.TestCase):
         self.assertEqual(effector_inputs["triage_list_ai_fix_prs"]["limit"], 7)
         self.assertTrue(effector_inputs["cleanup_remove_worktree"]["require_safe"])
         self.assertTrue(effector_inputs["dispatch_prepare_worktree"]["dry_run"])
-        self.assertEqual(effector_inputs["dispatch_prepare_worktree"]["clone_path"], "/tmp/o-r")
+        self.assertNotIn("clone_path", effector_inputs["dispatch_prepare_worktree"])
         self.assertEqual(result["path_id"], "auto_worker")
         self.assertFalse(result["any_failed"])
         self.assertEqual(result["processes"][0]["id"], "intake_poll")
         self.assertEqual(result["processes"][0]["output"]["status"], "planned")
+    def test_multi_repo_auto_worker_does_not_inject_first_repo_context(self) -> None:
+        from repo_agent.tick_all import run_all
+
+        cfg = AgentConfig(
+            mode="dry-run",
+            repos=(
+                RepoEntry(repo="o/first", board="first-board", clone_path="/tmp/first"),
+                RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida"),
+            ),
+        )
+        runner = mock.AsyncMock(return_value=self._host())
+        with mock.patch("repo_agent.tick_all.run_package_path_async", new=runner):
+            asyncio.run(run_all(db_path=Path("/tmp/auto-worker.sqlite"), config=cfg, dry_run=True, limit=7))
+        inputs = runner.await_args.kwargs["effector_inputs"]
+        for value in inputs.values():
+            self.assertNotEqual(value.get("repo"), "o/first")
+            self.assertNotEqual(value.get("board"), "first-board")
+            self.assertNotEqual(value.get("clone_path"), "/tmp/first")
+        self.assertEqual(runner.await_args.kwargs["inputs"]["repos"][1]["repo"], "o/temida")
+
 
     def test_empty_auto_worker_is_idle_and_not_worked(self) -> None:
         from repo_agent.flows.runtime import HostPathRunResult, JournalProcess

@@ -15,6 +15,32 @@ def git(args: list[str], *, cwd: str | Path | None = None, timeout: float = 120.
     proc = run_cmd(cmd, timeout=timeout)
     return proc.stdout.strip()
 
+def status_porcelain(worktree_path: str | Path) -> str:
+    """Return full porcelain status, failing closed on git errors."""
+    return git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree_path)
+
+
+def remote_ref(clone_path: str | Path, remote: str, branch: str) -> str:
+    """Resolve one remote branch to its exact object id."""
+    return git(["rev-parse", "--verify", f"refs/remotes/{remote}/{branch}"], cwd=clone_path)
+
+
+def local_branch_head(clone_path: str | Path, branch: str) -> str:
+    return git(["rev-parse", "--verify", f"refs/heads/{branch}"], cwd=clone_path)
+
+
+def branch_config_get(clone_path: str | Path, branch: str, key: str) -> str:
+    return git(["config", "--local", "--get", f"branch.{branch}.{key}"], cwd=clone_path)
+
+
+def branch_config_set(clone_path: str | Path, branch: str, key: str, value: str) -> None:
+    git(["config", "--local", f"branch.{branch}.{key}", value], cwd=clone_path)
+
+
+def remote_url(clone_path: str | Path, remote: str = "origin") -> str:
+    return git(["remote", "get-url", remote], cwd=clone_path)
+
+
 
 def worktree_list(clone_path: str) -> str:
     return git(["worktree", "list", "--porcelain"], cwd=clone_path)
@@ -86,6 +112,10 @@ def parse_worktree_porcelain(text: str) -> list[dict[str, str]]:
             current["branch"] = ""
         elif line == "bare":
             current["bare"] = "1"
+        elif line == "locked":
+            current["locked"] = "1"
+        elif line.startswith("locked "):
+            current["locked"] = line[len("locked ") :].strip() or "1"
     if current.get("path"):
         rows.append(current)
     return rows

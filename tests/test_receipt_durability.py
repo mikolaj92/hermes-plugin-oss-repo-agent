@@ -126,6 +126,21 @@ class ReceiptDurabilityTests(unittest.TestCase):
             self.assertEqual(merge["status"], "planned")
             self.assertFalse(merge_path.exists())
 
+    def test_supplied_identifiers_survive_receipt_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dispatch_path = Path(tmp) / "dispatch.json"
+            out = issue_to_pr.write_dispatch_receipt(request({
+                "receipt_path": str(dispatch_path),
+                "payload": {"phase": "DISPATCHED", "run_id": "payload-run", "path_id": "payload-path", "process_id": "payload-process", "candidate": "payload-candidate"},
+                "run_id": "input-run", "path_id": "input-path", "process_id": "input-process", "candidate": "input-candidate", "dry_run": False,
+            }))
+            self.assertEqual(out["status"], "written")
+            payload = json.loads(dispatch_path.read_text())
+            self.assertEqual(payload["run_id"], "input-run")
+            self.assertEqual(payload["path_id"], "input-path")
+            self.assertEqual(payload["process_id"], "input-process")
+            self.assertEqual(payload["candidate"], "input-candidate")
+
 
 if __name__ == "__main__":
     unittest.main()

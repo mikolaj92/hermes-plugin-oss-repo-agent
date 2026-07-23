@@ -40,6 +40,45 @@ def _repo_map(cfg: AgentConfig) -> dict[str, dict[str, Any]]:
     }
 
 
+def _policy(cfg: AgentConfig) -> dict[str, Any]:
+    return {
+        "automerge": cfg.automation.automerge,
+        "require_human_approval": cfg.automation.require_human_approval,
+        "require_checks": cfg.automation.require_checks,
+        "require_test_evidence": cfg.automation.require_test_evidence,
+        "merge_method": cfg.automation.merge_method,
+    }
+
+
+def _resolve_repo_context(
+    cfg: AgentConfig,
+    *,
+    repo: str | None,
+    board: str | None,
+    clone_path: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve one configured repository without silently choosing repos[0]."""
+    candidates = list(cfg.repos)
+    if repo:
+        candidates = [entry for entry in candidates if entry.repo == repo]
+    if board:
+        candidates = [entry for entry in candidates if entry.board == board]
+    if clone_path:
+        candidates = [entry for entry in candidates if entry.clone_path == clone_path]
+    if not candidates:
+        return None, "repository_context_not_found"
+    if len(candidates) != 1:
+        return None, "ambiguous_repository_context"
+    entry = candidates[0]
+    return {
+        "repo": entry.repo,
+        "board": entry.board,
+        "clone_path": entry.clone_path,
+        "priority": entry.priority,
+        "policy": _policy(cfg),
+    }, None
+
+
 def _package_path() -> Path:
     return Path(__file__).resolve().parents[3] / "fala-package.toml"
 
@@ -49,6 +88,7 @@ async def run_issue_to_pr_flow(
     db_path: Path,
     config: AgentConfig | None = None,
     dry_run: bool | None = None,
+    repo: str | None = None,
     board: str | None = None,
     task_id: str | None = None,
     clone_path: str | None = None,
@@ -67,26 +107,31 @@ async def run_issue_to_pr_flow(
         is_dry = False
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rid = run_id or f"issue-to-pr-{stamp}-{uuid.uuid4().hex[:8]}"
-    if not cfg.repos and not board and not task_id:
+    context, context_error = _resolve_repo_context(cfg, repo=repo, board=board, clone_path=clone_path)
+    if context is None:
+        reason = "no_repositories" if not cfg.repos else (context_error or "repository_context_not_found")
         return PathRunResult(
             run_id=rid,
             path_id=_PATH_ID,
             dry_run=is_dry,
             ticks=0,
-            stopped_reason="no_repositories",
+            stopped_reason=reason,
             summary={
-                "run_status": "idle",
-                "repos": [],
-                "board": "",
-                "task_id": None,
+                "run_status": "failed" if cfg.repos else "idle",
+                "reason": reason,
+                "repos": list(_repo_map(cfg)),
+                "repo": repo or "",
+                "board": board or "",
+                "clone_path": clone_path or "",
+                "task_id": task_id,
                 "failed_steps": [],
                 "worked": False,
             },
-            status="idle",
+            status="failed" if cfg.repos else "idle",
         )
-
-    resolved_board = board or (cfg.repos[0].board if cfg.repos else "")
-    resolved_clone = clone_path or (cfg.repos[0].clone_path if cfg.repos else "")
+    resolved_repo = str(context["repo"])
+    resolved_board = str(context["board"])
+    resolved_clone = str(context["clone_path"])
     wt_root = worktree_root or cfg.paths.worktree_root
     if not wt_root:
         wt_root = os.environ.get(
@@ -95,8 +140,7 @@ async def run_issue_to_pr_flow(
         )
     receipt = receipt_path or str(Path(cfg.paths.dispatch_receipts) / f"dispatch-{rid}.json")
     step_config: dict[str, Any] = {
-        "board": resolved_board,
-        "clone_path": resolved_clone,
+        **context,
         "worktree_root": wt_root,
         "base_branch": cfg.base_branch,
         "branch_prefix": cfg.branch_prefix,
@@ -113,31 +157,19 @@ async def run_issue_to_pr_flow(
         "pr_opened_label": cfg.labels.pr_opened,
         "generated_label": cfg.labels.generated,
     }
-    dry_input = {"dry_run": is_dry}
+    candidate = str(cfg.raw.get("candidate") or "")
+    dry_input = {"dry_run": is_dry, "run_id": rid, "path_id": _PATH_ID, **({"candidate": candidate} if candidate else {}), **context}
     effector_inputs: dict[str, dict[str, Any]] = {
-        "load_kanban_task": {
-            **dry_input,
-            "board": resolved_board,
-            **({"task_id": task_id} if task_id else {}),
-        },
+        "load_kanban_task": {**dry_input, **({"task_id": task_id} if task_id else {})},
         "parse_issue_ref": dry_input,
-        "prepare_worktree": {
-            **dry_input,
-            "clone_path": resolved_clone,
-            "worktree_root": wt_root,
-            "base_branch": cfg.base_branch,
-        },
+        "prepare_worktree": {**dry_input, "worktree_root": wt_root, "base_branch": cfg.base_branch},
         "run_omp": dry_input,
-        "verify_branch": {**dry_input, "clone_path": resolved_clone, "base_branch": cfg.base_branch},
+        "verify_branch": {**dry_input, "base_branch": cfg.base_branch},
         "push_branch": dry_input,
         "open_pull_request": {**dry_input, "base_branch": cfg.base_branch},
         "apply_pr_labels": dry_input,
         "write_dispatch_receipt": {**dry_input, "receipt_path": receipt},
-        "complete_kanban_task": {
-            **dry_input,
-            "board": resolved_board,
-            "result": "dispatched via issue_to_pr",
-        },
+        "complete_kanban_task": {**dry_input, "result": "dispatched via issue_to_pr"},
     }
     result = await run_package_path_async(
         db_path=db_path,

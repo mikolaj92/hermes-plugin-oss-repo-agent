@@ -56,17 +56,16 @@ def _step_config(cfg: Any, *, dry_run: bool, **extra: Any) -> dict[str, Any]:
     }
 
 
-def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "") -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     repos = [
         {"repo": r.repo, "board": r.board, "clone_path": r.clone_path, "priority": r.priority}
         for r in cfg.repos
     ]
-    repo = cfg.repos[0].repo if cfg.repos else ""
-    board = cfg.repos[0].board if cfg.repos else ""
-    clone_path = cfg.repos[0].clone_path if cfg.repos else ""
-    receipt = str(Path(cfg.paths.dispatch_receipts) / "auto-worker-dispatch.json")
-    merge_receipt = str(Path(cfg.paths.merge_receipts) / "auto-worker-merge.json")
-    common = {"dry_run": dry_run, "repo": repo, "board": board}
+    suffix = run_id or "unidentified"
+    receipt = str(Path(cfg.paths.dispatch_receipts) / f"auto-worker-dispatch-{suffix}.json")
+    merge_receipt = str(Path(cfg.paths.merge_receipts) / f"auto-worker-merge-{suffix}.json")
+    cleanup_receipt = str(Path(cfg.paths.dispatch_receipts) / f"auto-worker-cleanup-{suffix}.json")
+    common = {"dry_run": dry_run, "run_id": run_id, "path_id": "auto_worker"}
     inputs: dict[str, dict[str, Any]] = {
         "intake_poll": {"repos": repos, "limit": limit, "dry_run": dry_run},
         "intake_decide_issue_action": {"dry_run": dry_run},
@@ -75,43 +74,51 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int) -> tuple[dict[str, 
         "intake_kanban": {"dry_run": dry_run},
         "dispatch_load_kanban_task": {**common},
         "dispatch_parse_issue_ref": {"dry_run": dry_run},
-        "dispatch_prepare_worktree": {"dry_run": dry_run, "clone_path": clone_path, "worktree_root": cfg.paths.worktree_root, "base_branch": cfg.base_branch},
+        "dispatch_prepare_worktree": {"dry_run": dry_run, "worktree_root": cfg.paths.worktree_root, "base_branch": cfg.base_branch},
         "dispatch_run_omp": {"dry_run": dry_run},
-        "dispatch_verify_branch": {"dry_run": dry_run, "clone_path": clone_path, "base_branch": cfg.base_branch},
+        "dispatch_verify_branch": {"dry_run": dry_run, "base_branch": cfg.base_branch},
         "dispatch_push_branch": {"dry_run": dry_run},
         "dispatch_open_pull_request": {"dry_run": dry_run, "base_branch": cfg.base_branch},
         "dispatch_apply_pr_labels": {"dry_run": dry_run},
         "dispatch_write_dispatch_receipt": {"dry_run": dry_run, "receipt_path": receipt},
-        "dispatch_complete_kanban_task": {"dry_run": dry_run, "board": board, "result": "dispatched via auto_worker"},
-        "triage_list_ai_fix_prs": {"repo": repo, "dry_run": dry_run, "limit": limit},
-        "triage_load_pr_fields": {"repo": repo, "dry_run": dry_run},
+        "dispatch_complete_kanban_task": {"dry_run": dry_run, "result": "dispatched via auto_worker"},
+        "triage_list_ai_fix_prs": {"dry_run": dry_run, "limit": limit, "repos": repos},
+        "triage_load_pr_fields": {"dry_run": dry_run},
         "triage_evaluate_checks": {"dry_run": dry_run, "require_checks": cfg.automation.require_checks},
         "triage_evaluate_test_evidence": {"dry_run": dry_run, "require_test_evidence": cfg.automation.require_test_evidence},
         "triage_decide_triage_action": {"dry_run": dry_run, "automerge": cfg.automation.automerge, "branch_prefix": cfg.branch_prefix, "base_branch": cfg.base_branch},
         "triage_claim_pr": {**common},
         "triage_merge": {**common},
         "triage_write_merge_receipt": {"dry_run": dry_run, "receipt_path": merge_receipt},
-        "triage_close_linked_issue": {"dry_run": dry_run, "repo": repo},
+        "triage_close_linked_issue": {"dry_run": dry_run},
         "triage_comment_pr": {**common},
         "triage_create_review_fix_task": {**common},
         "triage_build_repair_prompt": {"dry_run": dry_run},
-        "triage_repair_prepare_worktree": {"dry_run": dry_run, "clone_path": clone_path, "worktree_root": cfg.paths.worktree_root, "base_branch": cfg.base_branch},
+        "triage_repair_prepare_worktree": {"dry_run": dry_run, "worktree_root": cfg.paths.worktree_root, "base_branch": cfg.base_branch},
         "triage_repair_run_omp": {"dry_run": dry_run},
         "triage_repair_push_branch": {"dry_run": dry_run},
         "cleanup_parse_issue_from_branch": {**common, "branch": ""},
         "cleanup_check_issue_closed": common.copy(),
         "cleanup_check_no_open_pr": {**common, "branch": ""},
-        "cleanup_remove_worktree": {**common, "clone_path": clone_path, "worktree_path": "", "require_safe": True},
-        "cleanup_delete_local_fix_branch": {**common, "clone_path": clone_path, "branch": ""},
+        "cleanup_remove_worktree": {**common, "worktree_path": "", "require_safe": True},
+        "cleanup_delete_local_fix_branch": {**common, "branch": ""},
         "cleanup_release_active_issue_claim": {**common, "claim_path": cfg.paths.active_issue},
+        "cleanup_write_cleanup_receipt": {**common, "receipt_path": cleanup_receipt},
     }
-    config = _step_config(cfg, dry_run=dry_run, repo=repo, board=board, clone_path=clone_path, receipt_path=receipt, merge_receipt_path=merge_receipt)
-    return {"dry_run": dry_run, "repos": repos, "limit": limit}, {key: {**config, **value} for key, value in inputs.items()}
-
+    config = _step_config(
+        cfg,
+        dry_run=dry_run,
+        receipt_path=receipt,
+        cleanup_receipt_path=cleanup_receipt,
+        merge_receipt_path=merge_receipt,
+        run_id=run_id,
+        path_id="auto_worker",
+    )
+    return {"dry_run": dry_run, "repos": repos, "limit": limit, "run_id": run_id, "path_id": "auto_worker"}, {key: {**config, **value} for key, value in inputs.items()}
 
 async def run_all(*, db_path: Path, config: Any, dry_run: bool, limit: int = 10) -> dict[str, Any]:
-    inputs, effector_inputs = _prefixed_inputs(config, dry_run=dry_run, limit=limit)
     run_id = f"auto-worker-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+    inputs, effector_inputs = _prefixed_inputs(config, dry_run=dry_run, limit=limit, run_id=run_id)
     host = await run_package_path_async(
         db_path=db_path,
         package_path=_PACKAGE_PATH,

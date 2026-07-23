@@ -86,6 +86,8 @@ def poll_eligible_issues(request: Request) -> Result:
                 row = {
                     "repo": repo,
                     "board": board,
+                    "clone_path": str(entry.get("clone_path") or ""),
+                    "priority": entry.get("priority", 0),
                     "number": int(issue.get("number") or 0),
                     "title": str(issue.get("title") or ""),
                     "body": str(issue.get("body") or ""),

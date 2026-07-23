@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from repo_agent.adapters_cli import CommandError
+from repo_agent.adapters_git import branch_config_get
 
 from repo_agent.config import AgentConfig, ConfigError, load_config
 from repo_agent.flows.common import PathRunResult, process_summary, process_values
@@ -22,7 +24,41 @@ _CLEANUP_EFFECTORS = (
     "remove_worktree",
     "delete_local_fix_branch",
     "release_active_issue_claim",
+    "write_cleanup_receipt",
 )
+
+def _resolve_repo_context(
+    cfg: AgentConfig,
+    *,
+    repo: str | None,
+    clone_path: str | None,
+) -> tuple[Any | None, str | None]:
+    candidates = list(cfg.repos)
+    if repo:
+        candidates = [entry for entry in candidates if entry.repo == repo]
+    if clone_path:
+        candidates = [entry for entry in candidates if entry.clone_path == clone_path]
+    if not candidates:
+        return None, "repository_context_not_found"
+    if len(candidates) != 1:
+        return None, "ambiguous_repository_context"
+    return candidates[0], None
+def _read_branch_provenance(clone_path: str, branch: str) -> tuple[dict[str, str] | None, str | None]:
+    if not branch:
+        return None, "missing_branch"
+    values: dict[str, str] = {}
+    for key in ("task", "issue", "receipt", "repo"):
+        try:
+            values[key] = branch_config_get(clone_path, branch, f"repo-agent-{key}").strip()
+        except CommandError as exc:
+            if exc.returncode == 1:
+                values[key] = ""
+            else:
+                return None, "cleanup_provenance_read_failed"
+    if not all(values.values()):
+        return None, "cleanup_provenance_missing"
+    return values, None
+
 
 
 async def run_cleanup_flow(
@@ -35,6 +71,9 @@ async def run_cleanup_flow(
     clone_path: str | None = None,
     worktree_path: str | None = None,
     claim_path: str | None = None,
+    task_id: str | None = None,
+    issue: int | str | None = None,
+    receipt_path: str | None = None,
     run_id: str | None = None,
     worker_id: str = "repo-agent:tick-cleanup",
     max_ticks: int = 20,
@@ -47,9 +86,29 @@ async def run_cleanup_flow(
     if dry_run is None and cfg.live:
         is_dry = False
 
-    resolved_repo = repo or (cfg.repos[0].repo if cfg.repos else "")
-    resolved_board = cfg.repos[0].board if cfg.repos else ""
-    resolved_clone = clone_path or (cfg.repos[0].clone_path if cfg.repos else "")
+    context, context_error = _resolve_repo_context(cfg, repo=repo, clone_path=clone_path)
+    if context is None:
+        reason = context_error or "repository_context_not_found"
+        rid = run_id or f"cleanup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+        return PathRunResult(
+            run_id=rid,
+            path_id="cleanup",
+            dry_run=is_dry,
+            ticks=0,
+            stopped_reason=reason,
+            summary={
+                "run_status": "failed" if cfg.repos else "idle",
+                "reason": reason,
+                "repo": repo or "",
+                "clone_path": clone_path or "",
+                "failed_steps": [],
+                "worked": False,
+            },
+            status="failed" if cfg.repos else "idle",
+        )
+    resolved_repo = context.repo
+    resolved_board = context.board
+    resolved_clone = context.clone_path
     resolved_branch = branch or ""
     resolved_claim = claim_path or cfg.paths.active_issue
     resolved_worktree = worktree_path or ""
@@ -57,8 +116,38 @@ async def run_cleanup_flow(
         safe = re.sub(r"[^a-zA-Z0-9._/-]+", "-", resolved_branch)
         resolved_worktree = str(Path(cfg.paths.worktree_root) / safe)
 
+    ownership_receipt = ""
+    resolved_task = str(task_id or "").strip()
+    resolved_issue = str(issue if issue is not None else "").strip()
+    if not is_dry:
+        provenance, provenance_error = _read_branch_provenance(resolved_clone, resolved_branch)
+        if provenance is None:
+            return PathRunResult(
+                run_id=run_id or f"cleanup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}",
+                path_id="cleanup",
+                dry_run=False,
+                ticks=0,
+                stopped_reason=provenance_error or "cleanup_provenance_missing",
+                summary={"run_status": "failed", "reason": provenance_error or "cleanup_provenance_missing", "repo": resolved_repo, "branch": resolved_branch, "failed_steps": [], "worked": False},
+                status="failed",
+            )
+        if provenance["repo"] != resolved_repo or (resolved_task and resolved_task != provenance["task"]) or (resolved_issue and resolved_issue != provenance["issue"]):
+            return PathRunResult(
+                run_id=run_id or f"cleanup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}",
+                path_id="cleanup",
+                dry_run=False,
+                ticks=0,
+                stopped_reason="cleanup_provenance_mismatch",
+                summary={"run_status": "failed", "reason": "cleanup_provenance_mismatch", "repo": resolved_repo, "branch": resolved_branch, "failed_steps": [], "worked": False},
+                status="failed",
+            )
+        resolved_task = provenance["task"]
+        resolved_issue = provenance["issue"]
+        ownership_receipt = provenance["receipt"]
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rid = run_id or f"cleanup-{stamp}-{uuid.uuid4().hex[:8]}"
+    resolved_receipt = receipt_path or str(Path(cfg.paths.dispatch_receipts) / f"cleanup-{rid}.json")
     step_config: dict[str, Any] = {
         "repo": resolved_repo,
         "board": resolved_board,
@@ -66,6 +155,12 @@ async def run_cleanup_flow(
         "clone_path": resolved_clone,
         "worktree_path": resolved_worktree,
         "active_issue_path": resolved_claim,
+        "task_id": resolved_task,
+        "issue": resolved_issue,
+        "receipt_id": ownership_receipt,
+        "receipt_path": resolved_receipt,
+        "run_id": rid,
+        "path_id": "cleanup",
         "gh_cli": cfg.gh_cli,
         "dry_run": is_dry,
         "require_safe": True,
@@ -75,7 +170,7 @@ async def run_cleanup_flow(
         "executor_thinking": cfg.executor.thinking,
         "executor_timeout_seconds": cfg.executor.timeout_seconds,
     }
-    common = {"dry_run": is_dry, "repo": resolved_repo, "board": resolved_board}
+    common = {"dry_run": is_dry, "repo": resolved_repo, "board": resolved_board, "task_id": resolved_task, "issue": resolved_issue, "receipt_id": ownership_receipt, "receipt_path": resolved_receipt, "run_id": rid, "path_id": "cleanup"}
     effector_inputs: dict[str, dict[str, Any]] = {
         "parse_issue_from_branch": {**common, "branch": resolved_branch},
         "check_issue_closed": common.copy(),
@@ -92,6 +187,7 @@ async def run_cleanup_flow(
             "branch": resolved_branch,
         },
         "release_active_issue_claim": {**common, "claim_path": resolved_claim},
+        "write_cleanup_receipt": {**common, "branch": resolved_branch, "receipt_path": resolved_receipt},
     }
     result = await run_package_path_async(
         db_path=db_path,

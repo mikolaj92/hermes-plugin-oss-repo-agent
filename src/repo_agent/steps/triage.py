@@ -24,6 +24,8 @@ from repo_agent.envelope import (
     upstream_noop,
 )
 
+_TERMINAL_FAILURES = {"failed", "cancelled", "timed_out"}
+
 def _decision_gate(request: Request, *, allowed: str | set[str]) -> Result | None:
     """No-op unless decide_triage_action selected the allowed action."""
     decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
@@ -133,6 +135,13 @@ def _provided_provenance(request: Request, *effector_ids: str) -> dict[str, Any]
             return dict(value)
     return {}
 
+def _terminal_upstream(request: Request, *effector_ids: str) -> Result | None:
+    for effector_id in effector_ids:
+        blob = cond_blob(request, effector_id)
+        if blob and (blob.get("ok") is False or str(blob.get("status") or "") in _TERMINAL_FAILURES):
+            return fail("upstream_failed", failure_class="terminal", retry_safe=False, upstream=blob, mutated=False)
+    return None
+
 
 def _verify_provenance(
     request: Request,
@@ -166,49 +175,53 @@ def list_ai_fix_prs(request: Request) -> Result:
     """List open PRs with head branch matching ai/fix/* (or branch_prefix)."""
     data = input_of(request)
     cfg = cfg_of(request)
-    repo = str(data.get("repo") or cfg.get("repo") or "")
+    context = cond_blob(request, "dispatch_parse_issue_ref", "dispatch_load_kanban_task", "intake_kanban", "intake_poll")
+    explicit_repo = str(data.get("repo") or context.get("repo") or cfg.get("repo") or "")
+    repos = [explicit_repo] if explicit_repo else [str(entry.get("repo") or "") for entry in (data.get("repos") or cfg.get("repos") or []) if isinstance(entry, dict)]
+    repos = list(dict.fromkeys(repo for repo in repos if repo))
     prefix = str(data.get("branch_prefix") or cfg.get("branch_prefix") or "ai/fix")
     limit = int(data.get("limit") or 50)
     gh = str(cfg.get("gh_cli") or "gh")
-    if not repo:
+    if not repos:
         return fail("missing_repo", failure_class="terminal", retry_safe=False)
-    try:
-        proc = run_cmd(
-            [
-                gh,
-                "pr",
-                "list",
-                "--repo",
-                repo,
-                "--state",
-                "open",
-                "--limit",
-                str(limit),
-                "--json",
-                "number,title,url,headRefName,author,labels,mergeable,statusCheckRollup",
-            ],
-            timeout=90,
-        )
-        prs = json.loads(proc.stdout or "")
-        if not isinstance(prs, list) or any(not isinstance(pr, dict) for pr in prs):
-            raise ValueError("invalid PR list read-back shape")
-    except CommandError as exc:
-        return fail("pr_list_failed", failure_class="retryable_read", retry_safe=True, error=str(exc))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        return fail("invalid_pr_list", failure_class="terminal", retry_safe=False, error=str(exc))
-    selected = [
-        p
-        for p in prs
-        if str(p.get("headRefName") or "").startswith(prefix)
-    ]
+    selected: list[dict[str, Any]] = []
+    all_open_count = 0
+    for repo in repos:
+        try:
+            proc = run_cmd(
+                [
+                    gh,
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "open",
+                    "--limit",
+                    str(limit),
+                    "--json",
+                    "number,title,url,headRefName,author,labels,mergeable,statusCheckRollup",
+                ],
+                timeout=90,
+            )
+            prs = json.loads(proc.stdout or "")
+            if not isinstance(prs, list) or any(not isinstance(pr, dict) for pr in prs):
+                raise ValueError("invalid PR list read-back shape")
+        except CommandError as exc:
+            return fail("pr_list_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), repo=repo)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            return fail("invalid_pr_list", failure_class="terminal", retry_safe=False, error=str(exc), repo=repo)
+        all_open_count += len(prs)
+        selected.extend({**pr, "repo": repo} for pr in prs if str(pr.get("headRefName") or "").startswith(prefix))
     if not selected:
-        return noop("no_open_prs", repo=repo, count=0, prs=[], all_open_count=len(prs))
+        return noop("no_open_prs", repo=explicit_repo, repos=repos, count=0, prs=[], all_open_count=all_open_count)
     return ok(
         status="listed",
-        repo=repo,
+        repo=str(selected[0]["repo"]),
+        repos=repos,
         count=len(selected),
         prs=selected,
-        all_open_count=len(prs),
+        all_open_count=all_open_count,
     )
 
 
@@ -220,13 +233,14 @@ def load_pr_fields(request: Request) -> Result:
     upstream = upstream_noop(request, "list_ai_fix_prs", "triage_list_ai_fix_prs")
     if upstream:
         return noop(str(upstream.get("reason") or "no_open_prs"))
-    repo = str(data.get("repo") or listed.get("repo") or cfg.get("repo") or "")
     number = int(data.get("number") or data.get("pr_number") or 0)
+    selected_pr: dict[str, Any] = {}
     if not number:
         prs = listed.get("prs") or []
         if isinstance(prs, list) and prs:
-            first = prs[0] if isinstance(prs[0], dict) else {}
-            number = int(first.get("number") or 0)
+            selected_pr = prs[0] if isinstance(prs[0], dict) else {}
+            number = int(selected_pr.get("number") or 0)
+    repo = str(data.get("repo") or selected_pr.get("repo") or listed.get("repo") or cond_get(request, "repo", "dispatch_parse_issue_ref", "dispatch_load_kanban_task") or cfg.get("repo") or "")
     gh = str(cfg.get("gh_cli") or "gh")
     if not repo or not number:
         return fail("missing_repo_or_number", failure_class="terminal", retry_safe=False)
@@ -395,14 +409,20 @@ def decide_triage_action(request: Request) -> Result:
         )
     )
     automerge = bool(data.get("automerge", cfg.get("automerge", False)))
+    require_approval = bool(
+        data.get("require_human_approval", cfg.get("require_human_approval", True))
+    )
     branch_prefix = str(data.get("branch_prefix") or cfg.get("branch_prefix") or "ai/fix")
     base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
     require_owner = bool(data.get("require_owner", cfg.get("require_owner", True)))
     repo = str(data.get("repo") or cond_get(request, "repo", "load_pr_fields", "list_ai_fix_prs") or cfg.get("repo") or "")
     repo_owner = repo.split("/", 1)[0] if "/" in repo else str(cfg.get("assignee") or "")
-    mergeable = str(pr.get("mergeable") or pr.get("mergeStateStatus") or "").upper()
+    mergeable_value = pr.get("mergeable") or pr.get("mergeStateStatus") or ""
+    mergeable = str(mergeable_value).upper() if isinstance(mergeable_value, str) else ""
     if mergeable == "CLEAN":
         mergeable = "MERGEABLE"
+    review_value = pr.get("reviewDecision")
+    review_decision = review_value.upper() if isinstance(review_value, str) else ""
     state = str(pr.get("state") or "").upper()
     head = str(pr.get("headRefName") or "")
     base = str(pr.get("baseRefName") or "")
@@ -423,7 +443,9 @@ def decide_triage_action(request: Request) -> Result:
         return ok(status="decided", action="skip", reason="non_ai_fix_branch", head=head)
     if base and base != base_branch:
         return ok(status="decided", action="skip", reason="wrong_base", base=base, base_branch=base_branch)
-    if require_owner and author_login and repo_owner and author_login != repo_owner:
+    if require_owner and not author_login:
+        return ok(status="decided", action="skip", reason="missing_author", owner=repo_owner)
+    if require_owner and repo_owner and author_login != repo_owner:
         return ok(
             status="decided",
             action="skip",
@@ -434,17 +456,23 @@ def decide_triage_action(request: Request) -> Result:
     if "ai:blocked" in labels:
         return ok(status="decided", action="skip", reason="ai_blocked_label")
     if not checks_pass:
-        # failing checks → repair if agent-owned, else comment
         return ok(status="decided", action="repair", reason="checks_not_green")
     if not evidence_pass:
         return ok(status="decided", action="comment_block", reason="missing_test_evidence")
     if mergeable in {"CONFLICTING", "DIRTY"}:
         return ok(status="decided", action="repair", reason="merge_conflict")
-    if automerge and mergeable in ("MERGEABLE", "UNKNOWN", ""):
+    if mergeable != "MERGEABLE":
+        return ok(status="decided", action="skip", reason="not_mergeable", mergeable=mergeable)
+    if require_approval and review_decision != "APPROVED":
+        return ok(
+            status="decided",
+            action="comment_block",
+            reason="approval_required",
+            review_decision=review_decision,
+        )
+    if automerge:
         return ok(status="decided", action="merge", reason="ready")
-    if automerge is False:
-        return ok(status="decided", action="comment_block", reason="automerge_disabled")
-    return ok(status="decided", action="skip", reason="not_mergeable", mergeable=mergeable)
+    return ok(status="decided", action="comment_block", reason="automerge_disabled")
 
 
 def claim_pr_assignee(request: Request) -> Result:
@@ -597,6 +625,9 @@ def comment_pr_once(request: Request) -> Result:
 
 def merge_pull_request(request: Request) -> Result:
     gated = _decision_gate(request, allowed="merge")
+    terminal = _terminal_upstream(request, "claim_pr", "claim_pr_assignee", "triage_claim_pr")
+    if terminal is not None:
+        return terminal
     if gated is not None:
         return gated
     """Merge a PR only after authoritative pre/post state verification."""
@@ -681,6 +712,9 @@ def merge_pull_request(request: Request) -> Result:
 def close_linked_issue(request: Request) -> Result:
     """Close an issue only after validating authoritative merged-PR provenance."""
     gated = _decision_gate(request, allowed="merge")
+    terminal = _terminal_upstream(request, "claim_pr", "claim_pr_assignee", "triage_claim_pr")
+    if terminal is not None:
+        return terminal
     if gated is not None:
         return gated
     data = input_of(request)
@@ -741,8 +775,44 @@ def close_linked_issue(request: Request) -> Result:
             pass
         return fail("close_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, verified_provenance=verified, **context)
     return ok(status="closed", mutated=True, verified_provenance=verified, **context)
+def _receipt_metadata(request: Request, payload: dict[str, Any], *, entity: dict[str, Any]) -> dict[str, Any]:
+    data = input_of(request)
+    cfg = cfg_of(request)
+    def first(key: str, default: Any = "") -> Any:
+        value = data.get(key)
+        if value in (None, ""):
+            value = cfg.get(key)
+        if value in (None, ""):
+            value = request.get(key)
+        if value in (None, ""):
+            value = payload.get(key, default)
+        return value
+    run_id = first("run_id")
+    path_id = first("path_id")
+    process_id = first("process_id")
+    candidate = first("candidate")
+    timestamp = first("timestamp", payload.get("timestamp", "unspecified"))
+    if not any((run_id, path_id, process_id, candidate, cfg, entity)):
+        return {}
+    return {
+        "run_id": str(run_id),
+        "path_id": str(path_id),
+        "process_id": str(process_id),
+        "candidate": candidate,
+        "config": dict(cfg),
+        "entity": dict(entity),
+        "timestamp": str(timestamp),
+    }
+
+
 def write_merge_receipt(request: Request) -> Result:
     """Write a receipt only from a fresh authoritative merged-PR read-back."""
+    merge_upstream = cond_blob(request, "merge", "merge_pull_request", "triage_merge")
+    if merge_upstream and (merge_upstream.get("ok") is False or str(merge_upstream.get("status") or "") in {"failed", "cancelled", "timed_out"}):
+        return fail("upstream_failed", failure_class="terminal", retry_safe=False, upstream=merge_upstream, mutated=False)
+    claim_terminal = _terminal_upstream(request, "claim_pr", "claim_pr_assignee", "triage_claim_pr")
+    if claim_terminal is not None:
+        return claim_terminal
     gated = _decision_gate(request, allowed="merge")
     if gated is not None:
         return gated
@@ -779,6 +849,14 @@ def write_merge_receipt(request: Request) -> Result:
             "verified_provenance": verified,
         }
     )
+    entity = {
+        "repo": repo,
+        "pr_number": number,
+        "head_sha": verified.get("head_oid"),
+        "merge_sha": verified.get("merge_oid"),
+        "merged_at": verified.get("merged_at"),
+    }
+    payload.update(_receipt_metadata(request, payload, entity=entity))
     p = Path(path)
 
     def existing_result() -> Result | None:

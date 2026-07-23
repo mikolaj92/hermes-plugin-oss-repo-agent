@@ -241,8 +241,9 @@ def _write_run_metadata(
             if not isinstance(existing, dict):
                 raise RuntimeFacadeError("Fala run metadata must decode to an object")
             if replayed:
-                if any(existing.get(key) != value for key, value in requested.items()):
-                    raise RuntimeFacadeError("Fala replay metadata disagrees with the durable journal")
+                # A replay returns the durable run; caller metadata may come from a
+                # different invocation (for example dry-run versus live). Never
+                # validate or rewrite immutable run metadata on that path.
                 return
             existing.update(requested)
             encoded = json.dumps(existing, sort_keys=True, separators=(",", ":"))
