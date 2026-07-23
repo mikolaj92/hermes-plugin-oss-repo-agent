@@ -168,3 +168,16 @@ This section supersedes every earlier disposition and blocker statement in this 
 - Focused deployment, parity, health/status, and receipt verification previously passed `58` tests; the full Fala-environment verification previously passed `207` tests.
 
 One health warning remains non-blocking: the scheduled Hermes updater log is stale. Its launchd job is present with latest exit `0`; no acceptance failure remains.
+
+## Post-promotion Definition of Done audit 2026-07-23
+
+**Final disposition: INCOMPLETE — DoD NOT MET.**
+
+This section supersedes the `PROMOTED` disposition above. The deployment passed its operational health, status, parity, and worker-smoke gates, but the required final F1–F4 verification wave did not approve it:
+
+- **F1 — REJECT:** final deployed Fala/plugin provenance and the accumulated change set are not reconciled with the literal completion plan, and no path-by-path baseline proves preservation of the original dirty worktree.
+- **F2 — REJECT:** `write_cleanup_receipt` in `src/repo_agent/steps/cleanup.py` publishes receipts with direct `Path.write_text()` rather than the repository's atomic, fsync-backed, no-clobber pattern. A crash, short write, or concurrent cleanup can lose, truncate, or overwrite terminal mutation evidence. Cleanup receipts also omit the Fala `process_id` supplied at the request boundary.
+- **F3 — REJECT:** the final record summarizes manual QA, but does not retain exact command output and exit codes for every required GitHub, receipt, deployment, launchd, health, parity, and smoke check.
+- **F4 — REJECT:** no contemporaneous pre/post inventory proves that the final live cutover did not touch unrelated branches, LaunchAgents, historical issue/PR state, or user files.
+
+The known-weak deployed revision `c919c72749aa67ea6d07472ba063aee435029f06` remains `deployment/current` pending an explicit operator decision to keep it running temporarily or roll it back. Its continued presence is not acceptance of the receipt-durability risk and must not be represented as DoD completion.
