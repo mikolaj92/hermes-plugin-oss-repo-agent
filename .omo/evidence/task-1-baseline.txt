@@ -1,0 +1,37 @@
+Task 1 baseline verification — 2026-07-22
+
+Frozen inventory before edits:
+- git status --short: only ?? .omo/plans/make-repo-agent-resolve-real-issues.md
+- plan SHA-256: d41758e62d12d6b7fba2ce45b40c29b5c47d89d10ffb8e11dc91f25a02ca269c
+- plugin HEAD/origin-main before baseline follow-up: e6dd717a5aaa9cec03388c3f9dcff3af3cb42d9b
+- no modified tracked product path existed; the untracked execution plan is intended project material
+
+Fala provenance:
+- pinned candidate commit: 69bc2ec9d4cdf61773114847c0c582fb2652296d
+- pinned commit pyproject version: 0.7.9
+- plugin pyproject and uv.lock dependency: fala 0.7.9
+- sibling Fala checkout HEAD: 69bc2ec9d4cdf61773114847c0c582fb2652296d
+- sibling checkout status: only submodule marker `? vendor/sqlite.fire`; this is expected submodule presentation, while candidate validation checks exact recorded submodule commit
+- absolute test environment: FALA_HOME=/Users/mini-m4-main/Developer/Fala; PYTHONPATH=src:.
+- import from /tmp reported fala 0.7.7 despite source pyproject 0.7.9; this is an installed/editable package metadata cache artifact and is not accepted as candidate provenance. Candidate construction reads the pinned commit's pyproject and validates 0.7.9.
+
+Observed verification:
+- full unittest discovery with absolute FALA_HOME: PASS, 212 tests
+- focused migration suite: PASS, 133 tests
+- candidate/parity/health suite: PASS
+- immutable promotion fixture test_promotion_installs_version_local_runtime_paths: PASS
+- pinned-version negative fixture test_wrong_fala_version_at_pinned_commit_is_rejected: PASS
+- uv lock --check: PASS, resolved 8 packages
+- bash -n scripts/*.sh: PASS
+- python compileall: PASS
+- tools/hygiene_check.py: PASS
+- scripts/repo_agent_smoke.sh: PASS
+- git diff --check: PASS
+- origin fetch confirmed baseline HEAD == origin/main
+
+Reconciled repository drift:
+- CI referenced deleted tests.test_issue_to_pr_to_merge_contract, so its explicit module list could not run.
+- CI now uses unittest discovery, with absolute FALA_HOME and PYTHONPATH=src:., preventing future module-list drift and matching the verified local suite. The tests directory has no package marker, so discovery intentionally omits `-t .`.
+- Earlier system-python and pytest attempts were collection/environment errors (Python 3.9, missing repo_agent/fala/tools, and pytest absent), not product regressions; they are not counted as baseline failures.
+
+No live GitHub mutation, launchd activation, deployment cutover, force push, branch reset, clean, or foreign-path edit occurred during baseline verification.

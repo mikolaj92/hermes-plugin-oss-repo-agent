@@ -1,0 +1,11 @@
+Task 1 fail-closed provenance fixture — 2026-07-22
+
+Command:
+FALA_HOME=/Users/mini-m4-main/Developer/Fala PYTHONPATH=src:. uv run --frozen python -m unittest tests.test_deployment_candidate.DeploymentCandidateTests.test_wrong_fala_version_at_pinned_commit_is_rejected -v
+
+Result:
+test_wrong_fala_version_at_pinned_commit_is_rejected ... ok
+Ran 1 test in 0.016s
+OK
+
+Contract proven: candidate construction rejects a pinned Fala commit whose pyproject version differs from the required 0.7.9 version instead of accepting mismatched manifest metadata.
