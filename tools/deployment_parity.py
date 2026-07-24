@@ -638,6 +638,8 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
             and policy.get("require_human_approval") is False
             and policy.get("executor_enabled") is True
         )
+        if autonomous and identity.get("mode") != "live":
+            errors.append("Fala autonomous identity policy requires live mode")
         if not guarded or not (manual or autonomous):
             errors.append("Fala identity policy is unsafe for promotion")
     if config_artifact_path and _regular_file(config_artifact_path) and isinstance(policy, dict) and set(policy) == policy_keys:

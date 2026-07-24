@@ -763,6 +763,18 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(result["candidate_id"], manifest["candidate_id"])
             self.assertTrue(result["ok"])
 
+    def test_guarded_autonomous_policy_requires_live_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._render(Path(directory))
+            parity = sys.modules["hermes_plugins.oss_repo_agent.tools.deployment_parity"]
+
+            with self.assertRaises(parity.DeploymentParityError) as raised:
+                self._render(Path(directory), autonomous=True)
+            self.assertIn(
+                "Fala autonomous identity policy requires live mode",
+                raised.exception.result["errors"],
+            )
+
     def test_guarded_autonomous_candidate_policy_is_safe(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
