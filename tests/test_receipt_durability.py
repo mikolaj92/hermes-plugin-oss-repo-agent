@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from repo_agent.steps import issue_to_pr, triage
+from repo_agent.steps import cleanup, issue_to_pr, triage
 
 
 def request(data: dict) -> dict:
@@ -140,6 +140,69 @@ class ReceiptDurabilityTests(unittest.TestCase):
             self.assertEqual(payload["path_id"], "input-path")
             self.assertEqual(payload["process_id"], "input-process")
             self.assertEqual(payload["candidate"], "input-candidate")
+    def _cleanup(self, path: Path, *, process_id: str = "cleanup-process") -> dict:
+        succeeded = {"ok": True, "status": "noop", "mutated": False, "reason": "no_target"}
+        return cleanup.write_cleanup_receipt({
+            "input": {
+                "receipt_path": str(path),
+                "dry_run": False,
+                "conduction": {
+                    "parse_issue_from_branch": succeeded,
+                    "check_issue_closed": succeeded,
+                    "check_no_open_pr": succeeded,
+                    "remove_worktree": succeeded,
+                    "delete_local_fix_branch": succeeded,
+                    "release_active_issue_claim": succeeded,
+                },
+            },
+            "config": {},
+            "run_id": "cleanup-run",
+            "path_id": "cleanup",
+            "process_id": process_id,
+        })
+
+    def test_cleanup_receipt_is_durable_and_preserves_request_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cleanup.json"
+            result = self._cleanup(path)
+            self.assertEqual(result["status"], "written")
+            payload = json.loads(path.read_text())
+            self.assertEqual(payload["run_id"], "cleanup-run")
+            self.assertEqual(payload["path_id"], "cleanup")
+            self.assertEqual(payload["process_id"], "cleanup-process")
+            same = self._cleanup(path)
+            self.assertEqual(same["status"], "exists")
+            self.assertFalse(same["mutated"])
+            self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+
+    def test_cleanup_receipt_fsync_failure_fails_closed_and_cleans_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cleanup.json"
+            with mock.patch("repo_agent.steps.cleanup.os.fsync", side_effect=OSError("fsync failed")):
+                result = self._cleanup(path)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "receipt_write_failed")
+            self.assertFalse(path.exists())
+            self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+
+    def test_cleanup_receipt_publish_race_does_not_clobber(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cleanup.json"
+            competitor_path = Path(tmp) / "competitor.json"
+            competitor = self._cleanup(competitor_path, process_id="competitor")
+            self.assertEqual(competitor["status"], "written")
+            competitor_payload = competitor_path.read_text()
+
+            def publish_competitor(_source: Path, destination: Path) -> None:
+                destination.write_text(competitor_payload)
+                raise FileExistsError
+
+            with mock.patch("repo_agent.steps.cleanup.os.link", side_effect=publish_competitor):
+                result = self._cleanup(path, process_id="loser")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "receipt_conflict")
+            self.assertEqual(json.loads(path.read_text())["process_id"], "competitor")
+            self.assertEqual(list(path.parent.glob(".*.tmp")), [])
 
 
 if __name__ == "__main__":

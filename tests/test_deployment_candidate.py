@@ -275,6 +275,74 @@ class DeploymentCandidateTests(unittest.TestCase):
         with patch.object(self.commands, "_launchctl_loaded_state", side_effect=fake_state):
             with self.assertRaisesRegex(self.commands.ConfigError, "multiple domains"):
                 self.commands._assert_legacy_mutators_unloaded()
+    def test_fala_gui_only_state_selects_gui_domain(self):
+        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        uid = self.commands.os.getuid()
+        def fake_state(observed_label, domain):
+            return {"label": observed_label, "domain": domain, "loaded": domain == f"gui/{uid}", "available": True}
+        with patch.object(self.commands, "_launchctl_loaded_state", side_effect=fake_state):
+            states = self.commands._launchctl_domain_states(label)
+            self.assertEqual(self.commands._launchctl_intended_domain(label, states), f"gui/{uid}")
+
+    def test_fala_user_only_state_selects_user_domain(self):
+        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        uid = self.commands.os.getuid()
+        def fake_state(observed_label, domain):
+            return {"label": observed_label, "domain": domain, "loaded": domain == f"user/{uid}", "available": True}
+        with patch.object(self.commands, "_launchctl_loaded_state", side_effect=fake_state):
+            states = self.commands._launchctl_domain_states(label)
+            self.assertEqual(self.commands._launchctl_intended_domain(label, states), f"user/{uid}")
+
+    def test_fala_duplicate_domains_fail_closed(self):
+        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        uid = self.commands.os.getuid()
+        states = {
+            f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": True},
+            f"gui/{uid}": {"label": label, "domain": f"gui/{uid}", "loaded": True},
+        }
+        with self.assertRaisesRegex(self.commands.ConfigError, "multiple domains"):
+            self.commands._launchctl_intended_domain(label, states)
+
+    def test_fala_cutover_bootstraps_only_intended_domain(self):
+        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        uid = self.commands.os.getuid()
+        states = {
+            f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False},
+            f"gui/{uid}": {"label": label, "domain": f"gui/{uid}", "loaded": True},
+        }
+        calls = []
+        plist = Path("/tmp/fala.plist")
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        with patch.object(self.commands, "_launchctl_loaded_state", return_value={"label": label, "loaded": False}), patch.object(
+            self.commands.subprocess, "run", side_effect=fake_run
+        ):
+            # Directly exercise the destructive domain sequence with a mocked
+            # exact-state verifier; deploy_fala covers the surrounding staging.
+            with patch.object(self.commands, "_verify_launchctl_exact"):
+                self.commands._launchctl_bootout(f"user/{uid}", label, ignore_failure=True)
+                self.commands._launchctl_bootout(f"gui/{uid}", label, ignore_failure=True)
+                self.commands.subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], check=True, capture_output=True, text=True)
+        self.assertIn(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], calls)
+        self.assertNotIn(["launchctl", "bootstrap", f"user/{uid}", str(plist)], calls)
+    def test_fala_gui_domain_state_restores_on_rollback(self):
+        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        uid = self.commands.os.getuid()
+        states = {
+            f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False},
+            f"gui/{uid}": {"label": label, "domain": f"gui/{uid}", "loaded": True},
+        }
+        calls = []
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        with patch.object(self.commands, "_launchctl_loaded_state", return_value={"label": label, "loaded": False}), patch.object(
+            self.commands.subprocess, "run", side_effect=fake_run
+        ):
+            self.commands._launchctl_restore_states(states, Path("/tmp/fala.plist"))
+        self.assertIn(["launchctl", "bootstrap", f"gui/{uid}", "/tmp/fala.plist"], calls)
+        self.assertNotIn(["launchctl", "bootstrap", f"user/{uid}", "/tmp/fala.plist"], calls)
 
     def test_version_copy_failure_removes_partial_version(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -304,7 +372,7 @@ class DeploymentCandidateTests(unittest.TestCase):
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
                 self.commands, "_assert_legacy_mutators_unloaded", return_value={}
-            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+            ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
             bootouts = [i for i, call in enumerate(calls) if call[:2] == ["launchctl", "bootout"]]
             bootstraps = [i for i, call in enumerate(calls) if call[:2] == ["launchctl", "bootstrap"]]
@@ -324,7 +392,7 @@ class DeploymentCandidateTests(unittest.TestCase):
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
                 self.commands, "_assert_legacy_mutators_unloaded", return_value={}
-            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+            ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
 
             legacy = (root / "current").resolve()
@@ -341,7 +409,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             second = self._render(root, config_path=other_config, db_path=root / "other.sqlite")
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
                 self.commands, "_assert_legacy_mutators_unloaded", return_value={}
-            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+            ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 result = self.commands.deploy_fala(self.cfg, str(second), True, deployment_root=str(root))
 
             self.assertTrue(result["promoted"])
@@ -362,7 +430,7 @@ class DeploymentCandidateTests(unittest.TestCase):
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
                 self.commands, "_assert_legacy_mutators_unloaded", return_value={}
-            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+            ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 result = self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
 
             candidate_id = result["candidate_id"]
@@ -541,7 +609,7 @@ class DeploymentCandidateTests(unittest.TestCase):
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
                 self.commands, "_assert_legacy_mutators_unloaded", return_value={}
-            ), patch.object(self.commands.subprocess, "run", side_effect=successful_run):
+            ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(self.commands.subprocess, "run", side_effect=successful_run):
                 self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
             old_target = (root / "current").resolve()
             other_config = root / "other.toml"

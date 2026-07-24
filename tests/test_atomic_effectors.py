@@ -554,6 +554,10 @@ class IssueToPrTests(unittest.TestCase):
                             "worktree_root": str(Path(tmp) / "wts"),
                             "base_branch": "main",
                             "dry_run": False,
+                            "conduction": {
+                                "dispatch_parse_issue_ref": {"task_id": "task-1", "issue": "1", "repo": "owner/repo", "branch": "ai/fix/1-x"},
+                                "dispatch_write_dispatch_receipt": {"receipt_path": "/tmp/dispatch-1.json"},
+                            },
                         }
                     )
                 )
@@ -576,6 +580,10 @@ class IssueToPrTests(unittest.TestCase):
                             "branch": "ai/fix/1-x",
                             "worktree_root": str(Path(tmp) / "wts"),
                             "dry_run": False,
+                            "conduction": {
+                                "dispatch_parse_issue_ref": {"task_id": "task-1", "issue": "1", "repo": "owner/repo", "branch": "ai/fix/1-x"},
+                                "dispatch_write_dispatch_receipt": {"receipt_path": "/tmp/dispatch-1.json"},
+                            },
                         }
                     )
                 )
@@ -1507,6 +1515,36 @@ class CleanupTests(unittest.TestCase):
                 req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": False, "conduction": {"cleanup_remove_worktree": {"ok": True, "status": "removed"}}})
             )
         self.assertEqual(bad["reason"], "delete_failed")
+
+        with mock.patch(
+            "repo_agent.steps.cleanup.branch_exists", side_effect=[True, False]
+        ), mock.patch(
+            "repo_agent.steps.cleanup._cleanup_owner_matches", return_value=True
+        ), mock.patch(
+            "repo_agent.steps.cleanup.delete_local_branch",
+            side_effect=CommandError(["git"], 1, "", "interrupted"),
+        ):
+            reconciled = cleanup.delete_local_fix_branch(
+                req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": False, "conduction": {"cleanup_remove_worktree": {"ok": True, "status": "removed"}}})
+            )
+        self.assertEqual(reconciled["status"], "deleted")
+        self.assertTrue(reconciled["reconciled"])
+        self.assertTrue(reconciled["mutated"])
+
+        with mock.patch(
+            "repo_agent.steps.cleanup.branch_exists",
+            side_effect=[True, CommandError(["git"], 1, "", "readback failed")],
+        ), mock.patch(
+            "repo_agent.steps.cleanup._cleanup_owner_matches", return_value=True
+        ), mock.patch(
+            "repo_agent.steps.cleanup.delete_local_branch",
+            side_effect=CommandError(["git"], 1, "", "interrupted"),
+        ):
+            uncertain = cleanup.delete_local_fix_branch(
+                req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": False, "conduction": {"cleanup_remove_worktree": {"ok": True, "status": "removed"}}})
+            )
+        self.assertEqual(uncertain["reason"], "delete_readback_failed")
+        self.assertTrue(uncertain["mutated"])
 
 
 class AdapterFailurePathTests(unittest.TestCase):

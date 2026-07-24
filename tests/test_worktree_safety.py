@@ -48,7 +48,22 @@ class TempGitSafetyTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def prepare(self, **extra: object) -> dict:
-        return issue_to_pr.prepare_worktree(request({**self.common, **extra}))
+        data = {**self.common, **extra}
+        conduction = data.pop("conduction", None)
+        if conduction is None:
+            conduction = {
+                "dispatch_parse_issue_ref": {
+                    "task_id": self.identity["task_id"],
+                    "issue": self.identity["issue"],
+                    "repo": self.identity["repo"],
+                    "branch": self.branch,
+                },
+                "dispatch_write_dispatch_receipt": {
+                    "receipt_path": self.identity["receipt_path"],
+                },
+            }
+        data["conduction"] = conduction
+        return issue_to_pr.prepare_worktree(request(data))
 
     def test_create_and_cleanup_owned_worktree(self) -> None:
         prepared = self.prepare()
@@ -107,5 +122,73 @@ class TempGitSafetyTests(unittest.TestCase):
         self.assertTrue(run_git(self.clone, "branch", "--list", self.branch))
 
 
+
+    def test_triage_repair_reuses_only_exact_conduction_provenance(self) -> None:
+        repair_conduction = {
+            "triage_build_repair_prompt": {
+                "task_id": "review-task-7",
+                "issue": "7",
+                "receipt_id": str(Path(self.tmp.name) / "repair-receipt.json"),
+                "repo": "owner/repo",
+                "branch": self.branch,
+            },
+        }
+        path_input = {
+            "clone_path": str(self.clone),
+            "worktree_root": str(self.worktrees),
+            "base_branch": "main",
+            "dry_run": False,
+            "conduction": repair_conduction,
+        }
+        first = issue_to_pr.prepare_worktree(request(path_input))
+        self.assertEqual(first["status"], "prepared", first)
+        second = issue_to_pr.prepare_worktree(request(path_input))
+        self.assertEqual(second["status"], "reused", second)
+        self.assertEqual(second["provenance"]["task_id"], "review-task-7")
+        self.assertEqual(second["provenance"]["issue"], "7")
+        self.assertEqual(second["provenance"]["repo"], "owner/repo")
+
+    def test_repair_provenance_missing_or_mismatched_fails_closed(self) -> None:
+        base = {
+            "clone_path": str(self.clone),
+            "worktree_root": str(self.worktrees),
+            "base_branch": "main",
+            "dry_run": False,
+            "conduction": {
+                "triage_build_repair_prompt": {
+                    "issue": "7",
+                    "receipt_id": str(Path(self.tmp.name) / "repair-receipt.json"),
+                    "repo": "owner/repo",
+                    "branch": self.branch,
+                },
+            },
+        }
+        missing = issue_to_pr.prepare_worktree(request(base))
+        self.assertEqual(missing["reason"], "missing_worktree_provenance")
+        self.assertFalse(run_git(self.clone, "branch", "--list", self.branch))
+
+        owned = dict(base)
+        owned["conduction"] = {
+            "triage_build_repair_prompt": {
+                "task_id": "review-task-7",
+                "issue": "7",
+                "receipt_id": str(Path(self.tmp.name) / "repair-receipt.json"),
+                "repo": "owner/repo",
+                "branch": self.branch,
+            },
+        }
+        self.assertEqual(issue_to_pr.prepare_worktree(request(owned))["status"], "prepared")
+        mismatched = dict(owned)
+        mismatched["conduction"] = {
+            "triage_build_repair_prompt": {
+                "task_id": "another-task",
+                "issue": "7",
+                "receipt_id": str(Path(self.tmp.name) / "repair-receipt.json"),
+                "repo": "owner/repo",
+                "branch": self.branch,
+            },
+        }
+        foreign = issue_to_pr.prepare_worktree(request(mismatched))
+        self.assertEqual(foreign["reason"], "foreign_worktree_ownership")
 if __name__ == "__main__":
     unittest.main()

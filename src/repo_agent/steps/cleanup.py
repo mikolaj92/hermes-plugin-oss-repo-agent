@@ -223,7 +223,20 @@ def remove_worktree(request: Request) -> Result:
     try:
         worktree_remove(clone_path, str(worktree), force=force)
     except CommandError as exc:
-        return fail("remove_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
+        try:
+            remaining = parse_worktree_porcelain(worktree_list(clone_path))
+        except CommandError as readback_exc:
+            return fail("remove_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(readback_exc), remove_error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=True, idempotency_key=cleanup_key)
+        still_present = any(str(Path(row.get("path") or "").resolve()) == str(worktree) for row in remaining)
+        if still_present:
+            return fail("remove_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
+        return ok(status="removed", clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, idempotency_key=cleanup_key, mutated=True, retry_safe=True, reconciled=True)
+    try:
+        remaining = parse_worktree_porcelain(worktree_list(clone_path))
+    except CommandError as exc:
+        return fail("remove_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=True, idempotency_key=cleanup_key)
+    if any(str(Path(row.get("path") or "").resolve()) == str(worktree) for row in remaining):
+        return fail("remove_not_confirmed", failure_class="reconcile_then_retry", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=True, idempotency_key=cleanup_key)
     return ok(status="removed", clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, idempotency_key=cleanup_key, mutated=True, retry_safe=True)
 
 
@@ -259,12 +272,18 @@ def delete_local_fix_branch(request: Request) -> Result:
     try:
         delete_local_branch(clone_path, branch, force=force)
     except CommandError as exc:
-        return fail("delete_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), idempotency_key=key, mutated=False)
+        try:
+            still_exists = branch_exists(clone_path, branch)
+        except CommandError as readback_exc:
+            return fail("delete_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(readback_exc), delete_error=str(exc), branch=branch, idempotency_key=key, mutated=True)
+        if still_exists:
+            return fail("delete_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), branch=branch, idempotency_key=key, mutated=False)
+        return ok(status="deleted", branch=branch, idempotency_key=key, mutated=True, retry_safe=True, reconciled=True)
     try:
         if branch_exists(clone_path, branch):
             return fail("delete_not_confirmed", failure_class="reconcile_then_retry", retry_safe=False, branch=branch, idempotency_key=key, mutated=True)
-    except Exception as exc:
-        return fail("delete_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), idempotency_key=key, mutated=True)
+    except CommandError as exc:
+        return fail("delete_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), branch=branch, idempotency_key=key, mutated=True)
     return ok(status="deleted", branch=branch, idempotency_key=key, mutated=True, retry_safe=True)
 
 
@@ -397,22 +416,58 @@ def write_cleanup_receipt(request: Request) -> Result:
     else:
         return fail("cleanup_evidence_inconclusive", failure_class="terminal", retry_safe=False, receipt_path=path, steps=steps)
     payload = dict(data.get("payload") or {})
-    payload.update({"phase": "CLEANUP_TERMINAL", "outcome": outcome, "run_id": data.get("run_id") or cfg.get("run_id") or "", "path_id": data.get("path_id") or cfg.get("path_id") or "cleanup", "process_id": data.get("process_id") or cfg.get("process_id") or "", "entity": {"task": data.get("task_id") or cfg.get("task_id") or "", "repo": data.get("repo") or cfg.get("repo") or "", "issue": data.get("issue") or cfg.get("issue") or "", "receipt": data.get("receipt_id") or path, "branch": data.get("branch") or cfg.get("branch") or "", "clone_path": data.get("clone_path") or cfg.get("clone_path") or "", "worktree_path": data.get("worktree_path") or cfg.get("worktree_path") or ""}, "steps": steps})
+    payload.update({"phase": "CLEANUP_TERMINAL", "outcome": outcome, "run_id": data.get("run_id") or cfg.get("run_id") or request.get("run_id") or "", "path_id": data.get("path_id") or cfg.get("path_id") or request.get("path_id") or "cleanup", "process_id": data.get("process_id") or cfg.get("process_id") or request.get("process_id") or "", "entity": {"task": data.get("task_id") or cfg.get("task_id") or "", "repo": data.get("repo") or cfg.get("repo") or "", "issue": data.get("issue") or cfg.get("issue") or "", "receipt": data.get("receipt_id") or path, "branch": data.get("branch") or cfg.get("branch") or "", "clone_path": data.get("clone_path") or cfg.get("clone_path") or "", "worktree_path": data.get("worktree_path") or cfg.get("worktree_path") or ""}, "steps": steps})
     if dry_run_flag(request):
         return planned(receipt_path=path, payload=payload)
     p = Path(path)
-    try:
-        if p.exists():
+
+    def existing_result() -> Result | None:
+        if not p.exists():
+            return None
+        try:
             existing = json.loads(p.read_text(encoding="utf-8"))
-            if existing == payload:
-                return ok(status="exists", receipt_path=path, payload=payload)
-            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
+        if existing == payload:
+            return ok(status="exists", receipt_path=path, payload=payload, mutated=False)
+        return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
+
+    prior = existing_result()
+    if prior is not None:
+        return prior
+    tmp_path: Path | None = None
+    try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        if json.loads(p.read_text(encoding="utf-8")) != payload:
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(tmp_path, p)
+        except FileExistsError:
+            prior = existing_result()
+            if prior is not None:
+                return prior
+            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
+        os.unlink(tmp_path)
+        tmp_path = None
+        dir_fd = os.open(str(p.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        if not p.is_file() or json.loads(p.read_text(encoding="utf-8")) != payload:
             raise ValueError("receipt read-back mismatch")
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, receipt_path=path, error=str(exc))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path, mutated=True)
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
     return ok(status="written", receipt_path=path, payload=payload, mutated=True)
 
 def create_maintenance_task(request: Request) -> Result:

@@ -1066,19 +1066,45 @@ def _launchctl_bootout(domain: str, label: str, *, ignore_failure: bool = False)
 def _verify_launchctl_unloaded(label: str, domain: str) -> None:
     if _launchctl_loaded_state(label, domain).get("loaded"):
         raise ConfigError(f"launchd service remains loaded: {domain}/{label}")
+def _launchctl_domain_states(label: str) -> dict[str, dict[str, Any]]:
+    """Inspect a label in both supported per-user launchd domains."""
+    uid = os.getuid()
+    return {
+        domain: _launchctl_loaded_state(label, domain)
+        for domain in (f"user/{uid}", f"gui/{uid}")
+    }
 
 
-def _launchctl_restore_state(state: dict[str, Any], plist: Path) -> None:
-    domain = str(state["domain"])
-    label = str(state["label"])
-    _launchctl_bootout(domain, label, ignore_failure=True)
-    _verify_launchctl_unloaded(label, domain)
-    if state.get("loaded"):
-        try:
-            subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True, text=True)
-            subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{label}"], check=True, capture_output=True, text=True)
-        except (OSError, subprocess.CalledProcessError) as exc:
-            raise ConfigError(f"unable to restore launchd service {domain}/{label}: {exc}") from exc
+def _launchctl_intended_domain(label: str, states: dict[str, dict[str, Any]]) -> str:
+    loaded = [domain for domain, state in states.items() if state.get("loaded")]
+    if len(loaded) > 1:
+        raise ConfigError(f"Fala service is loaded in multiple domains: {label}")
+    return loaded[0] if loaded else f"user/{os.getuid()}"
+
+
+def _verify_launchctl_exact(label: str, intended_domain: str) -> None:
+    states = _launchctl_domain_states(label)
+    loaded = [domain for domain, state in states.items() if state.get("loaded")]
+    if loaded != [intended_domain]:
+        detail = ", ".join(loaded) if loaded else "none"
+        raise ConfigError(f"Fala service domain verification failed: expected {intended_domain}, found {detail}")
+
+
+def _launchctl_restore_states(states: dict[str, dict[str, Any]], plist: Path) -> None:
+    """Restore every previously observed Fala domain, including unloaded domains."""
+    label = str(next(iter(states.values()))["label"]) if states else plist.stem
+    for domain, state in states.items():
+        _launchctl_bootout(domain, label, ignore_failure=True)
+        _verify_launchctl_unloaded(label, domain)
+        if state.get("loaded"):
+            try:
+                subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True, text=True)
+                subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{label}"], check=True, capture_output=True, text=True)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                raise ConfigError(f"unable to restore launchd service {domain}/{label}: {exc}") from exc
+
+
+
 
 
 
@@ -1234,133 +1260,135 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
     result: dict[str, Any] = {"ok": True, "candidate": str(candidate), "candidate_id": parity["candidate_id"], "promoted": False, "parity": parity}
     if not promote:
         return result
-
-    # Every promotion state read and mutation is serialized under one root lock.
-    with _deployment_lock(root):
-        candidate_id = str(parity["candidate_id"])
-        version = root / "versions" / candidate_id
-        versions_root = root / "versions"
-        root.mkdir(parents=True, exist_ok=True)
-        versions_root.mkdir(exist_ok=True)
-        if version.exists() and not version.is_dir():
-            raise ConfigError(f"deployment version is not a directory: {version}")
-        current = root / "current"
-        old_current_target: Path | None = None
-        if current.exists() or current.is_symlink():
-            if not current.is_symlink():
-                raise ConfigError(f"deployment current is not a symlink: {current}")
-            try:
-                old_current_target = current.resolve(strict=True)
-            except OSError as exc:
-                raise ConfigError(f"deployment current is dangling: {current}") from exc
-            if old_current_target.parent != versions_root.resolve() or not re.fullmatch(r"[0-9a-f]{64}", old_current_target.name):
-                raise ConfigError(f"deployment current points outside versions: {current}")
-            if not old_current_target.is_dir():
-                raise ConfigError(f"deployment current target is not a directory: {old_current_target}")
-            try:
-                old_manifest = json.loads((old_current_target / "manifest.json").read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ConfigError(f"deployment current manifest is invalid: {old_current_target}") from exc
-            if old_manifest.get("candidate_id") != old_current_target.name:
-                raise ConfigError("deployment current manifest candidate_id mismatch")
-            # The current deployment may predate stricter provenance gates.
-            # Keep its path for rollback, but do not let invalid historical
-            # bytes block promotion of a newly validated candidate.
-        plist = candidate / "launchd" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+    candidate_id = str(parity["candidate_id"])
+    versions_root = root / "versions"
+    versions_root.mkdir(parents=True, exist_ok=True)
+    version = versions_root / candidate_id
+    current = root / "current"
+    old_current_target: Path | None = None
+    if current.exists() or current.is_symlink():
+        if not current.is_symlink():
+            raise ConfigError(f"deployment current is not a symlink: {current}")
         try:
+            old_current_target = current.resolve(strict=True)
+        except OSError as exc:
+            raise ConfigError(f"deployment current is dangling: {current}") from exc
+        if old_current_target.parent != versions_root.resolve() or not re.fullmatch(r"[0-9a-f]{64}", old_current_target.name):
+            raise ConfigError(f"deployment current points outside versions: {current}")
+        if not old_current_target.is_dir():
+            raise ConfigError(f"deployment current target is not a directory: {old_current_target}")
+        try:
+            old_manifest = json.loads((old_current_target / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ConfigError(f"deployment current manifest is invalid: {old_current_target}") from exc
+        if old_manifest.get("candidate_id") != old_current_target.name:
+            raise ConfigError("deployment current manifest candidate_id mismatch")
+        # Historical deployments may predate stricter provenance gates. Keep
+        # the exact target for rollback without blocking a validated candidate.
+    plist = candidate / "launchd" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+    try:
+        subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ConfigError(f"Fala plist lint failed: {exc}") from exc
+    _assert_legacy_mutators_unloaded()
+    label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+    domain_states = _launchctl_domain_states(label)
+    domain = _launchctl_intended_domain(label, domain_states)
+    launch_agents = Path.home() / "Library" / "LaunchAgents"
+    target = launch_agents / plist.name
+    old_agent_exists = target.is_file()
+    old_agent_data = target.read_bytes() if old_agent_exists else None
+    previous_path = root / "previous.json"
+    previous_data = previous_path.read_bytes() if previous_path.is_file() else None
+    previous = {
+        "candidate_id": old_current_target.name if old_current_target else None,
+        "path": str(old_current_target) if old_current_target else None,
+        "loaded_state": domain_states,
+        "label": label,
+        "domain": domain,
+    }
+    version_created = False
+    try:
+        if version.exists():
+            validate_fala_candidate(version, deployment_root=root)
+            version_manifest = json.loads((version / "manifest.json").read_text(encoding="utf-8"))
+            candidate_manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+            if version_manifest.get("candidate_id") != candidate_id or version_manifest.get("identity") != candidate_manifest.get("identity"):
+                raise ConfigError("existing deployment version identity differs from candidate")
+            _verify_version_reuse(candidate, version)
+            plist = version / "launchd" / plist.name
+        else:
+            shutil.copytree(candidate, version, copy_function=shutil.copy2)
+            version_created = True
+            for path in version.rglob("*"):
+                if path.is_file():
+                    path.chmod(0o444)
+            for directory in (version, version / "launchd", version / "source"):
+                if directory.is_dir():
+                    directory.chmod(0o555)
+            _verify_candidate_copy(candidate, version)
+            _promote_version_runtime(version, root, candidate_id)
+            validate_fala_candidate(version, deployment_root=root)
+            plist = version / "launchd" / plist.name
             subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True, text=True)
-        except (OSError, subprocess.CalledProcessError) as exc:
-            raise ConfigError(f"Fala plist lint failed: {exc}") from exc
-        _assert_legacy_mutators_unloaded()
-        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
-        domain = f"user/{os.getuid()}"
-        loaded_state = _launchctl_loaded_state(label, domain)
-        launch_agents = Path.home() / "Library" / "LaunchAgents"
-        target = launch_agents / plist.name
-        old_agent_exists = target.is_file()
-        old_agent_data = target.read_bytes() if old_agent_exists else None
-        previous_path = root / "previous.json"
-        previous_data = previous_path.read_bytes() if previous_path.is_file() else None
-        previous = {"candidate_id": old_current_target.name if old_current_target else None, "path": str(old_current_target) if old_current_target else None, "loaded_state": loaded_state, "label": label, "domain": domain}
-        version_created = False
-        try:
-            if version.exists():
-                validate_fala_candidate(version, deployment_root=root)
-                version_manifest = json.loads((version / "manifest.json").read_text(encoding="utf-8"))
-                candidate_manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
-                if version_manifest.get("candidate_id") != candidate_id or version_manifest.get("identity") != candidate_manifest.get("identity"):
-                    raise ConfigError("existing deployment version identity differs from candidate")
-                _verify_version_reuse(candidate, version)
-                plist = version / "launchd" / plist.name
-            else:
-                shutil.copytree(candidate, version, copy_function=shutil.copy2)
-                version_created = True
-                for path in version.rglob("*"):
-                    if path.is_file():
-                        path.chmod(0o444)
-                for directory in (version, version / "launchd", version / "source"):
-                    if directory.is_dir():
-                        directory.chmod(0o555)
-                _verify_candidate_copy(candidate, version)
-                _promote_version_runtime(version, root, candidate_id)
-                validate_fala_candidate(version, deployment_root=root)
-                plist = version / "launchd" / plist.name
-                subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True, text=True)
-                _fsync_tree(version)
-                _fsync_directory(versions_root)
-        except Exception:
-            if version_created:
-                for path in sorted(version.rglob("*"), key=lambda item: len(item.parts), reverse=True):
-                    try:
-                        path.chmod(0o755)
-                    except OSError:
-                        pass
+            _fsync_tree(version)
+            _fsync_directory(versions_root)
+    except Exception:
+        if version_created:
+            for path in sorted(version.rglob("*"), key=lambda item: len(item.parts), reverse=True):
                 try:
-                    version.chmod(0o755)
+                    path.chmod(0o755)
                 except OSError:
                     pass
-                shutil.rmtree(version, ignore_errors=True)
-                _fsync_directory(versions_root)
-            raise
-        try:
-            _atomic_write(previous_path, _canonical_json(previous))
-            tmp_link = root / ".current.next"
-            if tmp_link.exists() or tmp_link.is_symlink():
-                tmp_link.unlink()
-            tmp_link.symlink_to(version, target_is_directory=True)
-            os.replace(tmp_link, current)
-            _fsync_directory(root)
-            _launchctl_bootout(domain, label, ignore_failure=True)
-            _verify_launchctl_unloaded(label, domain)
-            _atomic_write(target, plist.read_bytes())
-            subprocess.run(["launchctl", "bootstrap", domain, str(target)], check=True, capture_output=True, text=True)
-            subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{label}"], check=True, capture_output=True, text=True)
-        except (OSError, subprocess.CalledProcessError, ConfigError) as exc:
-            _launchctl_bootout(domain, label, ignore_failure=True)
-            _verify_launchctl_unloaded(label, domain)
-            if current.exists() or current.is_symlink():
-                current.unlink()
-                _fsync_directory(root)
-            if old_current_target is not None:
-                current.symlink_to(old_current_target, target_is_directory=True)
-                _fsync_directory(root)
-            if old_agent_exists and old_agent_data is not None:
-                _atomic_write(target, old_agent_data)
-            elif target.exists():
-                target.unlink()
-                _fsync_directory(target.parent)
-            if previous_data is not None:
-                _atomic_write(previous_path, previous_data)
-            elif previous_path.exists():
-                previous_path.unlink()
-                _fsync_directory(root)
             try:
-                _launchctl_restore_state(loaded_state, target)
-            except (OSError, subprocess.CalledProcessError, ConfigError) as restore_exc:
-                raise ConfigError(f"Fala promotion rollback could not restore launchd state: {restore_exc}") from restore_exc
-            raise ConfigError(f"Fala promotion rolled back after launchd failure: {exc}") from exc
-        result["promoted"] = True
-        result["current"] = str(current)
-        result["launch_agent"] = str(target)
-        result["loaded_state"] = loaded_state
-        return result
+                version.chmod(0o755)
+            except OSError:
+                pass
+            shutil.rmtree(version, ignore_errors=True)
+            _fsync_directory(versions_root)
+        raise
+    try:
+        _atomic_write(previous_path, _canonical_json(previous))
+        tmp_link = root / ".current.next"
+        if tmp_link.exists() or tmp_link.is_symlink():
+            tmp_link.unlink()
+        tmp_link.symlink_to(version, target_is_directory=True)
+        os.replace(tmp_link, current)
+        _fsync_directory(root)
+        for observed_domain in domain_states:
+            _launchctl_bootout(observed_domain, label, ignore_failure=True)
+            _verify_launchctl_unloaded(label, observed_domain)
+        _atomic_write(target, plist.read_bytes())
+        subprocess.run(["launchctl", "bootstrap", domain, str(target)], check=True, capture_output=True, text=True)
+        subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{label}"], check=True, capture_output=True, text=True)
+        _verify_launchctl_exact(label, domain)
+    except (OSError, subprocess.CalledProcessError, ConfigError) as exc:
+        for observed_domain in domain_states:
+            _launchctl_bootout(observed_domain, label, ignore_failure=True)
+            _verify_launchctl_unloaded(label, observed_domain)
+        if current.exists() or current.is_symlink():
+            current.unlink()
+            _fsync_directory(root)
+        if old_current_target is not None:
+            current.symlink_to(old_current_target, target_is_directory=True)
+            _fsync_directory(root)
+        if old_agent_exists and old_agent_data is not None:
+            _atomic_write(target, old_agent_data)
+        elif target.exists():
+            target.unlink()
+            _fsync_directory(target.parent)
+        if previous_data is not None:
+            _atomic_write(previous_path, previous_data)
+        elif previous_path.exists():
+            previous_path.unlink()
+            _fsync_directory(root)
+        try:
+            _launchctl_restore_states(domain_states, target)
+        except (OSError, subprocess.CalledProcessError, ConfigError) as restore_exc:
+            raise ConfigError(f"Fala promotion rollback could not restore launchd state: {restore_exc}") from restore_exc
+        raise ConfigError(f"Fala promotion rolled back after launchd failure: {exc}") from exc
+    result["promoted"] = True
+    result["current"] = str(current)
+    result["launch_agent"] = str(target)
+    result["loaded_state"] = domain_states
+    return result

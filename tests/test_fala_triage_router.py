@@ -459,3 +459,36 @@ class CleanupRepositoryRoutingTests(unittest.TestCase):
         runner.assert_not_awaited()
         self.assertEqual(result.summary["reason"], "cleanup_provenance_missing")
         self.assertEqual(result.status, "failed")
+
+    def test_partial_cleanup_persists_terminal_receipt_after_graph_cancellation(self) -> None:
+        cfg = AgentConfig(mode="dry-run", repos=(RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida"),))
+        host = HostPathRunResult(
+            run_id="cleanup-run",
+            path_id="cleanup",
+            run_status="failed",
+            replayed=False,
+            ticks=3,
+            processes=(
+                _process("parse_issue_from_branch", output={"ok": True, "status": "parsed", "mutated": False, "issue": 2}),
+                _process("check_issue_closed", output={"ok": True, "status": "checked", "mutated": False, "closed": True}),
+                _process("check_no_open_pr", output={"ok": True, "status": "checked", "mutated": False, "safe_to_cleanup": True}),
+                _process("remove_worktree", output={"ok": True, "status": "removed", "mutated": True}),
+                _process("delete_local_fix_branch", status="failed", output={"ok": False, "status": "failed", "mutated": False, "reason": "delete_failed"}),
+            ),
+        )
+
+        async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
+            runner = mock.AsyncMock(return_value=host)
+            writer = mock.Mock(return_value={"ok": True, "status": "written", "mutated": True, "receipt_path": "/tmp/cleanup.json"})
+            with mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=runner), mock.patch("repo_agent.flows.cleanup.write_cleanup_receipt", new=writer):
+                result = await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True, repo="o/temida", branch="ai/fix/2", receipt_path="/tmp/cleanup.json")
+            return result, writer
+
+        result, writer = asyncio.run(scenario())
+        writer.assert_called_once()
+        conduction = writer.call_args.args[0]["input"]["conduction"]
+        self.assertTrue(conduction["remove_worktree"]["mutated"])
+        self.assertEqual(conduction["release_active_issue_claim"]["status"], "cancelled")
+        self.assertEqual(result.summary["run_status"], "failed")
+        self.assertIn("write_cleanup_receipt", {process["step_id"] for process in result.processes})
+        self.assertEqual(result.status, "failed")

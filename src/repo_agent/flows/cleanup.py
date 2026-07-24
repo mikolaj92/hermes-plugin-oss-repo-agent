@@ -13,6 +13,7 @@ from repo_agent.adapters_git import branch_config_get
 from repo_agent.config import AgentConfig, ConfigError, load_config
 from repo_agent.flows.common import PathRunResult, process_summary, process_values
 from repo_agent.flows.runtime import run_package_path_async
+from repo_agent.steps.cleanup import write_cleanup_receipt
 
 
 _PACKAGE_PATH = Path(__file__).resolve().parents[3] / "fala-package.toml"
@@ -203,10 +204,41 @@ async def run_cleanup_flow(
     processes = list(result.processes)
     summaries = [process_summary(process) for process in processes]
     by_step = {summary["step_id"]: summary for summary in summaries if summary.get("step_id")}
+    outputs = [process_values(summary) for summary in summaries]
+    worked = any(bool(output.get("mutated")) for output in outputs)
+    receipt_output = process_values(by_step.get("write_cleanup_receipt") or {})
+    if worked and receipt_output.get("status") not in {"written", "exists"}:
+        conduction: dict[str, dict[str, Any]] = {}
+        for step in _CLEANUP_EFFECTORS[:-1]:
+            process = by_step.get(step) or {}
+            values = process_values(process)
+            conduction[step] = values or {
+                "ok": False,
+                "status": str(process.get("status") or "cancelled"),
+                "mutated": False,
+                "reason": str(process.get("error") or "upstream_cancelled"),
+            }
+        fallback = write_cleanup_receipt({
+            "input": {
+                **common,
+                "branch": resolved_branch,
+                "clone_path": resolved_clone,
+                "worktree_path": resolved_worktree,
+                "receipt_path": resolved_receipt,
+                "process_id": f"{rid}:write_cleanup_receipt:fallback",
+                "conduction": conduction,
+            },
+            "config": step_config,
+            "run_id": rid,
+            "path_id": "cleanup",
+            "process_id": f"{rid}:write_cleanup_receipt:fallback",
+        })
+        summaries.append({"id": f"{rid}:write_cleanup_receipt:fallback", "step_id": "write_cleanup_receipt", "status": "completed" if fallback.get("ok") else "failed", "attempt": 1, "max_attempts": 1, "output": fallback, "error": None if fallback.get("ok") else fallback.get("reason")})
+        by_step["write_cleanup_receipt"] = summaries[-1]
+        outputs.append(fallback)
     parse_output = process_values(by_step.get("parse_issue_from_branch") or {})
     run_status = str(result.run_status)
     terminal_failures = [summary for summary in summaries if summary.get("status") in _PROCESS_FAILURES]
-    outputs = [process_values(summary) for summary in summaries]
     worked = any(bool(output.get("mutated")) for output in outputs)
     idle = (
         parse_output.get("status") == "noop"

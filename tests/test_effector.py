@@ -96,6 +96,8 @@ class EffectorBoundaryTests(unittest.TestCase):
         self.assertFalse(values["dry_run"])
         self.assertNotIn("conduction", {"dry_run": observed["input"]["dry_run"]})
         self.assertEqual(observed["input"]["conduction"], {"prior": {"value": 1}})
+        self.assertEqual(observed["process_id"], "process-1")
+        self.assertEqual(observed["impulse_id"], "impulse-1")
 
     def test_secrets_are_redacted_from_result_and_stderr(self) -> None:
         secret = "sentinel-secret-value"

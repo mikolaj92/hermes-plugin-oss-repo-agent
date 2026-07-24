@@ -52,9 +52,36 @@ class KanbanTaskResolution:
     error: str | None = None
 
 
+_TRIAGE_REPAIR_ALIASES = (
+    "triage_create_review_fix_task",
+    "triage_build_repair_prompt",
+    "triage_decide_triage_action",
+    "triage_load_pr_fields",
+    "create_review_fix_task",
+    "build_repair_prompt",
+    "decide_triage_action",
+    "load_pr_fields",
+)
+_ISSUE_TO_PR_ALIASES = (
+    "parse_issue_ref",
+    "parse_issue_ref_from_task",
+    "dispatch_parse_issue_ref",
+    "load_kanban_task",
+    "dispatch_load_kanban_task",
+    "write_dispatch_receipt",
+    "dispatch_write_dispatch_receipt",
+)
+_PROVENANCE_ALIASES = _TRIAGE_REPAIR_ALIASES + _ISSUE_TO_PR_ALIASES
+
+
 def _repair_action_gate(request: Request) -> Result | None:
     """Prevent shared repair handlers from running for another triage action."""
-    decision = cond_blob(request, "decide_triage_action", "decide")
+    decision = cond_blob(
+        request,
+        "decide_triage_action",
+        "triage_decide_triage_action",
+        "decide",
+    )
     if not decision:
         return None
     if decision.get("status") == "noop":
@@ -69,6 +96,24 @@ def _repair_action_gate(request: Request) -> Result | None:
     if decision.get("action") != "repair":
         return noop("not_selected", action=decision.get("action"), upstream=decision)
     return None
+
+
+def _conduction_blobs(request: Request, aliases: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Read only the named path aliases, preserving path ownership boundaries."""
+    conduction = input_of(request).get("conduction")
+    if not isinstance(conduction, dict):
+        return []
+    blobs: list[dict[str, Any]] = []
+    for alias in aliases:
+        for name, value in conduction.items():
+            if name == alias or name.endswith(f"_{alias}"):
+                if isinstance(value, dict) and value and value not in blobs:
+                    blobs.append(dict(value))
+    return blobs
+
+
+
+
 
 def resolve_kanban_task_id_after_create_result(
     *,
@@ -413,23 +458,96 @@ def refresh_clone_base(request: Request) -> Result:
     return ok(status="refreshed", clone_path=clone_path, base_branch=base_branch, base_head=base_head, origin=origin, mutated=True)
 
 
+def _identity_values(
+    request: Request,
+    keys: tuple[str, ...],
+    aliases: tuple[str, ...] = _PROVENANCE_ALIASES,
+) -> list[str]:
+    values: list[str] = []
+    for source in _conduction_blobs(request, aliases):
+        for key in keys:
+            value = source.get(key)
+            if key in {"task_id", "task"} and isinstance(value, dict):
+                value = value.get("id") or value.get("task_id")
+            if value is None or not str(value).strip():
+                continue
+            normalized = str(value).strip()
+            if normalized not in values:
+                values.append(normalized)
+    return values
+
+
 def _worktree_provenance(request: Request, branch: str) -> dict[str, str]:
-    data = input_of(request)
-    cfg = cfg_of(request)
-    parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
-    receipt = cond_blob(request, "write_dispatch_receipt")
+    """Resolve one complete ownership tuple from this path's conduction."""
+    task_values = _identity_values(request, ("task_id", "task"))
+    issue_values = _identity_values(request, ("issue",))
+    receipt_values = _identity_values(request, ("receipt_id", "receipt_path"))
+    repo_values = _identity_values(request, ("repo",))
     return {
-        "task_id": str(data.get("task_id") or parsed.get("task_id") or "").strip(),
-        "issue": str(data.get("issue") or parsed.get("issue") or "").strip(),
-        "receipt": str(data.get("receipt_id") or data.get("receipt_path") or cfg.get("receipt_path") or receipt.get("receipt_path") or "").strip(),
-        "repo": str(data.get("repo") or parsed.get("repo") or "").strip(),
+        "task_id": task_values[0] if len(task_values) == 1 else "",
+        "issue": issue_values[0] if len(issue_values) == 1 else "",
+        "receipt": receipt_values[0] if len(receipt_values) == 1 else "",
+        "repo": repo_values[0] if len(repo_values) == 1 else "",
         "branch": branch,
     }
-def _provenance_matches(expected: dict[str, str], actual: dict[str, str]) -> bool:
-    # Every supplied identity must have an exact persisted match; missing identity
-    # is not ownership and therefore cannot authorize reuse or deletion.
-    keys = (("task_id", "task"), ("issue", "issue"), ("receipt", "receipt"), ("repo", "repo"))
-    return all(expected.get(source) and actual.get(target, "") == expected[source] for source, target in keys)
+
+
+def _worktree_provenance_error(request: Request, provenance: dict[str, str]) -> dict[str, Any]:
+    fields = {
+        "task_id": ("task_id", "task"),
+        "issue": ("issue",),
+        "receipt": ("receipt_id", "receipt_path"),
+        "repo": ("repo",),
+    }
+    missing = [key for key, aliases in fields.items() if not _identity_values(request, aliases)]
+    conflicts = {
+        key: values
+        for key, aliases in fields.items()
+        if len(values := _identity_values(request, aliases)) > 1
+    }
+    if not provenance.get("branch"):
+        missing.append("branch")
+    return {"missing": missing, "conflicts": conflicts}
+
+
+def _worktree_branch(request: Request) -> tuple[str, list[str]]:
+    """Resolve branch from repair/dispatch conduction, never path config."""
+    values = _identity_values(
+        request,
+        ("branch",),
+        aliases=(
+            "triage_build_repair_prompt",
+            "build_repair_prompt",
+            "triage_repair_prepare_worktree",
+            "repair_prepare_worktree",
+            "dispatch_parse_issue_ref",
+            "parse_issue_ref",
+            "parse_issue_ref_from_task",
+            "load_pr_fields",
+            "triage_load_pr_fields",
+        ),
+    )
+    # PR objects carry the branch under headRefName.
+    for blob in _conduction_blobs(
+        request,
+        (
+            "triage_build_repair_prompt",
+            "build_repair_prompt",
+            "triage_load_pr_fields",
+            "load_pr_fields",
+            "dispatch_parse_issue_ref",
+            "parse_issue_ref",
+        ),
+    ):
+        pr = blob.get("pr")
+        if isinstance(pr, dict) and str(pr.get("headRefName") or "").strip():
+            candidate = str(pr["headRefName"]).strip()
+            if candidate not in values:
+                values.append(candidate)
+        candidate = str(blob.get("headRefName") or "").strip()
+        if candidate and candidate not in values:
+            values.append(candidate)
+    return (values[0] if len(values) == 1 else ""), values
 
 
 def _branch_provenance(clone_path: str, branch: str) -> dict[str, str]:
@@ -441,6 +559,19 @@ def _branch_provenance(clone_path: str, branch: str) -> dict[str, str]:
             values[key] = ""
     return values
 
+def _provenance_matches(expected: dict[str, str], actual: dict[str, str]) -> bool:
+    """Accept reuse only when every recorded ownership field matches exactly."""
+    return all(
+        expected.get(expected_key, "")
+        and expected.get(expected_key, "") == actual.get(actual_key, "")
+        for expected_key, actual_key in (
+            ("task_id", "task"),
+            ("issue", "issue"),
+            ("receipt", "receipt"),
+            ("repo", "repo"),
+        )
+    )
+
 
 
 
@@ -448,27 +579,42 @@ def prepare_worktree(request: Request) -> Result:
     """Create/reuse a worktree only after clone, ref, and ownership read-backs."""
     data = input_of(request)
     cfg = cfg_of(request)
-    gated = _repair_action_gate(request)
-    if gated is not None:
-        return gated
     dry = dry_run_flag(request)
-    upstream = upstream_noop(request, "parse_issue_ref")
+    upstream = upstream_noop(
+        request,
+        "parse_issue_ref",
+        "dispatch_parse_issue_ref",
+        "triage_load_pr_fields",
+        "load_pr_fields",
+        "triage_build_repair_prompt",
+        "build_repair_prompt",
+    )
     if upstream:
         return noop(str(upstream.get("reason") or "no_ready_task"))
-    clone_path = str(data.get("clone_path") or cond_get(request, "clone_path", "refresh_clone_base", "parse_issue_ref", "load_kanban_task") or cfg.get("clone_path") or "")
-    branch = str(data.get("branch") or cond_get(request, "branch", "parse_issue_ref", "load_pr_fields", "build_repair_prompt") or "")
-    if not branch:
-        pr = cond_get(request, "pr", "load_pr_fields")
-        if isinstance(pr, dict):
-            branch = str(pr.get("headRefName") or "")
+    clone_path = str(data.get("clone_path") or cond_get(request, "clone_path", "refresh_clone_base", "parse_issue_ref", "dispatch_parse_issue_ref", "load_kanban_task", "dispatch_load_kanban_task", "triage_load_pr_fields", "load_pr_fields") or cfg.get("clone_path") or "")
+    branch, branch_values = _worktree_branch(request)
+    if dry and not branch:
+        branch = str(data.get("branch") or "").strip()
     worktree_root = str(data.get("worktree_root") or cfg.get("worktree_root") or "")
     base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
-    expected_head = str(data.get("expected_head") or cond_get(request, "expected_head", "prepare_worktree", "write_dispatch_receipt") or "").strip()
+    expected_head = str(data.get("expected_head") or cond_get(request, "expected_head", "prepare_worktree", "repair_prepare_worktree", "triage_repair_prepare_worktree", "write_dispatch_receipt", "dispatch_write_dispatch_receipt") or "").strip()
     if not clone_path or not branch or not worktree_root:
         return fail("missing_clone_branch_or_root", failure_class="terminal", retry_safe=False)
     safe = re.sub(r"[^a-zA-Z0-9._/-]+", "-", branch)
     path = Path(worktree_root) / safe
     provenance = _worktree_provenance(request, branch)
+    provenance_error = _worktree_provenance_error(request, provenance)
+    if not dry and (provenance_error["missing"] or provenance_error["conflicts"] or len(branch_values) != 1):
+        return fail(
+            "missing_worktree_provenance" if provenance_error["missing"] or len(branch_values) != 1 else "conflicting_worktree_provenance",
+            failure_class="terminal",
+            retry_safe=False,
+            branch=branch,
+            branch_values=branch_values,
+            provenance=provenance,
+            **provenance_error,
+            mutated=False,
+        )
     if dry:
         return planned(clone_path=clone_path, branch=branch, worktree_path=str(path), base_branch=base_branch, create_branch=True, provenance=provenance)
 
