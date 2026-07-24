@@ -748,6 +748,40 @@ class DeploymentCandidateTests(unittest.TestCase):
                 with self.assertRaises(self.commands.ConfigError):
                     self.commands.deploy_fala(self.cfg, str(second), True, deployment_root=str(root))
             self.assertEqual((root / "current").resolve(), old_target)
+    def test_unload_verification_failure_still_restores_filesystem(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._render(root)
+
+            def successful_run(argv, **kwargs):
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
+                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+            ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(
+                self.commands.subprocess, "run", side_effect=successful_run
+            ):
+                self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
+            old_current = (root / "current").resolve()
+            import tools.deployment_parity as parity
+            launch_agent = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+            old_plist = launch_agent.read_bytes()
+            old_previous = (root / "previous.json").read_bytes()
+            second = self._render(root, config_path=root / "other.toml", db_path=root / "other.sqlite")
+
+            with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
+                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+            ), patch.object(
+                self.commands, "_verify_launchctl_unloaded", side_effect=self.commands.ConfigError("unload verification uncertain")
+            ), patch.object(self.commands.subprocess, "run", side_effect=successful_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "unload verification uncertain"):
+                    self.commands.deploy_fala(self.cfg, str(second), True, deployment_root=str(root))
+
+            self.assertEqual((root / "current").resolve(), old_current)
+            self.assertEqual(launch_agent.read_bytes(), old_plist)
+            self.assertEqual((root / "previous.json").read_bytes(), old_previous)
 
     def test_render_and_candidate_independent_validation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -761,37 +795,12 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(result["candidate_id"], manifest["candidate_id"])
             self.assertTrue(result["ok"])
 
-    def test_guarded_autonomous_policy_requires_live_mode(self):
-        with tempfile.TemporaryDirectory() as directory:
-            self._render(Path(directory))
-            parity = sys.modules["hermes_plugins.oss_repo_agent.tools.deployment_parity"]
-
-            with self.assertRaises(parity.DeploymentParityError) as raised:
-                self._render(Path(directory), autonomous=True)
-            self.assertIn(
-                "Fala autonomous identity policy requires live mode",
-                raised.exception.result["errors"],
-            )
-
-    def test_guarded_autonomous_candidate_policy_is_safe(self):
+    def test_autonomous_policy_is_rejected_even_in_live_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            candidate = self._render(root, mode="live", autonomous=True)
-            import tools.deployment_parity as parity
-
-            result = parity.validate_fala_candidate(candidate, deployment_root=root)
-            self.assertTrue(result["ok"])
-            manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(
-                manifest["policy"],
-                {
-                    "automerge": True,
-                    "require_human_approval": False,
-                    "require_checks": True,
-                    "require_test_evidence": True,
-                    "executor_enabled": True,
-                },
-            )
+            with self.assertRaises(Exception) as raised:
+                self._render(root, mode="live", autonomous=True)
+            self.assertIn("Fala identity policy is unsafe for promotion", raised.exception.result["errors"])
 
     def test_candidate_policy_is_required_and_safe(self):
         with tempfile.TemporaryDirectory() as directory:

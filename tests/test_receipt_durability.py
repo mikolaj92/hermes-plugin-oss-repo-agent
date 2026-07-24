@@ -144,26 +144,62 @@ class ReceiptDurabilityTests(unittest.TestCase):
             self.assertEqual(payload["path_id"], "input-path")
             self.assertEqual(payload["process_id"], "input-process")
             self.assertEqual(payload["candidate"], "input-candidate")
-    def _cleanup(self, path: Path, *, process_id: str = "cleanup-process") -> dict:
-        succeeded = {"ok": True, "status": "noop", "mutated": False, "reason": "no_target"}
+    def _cleanup(self, path: Path, *, process_id: str = "cleanup-process", **overrides: object) -> dict:
+        identity = {
+            "task_id": "task-7",
+            "repo": "owner/repo",
+            "issue": 7,
+            "receipt_id": str(path),
+            "branch": "ai/fix/7-cleanup",
+            "clone_path": "/tmp/clone-owner-repo",
+            "worktree_path": "/tmp/worktree-owner-repo",
+        }
+        evidence = {
+            "parse_issue_from_branch": {"ok": True, "status": "parsed", "issue": 7, "branch": identity["branch"], "task_id": identity["task_id"], "repo": identity["repo"]},
+            "check_issue_closed": {"ok": True, "status": "checked", "closed": True, "repo": identity["repo"], "issue": 7},
+            "check_no_open_pr": {"ok": True, "status": "checked", "safe_to_cleanup": True, "open_count": 0, "branch": identity["branch"]},
+            "remove_worktree": {"ok": True, "status": "already_absent", "mutated": False, "clone_path": identity["clone_path"], "worktree_path": identity["worktree_path"], "branch": identity["branch"]},
+            "delete_local_fix_branch": {"ok": True, "status": "already_absent", "mutated": False, "clone_path": identity["clone_path"], "branch": identity["branch"]},
+            "release_active_issue_claim": {"ok": True, "status": "already_absent", "mutated": False, "repo": identity["repo"], "issue": 7},
+        }
+        identity.update(overrides)
         return cleanup.write_cleanup_receipt({
             "input": {
+                **identity,
                 "receipt_path": str(path),
                 "dry_run": False,
-                "conduction": {
-                    "parse_issue_from_branch": succeeded,
-                    "check_issue_closed": succeeded,
-                    "check_no_open_pr": succeeded,
-                    "remove_worktree": succeeded,
-                    "delete_local_fix_branch": succeeded,
-                    "release_active_issue_claim": succeeded,
-                },
+                "conduction": evidence,
             },
             "config": {},
             "run_id": "cleanup-run",
             "path_id": "cleanup",
             "process_id": process_id,
         })
+
+    def test_generic_ok_blobs_and_missing_identity_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cleanup.json"
+            generic = {name: {"ok": True, "status": "noop", "mutated": False} for name in ("parse_issue_from_branch", "check_issue_closed", "check_no_open_pr", "remove_worktree", "delete_local_fix_branch", "release_active_issue_claim")}
+            result = cleanup.write_cleanup_receipt({"input": {"receipt_path": str(path), "dry_run": False, "conduction": generic}, "config": {}})
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "cleanup_identity_missing")
+            missing = self._cleanup(path, task_id="")
+            self.assertFalse(missing["ok"])
+            self.assertEqual(missing["reason"], "cleanup_identity_missing")
+
+    def test_symlink_and_hardlink_receipts_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target.json"
+            target.write_text("{}", encoding="utf-8")
+            symlink = Path(tmp) / "symlink.json"
+            symlink.symlink_to(target)
+            self.assertEqual(self._cleanup(symlink)["reason"], "receipt_conflict")
+            hardlink = Path(tmp) / "hardlink.json"
+            target.unlink()
+            first = self._cleanup(target)
+            self.assertEqual(first["status"], "written")
+            os.link(target, hardlink)
+            self.assertEqual(self._cleanup(target)["reason"], "receipt_conflict")
 
     def test_cleanup_receipt_is_durable_and_preserves_request_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

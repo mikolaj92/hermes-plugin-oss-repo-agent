@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
+import stat
 import re
 import tempfile
 from pathlib import Path
@@ -406,12 +407,23 @@ def _receipt_directory_lock(directory: Path):
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
+def _private_receipt_stat(path: Path) -> os.stat_result | None:
+    """Return metadata only for a private, regular, single-link receipt inode."""
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077 or metadata.st_nlink != 1:
+        raise ValueError("receipt is not a private single-link regular file")
+    return metadata
+
+
 
 def _publish_cleanup_receipt(p: Path, payload: dict[str, Any], path: str) -> Result:
     def existing_result() -> Result | None:
-        if not p.exists():
-            return None
         try:
+            if _private_receipt_stat(p) is None:
+                return None
             existing = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             return fail("receipt_conflict", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
@@ -455,14 +467,14 @@ def _publish_cleanup_receipt(p: Path, payload: dict[str, Any], path: str) -> Res
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
-        if not p.is_file() or json.loads(p.read_text(encoding="utf-8")) != payload:
+        if _private_receipt_stat(p) is None or json.loads(p.read_text(encoding="utf-8")) != payload:
             raise ValueError("receipt read-back mismatch")
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
         rollback_error: Exception | None = None
         if published_identity is not None:
             try:
-                current = p.stat()
-                if (current.st_dev, current.st_ino) == published_identity:
+                current = _private_receipt_stat(p)
+                if current is not None and (current.st_dev, current.st_ino) == published_identity:
                     os.unlink(p)
                 dir_fd = os.open(str(p.parent), os.O_RDONLY)
                 try:
@@ -484,6 +496,75 @@ def _publish_cleanup_receipt(p: Path, payload: dict[str, Any], path: str) -> Res
     return ok(status="written", receipt_path=path, payload=payload, mutated=True)
 
 
+def _cleanup_identity(data: dict[str, Any], cfg: dict[str, Any], payload: dict[str, Any], evidence: dict[str, dict[str, Any]], receipt_path: str) -> dict[str, Any] | None:
+    payload_entity = payload.get("entity") if isinstance(payload.get("entity"), dict) else {}
+
+    def value(*keys: str, evidence_names: tuple[str, ...] = ()) -> Any:
+        for source in (data, cfg, payload_entity):
+            for key in keys:
+                candidate = source.get(key)
+                if candidate is not None and str(candidate).strip():
+                    return candidate
+        for name in evidence_names:
+            blob = evidence.get(name) or {}
+            for key in keys:
+                candidate = blob.get(key)
+                if candidate is not None and str(candidate).strip():
+                    return candidate
+        return ""
+
+    identity = {
+        "task": value("task_id", "task"),
+        "repo": value("repo", evidence_names=("check_issue_closed", "remove_worktree", "release_active_issue_claim")),
+        "issue": value("issue", evidence_names=("parse_issue_from_branch", "check_issue_closed", "release_active_issue_claim")),
+        "receipt": value("receipt_id", "receipt", "receipt_path") or receipt_path,
+        "branch": value("branch", evidence_names=("parse_issue_from_branch", "remove_worktree", "delete_local_fix_branch")),
+        "clone_path": value("clone_path", evidence_names=("remove_worktree",)),
+        "worktree_path": value("worktree_path", evidence_names=("remove_worktree",)),
+    }
+    for key in ("pr_number", "head_oid", "base_sha", "merge_oid", "origin_main_sha"):
+        candidate = value(key, evidence_names=tuple(evidence))
+        if candidate not in (None, ""):
+            identity[key] = candidate
+    if any(not str(identity[key]).strip() for key in ("task", "repo", "receipt", "branch", "clone_path", "worktree_path")):
+        return None
+    raw_issue = identity["issue"]
+    if isinstance(raw_issue, bool):
+        return None
+    try:
+        if int(raw_issue) <= 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    for source in (data, cfg, payload_entity):
+        for key, expected in identity.items():
+            if key in source and source[key] not in (None, "") and str(source[key]).strip() != str(expected).strip():
+                return None
+    return identity
+
+
+def _cleanup_evidence_contract(evidence: dict[str, dict[str, Any]]) -> str | None:
+    parse = evidence["parse_issue_from_branch"]
+    closed = evidence["check_issue_closed"]
+    no_open_pr = evidence["check_no_open_pr"]
+    removed = evidence["remove_worktree"]
+    deleted = evidence["delete_local_fix_branch"]
+    released = evidence["release_active_issue_claim"]
+    if parse.get("ok") is not True or closed.get("ok") is not True or no_open_pr.get("ok") is not True:
+        return None
+    if closed.get("status") != "checked" or closed.get("closed") is not True:
+        return None
+    if no_open_pr.get("status") != "checked" or no_open_pr.get("safe_to_cleanup") is not True or no_open_pr.get("open_count") != 0:
+        return None
+    if parse.get("status") == "parsed" and removed.get("status") == "removed" and deleted.get("status") == "deleted" and released.get("status") == "released":
+        if all(blob.get("ok") is True for blob in (removed, deleted, released)):
+            return "success"
+    if parse.get("status") == "parsed" and removed.get("status") == "already_absent" and deleted.get("status") == "already_absent" and released.get("status") == "already_absent":
+        if all(blob.get("ok") is True for blob in (removed, deleted, released)):
+            return "noop"
+    return None
+
+
 def write_cleanup_receipt(request: Request) -> Result:
     data = input_of(request)
     cfg = cfg_of(request)
@@ -501,25 +582,25 @@ def write_cleanup_receipt(request: Request) -> Result:
     }
     if not isinstance(conduction, dict):
         return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False, receipt_path=path)
-    evidence = {
-        name: next((conduction[key] for key in aliases if isinstance(conduction.get(key), dict)), None)
-        for name, aliases in required.items()
-    }
+    evidence = {name: next((conduction[key] for key in aliases if isinstance(conduction.get(key), dict)), None) for name, aliases in required.items()}
     if any(blob is None for blob in evidence.values()):
         return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False, receipt_path=path)
     steps = {name: {"status": blob.get("status"), "mutated": bool(blob.get("mutated", False)), "reason": blob.get("reason"), "failure": blob.get("failure_class") or blob.get("error")} for name, blob in evidence.items()}
     cancelled = any(blob.get("status") in {"cancelled", "timed_out"} for blob in evidence.values())
     failed = any(blob.get("ok") is False for blob in evidence.values())
+    payload = dict(data.get("payload") or {})
+    identity = _cleanup_identity(data, cfg, payload, evidence, path)
+    if identity is None:
+        return fail("cleanup_identity_missing", failure_class="terminal", retry_safe=False, receipt_path=path, steps=steps)
     if cancelled:
         outcome = "cancelled"
     elif failed:
         outcome = "partial" if any(item["mutated"] for item in steps.values()) else "failure"
-    elif all(blob.get("ok") is True for blob in evidence.values()):
-        outcome = "noop" if all(blob.get("status") in {"noop", "already_absent"} for blob in evidence.values()) else "success"
     else:
-        return fail("cleanup_evidence_inconclusive", failure_class="terminal", retry_safe=False, receipt_path=path, steps=steps)
-    payload = dict(data.get("payload") or {})
-    payload.update({"phase": "CLEANUP_TERMINAL", "outcome": outcome, "run_id": data.get("run_id") or cfg.get("run_id") or request.get("run_id") or "", "path_id": data.get("path_id") or cfg.get("path_id") or request.get("path_id") or "cleanup", "process_id": data.get("process_id") or cfg.get("process_id") or request.get("process_id") or "", "entity": {"task": data.get("task_id") or cfg.get("task_id") or "", "repo": data.get("repo") or cfg.get("repo") or "", "issue": data.get("issue") or cfg.get("issue") or "", "receipt": data.get("receipt_id") or path, "branch": data.get("branch") or cfg.get("branch") or "", "clone_path": data.get("clone_path") or cfg.get("clone_path") or "", "worktree_path": data.get("worktree_path") or cfg.get("worktree_path") or ""}, "steps": steps})
+        outcome = _cleanup_evidence_contract(evidence)
+        if outcome is None:
+            return fail("cleanup_evidence_inconclusive", failure_class="terminal", retry_safe=False, receipt_path=path, steps=steps)
+    payload.update({"phase": "CLEANUP_TERMINAL", "outcome": outcome, "run_id": data.get("run_id") or cfg.get("run_id") or request.get("run_id") or "", "path_id": data.get("path_id") or cfg.get("path_id") or request.get("path_id") or "cleanup", "process_id": data.get("process_id") or cfg.get("process_id") or request.get("process_id") or "", "entity": identity, "steps": steps})
     if dry_run_flag(request):
         return planned(receipt_path=path, payload=payload)
     p = Path(path)
@@ -528,7 +609,6 @@ def write_cleanup_receipt(request: Request) -> Result:
             return _publish_cleanup_receipt(p, payload, path)
     except OSError as exc:
         return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path, mutated=False)
-
 def create_maintenance_task(request: Request) -> Result:
     """Create one Kanban maintenance task per deterministic repo/PR marker."""
     data = input_of(request)

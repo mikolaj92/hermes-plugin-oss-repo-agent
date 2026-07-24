@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from argparse import ArgumentParser, Namespace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows development only
@@ -1405,30 +1405,47 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
             subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{label}"], check=True, capture_output=True, text=True)
             _verify_launchctl_exact(label, domain)
         except (OSError, subprocess.CalledProcessError, ConfigError) as exc:
+            rollback_errors: list[str] = []
+
+            def restore_step(label: str, operation: Callable[[], None]) -> None:
+                try:
+                    operation()
+                except (OSError, subprocess.CalledProcessError, ConfigError) as restore_exc:
+                    rollback_errors.append(f"{label}: {restore_exc}")
+
             for observed_domain, observed_state in domain_states.items():
-                _launchctl_bootout(observed_domain, label, ignore_failure=True)
+                restore_step(
+                    f"unload {observed_domain}",
+                    lambda observed_domain=observed_domain: _launchctl_bootout(observed_domain, label, ignore_failure=True),
+                )
                 if observed_state.get("available") is not False:
-                    _verify_launchctl_unloaded(label, observed_domain)
+                    restore_step(
+                        f"verify unload {observed_domain}",
+                        lambda observed_domain=observed_domain: _verify_launchctl_unloaded(label, observed_domain),
+                    )
             if current.exists() or current.is_symlink():
-                current.unlink()
-                _fsync_directory(root)
+                restore_step("remove current", lambda: current.unlink())
+                restore_step("sync deployment root", lambda: _fsync_directory(root))
             if old_current_target is not None:
-                current.symlink_to(old_current_target, target_is_directory=True)
-                _fsync_directory(root)
+                restore_step("restore current", lambda: current.symlink_to(old_current_target, target_is_directory=True))
+                restore_step("sync deployment root", lambda: _fsync_directory(root))
             if old_agent_exists and old_agent_data is not None:
-                _atomic_write(target, old_agent_data)
+                restore_step("restore installed plist", lambda: _atomic_write(target, old_agent_data))
             elif target.exists():
-                target.unlink()
-                _fsync_directory(target.parent)
+                restore_step("remove installed plist", lambda: target.unlink())
+                restore_step("sync launch agents", lambda: _fsync_directory(target.parent))
             if previous_data is not None:
-                _atomic_write(previous_path, previous_data)
+                restore_step("restore previous.json", lambda: _atomic_write(previous_path, previous_data))
             elif previous_path.exists():
-                previous_path.unlink()
-                _fsync_directory(root)
-            try:
-                _launchctl_restore_states(domain_states, target)
-            except (OSError, subprocess.CalledProcessError, ConfigError) as restore_exc:
-                raise ConfigError(f"Fala promotion rollback could not restore launchd state: {restore_exc}") from restore_exc
+                restore_step("remove previous.json", lambda: previous_path.unlink())
+                restore_step("sync deployment root", lambda: _fsync_directory(root))
+            restore_step("restore launchd state", lambda: _launchctl_restore_states(domain_states, target))
+            if rollback_errors:
+                detail = "; ".join(rollback_errors)
+                raise ConfigError(
+                    f"Fala promotion rolled back after launchd failure: {exc}; "
+                    f"rollback warnings: {detail}"
+                ) from exc
             raise ConfigError(f"Fala promotion rolled back after launchd failure: {exc}") from exc
         result["promoted"] = True
         result["current"] = str(current)
