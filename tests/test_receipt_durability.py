@@ -18,6 +18,7 @@ def request(data: dict) -> dict:
     return {
         "input": data,
         "config": {},
+        "conduction": {"decide_triage_action": {"ok": True, "status": "decided", "action": "merge", "reason": "ready"}},
     }
 
 
@@ -74,6 +75,7 @@ class ReceiptDurabilityTests(unittest.TestCase):
                     result = writer(path, payload)
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["reason"], "receipt_write_failed")
+                self.assertFalse(path.exists())
                 self.assertEqual(list(path.parent.glob(".*.tmp")), [])
 
     def test_readback_mismatch_and_json_corruption_fail_closed_and_clean_temp(self) -> None:
@@ -89,6 +91,7 @@ class ReceiptDurabilityTests(unittest.TestCase):
                         result = writer(path, payload)
                     self.assertFalse(result["ok"])
                     self.assertEqual(result["reason"], "receipt_write_failed")
+                    self.assertFalse(path.exists())
                     self.assertEqual(list(path.parent.glob(".*.tmp")), [])
 
     def test_existing_identical_receipt_is_idempotent_and_conflict_does_not_clobber(self) -> None:

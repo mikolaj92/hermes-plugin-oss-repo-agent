@@ -1,4 +1,5 @@
 from __future__ import annotations
+import base64
 
 import hashlib
 import io
@@ -735,6 +736,12 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
             capture_output=True,
             text=True,
         )
+        head = subprocess.run(
+            ["git", "-C", str(fala_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         submodules = subprocess.run(
             ["git", "-C", str(fala_root), "submodule", "status", "--recursive"],
             check=True,
@@ -743,6 +750,8 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ConfigError(f"unable to verify pinned Fala checkout: {exc}") from exc
+    if head.stdout.strip() != FALA_PINNED_COMMIT:
+        raise ConfigError("Fala checkout HEAD does not match pinned commit")
     if status.stdout.strip():
         raise ConfigError("pinned Fala checkout is dirty")
     fala_target = project / "Fala"
@@ -1064,8 +1073,12 @@ def _launchctl_bootout(domain: str, label: str, *, ignore_failure: bool = False)
 
 
 def _verify_launchctl_unloaded(label: str, domain: str) -> None:
-    if _launchctl_loaded_state(label, domain).get("loaded"):
+    state = _launchctl_loaded_state(label, domain)
+    if state.get("available") is False:
+        return
+    if state.get("loaded"):
         raise ConfigError(f"launchd service remains loaded: {domain}/{label}")
+
 def _launchctl_domain_states(label: str) -> dict[str, dict[str, Any]]:
     """Inspect a label in both supported per-user launchd domains."""
     uid = os.getuid()
@@ -1076,15 +1089,23 @@ def _launchctl_domain_states(label: str) -> dict[str, dict[str, Any]]:
 
 
 def _launchctl_intended_domain(label: str, states: dict[str, dict[str, Any]]) -> str:
-    loaded = [domain for domain, state in states.items() if state.get("loaded")]
+    available = {domain: state for domain, state in states.items() if state.get("available") is not False}
+    if not available:
+        raise ConfigError("no supported Fala launchd domain is available")
+    loaded = [domain for domain, state in available.items() if state.get("loaded")]
     if len(loaded) > 1:
         raise ConfigError(f"Fala service is loaded in multiple domains: {label}")
-    return loaded[0] if loaded else f"user/{os.getuid()}"
+    if loaded:
+        return loaded[0]
+    user_domain = f"user/{os.getuid()}"
+    return user_domain if user_domain in available else next(iter(available))
 
 
 def _verify_launchctl_exact(label: str, intended_domain: str) -> None:
     states = _launchctl_domain_states(label)
-    loaded = [domain for domain, state in states.items() if state.get("loaded")]
+    if states.get(intended_domain, {}).get("available") is False:
+        raise ConfigError(f"intended Fala launchd domain is unavailable: {intended_domain}")
+    loaded = [domain for domain, state in states.items() if state.get("available") is not False and state.get("loaded")]
     if loaded != [intended_domain]:
         detail = ", ".join(loaded) if loaded else "none"
         raise ConfigError(f"Fala service domain verification failed: expected {intended_domain}, found {detail}")
@@ -1127,10 +1148,13 @@ def _assert_legacy_mutators_unloaded() -> dict[str, dict[str, Any]]:
             domain: _launchctl_loaded_state(label, domain)
             for domain in (f"user/{os.getuid()}", f"gui/{os.getuid()}")
         }
-        loaded = [state for state in per_domain.values() if state.get("loaded")]
+        available = [state for state in per_domain.values() if state.get("available") is not False]
+        if not available:
+            raise ConfigError(f"no supported legacy launchd domain is available for {label}")
+        loaded = [state for state in available if state.get("loaded")]
         if len(loaded) > 1:
             raise ConfigError(f"legacy mutator label is loaded in multiple domains: {label}")
-        states[label] = loaded[0] if loaded else next(iter(per_domain.values()))
+        states[label] = loaded[0] if loaded else available[0]
     health = states["com.mikolaj92.hermes.repo-agent-health"]
     if health.get("loaded"):
         health_plist = Path.home() / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-health.plist"
@@ -1246,6 +1270,15 @@ def _verify_version_reuse(candidate: Path, version: Path) -> None:
         if source.read_bytes() != installed.read_bytes() or _sha256_file(source) != _sha256_file(installed):
             raise ConfigError(f"existing deployment version byte/hash mismatch: {relative}")
 
+def _assert_deployment_root_inventory(root: Path) -> None:
+    """Reject untracked pointer aliases before mutating deployment state."""
+    if not root.exists():
+        return
+    unexpected = sorted(path.name for path in root.iterdir() if path.is_symlink() and path.name != "current")
+    if unexpected:
+        raise ConfigError(f"unexpected deployment root symlinks: {', '.join(unexpected)}")
+
+
 def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *, deployment_root: str | None = None) -> dict[str, Any]:
     candidate_arg = Path(candidate_value).expanduser()
     root = _candidate_root(candidate_arg, deployment_root)
@@ -1261,6 +1294,7 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
     if not promote:
         return result
     with _deployment_lock(root):
+        _assert_deployment_root_inventory(root)
         candidate_id = str(parity["candidate_id"])
         versions_root = root / "versions"
         versions_root.mkdir(parents=True, exist_ok=True)
@@ -1299,6 +1333,8 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
         target = launch_agents / plist.name
         old_agent_exists = target.is_file()
         old_agent_data = target.read_bytes() if old_agent_exists else None
+        if any(state.get("loaded") for state in domain_states.values()) and not old_agent_exists:
+            raise ConfigError("loaded Fala service has no canonical installed plist to preserve")
         previous_path = root / "previous.json"
         previous_data = previous_path.read_bytes() if previous_path.is_file() else None
         previous = {
@@ -1307,6 +1343,11 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
             "loaded_state": domain_states,
             "label": label,
             "domain": domain,
+            "installed_plist": {
+                "present": old_agent_exists,
+                "sha256": _sha256_bytes(old_agent_data) if old_agent_data is not None else None,
+                "data_base64": base64.b64encode(old_agent_data).decode("ascii") if old_agent_data is not None else None,
+            }
         }
         version_created = False
         try:
@@ -1324,9 +1365,8 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
                 for path in version.rglob("*"):
                     if path.is_file():
                         path.chmod(0o444)
-                for directory in (version, version / "launchd", version / "source"):
-                    if directory.is_dir():
-                        directory.chmod(0o555)
+                for directory in (version, *(path for path in version.rglob("*") if path.is_dir())):
+                    directory.chmod(0o555)
                 _verify_candidate_copy(candidate, version)
                 _promote_version_runtime(version, root, candidate_id)
                 validate_fala_candidate(version, deployment_root=root)
@@ -1356,17 +1396,19 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
             tmp_link.symlink_to(version, target_is_directory=True)
             os.replace(tmp_link, current)
             _fsync_directory(root)
-            for observed_domain in domain_states:
+            for observed_domain, observed_state in domain_states.items():
                 _launchctl_bootout(observed_domain, label, ignore_failure=True)
-                _verify_launchctl_unloaded(label, observed_domain)
+                if observed_state.get("available") is not False:
+                    _verify_launchctl_unloaded(label, observed_domain)
             _atomic_write(target, plist.read_bytes())
             subprocess.run(["launchctl", "bootstrap", domain, str(target)], check=True, capture_output=True, text=True)
             subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{label}"], check=True, capture_output=True, text=True)
             _verify_launchctl_exact(label, domain)
         except (OSError, subprocess.CalledProcessError, ConfigError) as exc:
-            for observed_domain in domain_states:
+            for observed_domain, observed_state in domain_states.items():
                 _launchctl_bootout(observed_domain, label, ignore_failure=True)
-                _verify_launchctl_unloaded(label, observed_domain)
+                if observed_state.get("available") is not False:
+                    _verify_launchctl_unloaded(label, observed_domain)
             if current.exists() or current.is_symlink():
                 current.unlink()
                 _fsync_directory(root)

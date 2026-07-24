@@ -1075,6 +1075,7 @@ def write_dispatch_receipt(request: Request) -> Result:
         return planned(receipt_path=path, payload=payload)
 
     tmp_path: Path | None = None
+    published_identity: tuple[int, int] | None = None
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
@@ -1083,6 +1084,8 @@ def write_dispatch_receipt(request: Request) -> Result:
             fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
+            published = os.fstat(fh.fileno())
+            published_identity = (published.st_dev, published.st_ino)
         try:
             os.link(tmp_path, p)
         except FileExistsError:
@@ -1100,7 +1103,23 @@ def write_dispatch_receipt(request: Request) -> Result:
         if not p.is_file() or json.loads(p.read_text(encoding="utf-8")) != payload:
             raise ValueError("receipt read-back mismatch")
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path, mutated=True)
+        rollback_error: Exception | None = None
+        if published_identity is not None:
+            try:
+                current = p.stat()
+                if (current.st_dev, current.st_ino) == published_identity:
+                    os.unlink(p)
+                dir_fd = os.open(str(p.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except Exception as rollback_exc:
+                rollback_error = rollback_exc
+        error = str(exc)
+        if rollback_error is not None:
+            error = f"{error}; receipt rollback durability unconfirmed: {rollback_error}"
+        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=error, receipt_path=path, mutated=True)
     finally:
         if tmp_path is not None:
             try:

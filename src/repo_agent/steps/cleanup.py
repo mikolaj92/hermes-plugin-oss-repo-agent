@@ -339,7 +339,7 @@ def release_active_issue_claim(request: Request) -> Result:
     if deleted.get("ok") is not True or deleted.get("status") not in {"deleted", "already_absent"}:
         return fail("delete_local_fix_branch_not_successful", failure_class="terminal", retry_safe=False, evidence=deleted)
 
-    claim_path = str(data.get("claim_path") or cfg.get("active_issue_path") or "").strip()
+    configured_claim_path = str(data.get("claim_path") or cfg.get("active_issue_path") or "").strip()
     repo = str(data.get("repo") or closed.get("repo") or "").strip()
     raw_issue = data.get("issue") or (parsed or {}).get("issue") or closed.get("issue")
     if isinstance(raw_issue, bool):
@@ -349,11 +349,12 @@ def release_active_issue_claim(request: Request) -> Result:
             issue = int(raw_issue)
         except (TypeError, ValueError):
             issue = 0
-    if not claim_path:
+    if not configured_claim_path:
         return fail("missing_claim_path", failure_class="terminal", retry_safe=False)
     if not repo or issue <= 0:
         return fail("missing_claim_identity", failure_class="terminal", retry_safe=False, repo=repo, issue=issue)
-    path = Path(claim_path).expanduser()
+    configured = Path(configured_claim_path).expanduser()
+    path = configured / "claim.json" if configured.exists() and configured.is_dir() else (configured if configured.suffix.lower() == ".json" else configured / "claim.json")
     if not path.exists():
         return ok(status="already_absent", claim_path=str(path), repo=repo, issue=issue, mutated=False)
     try:
@@ -382,6 +383,14 @@ def release_active_issue_claim(request: Request) -> Result:
         path.unlink()
     except OSError as exc:
         return fail("unlink_failed", failure_class="reconcile_then_retry", retry_safe=False, claim_path=str(path), error=str(exc), mutated=True)
+    try:
+        parent_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except OSError as exc:
+        return fail("unlink_durability_unconfirmed", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc), mutated=True)
     return ok(status="released", claim_path=str(path), repo=repo, issue=issue, mutated=True)
 
 
@@ -430,6 +439,8 @@ def _publish_cleanup_receipt(p: Path, payload: dict[str, Any], path: str) -> Res
             fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
+            published = os.fstat(fh.fileno())
+            published_identity = (published.st_dev, published.st_ino)
         try:
             os.link(tmp_path, p)
         except FileExistsError:
@@ -437,32 +448,33 @@ def _publish_cleanup_receipt(p: Path, payload: dict[str, Any], path: str) -> Res
             if prior is not None:
                 return prior
             return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
-        published = p.stat()
-        published_identity = (published.st_dev, published.st_ino)
         os.unlink(tmp_path)
         tmp_path = None
         dir_fd = os.open(str(p.parent), os.O_RDONLY)
         try:
-            try:
-                os.fsync(dir_fd)
-            except OSError:
-                try:
-                    current = p.stat()
-                    if published_identity == (current.st_dev, current.st_ino):
-                        os.unlink(p)
-                except OSError:
-                    pass
-                try:
-                    os.fsync(dir_fd)
-                except OSError:
-                    pass
-                raise
+            os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
         if not p.is_file() or json.loads(p.read_text(encoding="utf-8")) != payload:
             raise ValueError("receipt read-back mismatch")
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path, mutated=True)
+        rollback_error: Exception | None = None
+        if published_identity is not None:
+            try:
+                current = p.stat()
+                if (current.st_dev, current.st_ino) == published_identity:
+                    os.unlink(p)
+                dir_fd = os.open(str(p.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except Exception as rollback_exc:
+                rollback_error = rollback_exc
+        error = str(exc)
+        if rollback_error is not None:
+            error = f"{error}; receipt rollback durability unconfirmed: {rollback_error}"
+        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=error, receipt_path=path, mutated=True)
     finally:
         if tmp_path is not None:
             try:

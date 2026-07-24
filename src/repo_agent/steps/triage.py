@@ -27,15 +27,11 @@ from repo_agent.envelope import (
 _TERMINAL_FAILURES = {"failed", "cancelled", "timed_out"}
 
 def _decision_gate(request: Request, *, allowed: str | set[str]) -> Result | None:
-    """No-op unless decide_triage_action selected the allowed action."""
+    """No-op unless an authoritative successful decision selected the action."""
     decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
-    if not decide and "action" not in input_of(request):
-        return None
-    if decide.get("ok") is False or str(decide.get("status") or "") in {
-        "failed",
-        "cancelled",
-        "timed_out",
-    }:
+    if not decide:
+        return noop("not_selected", action="skip", worked=False)
+    if decide.get("ok") is False or str(decide.get("status") or "") in _TERMINAL_FAILURES:
         return fail(
             "upstream_failed",
             failure_class="terminal",
@@ -49,8 +45,10 @@ def _decision_gate(request: Request, *, allowed: str | set[str]) -> Result | Non
             action=decide.get("action"),
             worked=False,
         )
+    if decide.get("status") != "decided" or ("ok" in decide and decide.get("ok") is not True):
+        return noop("not_selected", action="skip", worked=False)
     allowed_actions = {allowed} if isinstance(allowed, str) else set(allowed)
-    action = str(input_of(request).get("action") or decide.get("action") or "")
+    action = decide.get("action")
     if action in allowed_actions:
         return None
     if not action or action == "skip":
@@ -386,13 +384,27 @@ def decide_triage_action(request: Request) -> Result:
     pr = data.get("pr") or cond_get(request, "pr", "load_pr_fields", "triage_load_pr_fields") or {}
     checks = cond_blob(request, "evaluate_checks", "checks", "triage_evaluate_checks")
     evidence = cond_blob(request, "evaluate_test_evidence", "evidence", "triage_evaluate_test_evidence")
-    checks_pass = bool(
-        data.get(
-            "checks_pass",
-            data.get("pass_", checks.get("pass_", checks.get("pass"))),
-        )
+
+    terminal = _terminal_upstream(
+        request,
+        "evaluate_checks",
+        "evaluate_test_evidence",
+        "triage_evaluate_checks",
+        "triage_evaluate_test_evidence",
     )
-    upstream = upstream_noop(request, "list_ai_fix_prs", "load_pr_fields", "evaluate_checks", "evaluate_test_evidence", "triage_list_ai_fix_prs", "triage_load_pr_fields", "triage_evaluate_checks", "triage_evaluate_test_evidence")
+    if terminal is not None:
+        return terminal
+    upstream = upstream_noop(
+        request,
+        "list_ai_fix_prs",
+        "load_pr_fields",
+        "evaluate_checks",
+        "evaluate_test_evidence",
+        "triage_list_ai_fix_prs",
+        "triage_load_pr_fields",
+        "triage_evaluate_checks",
+        "triage_evaluate_test_evidence",
+    )
     if upstream:
         return noop(str(upstream.get("reason") or "no_open_prs"))
     if not isinstance(pr, dict):
@@ -402,12 +414,39 @@ def decide_triage_action(request: Request) -> Result:
             retry_safe=False,
             error="PR payload must be an object",
         )
-    evidence_pass = bool(
-        data.get(
-            "evidence_pass",
-            evidence.get("pass_", evidence.get("pass", False)),
-        )
-    )
+    conducted_pr = isinstance(data.get("conduction"), dict) and bool(data["conduction"])
+    if conducted_pr:
+        for field in ("state", "headRefName", "baseRefName"):
+            if not isinstance(pr.get(field), str) or not pr[field].strip():
+                return fail(
+                    "invalid_pr",
+                    failure_class="terminal",
+                    retry_safe=False,
+                    error=f"PR payload requires non-empty string {field}",
+                )
+
+    def decision_bool(name: str, blob: dict[str, Any]) -> bool | Result:
+        if name in data:
+            value = data[name]
+        elif name == "checks_pass":
+            value = data.get("pass_", blob.get("pass_", blob.get("pass", False)))
+        else:
+            value = blob.get("pass_", blob.get("pass", False))
+        if not isinstance(value, bool):
+            return fail(
+                "invalid_decision_input",
+                failure_class="terminal",
+                retry_safe=False,
+                error=f"{name} must be boolean",
+            )
+        return value
+
+    checks_pass = decision_bool("checks_pass", checks)
+    if isinstance(checks_pass, dict):
+        return checks_pass
+    evidence_pass = decision_bool("evidence_pass", evidence)
+    if isinstance(evidence_pass, dict):
+        return evidence_pass
     automerge = bool(data.get("automerge", cfg.get("automerge", False)))
     require_approval = bool(
         data.get("require_human_approval", cfg.get("require_human_approval", True))
@@ -425,10 +464,10 @@ def decide_triage_action(request: Request) -> Result:
     review_decision = review_value.upper() if isinstance(review_value, str) else ""
     state = str(pr.get("state") or "").upper()
     head = str(pr.get("headRefName") or "")
-    base = str(pr.get("baseRefName") or "")
-    is_draft = bool(pr.get("isDraft") or pr.get("is_draft"))
     author = pr.get("author") if isinstance(pr.get("author"), dict) else {}
+    base = str(pr.get("baseRefName") or "")
     author_login = str(author.get("login") or pr.get("author") or "").strip()
+    is_draft = bool(pr.get("isDraft") or pr.get("is_draft"))
     labels = {
         str(x.get("name") or "")
         for x in (pr.get("labels") or [])
@@ -473,8 +512,6 @@ def decide_triage_action(request: Request) -> Result:
     if automerge:
         return ok(status="decided", action="merge", reason="ready")
     return ok(status="decided", action="comment_block", reason="automerge_disabled")
-
-
 def claim_pr_assignee(request: Request) -> Result:
     gated = _decision_gate(request, allowed="merge")
     if gated is not None:
@@ -813,9 +850,11 @@ def write_merge_receipt(request: Request) -> Result:
     claim_terminal = _terminal_upstream(request, "claim_pr", "claim_pr_assignee", "triage_claim_pr")
     if claim_terminal is not None:
         return claim_terminal
-    gated = _decision_gate(request, allowed="merge")
-    if gated is not None:
-        return gated
+    decide_blob = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
+    if decide_blob:
+        gated = _decision_gate(request, allowed="merge")
+        if gated is not None:
+            return gated
     data = input_of(request)
     cfg = cfg_of(request)
     dry = dry_run_flag(request)
@@ -882,6 +921,7 @@ def write_merge_receipt(request: Request) -> Result:
     if prior is not None:
         return prior
     tmp_path: Path | None = None
+    published_identity: tuple[int, int] | None = None
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
@@ -890,6 +930,8 @@ def write_merge_receipt(request: Request) -> Result:
             fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
+            published = os.fstat(fh.fileno())
+            published_identity = (published.st_dev, published.st_ino)
         try:
             os.link(tmp_path, p)
         except FileExistsError:
@@ -907,7 +949,23 @@ def write_merge_receipt(request: Request) -> Result:
         if not p.is_file() or json.loads(p.read_text(encoding="utf-8")) != payload:
             raise ValueError("receipt read-back mismatch")
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path, mutated=True)
+        rollback_error: Exception | None = None
+        if published_identity is not None:
+            try:
+                current = p.stat()
+                if (current.st_dev, current.st_ino) == published_identity:
+                    os.unlink(p)
+                dir_fd = os.open(str(p.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except Exception as rollback_exc:
+                rollback_error = rollback_exc
+        error = str(exc)
+        if rollback_error is not None:
+            error = f"{error}; receipt rollback durability unconfirmed: {rollback_error}"
+        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=error, receipt_path=path, mutated=True)
     finally:
         if tmp_path is not None:
             try:

@@ -198,6 +198,32 @@ class DeploymentCandidateTests(unittest.TestCase):
                         self.cfg, str(root / "candidates" / "candidate"), config_path=str(config), fala_db=str(root / "state.sqlite"), deployment_root=str(root)
                     )
 
+    def test_fala_checkout_head_must_match_pinned_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.toml"
+            config.write_text("mode = 'dry-run'\n", encoding="utf-8")
+            fala_root = (ROOT.parent / "Fala").resolve()
+            project_root = ROOT.resolve()
+            real_run = self.commands.subprocess.run
+
+            def wrong_head(argv, *args, **kwargs):
+                command = list(argv)
+                if len(command) >= 3 and command[:2] == ["git", "-C"]:
+                    checkout = Path(command[2]).resolve()
+                    if command[3:] == ["status", "--porcelain"] and checkout in {project_root, fala_root}:
+                        return subprocess.CompletedProcess(command, 0, "", "")
+                    if checkout == fala_root and command[3:] == ["rev-parse", "HEAD"]:
+                        return subprocess.CompletedProcess(command, 0, "0" * 40 + "\n", "")
+                    if checkout == fala_root and command[3:] == ["submodule", "status", "--recursive"]:
+                        return subprocess.CompletedProcess(command, 0, "", "")
+                return real_run(argv, *args, **kwargs)
+            with patch.object(self.commands.subprocess, "run", side_effect=wrong_head), patch.object(
+                self.commands, "_read_git_revision", return_value="plugin-commit"
+            ):
+                with self.assertRaisesRegex(self.commands.ConfigError, "HEAD does not match"):
+                    self.commands._copy_candidate_source(ROOT.resolve(), root / "source", config, ROOT / "uv.lock")
+
 
     def test_wrong_fala_version_at_pinned_commit_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -294,6 +320,28 @@ class DeploymentCandidateTests(unittest.TestCase):
             states = self.commands._launchctl_domain_states(label)
             self.assertEqual(self.commands._launchctl_intended_domain(label, states), f"user/{uid}")
 
+    def test_fala_unavailable_user_domain_selects_and_verifies_gui(self):
+        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        uid = self.commands.os.getuid()
+        states = {
+            f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False, "available": False},
+            f"gui/{uid}": {"label": label, "domain": f"gui/{uid}", "loaded": True, "available": True},
+        }
+        self.assertEqual(self.commands._launchctl_intended_domain(label, states), f"gui/{uid}")
+        with patch.object(self.commands, "_launchctl_domain_states", return_value=states):
+            self.commands._verify_launchctl_exact(label, f"gui/{uid}")
+
+    def test_fala_unavailable_intended_domain_fails_closed(self):
+        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        uid = self.commands.os.getuid()
+        states = {
+            f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False, "available": False},
+            f"gui/{uid}": {"label": label, "domain": f"gui/{uid}", "loaded": False, "available": True},
+        }
+        with patch.object(self.commands, "_launchctl_domain_states", return_value=states):
+            with self.assertRaisesRegex(self.commands.ConfigError, "intended.*unavailable"):
+                self.commands._verify_launchctl_exact(label, f"user/{uid}")
+
     def test_fala_duplicate_domains_fail_closed(self):
         label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
         uid = self.commands.os.getuid()
@@ -356,6 +404,32 @@ class DeploymentCandidateTests(unittest.TestCase):
                 with self.assertRaises(self.commands.ConfigError):
                     self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
             self.assertFalse((root / "versions" / candidate_id).exists())
+
+    def test_loaded_service_without_canonical_plist_fails_before_cutover(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            uid = self.commands.os.getuid()
+            label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+            states = {
+                f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": True, "available": True},
+                f"gui/{uid}": {"label": label, "domain": f"gui/{uid}", "loaded": False, "available": False},
+            }
+            calls: list[list[str]] = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(list(argv))
+                return subprocess.CompletedProcess(argv, 0, "OK\n", "")
+
+            with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
+                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+            ), patch.object(self.commands, "_launchctl_domain_states", return_value=states), patch.object(
+                self.commands.subprocess, "run", side_effect=fake_run
+            ):
+                with self.assertRaisesRegex(self.commands.ConfigError, "no canonical installed plist"):
+                    self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+            self.assertFalse((root / "current").exists())
+            self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in calls))
 
     def test_promotion_runs_inside_deployment_lock(self):
         with tempfile.TemporaryDirectory() as directory:

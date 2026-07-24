@@ -151,6 +151,35 @@ class PrDecideMatrixTests(unittest.TestCase):
         )
         self.assertEqual(out["action"], "merge")
         self.assertEqual(out["reason"], "ready")
+    def test_failed_check_upstream_cannot_route_repair(self) -> None:
+        out = triage.decide_triage_action(
+            req(
+                {
+                    "pr": self._pr(),
+                    "checks_pass": False,
+                    "evidence_pass": True,
+                    "conduction": {
+                        "evaluate_checks": {"status": "failed", "ok": False, "reason": "read_failed"},
+                    },
+                }
+            )
+        )
+        self.assertEqual(out["reason"], "upstream_failed")
+        self.assertFalse(out["mutated"])
+
+    def test_direct_merge_action_cannot_bypass_decision_gate(self) -> None:
+        out = triage.merge_pull_request(
+            req({"action": "merge", "repo": "owner/repo", "number": 42, "dry_run": True})
+        )
+        self.assertEqual(out["status"], "noop")
+        self.assertFalse(out["mutated"])
+
+    def test_string_false_evidence_cannot_merge(self) -> None:
+        out = triage.decide_triage_action(
+            req({"pr": self._pr(), "checks_pass": True, "evidence_pass": "false", "automerge": True})
+        )
+        self.assertEqual(out["reason"], "invalid_decision_input")
+        self.assertFalse(out["mutated"])
     def test_approval_and_mergeability_matrix(self) -> None:
         cases = (
             (True, "APPROVED", "MERGEABLE", "merge"),

@@ -22,6 +22,18 @@ from repo_agent.steps.poll import poll_eligible_issues
 def req(input_data=None, config=None):
     return {"input": input_data or {}, "config": config or {}}
 
+def triage_req(action, input_data=None, config=None):
+    data = dict(input_data or {})
+    data["conduction"] = {
+        "decide_triage_action": {
+            "ok": True,
+            "status": "decided",
+            "action": action,
+            "reason": "test fixture",
+        }
+    }
+    return req(data, config)
+
 
 class CatalogTests(unittest.TestCase):
     def test_catalog_spans_all_domains(self) -> None:
@@ -858,16 +870,12 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(block["action"], "comment_block")
 
     def test_comment_pr_dry_run_success_failure(self) -> None:
-        dry = triage.comment_pr_once(
-            req(
-                {
-                    "repo": "o/r",
-                    "number": 5,
-                    "body": "blocked: missing tests",
-                    "dry_run": True,
-                }
-            )
-        )
+        dry = triage.comment_pr_once(triage_req("comment_block", {
+            "repo": "o/r",
+            "number": 5,
+            "body": "blocked: missing tests",
+            "dry_run": True,
+        }))
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
@@ -877,38 +885,28 @@ class TriageTests(unittest.TestCase):
                 SimpleNamespace(stdout=json.dumps({"comments": [{"body": "blocked\n\n<!-- repo-agent:o/r:5:triage -->"}]}), stderr="", returncode=0),
             ],
         ):
-            ok_out = triage.comment_pr_once(
-                req(
-                    {
-                        "repo": "o/r",
-                        "number": 5,
-                        "body": "blocked",
-                        "dry_run": False,
-                    }
-                )
-            )
+            ok_out = triage.comment_pr_once(triage_req("comment_block", {
+                "repo": "o/r",
+                "number": 5,
+                "body": "blocked",
+                "dry_run": False,
+            }))
         self.assertEqual(ok_out["status"], "commented")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
             side_effect=CommandError(["gh"], 1, "", "fail"),
         ):
-            bad = triage.comment_pr_once(
-                req({"repo": "o/r", "number": 5, "body": "x", "dry_run": False})
-            )
+            bad = triage.comment_pr_once(triage_req("comment_block", {"repo": "o/r", "number": 5, "body": "x", "dry_run": False}))
         self.assertEqual(bad["reason"], "comment_read_failed")
 
     def test_merge_success_and_failure(self) -> None:
-        dry = triage.merge_pull_request(
-            req(
-                {
-                    "repo": "o/r",
-                    "number": 5,
-                    "head_oid": "abc",
-                    "dry_run": True,
-                }
-            )
-        )
+        dry = triage.merge_pull_request(triage_req("merge", {
+            "repo": "o/r",
+            "number": 5,
+            "head_oid": "abc",
+            "dry_run": True,
+        }))
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
@@ -918,16 +916,12 @@ class TriageTests(unittest.TestCase):
                 SimpleNamespace(stdout=json.dumps({"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z", "headRefOid": "abc", "headRefName": "ai/fix/5-x", "mergeCommit": {"oid": "merge-1"}}), stderr="", returncode=0),
             ],
         ):
-            ok_out = triage.merge_pull_request(
-                req(
-                    {
-                        "repo": "o/r",
-                        "number": 5,
-                        "head_oid": "abc",
-                        "dry_run": False,
-                    }
-                )
-            )
+            ok_out = triage.merge_pull_request(triage_req("merge", {
+                "repo": "o/r",
+                "number": 5,
+                "head_oid": "abc",
+                "dry_run": False,
+            }))
         self.assertEqual(ok_out["status"], "merged")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
@@ -938,9 +932,7 @@ class TriageTests(unittest.TestCase):
                 SimpleNamespace(stdout="", stderr="", returncode=0),
             ],
         ):
-            bad = triage.merge_pull_request(
-                req({"repo": "o/r", "number": 5, "head_oid": "abc", "dry_run": False})
-            )
+            bad = triage.merge_pull_request(triage_req("merge", {"repo": "o/r", "number": 5, "head_oid": "abc", "dry_run": False}))
         self.assertEqual(bad["reason"], "merge_failed")
 
     def test_list_ai_fix_prs_and_load_pr_fields(self) -> None:
@@ -1009,9 +1001,7 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(bad["reason"], "pr_view_failed")
 
     def test_claim_pr_close_issue_merge_receipt(self) -> None:
-        dry = triage.claim_pr_assignee(
-            req({"repo": "o/r", "number": 3, "dry_run": True}, {"assignee": "me"})
-        )
+        dry = triage.claim_pr_assignee(triage_req("merge", {"repo": "o/r", "number": 3, "dry_run": True}, {"assignee": "me"}))
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
@@ -1021,9 +1011,7 @@ class TriageTests(unittest.TestCase):
                 SimpleNamespace(stdout=json.dumps({"assignees": [{"login": "me"}]}), stderr="", returncode=0),
             ],
         ):
-            claimed = triage.claim_pr_assignee(
-                req({"repo": "o/r", "number": 3, "dry_run": False}, {"assignee": "me"})
-            )
+            claimed = triage.claim_pr_assignee(triage_req("merge", {"repo": "o/r", "number": 3, "dry_run": False}, {"assignee": "me"}))
         self.assertEqual(claimed["status"], "claimed")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
@@ -1032,18 +1020,14 @@ class TriageTests(unittest.TestCase):
                 CommandError(["gh"], 1, "", "nope"),
             ],
         ):
-            bad_claim = triage.claim_pr_assignee(
-                req({"repo": "o/r", "number": 3, "dry_run": False})
-            )
+            bad_claim = triage.claim_pr_assignee(triage_req("merge", {"repo": "o/r", "number": 3, "dry_run": False}))
         self.assertEqual(bad_claim["reason"], "claim_failed")
 
         provenance = {
             "source": "github_pr_readback", "state": "MERGED", "repo": "o/r", "number": 7,
             "head_oid": "head-7", "head_ref": "ai/fix/7-x", "merge_oid": "merge-7", "merged_at": "2026-01-01T00:00:00Z",
         }
-        dry_c = triage.close_linked_issue(
-            req({"repo": "o/r", "issue": 7, "dry_run": True})
-        )
+        dry_c = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 7, "dry_run": True}))
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
             side_effect=[
@@ -1053,9 +1037,7 @@ class TriageTests(unittest.TestCase):
                 SimpleNamespace(stdout=json.dumps({"state": "CLOSED"}), stderr="", returncode=0),
             ],
         ):
-            closed = triage.close_linked_issue(
-                req({"repo": "o/r", "issue": 7, "dry_run": False, "verified_provenance": provenance})
-            )
+            closed = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 7, "dry_run": False, "verified_provenance": provenance}))
         self.assertEqual(closed["status"], "closed")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
@@ -1066,9 +1048,7 @@ class TriageTests(unittest.TestCase):
                 SimpleNamespace(stdout=json.dumps({"state": "OPEN"}), stderr="", returncode=0),
             ],
         ):
-            bad_close = triage.close_linked_issue(
-                req({"repo": "o/r", "issue": 7, "dry_run": False, "verified_provenance": provenance})
-            )
+            bad_close = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 7, "dry_run": False, "verified_provenance": provenance}))
         self.assertEqual(bad_close["reason"], "close_failed")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1106,7 +1086,7 @@ class TriageTests(unittest.TestCase):
                     "repo_agent.steps.triage.run_cmd",
                     return_value=SimpleNamespace(stdout=stdout, stderr="", returncode=0),
                 ):
-                    out = triage.merge_pull_request(req(base))
+                    out = triage.merge_pull_request(triage_req("merge", base))
                 self.assertEqual(out["reason"], expected)
         already = {
             "state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z", "headRefOid": "head-4",
@@ -1116,14 +1096,12 @@ class TriageTests(unittest.TestCase):
             "repo_agent.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps(already), stderr="", returncode=0),
         ):
-            out = triage.merge_pull_request(req(base))
+            out = triage.merge_pull_request(triage_req("merge", base))
         self.assertEqual(out["status"], "already_merged")
         self.assertFalse(out["mutated"])
         for provenance in ({}, {"source": "forged", "repo": "o/r", "number": 4}):
             with self.subTest(provenance=provenance):
-                out = triage.close_linked_issue(
-                    req({"repo": "o/r", "issue": 4, "dry_run": False, "verified_provenance": provenance})
-                )
+                out = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 4, "dry_run": False, "verified_provenance": provenance}))
                 self.assertEqual(out["reason"], "merge_provenance_unverified")
         valid = {
             "source": "github_pr_readback", "state": "MERGED", "repo": "o/r", "number": 4,
@@ -1134,9 +1112,7 @@ class TriageTests(unittest.TestCase):
             "repo_agent.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps(already), stderr="", returncode=0),
         ):
-            out = triage.close_linked_issue(
-                req({"repo": "o/r", "issue": 4, "dry_run": False, "verified_provenance": mismatched})
-            )
+            out = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 4, "dry_run": False, "verified_provenance": mismatched}))
         self.assertEqual(out["reason"], "merge_provenance_unverified")
     def test_assignee_post_readback_absent_and_already_claimed(self) -> None:
         base = {"repo": "o/r", "number": 4, "assignee": "agent", "dry_run": False}
@@ -1148,13 +1124,13 @@ class TriageTests(unittest.TestCase):
                 SimpleNamespace(stdout=json.dumps({"assignees": []}), stderr="", returncode=0),
             ],
         ):
-            out = triage.claim_pr_assignee(req(base))
+            out = triage.claim_pr_assignee(triage_req("merge", base))
         self.assertEqual(out["reason"], "assignee_readback_mismatch")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps({"assignees": [{"login": "agent"}]}), stderr="", returncode=0),
         ):
-            out = triage.claim_pr_assignee(req(base))
+            out = triage.claim_pr_assignee(triage_req("merge", base))
         self.assertEqual(out["status"], "already_claimed")
 
     def test_comment_post_readback_absent_and_marker_idempotency(self) -> None:
@@ -1167,13 +1143,13 @@ class TriageTests(unittest.TestCase):
                 SimpleNamespace(stdout=json.dumps({"comments": []}), stderr="", returncode=0),
             ],
         ):
-            out = triage.comment_pr_once(req({"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False}))
+            out = triage.comment_pr_once(triage_req("comment_block", {"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False}))
         self.assertEqual(out["reason"], "comment_readback_mismatch")
         with mock.patch(
             "repo_agent.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps({"comments": [{"body": f"blocked\\n\\n{marker}"}]}), stderr="", returncode=0),
         ):
-            out = triage.comment_pr_once(req({"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False}))
+            out = triage.comment_pr_once(triage_req("comment_block", {"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False}))
         self.assertTrue(out["reconciled"])
 
     def test_assignee_and_comment_blank_or_malformed_readback_fail_closed(self) -> None:
@@ -1193,7 +1169,8 @@ class TriageTests(unittest.TestCase):
                         data["assignee"] = "agent"
                     else:
                         data["body"] = "blocked"
-                    out = handler(req(data))
+                    action = "merge" if handler is triage.claim_pr_assignee else "comment_block"
+                    out = handler(triage_req(action, data))
                 self.assertEqual(out["reason"], reason)
         dry_r = triage.write_merge_receipt(
             req({"receipt_path": "/tmp/x", "payload": {}, "dry_run": True})
@@ -1441,6 +1418,27 @@ class CleanupTests(unittest.TestCase):
         )
         self.assertEqual(out["status"], "noop")
         self.assertEqual(out["reason"], "no_branch")
+    def test_release_active_claim_directory_path_removes_claim_json_and_fsyncs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            claim = directory / "claim.json"
+            claim.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
+            with mock.patch("repo_agent.steps.cleanup.os.fsync") as fsync:
+                out = cleanup.release_active_issue_claim(req({"claim_path": str(directory), "repo": "o/r", "issue": 3, "dry_run": False, "conduction": {"remove_worktree": {"ok": True, "status": "removed"}, "check_issue_closed": {"ok": True, "closed": True}, "check_no_open_pr": {"ok": True, "safe_to_cleanup": True}, "delete_local_fix_branch": {"ok": True, "status": "deleted"}}}))
+            self.assertEqual(out["status"], "released")
+            self.assertFalse(claim.exists())
+            fsync.assert_called_once()
+
+    def test_release_active_claim_unlink_fsync_failure_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            claim = directory / "claim.json"
+            claim.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
+            with mock.patch("repo_agent.steps.cleanup.os.fsync", side_effect=OSError("disk full")):
+                out = cleanup.release_active_issue_claim(req({"claim_path": str(directory), "repo": "o/r", "issue": 3, "dry_run": False, "conduction": {"remove_worktree": {"ok": True, "status": "removed"}, "check_issue_closed": {"ok": True, "closed": True}, "check_no_open_pr": {"ok": True, "safe_to_cleanup": True}, "delete_local_fix_branch": {"ok": True, "status": "deleted"}}}))
+            self.assertFalse(out["ok"])
+            self.assertEqual(out["reason"], "unlink_durability_unconfirmed")
+            self.assertFalse(claim.exists())
 
     def test_create_maintenance_dry(self) -> None:
         out = cleanup.create_maintenance_task(
