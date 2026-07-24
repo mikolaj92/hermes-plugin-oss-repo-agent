@@ -80,9 +80,12 @@ class DeploymentCandidateTests(unittest.TestCase):
             candidates = root / "candidates"
             self.assertEqual(list(candidates.iterdir()) if candidates.exists() else [], [])
 
-    def _render(self, root: Path, *, mode: str = "dry-run", config_path: Path | None = None, db_path: Path | None = None) -> Path:
+    def _render(self, root: Path, *, mode: str = "dry-run", config_path: Path | None = None, db_path: Path | None = None, autonomous: bool = False) -> Path:
         config = config_path or root / "config.toml"
-        config.write_text(f"mode = '{mode}'\n", encoding="utf-8")
+        config.write_text(
+            f"mode = '{mode}'\n[automation]\nautomerge = {str(autonomous).lower()}\nrequire_human_approval = {str(not autonomous).lower()}\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = {str(autonomous).lower()}\n",
+            encoding="utf-8",
+        )
         db = db_path or root / "state.sqlite"
         lock_data = (ROOT / "uv.lock").read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
         identity = {
@@ -100,11 +103,11 @@ class DeploymentCandidateTests(unittest.TestCase):
             "config_artifact_path": "source/config.toml",
             "revision_path": "source/revision.txt",
             "policy": {
-                "automerge": False,
-                "require_human_approval": True,
+                "automerge": autonomous,
+                "require_human_approval": not autonomous,
                 "require_checks": True,
                 "require_test_evidence": True,
-                "executor_enabled": False,
+                "executor_enabled": autonomous,
             },
         }
         candidate_id = hashlib.sha256((json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
@@ -112,11 +115,24 @@ class DeploymentCandidateTests(unittest.TestCase):
         real_which = self.commands.shutil.which
         def fake_which(command, **kwargs):
             return "/usr/bin/uv" if command == "uv" else real_which(command, **kwargs)
+        cfg = self.commands.OssRepoAgentConfig.from_mapping(
+            {
+                "mode": mode,
+                "automation": {
+                    "automerge": autonomous,
+                    "require_human_approval": not autonomous,
+                    "require_checks": True,
+                    "require_test_evidence": True,
+                },
+                "executor": {"enabled": autonomous},
+                "repos": [],
+            }
+        )
         with self._fala_git_clean(), patch.object(self.commands, "_read_git_revision", return_value="plugin-commit"), patch.object(
             self.commands.shutil, "which", side_effect=fake_which
         ):
             result = self.commands.render_launchd(
-                self.cfg, str(candidate), config_path=str(config), fala_db=str(db), mode=mode, deployment_root=str(root)
+                cfg, str(candidate), config_path=str(config), fala_db=str(db), mode=mode, deployment_root=str(root)
             )
         self.assertTrue(result["ok"])
         return candidate
@@ -746,6 +762,26 @@ class DeploymentCandidateTests(unittest.TestCase):
             manifest = json.loads(candidate.joinpath("manifest.json").read_text())
             self.assertEqual(result["candidate_id"], manifest["candidate_id"])
             self.assertTrue(result["ok"])
+
+    def test_guarded_autonomous_candidate_policy_is_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root, mode="live", autonomous=True)
+            import tools.deployment_parity as parity
+
+            result = parity.validate_fala_candidate(candidate, deployment_root=root)
+            self.assertTrue(result["ok"])
+            manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["policy"],
+                {
+                    "automerge": True,
+                    "require_human_approval": False,
+                    "require_checks": True,
+                    "require_test_evidence": True,
+                    "executor_enabled": True,
+                },
+            )
 
     def test_candidate_policy_is_required_and_safe(self):
         with tempfile.TemporaryDirectory() as directory:

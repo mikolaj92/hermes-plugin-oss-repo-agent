@@ -627,13 +627,18 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         for key in policy_keys:
             if not isinstance(policy.get(key), bool):
                 errors.append(f"Fala identity policy {key} must be a bool")
-        if (
-            policy.get("automerge") is not False
-            or policy.get("require_human_approval") is not True
-            or policy.get("require_checks") is not True
-            or policy.get("require_test_evidence") is not True
-            or policy.get("executor_enabled") is not False
-        ):
+        guarded = policy.get("require_checks") is True and policy.get("require_test_evidence") is True
+        manual = (
+            policy.get("automerge") is False
+            and policy.get("require_human_approval") is True
+            and policy.get("executor_enabled") is False
+        )
+        autonomous = (
+            policy.get("automerge") is True
+            and policy.get("require_human_approval") is False
+            and policy.get("executor_enabled") is True
+        )
+        if not guarded or not (manual or autonomous):
             errors.append("Fala identity policy is unsafe for promotion")
     if config_artifact_path and _regular_file(config_artifact_path) and isinstance(policy, dict) and set(policy) == policy_keys:
         try:

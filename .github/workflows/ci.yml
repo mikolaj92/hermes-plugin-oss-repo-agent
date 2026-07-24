@@ -16,6 +16,7 @@ jobs:
           repository: mikolaj92/Fala
           path: Fala
           ref: 69bc2ec9d4cdf61773114847c0c582fb2652296d
+          submodules: recursive
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
