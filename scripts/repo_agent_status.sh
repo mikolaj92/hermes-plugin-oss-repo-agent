@@ -36,7 +36,10 @@ done
 
 status_failures=0
 require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || { printf 'missing-command name=%s\n' "$1"; status_failures=$((status_failures + 1)); return 1; }
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'missing-command name=%s\n' "$1"
+    status_failures=$((status_failures + 1))
+  fi
 }
 launchctl_query() {
   local output

@@ -36,6 +36,7 @@ jobs:
         env:
           FALA_HOME: ${{ github.workspace }}/Fala
           PYTHONPATH: src:.
+          CONDA_PREFIX: ${{ github.workspace }}/Fala/.pixi/envs/default
         run: python -m unittest discover -s tests -v
       - name: Hygiene
         working-directory: hermes-plugin-oss-repo-agent

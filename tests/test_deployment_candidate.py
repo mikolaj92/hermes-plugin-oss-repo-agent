@@ -289,14 +289,12 @@ class DeploymentCandidateTests(unittest.TestCase):
                         fala_db=str(root / "state.sqlite"),
                         deployment_root=str(root),
                     )
-    def test_existing_candidate_rejects_stale_requested_configuration(self):
+    def test_changed_configuration_produces_distinct_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self._render(root)
-            other = root / "other.toml"
-            other.write_text("mode = 'live'\n", encoding="utf-8")
-            with self.assertRaises(self.commands.ConfigError):
-                self._render(root, mode="live", config_path=other, db_path=root / "other.sqlite")
+            original = self._render(root)
+            changed = self._render(root, mode="live")
+            self.assertNotEqual(changed.name, original.name)
 
     def test_legacy_mutators_probe_user_and_gui_domains(self):
         calls: list[str] = []
