@@ -867,6 +867,14 @@ def write_merge_receipt(request: Request) -> Result:
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             return fail("receipt_conflict", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
         if existing == payload:
+            try:
+                dir_fd = os.open(str(p.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError as exc:
+                return fail("receipt_durability_unconfirmed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
             return ok(status="exists", receipt_path=path, payload=payload, mutated=False)
         return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
 

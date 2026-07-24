@@ -209,6 +209,9 @@ async def run_pr_triage_decide(
         "repair_prepare_worktree": {
             **dry_input,
             "clone_path": clone_path,
+            "repo": resolved_repo,
+            "issue": pr_number,
+            "receipt_path": receipt,
             "worktree_root": step_config["worktree_root"],
             "base_branch": step_config["base_branch"],
         },

@@ -551,6 +551,7 @@ class IssueToPrTests(unittest.TestCase):
                         {
                             "clone_path": tmp,
                             "branch": "ai/fix/1-x",
+                            "receipt_path": "/tmp/dispatch-1.json",
                             "worktree_root": str(Path(tmp) / "wts"),
                             "base_branch": "main",
                             "dry_run": False,
@@ -578,7 +579,9 @@ class IssueToPrTests(unittest.TestCase):
                         {
                             "clone_path": tmp,
                             "branch": "ai/fix/1-x",
+                            "receipt_path": "/tmp/dispatch-1.json",
                             "worktree_root": str(Path(tmp) / "wts"),
+                            "base_branch": "main",
                             "dry_run": False,
                             "conduction": {
                                 "dispatch_parse_issue_ref": {"task_id": "task-1", "issue": "1", "repo": "owner/repo", "branch": "ai/fix/1-x"},

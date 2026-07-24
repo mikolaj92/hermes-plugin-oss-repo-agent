@@ -190,5 +190,35 @@ class TempGitSafetyTests(unittest.TestCase):
         }
         foreign = issue_to_pr.prepare_worktree(request(mismatched))
         self.assertEqual(foreign["reason"], "foreign_worktree_ownership")
+
+    def test_live_shaped_repair_input_has_complete_provenance(self) -> None:
+        request_data = {
+            "clone_path": str(self.clone),
+            "worktree_root": str(self.worktrees),
+            "base_branch": "main",
+            "repo": "owner/repo",
+            "issue": "7",
+            "receipt_path": str(Path(self.tmp.name) / "repair-receipt.json"),
+            "dry_run": False,
+            "conduction": {
+                "triage_build_repair_prompt": {
+                    "task_id": "review-task-7",
+                    "repo": "owner/repo",
+                    "issue": "7",
+                    "branch": self.branch,
+                },
+                "triage_decide_triage_action": {"action": "repair", "status": "decided"},
+            },
+        }
+        result = issue_to_pr.prepare_worktree(request(request_data))
+        self.assertEqual(result["status"], "prepared", result)
+        conflict = dict(request_data)
+        conflict["conduction"] = {
+            **request_data["conduction"],
+            "triage_repair_prepare_worktree": {"task_id": "other-task"},
+        }
+        rejected = issue_to_pr.prepare_worktree(request(conflict))
+        self.assertEqual(rejected["reason"], "conflicting_worktree_provenance")
+        self.assertFalse(rejected["mutated"])
 if __name__ == "__main__":
     unittest.main()

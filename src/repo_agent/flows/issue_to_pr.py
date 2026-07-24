@@ -162,7 +162,7 @@ async def run_issue_to_pr_flow(
     effector_inputs: dict[str, dict[str, Any]] = {
         "load_kanban_task": {**dry_input, **({"task_id": task_id} if task_id else {})},
         "parse_issue_ref": dry_input,
-        "prepare_worktree": {**dry_input, "worktree_root": wt_root, "base_branch": cfg.base_branch},
+        "prepare_worktree": {**dry_input, "receipt_path": receipt, "worktree_root": wt_root, "base_branch": cfg.base_branch},
         "run_omp": dry_input,
         "verify_branch": {**dry_input, "base_branch": cfg.base_branch},
         "push_branch": dry_input,

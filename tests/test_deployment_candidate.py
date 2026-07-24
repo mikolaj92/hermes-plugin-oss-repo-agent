@@ -10,6 +10,7 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -355,6 +356,37 @@ class DeploymentCandidateTests(unittest.TestCase):
                 with self.assertRaises(self.commands.ConfigError):
                     self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
             self.assertFalse((root / "versions" / candidate_id).exists())
+
+    def test_promotion_runs_inside_deployment_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            events: list[str] = []
+            original_lock = self.commands._deployment_lock
+
+            @contextmanager
+            def recording_lock(lock_root: Path):
+                with original_lock(lock_root):
+                    events.append(f"enter:{lock_root}")
+                    try:
+                        yield
+                    finally:
+                        events.append(f"exit:{lock_root}")
+
+            def fake_run(argv, **kwargs):
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                return subprocess.CompletedProcess(argv, 0, "OK\n", "")
+
+            with patch.object(self.commands, "_deployment_lock", side_effect=recording_lock), patch.object(
+                self.commands.Path, "home", return_value=root / "home"
+            ), patch.object(self.commands, "_assert_legacy_mutators_unloaded", return_value={}), patch.object(
+                self.commands, "_verify_launchctl_exact"
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+                result = self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+
+            self.assertTrue(result["promoted"])
+            self.assertEqual(events, [f"enter:{root}", f"exit:{root}"])
 
     def test_promotion_boots_out_fala_before_bootstrap(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
+import fcntl
 import json
 import os
 import re
 import tempfile
 from pathlib import Path
+from typing import Any
 from repo_agent.envelope import Request, Result
 
 from repo_agent.adapters_cli import CommandError, hermes_kanban_json, run_cmd
@@ -381,6 +385,93 @@ def release_active_issue_claim(request: Request) -> Result:
     return ok(status="released", claim_path=str(path), repo=repo, issue=issue, mutated=True)
 
 
+@contextmanager
+def _receipt_directory_lock(directory: Path):
+    """Serialize publication, reconciliation, and rollback in one directory."""
+    directory.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(directory), os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _publish_cleanup_receipt(p: Path, payload: dict[str, Any], path: str) -> Result:
+    def existing_result() -> Result | None:
+        if not p.exists():
+            return None
+        try:
+            existing = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
+        if existing == payload:
+            try:
+                dir_fd = os.open(str(p.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError as exc:
+                return fail("receipt_durability_unconfirmed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
+            return ok(status="exists", receipt_path=path, payload=payload, mutated=False)
+        return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
+
+    prior = existing_result()
+    if prior is not None:
+        return prior
+    tmp_path: Path | None = None
+    published_identity: tuple[int, int] | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(tmp_path, p)
+        except FileExistsError:
+            prior = existing_result()
+            if prior is not None:
+                return prior
+            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
+        published = p.stat()
+        published_identity = (published.st_dev, published.st_ino)
+        os.unlink(tmp_path)
+        tmp_path = None
+        dir_fd = os.open(str(p.parent), os.O_RDONLY)
+        try:
+            try:
+                os.fsync(dir_fd)
+            except OSError:
+                try:
+                    current = p.stat()
+                    if published_identity == (current.st_dev, current.st_ino):
+                        os.unlink(p)
+                except OSError:
+                    pass
+                try:
+                    os.fsync(dir_fd)
+                except OSError:
+                    pass
+                raise
+        finally:
+            os.close(dir_fd)
+        if not p.is_file() or json.loads(p.read_text(encoding="utf-8")) != payload:
+            raise ValueError("receipt read-back mismatch")
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path, mutated=True)
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+    return ok(status="written", receipt_path=path, payload=payload, mutated=True)
+
+
 def write_cleanup_receipt(request: Request) -> Result:
     data = input_of(request)
     cfg = cfg_of(request)
@@ -420,55 +511,11 @@ def write_cleanup_receipt(request: Request) -> Result:
     if dry_run_flag(request):
         return planned(receipt_path=path, payload=payload)
     p = Path(path)
-
-    def existing_result() -> Result | None:
-        if not p.exists():
-            return None
-        try:
-            existing = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
-        if existing == payload:
-            return ok(status="exists", receipt_path=path, payload=payload, mutated=False)
-        return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
-
-    prior = existing_result()
-    if prior is not None:
-        return prior
-    tmp_path: Path | None = None
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
-        tmp_path = Path(tmp_name)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        try:
-            os.link(tmp_path, p)
-        except FileExistsError:
-            prior = existing_result()
-            if prior is not None:
-                return prior
-            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
-        os.unlink(tmp_path)
-        tmp_path = None
-        dir_fd = os.open(str(p.parent), os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-        if not p.is_file() or json.loads(p.read_text(encoding="utf-8")) != payload:
-            raise ValueError("receipt read-back mismatch")
-    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path, mutated=True)
-    finally:
-        if tmp_path is not None:
-            try:
-                os.unlink(tmp_path)
-            except FileNotFoundError:
-                pass
-    return ok(status="written", receipt_path=path, payload=payload, mutated=True)
+        with _receipt_directory_lock(p.parent):
+            return _publish_cleanup_receipt(p, payload, path)
+    except OSError as exc:
+        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path, mutated=False)
 
 def create_maintenance_task(request: Request) -> Result:
     """Create one Kanban maintenance task per deterministic repo/PR marker."""

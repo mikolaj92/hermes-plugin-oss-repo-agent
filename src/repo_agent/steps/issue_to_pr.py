@@ -57,6 +57,7 @@ _TRIAGE_REPAIR_ALIASES = (
     "triage_build_repair_prompt",
     "triage_decide_triage_action",
     "triage_load_pr_fields",
+    "triage_repair_prepare_worktree",
     "create_review_fix_task",
     "build_repair_prompt",
     "decide_triage_action",
@@ -68,11 +69,11 @@ _ISSUE_TO_PR_ALIASES = (
     "dispatch_parse_issue_ref",
     "load_kanban_task",
     "dispatch_load_kanban_task",
-    "write_dispatch_receipt",
-    "dispatch_write_dispatch_receipt",
 )
-_PROVENANCE_ALIASES = _TRIAGE_REPAIR_ALIASES + _ISSUE_TO_PR_ALIASES
-
+_PROVENANCE_ALIASES = _TRIAGE_REPAIR_ALIASES + _ISSUE_TO_PR_ALIASES + (
+    "triage_repair_prepare_worktree",
+    "repair_prepare_worktree",
+)
 
 def _repair_action_gate(request: Request) -> Result | None:
     """Prevent shared repair handlers from running for another triage action."""
@@ -463,8 +464,12 @@ def _identity_values(
     keys: tuple[str, ...],
     aliases: tuple[str, ...] = _PROVENANCE_ALIASES,
 ) -> list[str]:
+    """Collect every non-empty identity value available before this effector."""
     values: list[str] = []
-    for source in _conduction_blobs(request, aliases):
+
+    def add(source: Any) -> None:
+        if not isinstance(source, dict):
+            return
         for key in keys:
             value = source.get(key)
             if key in {"task_id", "task"} and isinstance(value, dict):
@@ -474,6 +479,11 @@ def _identity_values(
             normalized = str(value).strip()
             if normalized not in values:
                 values.append(normalized)
+
+    add(input_of(request))
+    add(cfg_of(request))
+    for source in _conduction_blobs(request, aliases):
+        add(source)
     return values
 
 
@@ -511,42 +521,22 @@ def _worktree_provenance_error(request: Request, provenance: dict[str, str]) -> 
 
 
 def _worktree_branch(request: Request) -> tuple[str, list[str]]:
-    """Resolve branch from repair/dispatch conduction, never path config."""
-    values = _identity_values(
-        request,
-        ("branch",),
-        aliases=(
-            "triage_build_repair_prompt",
-            "build_repair_prompt",
-            "triage_repair_prepare_worktree",
-            "repair_prepare_worktree",
-            "dispatch_parse_issue_ref",
-            "parse_issue_ref",
-            "parse_issue_ref_from_task",
-            "load_pr_fields",
-            "triage_load_pr_fields",
-        ),
+    """Resolve branch from current input/config and upstream conduction."""
+    aliases = (
+        "triage_build_repair_prompt", "build_repair_prompt",
+        "triage_repair_prepare_worktree", "repair_prepare_worktree",
+        "dispatch_parse_issue_ref", "parse_issue_ref", "parse_issue_ref_from_task",
+        "load_pr_fields", "triage_load_pr_fields",
     )
-    # PR objects carry the branch under headRefName.
-    for blob in _conduction_blobs(
-        request,
-        (
-            "triage_build_repair_prompt",
-            "build_repair_prompt",
-            "triage_load_pr_fields",
-            "load_pr_fields",
-            "dispatch_parse_issue_ref",
-            "parse_issue_ref",
-        ),
-    ):
+    values = _identity_values(request, ("branch",), aliases=aliases)
+    for blob in _conduction_blobs(request, aliases):
         pr = blob.get("pr")
-        if isinstance(pr, dict) and str(pr.get("headRefName") or "").strip():
-            candidate = str(pr["headRefName"]).strip()
-            if candidate not in values:
-                values.append(candidate)
-        candidate = str(blob.get("headRefName") or "").strip()
-        if candidate and candidate not in values:
-            values.append(candidate)
+        candidates = [pr.get("headRefName")] if isinstance(pr, dict) else []
+        candidates.append(blob.get("headRefName"))
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if value and value not in values:
+                values.append(value)
     return (values[0] if len(values) == 1 else ""), values
 
 
@@ -593,6 +583,8 @@ def prepare_worktree(request: Request) -> Result:
         return noop(str(upstream.get("reason") or "no_ready_task"))
     clone_path = str(data.get("clone_path") or cond_get(request, "clone_path", "refresh_clone_base", "parse_issue_ref", "dispatch_parse_issue_ref", "load_kanban_task", "dispatch_load_kanban_task", "triage_load_pr_fields", "load_pr_fields") or cfg.get("clone_path") or "")
     branch, branch_values = _worktree_branch(request)
+    if not branch and branch_values:
+        branch = branch_values[0]
     if dry and not branch:
         branch = str(data.get("branch") or "").strip()
     worktree_root = str(data.get("worktree_root") or cfg.get("worktree_root") or "")
@@ -606,7 +598,7 @@ def prepare_worktree(request: Request) -> Result:
     provenance_error = _worktree_provenance_error(request, provenance)
     if not dry and (provenance_error["missing"] or provenance_error["conflicts"] or len(branch_values) != 1):
         return fail(
-            "missing_worktree_provenance" if provenance_error["missing"] or len(branch_values) != 1 else "conflicting_worktree_provenance",
+            "conflicting_worktree_provenance" if provenance_error["conflicts"] or len(branch_values) != 1 else "missing_worktree_provenance",
             failure_class="terminal",
             retry_safe=False,
             branch=branch,
@@ -1065,6 +1057,14 @@ def write_dispatch_receipt(request: Request) -> Result:
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             return fail("receipt_conflict", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
         if existing == payload:
+            try:
+                dir_fd = os.open(str(p.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError as exc:
+                return fail("receipt_durability_unconfirmed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
             return ok(status="exists", receipt_path=path, payload=payload, mutated=False)
         return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
 

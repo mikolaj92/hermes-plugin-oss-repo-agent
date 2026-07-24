@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -175,7 +176,44 @@ class ReceiptDurabilityTests(unittest.TestCase):
             self.assertFalse(same["mutated"])
             self.assertEqual(list(path.parent.glob(".*.tmp")), [])
 
-    def test_cleanup_receipt_fsync_failure_fails_closed_and_cleans_temp(self) -> None:
+    def test_cleanup_receipt_directory_fsync_failure_unpublishes_and_allows_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cleanup.json"
+            with mock.patch("repo_agent.steps.cleanup.os.fsync", side_effect=[None, OSError("directory fsync failed"), None]):
+                result = self._cleanup(path)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "receipt_write_failed")
+            self.assertFalse(path.exists())
+            self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+
+            retry = self._cleanup(path)
+            self.assertEqual(retry["status"], "written")
+            self.assertTrue(path.is_file())
+    def test_cleanup_receipt_failed_rollback_is_never_accepted_without_fsync(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cleanup.json"
+            real_unlink = os.unlink
+
+            def fail_published_unlink(target: Path | str) -> None:
+                if Path(target) == path:
+                    raise OSError("rollback unlink failed")
+                real_unlink(target)
+
+            with (
+                mock.patch("repo_agent.steps.cleanup.os.fsync", side_effect=[None, OSError("directory fsync failed"), OSError("rollback fsync failed")]),
+                mock.patch("repo_agent.steps.cleanup.os.unlink", side_effect=fail_published_unlink),
+            ):
+                result = self._cleanup(path)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "receipt_write_failed")
+            self.assertTrue(path.is_file())
+
+            with mock.patch("repo_agent.steps.cleanup.os.fsync", side_effect=OSError("durability still unconfirmed")):
+                retry = self._cleanup(path)
+            self.assertFalse(retry["ok"])
+            self.assertEqual(retry["reason"], "receipt_durability_unconfirmed")
+
+    def test_cleanup_receipt_fsync_before_publication_fails_closed_and_cleans_temp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cleanup.json"
             with mock.patch("repo_agent.steps.cleanup.os.fsync", side_effect=OSError("fsync failed")):

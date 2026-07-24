@@ -146,6 +146,7 @@ def build_repair_prompt(request: Request) -> Result:
         return gated
     data = input_of(request)
     loaded = cond_blob(request, "load_pr_fields", "triage_load_pr_fields")
+    created = cond_blob(request, "create_review_fix_task", "triage_create_review_fix_task")
     decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
     checks = cond_blob(request, "evaluate_checks", "checks", "triage_evaluate_checks")
     pr = data.get("pr") or loaded.get("pr") or {}
@@ -160,12 +161,19 @@ def build_repair_prompt(request: Request) -> Result:
         "Update the branch to fix CI/merge issues. Keep scope minimal.\n"
         "Do not force-push. Do not merge.\n"
     )
+    task_id = created.get("task_id") or data.get("task_id")
+    repo = data.get("repo") or loaded.get("repo")
+    linked = pr.get("linkedIssue") if isinstance(pr, dict) else None
+    issue = data.get("issue") or loaded.get("issue") or (linked.get("number") if isinstance(linked, dict) else linked) or number
     return ok(
         status="built",
         prompt=body,
         reason=reason,
         pr_number=number,
         branch=pr.get("headRefName") if isinstance(pr, dict) else None,
+        **({"task_id": task_id} if task_id else {}),
+        **({"repo": repo} if repo else {}),
+        **({"issue": issue} if issue else {}),
     )
 
 
