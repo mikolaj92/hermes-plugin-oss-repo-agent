@@ -282,6 +282,7 @@ class IntakeFlowE2ETests(unittest.TestCase):
                 )
             )
 
+        self.assertEqual(result.failed, [], msg=str(result.processes))
         self.assertEqual(result.stopped_reason, "worked")
         self.assertEqual(result.ticks, 5)
         self.assertEqual(len(result.failed), 0)
