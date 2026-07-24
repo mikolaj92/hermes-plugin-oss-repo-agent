@@ -181,3 +181,20 @@ This section supersedes the `PROMOTED` disposition above. The deployment passed 
 - **F4 — REJECT:** no contemporaneous pre/post inventory proves that the final live cutover did not touch unrelated branches, LaunchAgents, historical issue/PR state, or user files.
 
 The known-weak deployed revision `c919c72749aa67ea6d07472ba063aee435029f06` remains `deployment/current` pending an explicit operator decision to keep it running temporarily or roll it back. Its continued presence is not acceptance of the receipt-durability risk and must not be represented as DoD completion.
+
+## Final audit reconciliation 2026-07-24
+
+**Final disposition: INCOMPLETE — DoD NOT MET.**
+
+This section supersedes every earlier disposition and cleanup statement in this historical record.
+
+- Source provenance is current and clean: `main` and `origin/main` both resolve to `3330961eb8d10b1c03e32aedbfc73db2d1e0fef0`. The active manifest binds that plugin commit to Fala `0.7.9` at `69bc2ec9d4cdf61773114847c0c582fb2652296d` and immutable candidate `f8f37a78bcd3b3107955a8eec68139d926ba32e0a5a4b17ee9e79b9b68e4e80c`.
+- Current operational checks pass: health and status exit `0`, source-to-active script parity reports `ok=true`, the database reports integrity `ok` with its latest run `completed`/`live` and zero unresolved, failed, or waiting processes, the canonical Fala launchd service reports last exit `0`, and the bounded repository smoke exits `0`.
+- Cleanup is not terminally proven. GitHub reports issue `#8` closed and PR `#9` merged, but the exact remote branch remains at `065b26c8fb610f9c60b4663856b16d5b4ac749c0`. Remote retention is required by the cleanup scope unless separately authorized; no remote deletion was attempted.
+- The durable cleanup outcome says `NO_TARGET_RECONCILED` and `remote_branch_deleted=false`, but it does not record explicit no-claim, no-lease, no-lock, and no-worktree postconditions. The task receipt still says `PR_OPEN` / `pr-open`, and its empty `.lock` artifact remains. Therefore the receipt cannot satisfy the terminal cleanup acceptance contract.
+- **F1 — REJECT:** the current accumulated change set and live mutations lack a contemporaneous path-by-path plan-compliance and dirty-worktree preservation audit. The recorded baseline is historical and does not close the final mutation boundary.
+- **F2 — REJECT:** the earlier receipt durability defects were repaired in source, but the authoritative cleanup evidence remains contradictory and does not prove a terminal cleanup state.
+- **F3 — REJECT:** GitHub, source, candidate, launchd, database, smoke, health, status, and parity checks pass; cleanup evidence does not.
+- **F4 — REJECT:** only a pre-promotion inventory exists. No contemporaneous post-inventory proves that unrelated branches, LaunchAgents, historical issue/PR state, and user files were unchanged during the final cutover.
+
+The active deployment remains operational but is not accepted as Definition-of-Done completion. No cleanup mutation or remote branch deletion is authorized or claimed by this audit.
