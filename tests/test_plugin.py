@@ -120,6 +120,7 @@ retry_backoff_seconds = 60
 [paths]
 worktree_root = "{root / 'worktrees'}"
 dispatch_receipts = "{root / 'dispatch'}"
+task_receipts = "{root / 'task-receipts'}"
 merge_receipts = "{root / 'merge'}"
 active_issue = "{root / 'active'}"
 
@@ -192,6 +193,7 @@ priority = 100
                 for name, relative in {
                     "worktree_root": ".hermes/worktrees/repo-agent",
                     "dispatch_receipts": ".hermes/state/repo-agent-dispatch",
+                    "task_receipts": ".hermes/state/repo-agent-receipts",
                     "merge_receipts": ".hermes/state/repo-agent-merge",
                     "active_issue": ".hermes/state/repo-agent-active",
                 }.items():
@@ -204,6 +206,18 @@ priority = 100
                 self.assertTrue(runtime_clone.is_absolute())
                 self.assertEqual(root_clone, runtime_clone)
                 self.assertEqual(runtime_clone, expected_root / "repos/example-repo")
+
+    def test_task_receipts_path_is_optional_and_defaults(self):
+        runtime_config = importlib.import_module("repo_agent.config")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self._write_mode_config(root, "live")
+            config.write_text(config.read_text(encoding="utf-8").replace(f'task_receipts = "{root / "root" / "task-receipts"}"\n', ""), encoding="utf-8")
+            schema = json.loads((PLUGIN_ROOT / "schemas" / "config.schema.json").read_text(encoding="utf-8"))
+            self.assertNotIn("task_receipts", schema["properties"]["paths"]["required"])
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                loaded = runtime_config.load_config(config)
+            self.assertEqual(loaded.paths.task_receipts, str(root / ".hermes/state/repo-agent-receipts"))
 
     def test_root_operational_modes_require_config_and_explicit_live(self):
         module = load_plugin()

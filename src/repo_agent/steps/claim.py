@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import fcntl
+from contextlib import contextmanager
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -74,6 +76,19 @@ def _claims_in_directory(path: Path, max_active: int) -> tuple[list[tuple[Path, 
         if payload is not None:
             claims.append((entry, payload))
     return claims, None
+
+
+@contextmanager
+def claim_directory_lock(path: Path):
+    """Serialize claim creation and deletion in the claim directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    directory_fd = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        fcntl.flock(directory_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(directory_fd, fcntl.LOCK_UN)
+        os.close(directory_fd)
 
 
 def _reserve_claim(path: Path, *, repo: str, issue: int, board: str, assignee: str) -> tuple[dict[str, Any] | None, str | None, bool]:
@@ -183,26 +198,27 @@ def claim_github_issue(request: Request) -> Result:
     claim_path = _claim_file(configured_value)
     if claim_path is None:
         return fail("missing_claim_path", failure_class="terminal", retry_safe=False, selected=selected)
-    claims, error = _claims_in_directory(claim_path.parent, max_active) if is_claim_directory else ([], None)
-    if error:
-        return fail(error.split(":", 1)[0], failure_class="terminal", retry_safe=False, selected=selected, claim_path=str(claim_path), error=error)
-    identity = (repo, number, board, assignee)
-    match = next(((p, c) for p, c in claims if _claim_identity(c) == identity), None)
-    local_mutated = False
-    if match:
-        claim_path, claim = match
-        reused = True
-    else:
-        if len(claims) >= max_active:
-            return fail("claim_capacity_exhausted", failure_class="terminal", retry_safe=False, selected=selected, claim_path=str(claim_path), active_claims=[c for _, c in claims], max_active_issues=max_active)
-        if max_active > 1 and claim_path.name == "claim.json" and claim_path.exists():
-            claim_path = claim_path.parent / f"claim-{repo.replace('/', '_')}-{number}.json"
-        claim, error, reused = _reserve_claim(claim_path, repo=repo, issue=number, board=board, assignee=assignee)
-        local_mutated = not reused
+    with claim_directory_lock(claim_path):
+        claims, error = _claims_in_directory(claim_path.parent, max_active) if is_claim_directory else ([], None)
         if error:
-            reason = "claim_busy" if error == "claim_busy" else error.split(":", 1)[0]
-            failure_class = "reconcile_then_retry" if local_mutated or reason == "claim_uncertain" else "terminal"
-            return fail(reason, failure_class=failure_class, retry_safe=False, selected=selected, claim_path=str(claim_path), claim=claim, error=error, mutated=local_mutated)
+            return fail(error.split(":", 1)[0], failure_class="terminal", retry_safe=False, selected=selected, claim_path=str(claim_path), error=error)
+        identity = (repo, number, board, assignee)
+        match = next(((p, c) for p, c in claims if _claim_identity(c) == identity), None)
+        local_mutated = False
+        if match:
+            claim_path, claim = match
+            reused = True
+        else:
+            if len(claims) >= max_active:
+                return fail("claim_capacity_exhausted", failure_class="terminal", retry_safe=False, selected=selected, claim_path=str(claim_path), active_claims=[c for _, c in claims], max_active_issues=max_active)
+            if max_active > 1 and claim_path.name == "claim.json" and claim_path.exists():
+                claim_path = claim_path.parent / f"claim-{repo.replace('/', '_')}-{number}.json"
+            claim, error, reused = _reserve_claim(claim_path, repo=repo, issue=number, board=board, assignee=assignee)
+            local_mutated = not reused
+            if error:
+                reason = "claim_busy" if error == "claim_busy" else error.split(":", 1)[0]
+                failure_class = "reconcile_then_retry" if local_mutated or reason == "claim_uncertain" else "terminal"
+                return fail(reason, failure_class=failure_class, retry_safe=False, selected=selected, claim_path=str(claim_path), claim=claim, error=error, mutated=local_mutated)
     actions: list[dict[str, Any]] = []
     def read_claim() -> tuple[set[str], set[str]]:
         proc = run_cmd([gh, "issue", "view", str(number), "--repo", repo, "--json", "assignees,labels"], timeout=60)

@@ -122,11 +122,12 @@ class ExecutorConfig:
 class PathConfig:
     worktree_root: str = "~/.hermes/worktrees/repo-agent"
     dispatch_receipts: str = "~/.hermes/state/repo-agent-dispatch"
+    task_receipts: str = "~/.hermes/state/repo-agent-receipts"
     merge_receipts: str = "~/.hermes/state/repo-agent-merge"
     active_issue: str = "~/.hermes/state/repo-agent-active"
 
     def __post_init__(self) -> None:
-        for name in ("worktree_root", "dispatch_receipts", "merge_receipts", "active_issue"):
+        for name in ("worktree_root", "dispatch_receipts", "task_receipts", "merge_receipts", "active_issue"):
             value = str(getattr(self, name)).strip()
             if not value:
                 raise ConfigError(f"paths.{name} must not be empty")
@@ -328,6 +329,7 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
     paths = PathConfig(
         worktree_root=str(_env_or(paths_data, "worktree_root", env, "HERMES_WORKTREE_ROOT", "~/.hermes/worktrees/repo-agent")),
         dispatch_receipts=str(_env_or(paths_data, "dispatch_receipts", env, "HERMES_REPO_AGENT_RECEIPT_DIR", "~/.hermes/state/repo-agent-dispatch")),
+        task_receipts=str(_env_or(paths_data, "task_receipts", env, "HERMES_REPO_AGENT_TASK_RECEIPT_DIR", "~/.hermes/state/repo-agent-receipts")),
         merge_receipts=str(_env_or(paths_data, "merge_receipts", env, "HERMES_REPO_AGENT_MERGE_RECEIPT_DIR", "~/.hermes/state/repo-agent-merge")),
         active_issue=str(_env_or(paths_data, "active_issue", env, "HERMES_REPO_AGENT_ACTIVE_ISSUE_DIR", "~/.hermes/state/repo-agent-active")),
     )

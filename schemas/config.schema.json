@@ -48,7 +48,7 @@
     "paths": {
       "type": "object", "additionalProperties": false,
       "required": ["worktree_root", "dispatch_receipts", "merge_receipts", "active_issue"],
-      "properties": {"worktree_root": {"type": "string", "minLength": 1}, "dispatch_receipts": {"type": "string", "minLength": 1}, "merge_receipts": {"type": "string", "minLength": 1}, "active_issue": {"type": "string", "minLength": 1}}
+      "properties": {"worktree_root": {"type": "string", "minLength": 1}, "dispatch_receipts": {"type": "string", "minLength": 1}, "task_receipts": {"type": "string", "minLength": 1}, "merge_receipts": {"type": "string", "minLength": 1}, "active_issue": {"type": "string", "minLength": 1}}
     },
     "repos": {
       "type": "array", "minItems": 1,

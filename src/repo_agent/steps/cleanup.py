@@ -26,6 +26,7 @@ from repo_agent.adapters_git import (
     worktree_list,
     worktree_remove,
 )
+from repo_agent.steps.claim import claim_directory_lock
 
 from repo_agent.envelope import (
     cfg_of,
@@ -356,43 +357,57 @@ def release_active_issue_claim(request: Request) -> Result:
         return fail("missing_claim_identity", failure_class="terminal", retry_safe=False, repo=repo, issue=issue)
     configured = Path(configured_claim_path).expanduser()
     path = configured / "claim.json" if configured.exists() and configured.is_dir() else (configured if configured.suffix.lower() == ".json" else configured / "claim.json")
-    if not path.exists():
-        return ok(status="already_absent", claim_path=str(path), repo=repo, issue=issue, mutated=False)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc))
-    if not isinstance(payload, dict):
-        return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload)
-    claim_repo = str(payload.get("repo") or "").strip()
-    claim_board = str(payload.get("board") or "").strip()
-    claim_at = str(payload.get("claimedAt") or "").strip()
-    claim_issue = payload.get("issue")
-
-
-
-
-    if payload.get("version") != 1 or not claim_repo or not claim_board or not claim_at or isinstance(claim_issue, bool) or not isinstance(claim_issue, int) or claim_issue <= 0:
-        return fail("claim_malformed", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload)
-    if claim_repo != repo:
-        return fail("claim_repo_mismatch", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload, repo=repo)
-    if claim_issue != issue:
-        return fail("claim_issue_mismatch", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload, issue=issue)
-    if dry:
-        return planned(claim_path=str(path), payload=payload, repo=repo, issue=issue)
-    try:
-        path.unlink()
-    except OSError as exc:
-        return fail("unlink_failed", failure_class="reconcile_then_retry", retry_safe=False, claim_path=str(path), error=str(exc), mutated=True)
-    try:
-        parent_fd = os.open(str(path.parent), os.O_RDONLY)
+    with claim_directory_lock(path):
+        if not path.exists():
+            return ok(status="already_absent", claim_path=str(path), repo=repo, issue=issue, mutated=False)
+        fd = -1
         try:
-            os.fsync(parent_fd)
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise ValueError("claim is not a single-link regular file")
+            with os.fdopen(fd, "r", encoding="utf-8") as handle:
+                fd = -1
+                payload = json.load(handle)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc))
         finally:
-            os.close(parent_fd)
-    except OSError as exc:
-        return fail("unlink_durability_unconfirmed", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc), mutated=True)
-    return ok(status="released", claim_path=str(path), repo=repo, issue=issue, mutated=True)
+            if fd >= 0:
+                os.close(fd)
+        if not isinstance(payload, dict):
+            return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload)
+        claim_repo = str(payload.get("repo") or "").strip()
+        claim_board = str(payload.get("board") or "").strip()
+        claim_at = str(payload.get("claimedAt") or "").strip()
+        claim_issue = payload.get("issue")
+        if payload.get("version") != 1 or not claim_repo or not claim_board or not claim_at or isinstance(claim_issue, bool) or not isinstance(claim_issue, int) or claim_issue <= 0:
+            return fail("claim_malformed", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload)
+        if claim_repo != repo:
+            return fail("claim_repo_mismatch", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload, repo=repo)
+        if claim_issue != issue:
+            return fail("claim_issue_mismatch", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload, issue=issue)
+        if dry:
+            return planned(claim_path=str(path), payload=payload, repo=repo, issue=issue)
+        try:
+            current = os.lstat(path)
+            if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+                raise ValueError("claim inode changed during release")
+            path.unlink()
+        except OSError as exc:
+            return fail("unlink_failed", failure_class="reconcile_then_retry", retry_safe=False, claim_path=str(path), error=str(exc), mutated=True)
+        except ValueError as exc:
+            return fail("claim_changed", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc), mutated=False)
+        try:
+            parent_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+        except OSError as exc:
+            return fail("unlink_durability_unconfirmed", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc), mutated=True)
+        if path.exists():
+            return fail("claim_changed", failure_class="terminal", retry_safe=False, claim_path=str(path), error="claim still exists after release", mutated=True)
+        return ok(status="released", claim_path=str(path), repo=repo, issue=issue, mutated=True)
 
 
 @contextmanager

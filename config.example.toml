@@ -43,6 +43,7 @@ retry_backoff_seconds = 60
 [paths]
 worktree_root = "~/.hermes/worktrees/repo-agent"
 dispatch_receipts = "~/.hermes/state/repo-agent-dispatch"
+task_receipts = "~/.hermes/state/repo-agent-receipts"
 merge_receipts = "~/.hermes/state/repo-agent-merge"
 active_issue = "~/.hermes/state/repo-agent-active"
 

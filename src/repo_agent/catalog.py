@@ -303,6 +303,13 @@ EFFECTORS: tuple[EffectorEntry, ...] = (
         True,
     ),
     EffectorEntry(
+        "reconcile_no_target_cleanup",
+        "cleanup",
+        "repo_agent.steps.cleanup_reconcile.reconcile_no_target_cleanup",
+        "Prove an exact already-absent cleanup target while retaining its remote branch.",
+        True,
+    ),
+    EffectorEntry(
         "create_maintenance_task",
         "cleanup",
         "repo_agent.steps.cleanup.create_maintenance_task",
