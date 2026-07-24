@@ -198,3 +198,15 @@ This section supersedes every earlier disposition and cleanup statement in this 
 - **F4 — REJECT:** only a pre-promotion inventory exists. No contemporaneous post-inventory proves that unrelated branches, LaunchAgents, historical issue/PR state, and user files were unchanged during the final cutover.
 
 The active deployment remains operational but is not accepted as Definition-of-Done completion. No cleanup mutation or remote branch deletion is authorized or claimed by this audit.
+
+## Cleanup hardening closure 2026-07-24
+
+**Final disposition remains: INCOMPLETE — DoD NOT MET.**
+
+- Cleanup reconciliation hardening was committed and pushed to `main` and `origin/main` as `60bba3e` (`fix: harden terminal cleanup reconciliation`). This source update does not claim a deployment cutover or a new live cleanup mutation.
+- The reconciler now binds clone, worktree, claim, database, task receipt, merge receipt, and cleanup receipt paths to trusted runtime configuration; rejects noncanonical branch and escaped paths before commands; validates GitHub, Git, receipt, worker, lock, and Fala lease evidence; and publishes terminal evidence under the repository's durable receipt protocol.
+- Directory claim stores and configured single-JSON claim files retain distinct scan semantics under the aligned claim lock. Missing or inaccessible configured clones return the terminal `cleanup_context_missing` result rather than escaping the step. The new `paths.task_receipts` setting remains optional and uses the runtime default when omitted.
+- Final focused verification passed `47` tests. Python compilation, repository hygiene, `git diff --check`, and `scripts/repo_agent_smoke.sh` passed. The immediately preceding full repository run passed `284` tests; the final regressions were then covered by the focused run.
+- Two independent final read-only audits approved the cleanup security and compatibility contracts with no findings.
+
+The source defects identified by the earlier F2 review are closed. Definition of Done remains incomplete because this source-only closure did not perform or prove a new authoritative live issue-8 reconciliation, deployment activation, or contemporaneous F1/F3/F4 operational inventory wave.
