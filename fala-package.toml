@@ -534,13 +534,13 @@ conduction = ["cleanup_remove_worktree", "cleanup_parse_issue_from_branch", "cle
 adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "repo_agent.steps.cleanup.release_active_issue_claim" }
 
-
 [[correlation_paths.effectors]]
 id = "cleanup_write_cleanup_receipt"
 capability = "repo_agent_step"
 conduction = ["cleanup_parse_issue_from_branch", "cleanup_check_issue_closed", "cleanup_check_no_open_pr", "cleanup_remove_worktree", "cleanup_delete_local_fix_branch", "cleanup_release_active_issue_claim"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "repo_agent.steps.cleanup.write_cleanup_receipt" }
+
 
 [runtime.backend]
 kind = "sqlite"

@@ -588,6 +588,14 @@ def write_cleanup_receipt(request: Request) -> Result:
     steps = {name: {"status": blob.get("status"), "mutated": bool(blob.get("mutated", False)), "reason": blob.get("reason"), "failure": blob.get("failure_class") or blob.get("error")} for name, blob in evidence.items()}
     cancelled = any(blob.get("status") in {"cancelled", "timed_out"} for blob in evidence.values())
     failed = any(blob.get("ok") is False for blob in evidence.values())
+    no_target = (
+        evidence["parse_issue_from_branch"].get("ok") is True
+        and evidence["parse_issue_from_branch"].get("status") == "noop"
+        and evidence["parse_issue_from_branch"].get("reason") == "no_branch"
+        and all(blob.get("ok") is True and not blob.get("mutated", False) for blob in evidence.values())
+    )
+    if no_target:
+        return noop("no_branch", receipt_path=path)
     payload = dict(data.get("payload") or {})
     identity = _cleanup_identity(data, cfg, payload, evidence, path)
     if identity is None:

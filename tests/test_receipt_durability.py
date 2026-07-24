@@ -176,6 +176,32 @@ class ReceiptDurabilityTests(unittest.TestCase):
             "process_id": process_id,
         })
 
+    def test_no_target_cleanup_skips_receipt_without_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cleanup.json"
+            evidence = {
+                name: {"ok": True, "status": "noop", "reason": "no_branch", "mutated": False}
+                for name in ("parse_issue_from_branch", "check_issue_closed", "check_no_open_pr", "remove_worktree", "delete_local_fix_branch", "release_active_issue_claim")
+            }
+            result = cleanup.write_cleanup_receipt({"input": {"receipt_path": str(path), "dry_run": False, "conduction": evidence}, "config": {}})
+            self.assertEqual(result["status"], "noop")
+            self.assertEqual(result["reason"], "no_branch")
+            self.assertFalse(result["mutated"])
+            self.assertFalse(path.exists())
+
+    def test_no_target_cleanup_fails_closed_after_any_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cleanup.json"
+            evidence = {
+                name: {"ok": True, "status": "noop", "reason": "no_branch", "mutated": False}
+                for name in ("parse_issue_from_branch", "check_issue_closed", "check_no_open_pr", "remove_worktree", "delete_local_fix_branch", "release_active_issue_claim")
+            }
+            evidence["remove_worktree"]["mutated"] = True
+            result = cleanup.write_cleanup_receipt({"input": {"receipt_path": str(path), "dry_run": False, "conduction": evidence}, "config": {}})
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "cleanup_identity_missing")
+            self.assertFalse(path.exists())
+
     def test_generic_ok_blobs_and_missing_identity_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cleanup.json"

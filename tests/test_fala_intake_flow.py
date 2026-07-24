@@ -167,6 +167,8 @@ class TickAllHostPathTests(unittest.TestCase):
         self.assertTrue(effector_inputs["cleanup_remove_worktree"]["require_safe"])
         self.assertTrue(effector_inputs["dispatch_prepare_worktree"]["dry_run"])
         self.assertNotIn("clone_path", effector_inputs["dispatch_prepare_worktree"])
+        self.assertIn("cleanup_write_cleanup_receipt", effector_inputs)
+        self.assertIn("cleanup_receipt_path", effector_inputs["cleanup_parse_issue_from_branch"])
         self.assertEqual(result["path_id"], "auto_worker")
         self.assertFalse(result["any_failed"])
         self.assertEqual(result["processes"][0]["id"], "intake_poll")
