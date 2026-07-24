@@ -31,6 +31,10 @@ jobs:
           python -m pip install -e ../Fala
           python -m pip install -e .
           python -m pip install PyYAML
+          mkdir -p ../Fala/mojo/fala/native
+          cc -std=c11 -Wall -Wextra -dynamiclib \
+            -o ../Fala/mojo/fala/native/libfala_process_host.dylib \
+            ../Fala/mojo/fala/native_process_host.c
       - name: Run unit suite
         working-directory: hermes-plugin-oss-repo-agent
         env:
