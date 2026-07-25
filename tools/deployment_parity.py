@@ -653,16 +653,18 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
             embedded = tomllib.loads(config_artifact_path.read_text(encoding="utf-8"))
             automation = embedded.get("automation") or {}
             executor = embedded.get("executor") or {}
+            if not isinstance(automation, dict) or not isinstance(executor, dict):
+                raise ValueError("policy table is invalid")
             expected_policy = {
-                "automerge": bool(automation.get("automerge", False)),
-                "require_human_approval": bool(automation.get("require_human_approval", True)),
-                "require_checks": bool(automation.get("require_checks", True)),
-                "require_test_evidence": bool(automation.get("require_test_evidence", True)),
-                "executor_enabled": bool(executor.get("enabled", False)),
+                "automerge": embedded.get("automerge", automation.get("automerge", False)),
+                "require_human_approval": embedded.get("require_human_approval", automation.get("require_human_approval", True)),
+                "require_checks": embedded.get("require_checks", automation.get("require_checks", True)),
+                "require_test_evidence": embedded.get("require_test_evidence", automation.get("require_test_evidence", True)),
+                "executor_enabled": executor.get("enabled", False),
             }
             if policy != expected_policy:
                 errors.append("Fala identity policy does not match embedded config")
-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, ValueError, tomllib.TOMLDecodeError) as exc:
             errors.append(f"Fala embedded config policy is unreadable: {exc}")
     metadata: dict[str, object] | None = None
     if metadata_path and _regular_file(metadata_path):

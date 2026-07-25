@@ -81,10 +81,11 @@ class DeploymentCandidateTests(unittest.TestCase):
             candidates = root / "candidates"
             self.assertEqual(list(candidates.iterdir()) if candidates.exists() else [], [])
 
-    def _render(self, root: Path, *, mode: str = "dry-run", config_path: Path | None = None, db_path: Path | None = None, autonomous: bool = False) -> Path:
+    def _render(self, root: Path, *, mode: str = "dry-run", config_path: Path | None = None, db_path: Path | None = None, autonomous: bool = False, top_level_precedence: bool = False) -> Path:
         config = config_path or root / "config.toml"
+        top_level = "automerge = false\n" if top_level_precedence else ""
         config.write_text(
-            f"mode = '{mode}'\n[automation]\nautomerge = {str(autonomous).lower()}\nrequire_human_approval = {str(not autonomous).lower()}\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = {str(autonomous).lower()}\n",
+            f"mode = '{mode}'\n{top_level}[automation]\nautomerge = {str(autonomous or top_level_precedence).lower()}\nrequire_human_approval = {str(not autonomous).lower()}\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = {str(autonomous).lower()}\n",
             encoding="utf-8",
         )
         db = db_path or root / "state.sqlite"
@@ -1106,6 +1107,12 @@ class DeploymentCandidateTests(unittest.TestCase):
             manifest = json.loads(candidate.joinpath("manifest.json").read_text())
             self.assertEqual(result["candidate_id"], manifest["candidate_id"])
             self.assertTrue(result["ok"])
+
+    def test_candidate_policy_uses_top_level_precedence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = self._render(Path(directory), top_level_precedence=True)
+            import tools.deployment_parity as parity
+            self.assertTrue(parity.validate_fala_candidate(candidate)["ok"])
 
     def test_autonomous_policy_is_rejected_even_in_live_mode(self):
         with tempfile.TemporaryDirectory() as directory:
