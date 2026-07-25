@@ -260,8 +260,7 @@ def _validate_active_plist_roots(
     contracts: dict[str, tuple[str, tuple[str, ...]]],
     errors: list[str],
 ) -> None:
-    """Validate managed plists in shared LaunchAgents roots."""
-    expected = {_plist_name(template): contracts[_plist_name(template)] for template in templates}
+    expected = {name: contracts[name] for template in templates if (name := _plist_name(template)) in contracts}
     fala_name = "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
     fala_template_name = "oss-repo-agent-fala-tick-all.plist"
     for root_input in roots:

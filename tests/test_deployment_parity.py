@@ -89,6 +89,17 @@ class DeploymentParityTests(unittest.TestCase):
         errors = raised.exception.result["errors"]
         self.assertTrue(any("active launchd Label mismatch" in error for error in errors))
         self.assertTrue(any("active launchd ProgramArguments mismatch" in error for error in errors))
+    def test_invalid_template_with_active_root_reports_parity_error(self):
+        holder, source, active, templates = self.make_deployment()
+        self.addCleanup(holder.cleanup)
+        active_plist = Path(holder.name) / "active-launchd"
+        active_plist.mkdir()
+        template = templates / "launchd" / "oss-repo-agent-health.plist.template"
+        template.write_text("not a plist", encoding="utf-8")
+        with self.assertRaises(DeploymentParityError) as raised:
+            validate(source, active, [templates / "launchd"], active_plist_roots=[active_plist])
+        self.assertTrue(any("invalid launchd template" in error for error in raised.exception.result["errors"]))
+
     def test_active_byte_drift_fails_closed(self):
         holder, source, active, templates = self.make_deployment()
         self.addCleanup(holder.cleanup)
