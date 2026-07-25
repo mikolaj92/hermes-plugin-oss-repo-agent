@@ -210,3 +210,15 @@ The active deployment remains operational but is not accepted as Definition-of-D
 - Two independent final read-only audits approved the cleanup security and compatibility contracts with no findings.
 
 The source defects identified by the earlier F2 review are closed. Definition of Done remains incomplete because this source-only closure did not perform or prove a new authoritative live issue-8 reconciliation, deployment activation, or contemporaneous F1/F3/F4 operational inventory wave.
+
+## Fail-closed launchd reconciliation 2026-07-25
+
+**Final disposition remains: INCOMPLETE — DoD NOT MET.**
+
+- Source hardening commit `c93d9f2` is pushed to `main` and `origin/main`. It now treats launchctl exit `125` (`Domain does not support specified action`) as unknown and fatal in deployment, health, and status paths rather than evidence that a label is absent. Focused verification passed `93` tests (`31` health/status and `62` deployment-candidate tests); Python compilation, shell syntax, and `git diff --check` passed.
+- The active immutable deployment remains candidate `53f59f83f016841a3c2d88a42c5b189c0b07bf1d6d49d7e36696351f58d110c3`, bound to earlier plugin revision `7a941fca755d0914ca0d0524bede1850abaa6e7d`. Its latest bounded Fala tick `auto-worker-20260725T022140Z-1846521e` completed live with zero unresolved, failed, or waiting processes.
+- The supported `user/501` probe finds the canonical Fala job loaded with last exit `0`. The required `gui/501` probe returns exit `125`; retry through `launchctl asuser 501` fails with `Operation not permitted`. This is unresolved domain ambiguity, not proof of absence, and blocks the exact-one-domain acceptance gate.
+- Final source health and status now fail closed on that ambiguity. Health also reports source-to-active drift because the new fail-closed scripts and commit are not deployed. The host has less than the configured `5 GiB` free-space threshold; a diagnostic run with `HERMES_REPO_AGENT_MIN_FREE_GB=0` does not waive that production gate.
+- The installed observational health plist is byte-identical to the canonical rendered source template and passes `plutil -lint`, but it is not loaded. No claim is made that copying its bytes changed launchd runtime state.
+
+No completion or promotion claim is made. Closure requires a launchd probe from a context where `gui/501` is authoritatively queryable (or authoritative evidence that the domain does not exist), then a fresh immutable candidate for `c93d9f2`, deployment/parity verification, and health/status with all configured gates unmodified.
