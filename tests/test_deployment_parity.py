@@ -58,6 +58,22 @@ class DeploymentParityTests(unittest.TestCase):
         with self.assertRaises(DeploymentParityError) as raised:
             validate(source, active, [templates / "launchd"])
         self.assertTrue(any("unexpected active script" in error for error in raised.exception.result["errors"]))
+    def test_active_plist_root_ignores_unrelated_launchagents(self):
+        holder, source, active, templates = self.make_deployment()
+        self.addCleanup(holder.cleanup)
+        active_plist = Path(holder.name) / "active-launchd"
+        active_plist.mkdir()
+        from tools.deployment_parity import _render_template
+        for template in (templates / "launchd").glob("*.plist.template"):
+            installed_name = "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist" if "fala-tick-all" in template.name else template.name.removesuffix(".template")
+            active_plist.joinpath(installed_name).write_text(
+                _render_template(template.read_text(encoding="utf-8"), active.parent.parent, active),
+                encoding="utf-8",
+            )
+        (active_plist / "com.example.unrelated.plist").write_text("not even a plist", encoding="utf-8")
+        result = validate(source, active, [templates / "launchd"], active_plist_roots=[active_plist])
+        self.assertTrue(result["ok"])
+
     def test_active_plist_label_and_arguments_drift_fails_closed(self):
         holder, source, active, templates = self.make_deployment()
         self.addCleanup(holder.cleanup)

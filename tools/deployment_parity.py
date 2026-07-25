@@ -189,6 +189,7 @@ def _validate_rendered_roots(
     label: str,
     contracts: dict[str, tuple[str, tuple[str, ...]]],
     errors: list[str],
+    exact_inventory: bool = True,
 ) -> dict[str, Path]:
     """Validate one rendered plist inventory without merging root identities."""
     expected = {_plist_name(path): path for path in templates}
@@ -208,6 +209,8 @@ def _validate_rendered_roots(
             continue
         root_names: set[str] = set()
         all_files = sorted(path for path in root.rglob("*") if path.is_file() or path.is_symlink())
+        if not exact_inventory:
+            all_files = [path for path in all_files if path.name in expected]
         for path in all_files:
             name = path.name
             root_names.add(name)
@@ -248,6 +251,51 @@ def _validate_rendered_roots(
         missing = set(expected) - root_names
         errors.extend(f"missing {label} launchd artifact: {name}" for name in sorted(missing))
     return parsed
+
+
+def _validate_active_plist_roots(
+    templates: list[Path],
+    roots: Iterable[Path],
+    *,
+    contracts: dict[str, tuple[str, tuple[str, ...]]],
+    errors: list[str],
+) -> None:
+    """Validate managed plists in shared LaunchAgents roots."""
+    expected = {_plist_name(template): contracts[_plist_name(template)] for template in templates}
+    fala_name = "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+    fala_template_name = "oss-repo-agent-fala-tick-all.plist"
+    for root_input in roots:
+        root = root_input.expanduser()
+        if root.is_symlink():
+            errors.append(f"active root must not be a symlink: {root}")
+        root = root.resolve()
+        if not root.is_dir():
+            errors.append(f"required active directory missing: {root}")
+            continue
+        for name, (expected_label, expected_args) in expected.items():
+            installed_name = fala_name if name == fala_template_name else name
+            path = root / installed_name
+            if not path.exists():
+                errors.append(f"missing active launchd artifact: {installed_name}")
+                continue
+            if path.is_symlink():
+                errors.append(f"active launchd artifact must not be a symlink: {path}")
+                continue
+            try:
+                stat = path.lstat()
+                document = plistlib.loads(path.read_bytes())
+            except (OSError, plistlib.InvalidFileException, ValueError) as exc:
+                errors.append(f"invalid active launchd plist {path}: {exc}")
+                continue
+            if stat.st_nlink != 1:
+                errors.append(f"active launchd artifact must not be a hardlink: {path}")
+            if not isinstance(document, dict):
+                errors.append(f"active launchd plist must be a dictionary: {path}")
+                continue
+            if document.get("Label") != expected_label:
+                errors.append(f"active launchd Label mismatch: {path}")
+            if name != fala_template_name and document.get("ProgramArguments") != list(expected_args):
+                errors.append(f"active launchd ProgramArguments mismatch: {path}")
 
 
 def validate(
@@ -369,7 +417,7 @@ def validate(
         if not plist_roots or any(root is None for root in plist_roots):
             errors.append("active plist parity root is omitted")
         else:
-            _validate_rendered_roots(templates, plist_roots, label="active", contracts=contracts, errors=errors)
+            _validate_active_plist_roots(templates, plist_roots, contracts=contracts, errors=errors)
     if render_roots is not None:
         if not rendered_roots or any(root is None for root in rendered_roots):
             errors.append("rendered parity root is omitted")
