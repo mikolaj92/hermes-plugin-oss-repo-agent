@@ -51,6 +51,10 @@ def _step_config(cfg: Any, *, dry_run: bool, **extra: Any) -> dict[str, Any]:
         "dispatch_receipts": cfg.paths.dispatch_receipts,
         "merge_receipts": cfg.paths.merge_receipts,
         "active_issue": cfg.paths.active_issue,
+        "repos": [
+            {"repo": entry.repo, "board": entry.board, "clone_path": entry.clone_path, "priority": entry.priority}
+            for entry in cfg.repos
+        ],
         "dry_run": dry_run,
         **extra,
     }

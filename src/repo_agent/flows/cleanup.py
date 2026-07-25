@@ -13,7 +13,7 @@ from repo_agent.adapters_git import branch_config_get
 from repo_agent.config import AgentConfig, ConfigError, load_config
 from repo_agent.flows.common import PathRunResult, process_summary, process_values
 from repo_agent.flows.runtime import run_package_path_async
-from repo_agent.steps.cleanup import write_cleanup_receipt
+
 
 
 _PACKAGE_PATH = Path(__file__).resolve().parents[3] / "fala-package.toml"
@@ -59,6 +59,109 @@ def _read_branch_provenance(clone_path: str, branch: str) -> tuple[dict[str, str
     if not all(values.values()):
         return None, "cleanup_provenance_missing"
     return values, None
+
+
+async def run_cleanup_reconcile_flow(
+    *,
+    db_path: Path,
+    config: AgentConfig,
+    dry_run: bool,
+    branch: str,
+    repo: str | None = None,
+    clone_path: str | None = None,
+    worktree_path: str | None = None,
+    claim_path: str | None = None,
+    issue: int | None = None,
+    pr_number: int | None = None,
+    task_id: str | None = None,
+    task_receipt_path: str | None = None,
+    merge_receipt_path: str | None = None,
+    receipt_path: str | None = None,
+    base_sha: str | None = None,
+    head_oid: str | None = None,
+    merge_oid: str | None = None,
+    origin_main_sha: str | None = None,
+    authorize_remote_retention: bool = False,
+    worker_id: str = "repo-agent:tick-cleanup-reconcile",
+    max_ticks: int = 4,
+) -> PathRunResult:
+    """Run the atomic no-target cleanup reconciliation package path."""
+    resolved_clone = str(Path(clone_path).expanduser().absolute()) if clone_path else None
+    context, context_error = _resolve_repo_context(config, repo=repo, clone_path=resolved_clone)
+    if context is None:
+        return PathRunResult(
+            run_id="cleanup-reconcile",
+            path_id="cleanup_reconcile",
+            dry_run=bool(dry_run),
+            ticks=0,
+            stopped_reason=context_error or "repository_context_not_found",
+            summary={"run_status": "failed"},
+            status="failed",
+        )
+
+    resolved_worktree = worktree_path or str(Path(config.paths.worktree_root) / branch)
+    step_input = {
+        "repo": context.repo,
+        "issue": issue,
+        "pr_number": pr_number,
+        "task_id": task_id,
+        "branch": branch,
+        "clone_path": context.clone_path,
+        "worktree_path": resolved_worktree,
+        "claim_path": claim_path or config.paths.active_issue,
+        "task_receipt_path": task_receipt_path,
+        "merge_receipt_path": merge_receipt_path,
+        "receipt_path": receipt_path,
+        "db_path": str(db_path),
+        "base_sha": base_sha,
+        "head_oid": head_oid,
+        "merge_oid": merge_oid,
+        "origin_main_sha": origin_main_sha,
+        "remote_retention_authorized": authorize_remote_retention,
+        "dry_run": bool(dry_run),
+    }
+    step_config = {
+        "repo": context.repo,
+        "clone_path": context.clone_path,
+        "worktree_root": config.paths.worktree_root,
+        "claim_root": config.paths.active_issue,
+        "db_path": str(db_path),
+        "task_receipt_root": config.paths.task_receipts,
+        "merge_receipt_root": config.paths.merge_receipts,
+        "cleanup_receipt_root": str(Path(config.paths.merge_receipts) / "cleanup-outcomes"),
+    }
+    result = await run_package_path_async(
+        db_path=db_path,
+        package_path=_PACKAGE_PATH,
+        path_id="cleanup_reconcile",
+        run_id="cleanup-reconcile",
+        effector_inputs={"reconcile_no_target_cleanup": step_input},
+        effector_configs={"reconcile_no_target_cleanup": step_config},
+        max_ticks=max_ticks,
+        worker_id=worker_id,
+    )
+    processes = [process_summary(process) for process in result.processes]
+    by_step = {summary["step_id"]: summary for summary in processes if summary.get("step_id")}
+    output = process_values(by_step.get("reconcile_no_target_cleanup") or {})
+    failed = bool(result.failed)
+    if output:
+        failed = failed or output.get("ok") is not True
+    elif result.run_status in {"failed", "cancelled", "timed_out"}:
+        failed = True
+    stopped_reason = str(output.get("reason") or output.get("status") or result.run_status)
+    return PathRunResult(
+        run_id=result.run_id,
+        path_id="cleanup_reconcile",
+        dry_run=bool(dry_run),
+        ticks=result.ticks,
+        stopped_reason=stopped_reason,
+        completed=[process_summary(process) for process in result.completed],
+        failed=[process_summary(process) for process in result.failed] or ([output] if failed and output else []),
+        processes=processes,
+        summary={"run_status": "failed" if failed else "completed", "outcome": output.get("status")},
+        status="failed" if failed else "completed",
+    )
+
 
 
 
@@ -206,36 +309,6 @@ async def run_cleanup_flow(
     by_step = {summary["step_id"]: summary for summary in summaries if summary.get("step_id")}
     outputs = [process_values(summary) for summary in summaries]
     worked = any(bool(output.get("mutated")) for output in outputs)
-    receipt_output = process_values(by_step.get("write_cleanup_receipt") or {})
-    if worked and receipt_output.get("status") not in {"written", "exists"}:
-        conduction: dict[str, dict[str, Any]] = {}
-        for step in _CLEANUP_EFFECTORS[:-1]:
-            process = by_step.get(step) or {}
-            values = process_values(process)
-            conduction[step] = values or {
-                "ok": False,
-                "status": str(process.get("status") or "cancelled"),
-                "mutated": False,
-                "reason": str(process.get("error") or "upstream_cancelled"),
-            }
-        fallback = write_cleanup_receipt({
-            "input": {
-                **common,
-                "branch": resolved_branch,
-                "clone_path": resolved_clone,
-                "worktree_path": resolved_worktree,
-                "receipt_path": resolved_receipt,
-                "process_id": f"{rid}:write_cleanup_receipt:fallback",
-                "conduction": conduction,
-            },
-            "config": step_config,
-            "run_id": rid,
-            "path_id": "cleanup",
-            "process_id": f"{rid}:write_cleanup_receipt:fallback",
-        })
-        summaries.append({"id": f"{rid}:write_cleanup_receipt:fallback", "step_id": "write_cleanup_receipt", "status": "completed" if fallback.get("ok") else "failed", "attempt": 1, "max_attempts": 1, "output": fallback, "error": None if fallback.get("ok") else fallback.get("reason")})
-        by_step["write_cleanup_receipt"] = summaries[-1]
-        outputs.append(fallback)
     parse_output = process_values(by_step.get("parse_issue_from_branch") or {})
     run_status = str(result.run_status)
     terminal_failures = [summary for summary in summaries if summary.get("status") in _PROCESS_FAILURES]

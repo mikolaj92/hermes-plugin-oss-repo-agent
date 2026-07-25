@@ -41,8 +41,7 @@
       "properties": {
         "enabled": {"type": "boolean"}, "command": {"type": "string", "minLength": 1},
         "model": {"type": "string", "minLength": 1}, "thinking": {"type": "string", "minLength": 1},
-        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0}, "max_attempts": {"type": "integer", "minimum": 1},
-        "retry_backoff_seconds": {"type": "number", "minimum": 0}
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0}
       }
     },
     "paths": {

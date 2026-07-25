@@ -21,11 +21,21 @@ class TickCleanupTests(unittest.TestCase):
             )
             repo = SimpleNamespace(repo="owner/repo", clone_path=str(root / "clone"))
             cfg = SimpleNamespace(paths=paths, repos=(repo,))
-            captured = {}
+            captured: dict = {}
 
-            def reconcile(request):
-                captured.update(request)
-                return {"ok": True, "status": "planned"}
+            host = SimpleNamespace(
+                run_id="cleanup-reconcile",
+                path_id="cleanup_reconcile",
+                run_status="completed",
+                ticks=1,
+                processes=(),
+                completed=(),
+                failed=(),
+            )
+
+            async def run_path(**kwargs):
+                captured["kwargs"] = kwargs
+                return host
 
             argv = [
                 "--reconcile-no-target", "--branch", "ai/fix/8-test", "--issue", "8",
@@ -34,15 +44,19 @@ class TickCleanupTests(unittest.TestCase):
                 "--base-sha", "1" * 40, "--head-oid", "2" * 40, "--merge-oid", "3" * 40, "--origin-main-sha", "4" * 40,
                 "--authorize-remote-retention", "--dry-run",
             ]
-            with mock.patch.object(tick_cleanup, "load_config", return_value=cfg), mock.patch.object(tick_cleanup, "ensure_fala_paths", return_value=(root / "fala.sqlite", None)), mock.patch.object(tick_cleanup, "reconcile_no_target_cleanup", side_effect=reconcile), mock.patch.object(tick_cleanup, "print_path_result", return_value=0):
+            with mock.patch.object(tick_cleanup, "load_config", return_value=cfg), mock.patch.object(tick_cleanup, "ensure_fala_paths", return_value=(root / "fala.sqlite", None)), mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=run_path), mock.patch.object(tick_cleanup, "print_path_result", return_value=0):
                 self.assertEqual(tick_cleanup.main(argv), 0)
 
-            self.assertEqual(captured["input"]["claim_path"], str(root / "active"))
+            inputs = captured["kwargs"]["effector_inputs"]["reconcile_no_target_cleanup"]
+            config = captured["kwargs"]["effector_configs"]["reconcile_no_target_cleanup"]
+            self.assertEqual(inputs["claim_path"], str(root / "active"))
             paths.active_issue = str(root / "active.json")
-            with mock.patch.object(tick_cleanup, "load_config", return_value=cfg), mock.patch.object(tick_cleanup, "ensure_fala_paths", return_value=(root / "fala.sqlite", None)), mock.patch.object(tick_cleanup, "reconcile_no_target_cleanup", side_effect=reconcile), mock.patch.object(tick_cleanup, "print_path_result", return_value=0):
+            with mock.patch.object(tick_cleanup, "load_config", return_value=cfg), mock.patch.object(tick_cleanup, "ensure_fala_paths", return_value=(root / "fala.sqlite", None)), mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=run_path), mock.patch.object(tick_cleanup, "print_path_result", return_value=0):
                 self.assertEqual(tick_cleanup.main(argv), 0)
-            self.assertEqual(captured["input"]["claim_path"], str(root / "active.json"))
-            self.assertEqual(captured["config"]["task_receipt_root"], str(root / "task-receipts"))
+            inputs = captured["kwargs"]["effector_inputs"]["reconcile_no_target_cleanup"]
+            config = captured["kwargs"]["effector_configs"]["reconcile_no_target_cleanup"]
+            self.assertEqual(inputs["claim_path"], str(root / "active.json"))
+            self.assertEqual(config["task_receipt_root"], str(root / "task-receipts"))
 
 
 if __name__ == "__main__":

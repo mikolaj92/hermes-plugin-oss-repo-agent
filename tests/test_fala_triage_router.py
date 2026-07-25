@@ -460,7 +460,7 @@ class CleanupRepositoryRoutingTests(unittest.TestCase):
         self.assertEqual(result.summary["reason"], "cleanup_provenance_missing")
         self.assertEqual(result.status, "failed")
 
-    def test_partial_cleanup_persists_terminal_receipt_after_graph_cancellation(self) -> None:
+    def test_partial_cleanup_does_not_bypass_fala_after_graph_cancellation(self) -> None:
         cfg = AgentConfig(mode="dry-run", repos=(RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida"),))
         host = HostPathRunResult(
             run_id="cleanup-run",
@@ -477,18 +477,11 @@ class CleanupRepositoryRoutingTests(unittest.TestCase):
             ),
         )
 
-        async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
-            runner = mock.AsyncMock(return_value=host)
-            writer = mock.Mock(return_value={"ok": True, "status": "written", "mutated": True, "receipt_path": "/tmp/cleanup.json"})
-            with mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=runner), mock.patch("repo_agent.flows.cleanup.write_cleanup_receipt", new=writer):
-                result = await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True, repo="o/temida", branch="ai/fix/2", receipt_path="/tmp/cleanup.json")
-            return result, writer
+        async def scenario() -> PathRunResult:
+            with mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=mock.AsyncMock(return_value=host)):
+                return await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True, repo="o/temida", branch="ai/fix/2", receipt_path="/tmp/cleanup.json")
 
-        result, writer = asyncio.run(scenario())
-        writer.assert_called_once()
-        conduction = writer.call_args.args[0]["input"]["conduction"]
-        self.assertTrue(conduction["remove_worktree"]["mutated"])
-        self.assertEqual(conduction["release_active_issue_claim"]["status"], "cancelled")
+        result = asyncio.run(scenario())
         self.assertEqual(result.summary["run_status"], "failed")
-        self.assertIn("write_cleanup_receipt", {process["step_id"] for process in result.processes})
+        self.assertNotIn("write_cleanup_receipt", {process["step_id"] for process in result.processes})
         self.assertEqual(result.status, "failed")

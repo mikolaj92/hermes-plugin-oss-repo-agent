@@ -1311,6 +1311,19 @@ class CleanupTests(unittest.TestCase):
             {"input": {"conduction": {"repair_push_branch": {"branch": "ai/fix/18-fix-session"}}}, "config": {}}
         )
         self.assertEqual(conducted["issue"], 18)
+        merged = cleanup.parse_issue_from_branch({
+            "input": {"conduction": {
+                "triage_close_linked_issue": {
+                    "repo": "o/r",
+                    "verified_provenance": {"head_ref": "ai/fix/19-fix-cleanup"},
+                },
+                "triage_load_pr_fields": {"pr": {"headRefName": "ai/fix/19-fix-cleanup"}},
+            }},
+            "config": {"repos": [{"repo": "o/r", "clone_path": "/tmp/clone"}], "worktree_root": "/tmp/worktrees"},
+        })
+        self.assertEqual(merged["issue"], 19)
+        self.assertEqual(merged["clone_path"], "/tmp/clone")
+        self.assertEqual(merged["worktree_path"], "/tmp/worktrees/ai/fix/19-fix-cleanup")
 
     def test_parse_issue_fail(self) -> None:
         out = cleanup.parse_issue_from_branch(req({"branch": "feature/foo"}))

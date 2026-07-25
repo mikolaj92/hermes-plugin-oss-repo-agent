@@ -277,6 +277,17 @@ conduction = ["parse_issue_from_branch", "check_issue_closed", "check_no_open_pr
 adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "repo_agent.steps.cleanup.write_cleanup_receipt" }
 
+[[correlation_paths]]
+id = "cleanup_reconcile"
+title = "Cleanup Reconcile"
+
+[[correlation_paths.effectors]]
+id = "reconcile_no_target_cleanup"
+capability = "repo_agent_step"
+adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "repo_agent.steps.cleanup_reconcile.reconcile_no_target_cleanup" }
+
+
 # The full worker is one Fala run. Prefixes keep process IDs unique while
 # preserving each domain handler's stable operation name in config.
 [[correlation_paths]]
@@ -495,7 +506,7 @@ config = { handler = "repo_agent.steps.issue_to_pr.push_branch" }
 [[correlation_paths.effectors]]
 id = "cleanup_parse_issue_from_branch"
 capability = "repo_agent_step"
-conduction = ["triage_write_merge_receipt", "triage_close_linked_issue", "triage_comment_pr", "triage_repair_push_branch", "dispatch_parse_issue_ref", "dispatch_prepare_worktree", "dispatch_write_dispatch_receipt"]
+conduction = ["triage_close_linked_issue", "triage_load_pr_fields"]
 config = { handler = "repo_agent.steps.cleanup.parse_issue_from_branch" }
 adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"], cwd = ".", timeout_seconds = 900 }
 

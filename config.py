@@ -73,8 +73,6 @@ class ExecutorConfig:
     model: str = "omniroute/omp/default"
     thinking: str = "medium"
     timeout_seconds: float = 1800
-    max_attempts: int = 3
-    retry_backoff_seconds: float = 60
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any] | None) -> "ExecutorConfig":
@@ -82,12 +80,6 @@ class ExecutorConfig:
         timeout = float(data.get("timeout_seconds", 1800))
         if timeout <= 0:
             raise ConfigError("executor.timeout_seconds must be positive")
-        max_attempts = int(data.get("max_attempts", 3))
-        if max_attempts < 1:
-            raise ConfigError("executor.max_attempts must be at least 1")
-        retry_backoff = float(data.get("retry_backoff_seconds", 60))
-        if retry_backoff < 0:
-            raise ConfigError("executor.retry_backoff_seconds must not be negative")
         command = str(data.get("command", "claude"))
         if not command or any(part in command for part in ("/", "\\", " ")):
             raise ConfigError("executor.command must be a command name")
@@ -97,8 +89,6 @@ class ExecutorConfig:
             model=str(data.get("model", "omniroute/omp/default")),
             thinking=str(data.get("thinking", "medium")),
             timeout_seconds=timeout,
-            max_attempts=max_attempts,
-            retry_backoff_seconds=retry_backoff,
         )
 
 

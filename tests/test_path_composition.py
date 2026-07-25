@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 PACKAGE_PATH = Path(__file__).resolve().parents[1] / "fala-package.toml"
-EXPECTED_PATH_IDS = {"issue_intake", "issue_to_pr", "pr_triage", "cleanup", "auto_worker"}
+EXPECTED_PATH_IDS = {"issue_intake", "issue_to_pr", "pr_triage", "cleanup", "cleanup_reconcile", "auto_worker"}
 
 
 class PackageStructureTests(unittest.TestCase):

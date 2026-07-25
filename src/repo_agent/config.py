@@ -102,16 +102,10 @@ class ExecutorConfig:
     model: str = "omniroute/omp/default"
     thinking: str = "medium"
     timeout_seconds: float = 7200.0
-    max_attempts: int = 3
-    retry_backoff_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if self.timeout_seconds <= 0:
             raise ConfigError("executor.timeout_seconds must be greater than 0")
-        if self.max_attempts < 1:
-            raise ConfigError("executor.max_attempts must be at least 1")
-        if self.retry_backoff_seconds < 0:
-            raise ConfigError("executor.retry_backoff_seconds must not be negative")
         if self.enabled and not self.command.strip():
             raise ConfigError("executor.command must not be empty when enabled")
         if self.enabled and not self.model.strip():
@@ -323,8 +317,6 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
         model=str(executor_data.get("model", "omniroute/omp/default")),
         thinking=str(executor_data.get("thinking", "medium")),
         timeout_seconds=float(executor_data.get("timeout_seconds", 7200)),
-        max_attempts=int(executor_data.get("max_attempts", 3)),
-        retry_backoff_seconds=float(executor_data.get("retry_backoff_seconds", 60)),
     )
     paths = PathConfig(
         worktree_root=str(_env_or(paths_data, "worktree_root", env, "HERMES_WORKTREE_ROOT", "~/.hermes/worktrees/repo-agent")),

@@ -114,8 +114,6 @@ command = "omp"
 model = "omniroute/omp/default"
 thinking = "medium"
 timeout_seconds = 7200
-max_attempts = 3
-retry_backoff_seconds = 60
 
 [paths]
 worktree_root = "{root / 'worktrees'}"
@@ -188,7 +186,7 @@ priority = 100
                     self.assertEqual(getattr(root_cfg.labels, name), getattr(runtime_cfg.labels, name))
                 self.assertEqual(root_cfg.automerge, runtime_cfg.automation.automerge)
                 self.assertEqual(runtime_cfg.automation.fixer_assignee, "repo-agent-fixer")
-                for name in ("model", "thinking", "timeout_seconds", "max_attempts", "retry_backoff_seconds"):
+                for name in ("model", "thinking", "timeout_seconds"):
                     self.assertEqual(getattr(root_cfg.executor, name), getattr(runtime_cfg.executor, name))
                 for name, relative in {
                     "worktree_root": ".hermes/worktrees/repo-agent",

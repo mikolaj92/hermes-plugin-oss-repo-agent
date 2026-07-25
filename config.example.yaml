@@ -25,8 +25,6 @@ executor:
   model: omniroute/omp/default
   thinking: medium
   timeout_seconds: 7200
-  max_attempts: 3
-  retry_backoff_seconds: 60
 repos:
   - repo: owner/example-repo
     board: owner-example-repo

@@ -53,12 +53,12 @@ def _task_marker_matches(task: object, marker: str) -> bool:
 
 def _cleanup_provenance(data: dict[str, object], cfg: dict[str, object], branch: str, conduction: dict[str, object] | None = None) -> dict[str, str]:
     conduction = conduction or {}
-    parsed = next((conduction[key] for key in ("dispatch_parse_issue_ref", "parse_issue_ref") if isinstance(conduction.get(key), dict)), {})
+    parsed = next((conduction[key] for key in ("cleanup_parse_issue_from_branch", "parse_issue_from_branch", "dispatch_parse_issue_ref", "parse_issue_ref") if isinstance(conduction.get(key), dict)), {})
     receipt = next((conduction[key] for key in ("dispatch_write_dispatch_receipt", "write_dispatch_receipt") if isinstance(conduction.get(key), dict)), {})
     return {
         "task": str(data.get("task_id") or cfg.get("task_id") or parsed.get("task_id") or "").strip(),
         "issue": str(data.get("issue") or cfg.get("issue") or parsed.get("issue") or "").strip(),
-        "receipt": str(data.get("receipt_id") or cfg.get("receipt_id") or receipt.get("receipt_path") or data.get("receipt_path") or cfg.get("receipt_path") or "").strip(),
+        "receipt": str(data.get("receipt_id") or cfg.get("receipt_id") or parsed.get("receipt_id") or receipt.get("receipt_path") or "").strip(),
         "repo": str(data.get("repo") or cfg.get("repo") or parsed.get("repo") or "").strip(),
         "branch": branch,
     }
@@ -82,18 +82,56 @@ def _task_id(task: dict[str, object]) -> object:
 
 
 def parse_issue_from_branch(request: Request) -> Result:
-    """Pure: extract issue number from ai/fix/<n>-... branch name."""
+    """Resolve one merged ai/fix branch and its local ownership identity."""
     data = input_of(request)
-    context = cond_blob(request, "dispatch_parse_issue_ref", "dispatch_prepare_worktree", "dispatch_write_dispatch_receipt", "triage_load_pr_fields", "triage_repair_prepare_worktree", "triage_repair_push_branch", "repair_push_branch", "write_merge_receipt", "comment_pr")
-    branch = str(data.get("branch") or cfg_of(request).get("branch") or context.get("branch") or "")
+    cfg = cfg_of(request)
+    aliases = (
+        "triage_close_linked_issue", "triage_load_pr_fields",
+        "dispatch_prepare_worktree", "dispatch_parse_issue_ref",
+        "triage_repair_prepare_worktree", "triage_repair_push_branch", "repair_push_branch",
+    )
+    blobs = [cond_blob(request, name) for name in aliases]
+    sources: list[dict[str, Any]] = [data, cfg, *[blob for blob in blobs if blob]]
+    for blob in tuple(sources):
+        for key in ("verified_provenance", "pr", "payload", "entity"):
+            nested = blob.get(key)
+            if isinstance(nested, dict):
+                sources.append(nested)
+                entity = nested.get("entity")
+                if isinstance(entity, dict):
+                    sources.append(entity)
+
+    def first(*keys: str) -> str:
+        return next((str(source.get(key)).strip() for source in sources for key in keys if source.get(key) not in (None, "")), "")
+
+    branch = first("branch", "head_ref", "headRefName")
     if not branch:
-        return noop("no_branch", branch=branch)
-    m = re.search(r"(?:^|/)ai/fix/(\d+)", branch)
-    if not m:
-        m = re.search(r"/(\d+)(?:-|$)", branch)
-    if not m:
+        return noop("no_branch", branch="")
+    match = re.search(r"(?:^|/)ai/fix/(\d+)", branch) or re.search(r"/(\d+)(?:-|$)", branch)
+    if not match:
         return fail("unparseable_branch", failure_class="terminal", retry_safe=False, branch=branch, idempotency_key=f"cleanup:branch:{branch}:parse")
-    return ok(status="parsed", issue=int(m.group(1)), branch=branch, **{key: context[key] for key in ("repo", "clone_path", "worktree_path", "task_id", "receipt_path") if context.get(key) not in (None, "")})
+    issue = int(match.group(1))
+    repo = first("repo")
+    clone_path = first("clone_path")
+    if not clone_path and repo:
+        matches = [str(entry.get("clone_path") or "") for entry in cfg.get("repos", []) if isinstance(entry, dict) and entry.get("repo") == repo]
+        if len(matches) == 1:
+            clone_path = matches[0]
+    identity: dict[str, Any] = {"repo": repo, "clone_path": clone_path}
+    if clone_path:
+        for output_key, config_key in (("task_id", "task"), ("receipt_id", "receipt"), ("recorded_repo", "repo"), ("recorded_issue", "issue")):
+            try:
+                identity[output_key] = branch_config_get(clone_path, branch, f"repo-agent-{config_key}").strip()
+            except CommandError:
+                identity[output_key] = ""
+        if identity["recorded_repo"] and repo and identity["recorded_repo"] != repo:
+            return fail("cleanup_provenance_mismatch", failure_class="terminal", retry_safe=False, branch=branch, repo=repo, recorded_repo=identity["recorded_repo"])
+        if identity["recorded_issue"] and identity["recorded_issue"] != str(issue):
+            return fail("cleanup_provenance_mismatch", failure_class="terminal", retry_safe=False, branch=branch, issue=issue, recorded_issue=identity["recorded_issue"])
+    worktree_path = first("worktree_path")
+    if not worktree_path and cfg.get("worktree_root"):
+        worktree_path = str(Path(str(cfg["worktree_root"])) / re.sub(r"[^a-zA-Z0-9._/-]+", "-", branch))
+    return ok(status="parsed", issue=issue, branch=branch, worktree_path=worktree_path, **{key: value for key, value in identity.items() if value})
 
 
 def check_issue_closed(request: Request) -> Result:
