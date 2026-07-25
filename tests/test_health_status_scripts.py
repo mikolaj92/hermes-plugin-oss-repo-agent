@@ -141,8 +141,8 @@ class HealthStatusScriptTests(unittest.TestCase):
 if [[ "$1" == print ]]; then
   domain="${2%/*}"
   label="${2##*/}"
-  if [[ "$domain" == gui/* && "${FAKE_LAUNCHCTL_GUI_AVAILABLE:-0}" != 1 ]]; then printf 'Domain does not support specified action\n' >&2; exit 125; fi
-  case ",${FAKE_LAUNCHCTL_LOADED:-}," in *,"$label",*) printf 'state = running\nruns = 1\nlast exit code = %s\n' "${FAKE_LAUNCHCTL_EXIT_CODE:-0}"; exit 0;; esac
+  if [[ "$domain" == gui/* && "${FAKE_LAUNCHCTL_GUI_AVAILABLE:-1}" != 1 ]]; then printf 'Domain does not support specified action\n' >&2; exit 125; fi
+  if [[ "$domain" == user/* || "${FAKE_LAUNCHCTL_LOAD_GUI:-0}" == 1 ]]; then case ",${FAKE_LAUNCHCTL_LOADED:-}," in *,"$label",*) printf 'state = running\nruns = 1\nlast exit code = %s\n' "${FAKE_LAUNCHCTL_EXIT_CODE:-0}"; exit 0;; esac; fi
   printf 'could not find service\n' >&2; exit 1
 fi
 exit 0
@@ -227,6 +227,16 @@ exit 0
         completed = self._run("repo_agent_status.sh", extra={"HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "maybe"})
         self.assertEqual(completed.returncode, 2)
         self.assertIn("invalid-env", completed.stderr)
+
+    def test_health_rejects_unsupported_launchctl_domain(self):
+        completed = self._run("repo_agent_health.sh", extra={"FAKE_LAUNCHCTL_GUI_AVAILABLE": "0"})
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("launchd-query-failed", completed.stdout)
+
+    def test_status_rejects_unsupported_launchctl_domain(self):
+        completed = self._run("repo_agent_status.sh", extra={"FAKE_LAUNCHCTL_GUI_AVAILABLE": "0"})
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("launchctl-error", completed.stderr)
 
     def test_health_marks_missing_current_and_db(self):
         completed = self._run("repo_agent_health.sh")

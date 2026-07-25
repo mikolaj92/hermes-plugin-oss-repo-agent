@@ -44,7 +44,7 @@ require_cmd() {
 launchctl_query() {
   local output
   if ! output="$(launchctl print "$1" 2>&1)"; then
-    [[ "$output" == *"could not find service"* || "$output" == *"No such process"* || "$output" == *"Could not find service"* || "$output" == *"Domain does not support specified action"* ]] && return 1
+    [[ "$output" == *"could not find service"* || "$output" == *"No such process"* || "$output" == *"Could not find service"* ]] && return 1
     printf 'launchctl-error target=%s error=%s\n' "$1" "$output" >&2
     return 2
   fi

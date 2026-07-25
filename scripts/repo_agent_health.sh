@@ -325,7 +325,7 @@ require_cmd() {
 launchctl_query() {
   local output
   if ! output="$(launchctl print "$1" 2>&1)"; then
-    [[ "$output" == *"could not find service"* || "$output" == *"No such process"* || "$output" == *"Could not find service"* || "$output" == *"Domain does not support specified action"* ]] && return 1
+    [[ "$output" == *"could not find service"* || "$output" == *"No such process"* || "$output" == *"Could not find service"* ]] && return 1
     log ERROR "launchctl-query-unknown target=$1 details=$(printf '%q' "$output")"
     return 2
   fi

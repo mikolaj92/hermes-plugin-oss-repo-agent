@@ -1114,7 +1114,7 @@ def _launchctl_loaded_state(label: str, domain: str) -> dict[str, Any]:
     if result.returncode == 0:
         return {"label": label, "domain": domain, "loaded": True, "available": True}
     if "domain does not support specified action" in f"{result.stdout or ''}\n{result.stderr or ''}".lower():
-        return {"label": label, "domain": domain, "loaded": False, "available": False}
+        raise ConfigError(f"unable to inspect launchd state for {domain}/{label}: domain does not support specified action")
     if _launchctl_absent(result):
         return {"label": label, "domain": domain, "loaded": False, "available": True}
     detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
