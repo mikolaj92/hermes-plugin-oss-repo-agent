@@ -690,6 +690,69 @@ def _runtime_identity(document: dict[str, Any], plist_data: bytes) -> dict[str, 
         "limit_load_to_session_type": document.get("LimitLoadToSessionType"),
         "plist_sha256": _sha256_bytes(plist_data),
     }
+def _safe_archive_member_path(destination: Path, member_name: str, *, allow_existing_dir: bool = False) -> Path:
+    """Resolve a tar member to a path that cannot escape destination."""
+    root = destination.resolve()
+    name = member_name.replace("\\", "/")
+    if not name or name.endswith("/") or name in {".", ".."} or Path(name).is_absolute():
+        raise ConfigError("pinned source archive contains an unsafe path")
+    parts = Path(name).parts
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ConfigError("pinned source archive contains an unsafe path")
+    target = root.joinpath(*parts)
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ConfigError("pinned source archive contains an unsafe path") from exc
+    # Reject writes that would traverse a previously materialized non-directory
+    # or symlink (e.g. a link planted by an earlier member).
+    current = root
+    for part in parts[:-1]:
+        current = current / part
+        if current.is_symlink() or (current.exists() and not current.is_dir()):
+            raise ConfigError("pinned source archive contains an unsafe path")
+        if current.exists():
+            try:
+                current.resolve().relative_to(root)
+            except ValueError as exc:
+                raise ConfigError("pinned source archive contains an unsafe path") from exc
+    if target.is_symlink():
+        raise ConfigError("pinned source archive contains an unsafe path")
+    if target.exists():
+        if not (allow_existing_dir and target.is_dir()):
+            raise ConfigError("pinned source archive contains an unsafe path")
+    return target
+
+
+def _extract_git_archive(bundle: tarfile.TarFile, destination: Path) -> None:
+    """Extract only regular files and directories; reject links/devices/traversal."""
+    destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
+    for member in bundle.getmembers():
+        if member.isdir():
+            # Directory members may be recorded with a trailing slash.
+            name = member.name.replace("\\", "/").rstrip("/")
+            if not name:
+                continue
+            target = _safe_archive_member_path(destination, name, allow_existing_dir=True)
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        if not member.isreg():
+            raise ConfigError("pinned source archive contains an unsafe path")
+        target = _safe_archive_member_path(destination, member.name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = bundle.extractfile(member)
+        if source is None:
+            raise ConfigError("pinned source archive contains an unsafe path")
+        with source, target.open("wb") as handle:
+            shutil.copyfileobj(source, handle)
+        # Keep only r-x bits from the archive mode; strip write and setuid/setgid/sticky.
+        target.chmod(member.mode & 0o555)
+        try:
+            target.resolve().relative_to(root)
+        except ValueError as exc:
+            raise ConfigError("pinned source archive contains an unsafe path") from exc
+
 def _copy_git_tree(repo: Path, revision: str, destination: Path) -> None:
     try:
         archive = subprocess.run(
@@ -702,13 +765,7 @@ def _copy_git_tree(repo: Path, revision: str, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     try:
         with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
-            for member in bundle.getmembers():
-                target = (destination / member.name).resolve()
-                try:
-                    target.relative_to(destination.resolve())
-                except ValueError as exc:
-                    raise ConfigError("pinned source archive contains an unsafe path") from exc
-            bundle.extractall(destination)
+            _extract_git_archive(bundle, destination)
     except (OSError, tarfile.TarError) as exc:
         raise ConfigError(f"unable to unpack pinned source {repo}: {exc}") from exc
 
@@ -1034,8 +1091,14 @@ def render_launchd(
 
 def _candidate_root(candidate: Path, deployment_root: str | None) -> Path:
     if deployment_root:
-        return Path(deployment_root).expanduser().absolute()
-    return candidate.parent.parent.absolute()
+        root = Path(deployment_root).expanduser().absolute()
+    else:
+        root = candidate.parent.parent.absolute()
+    if root.is_symlink():
+        raise ConfigError(f"deployment root must not be a symlink: {root}")
+    if not root.is_dir():
+        raise ConfigError(f"deployment root must be a directory: {root}")
+    return root
 
 
 def _launchctl_absent(result: subprocess.CompletedProcess[str]) -> bool:
@@ -1388,6 +1451,25 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
                 shutil.rmtree(version, ignore_errors=True)
                 _fsync_directory(versions_root)
             raise
+        # Re-probe immediately before current/pointer and launchd cutover so a
+        # legacy mutator that loaded during staging aborts before activation.
+        try:
+            _assert_legacy_mutators_unloaded()
+        except Exception:
+            if version_created:
+                for path in sorted(version.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+                    try:
+                        path.chmod(0o755)
+                    except OSError:
+                        pass
+                try:
+                    version.chmod(0o755)
+                except OSError:
+                    pass
+                shutil.rmtree(version, ignore_errors=True)
+                _fsync_directory(versions_root)
+            raise
+
         try:
             _atomic_write(previous_path, _canonical_json(previous))
             tmp_link = root / ".current.next"

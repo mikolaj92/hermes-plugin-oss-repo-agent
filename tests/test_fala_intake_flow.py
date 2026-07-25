@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import fala
 
 from repo_agent.config import AgentConfig, RepoEntry
 from repo_agent.flows.intake import run_intake_flow
@@ -274,15 +276,19 @@ class IntakeFlowE2ETests(unittest.TestCase):
                 ),
             )
             db = Path(tmp) / "state.sqlite"
-            result = asyncio.run(
-                run_intake_flow(
-                    db_path=db,
-                    config=cfg,
-                    dry_run=True,
-                    limit=5,
-                    run_id="test-intake-1",
+            fala_home = Path(fala.__file__).resolve().parents[2]
+            if not (fala_home / "mojo" / "fala").is_dir():
+                self.skipTest("installed Fala package does not include its Mojo source checkout")
+            with mock.patch.dict(os.environ, {"FALA_HOME": str(fala_home)}, clear=False):
+                result = asyncio.run(
+                    run_intake_flow(
+                        db_path=db,
+                        config=cfg,
+                        dry_run=True,
+                        limit=5,
+                        run_id="test-intake-1",
+                    )
                 )
-            )
 
         self.assertEqual(result.failed, [], msg=str(result.processes))
         self.assertEqual(result.stopped_reason, "worked")

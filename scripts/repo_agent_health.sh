@@ -18,7 +18,6 @@ FALA_DB="${HERMES_REPO_AGENT_FALA_DB:-$HOME/.hermes/oss-repo-agent/fala/state.sq
 FALA_PLIST="${HERMES_REPO_AGENT_FALA_PLIST:-$HOME/Library/LaunchAgents/$FALA_LABEL.plist}"
 FALA_MAX_RUN_AGE_SECONDS="${HERMES_REPO_AGENT_FALA_MAX_RUN_AGE_SECONDS:-1800}"
 FALA_REQUIRE_LIVE="${HERMES_REPO_AGENT_FALA_REQUIRE_LIVE:-1}"
-REPAIR=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 valid_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
@@ -31,8 +30,15 @@ if [[ "$FALA_REQUIRE_LIVE" != 0 && "$FALA_REQUIRE_LIVE" != 1 ]]; then
 fi
 
 validate_fala_current() {
-  python3 - "$1" "$2" "$3" "$4" <<'PY'
-import hashlib, json, pathlib, plistlib, sys
+  local candidate_id managed_python
+  candidate_id="$(basename "$1")"
+  managed_python="$DEPLOYMENT_ROOT/runtime/$candidate_id/.venv/bin/python"
+  if [[ "$managed_python" != /* || ! -x "$managed_python" ]] || ! "$managed_python" -c 'import sys,tomllib; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; then
+    printf 'toml-parser-unavailable interpreter=%s\n' "$managed_python"
+    return 1
+  fi
+  "$managed_python" - "$1" "$2" "$3" "$4" <<'PY'
+import hashlib, json, pathlib, plistlib, sys, tomllib
 candidate = pathlib.Path(sys.argv[1]).resolve()
 installed = pathlib.Path(sys.argv[2]).expanduser()
 require_live = sys.argv[3] == "1"
@@ -56,6 +62,20 @@ def artifact_path(relative):
         return None
     return path
 
+
+def policy_from_toml_text(text):
+    root = tomllib.loads(text)
+    automation = root.get("automation") or {}
+    executor = root.get("executor") or {}
+    if not isinstance(automation, dict) or not isinstance(executor, dict):
+        raise ValueError("policy-table-invalid")
+    return {
+        "automerge": automation.get("automerge", root.get("automerge", False)),
+        "require_human_approval": automation.get("require_human_approval", root.get("require_human_approval", True)),
+        "require_checks": automation.get("require_checks", root.get("require_checks", True)),
+        "require_test_evidence": automation.get("require_test_evidence", root.get("require_test_evidence", True)),
+        "executor_enabled": executor.get("enabled", False),
+    }
 try:
     if candidate.parent != (deployment_root / "versions").resolve():
         errors.append("current-outside-versions")
@@ -83,6 +103,35 @@ try:
     for key, expected in identity.items():
         if key in stable_keys and manifest.get(key) != expected:
             errors.append(f"identity-mismatch:{key}")
+    policy = manifest.get("policy")
+    policy_keys = {"automerge", "require_human_approval", "require_checks", "require_test_evidence", "executor_enabled"}
+    safe_policy = {
+        "automerge": False,
+        "require_human_approval": True,
+        "require_checks": True,
+        "require_test_evidence": True,
+        "executor_enabled": False,
+    }
+    if not isinstance(policy, dict) or set(policy) != policy_keys or any(not isinstance(policy.get(key), bool) for key in policy_keys):
+        errors.append("identity-policy-invalid")
+        policy = policy if isinstance(policy, dict) else {}
+    elif policy != safe_policy:
+        errors.append("identity-policy-unsafe")
+    try:
+        expected_policy = policy_from_toml_text((candidate / "source" / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError):
+        errors.append("identity-policy-config-unreadable")
+        expected_policy = None
+    if expected_policy is not None and isinstance(policy, dict) and set(policy) == policy_keys and all(isinstance(policy.get(key), bool) for key in policy_keys) and policy != expected_policy:
+        errors.append("identity-policy-config-mismatch")
+    active_config = pathlib.Path(str(manifest.get("config_path") or "")).expanduser()
+    if active_config.is_file() and not active_config.is_symlink():
+        try:
+            active_policy = policy_from_toml_text(active_config.read_text(encoding="utf-8"))
+            if isinstance(policy, dict) and set(policy) == policy_keys and all(isinstance(policy.get(key), bool) for key in policy_keys) and policy != active_policy:
+                errors.append("identity-policy-active-config-mismatch")
+        except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError):
+            errors.append("identity-policy-active-config-unreadable")
     mode = manifest.get("mode")
     manifest_args = manifest.get("program_arguments")
     if not isinstance(manifest_args, list) or any(not isinstance(value, str) for value in manifest_args):
@@ -104,6 +153,13 @@ try:
     if not isinstance(artifacts, dict) or not artifacts:
         errors.append("manifest-artifacts-invalid")
         artifacts = {}
+    config_artifact = artifact_path(manifest.get("config_artifact_path"))
+    config_hash = manifest.get("config_hash")
+    if config_artifact is None or not config_artifact.is_file() or not isinstance(config_hash, str) or sha256(config_artifact.read_bytes()) != config_hash:
+        errors.append("identity-config-hash-mismatch")
+    active_config = pathlib.Path(str(manifest.get("config_path") or "")).expanduser()
+    if active_config.is_file() and not active_config.is_symlink() and (not isinstance(config_hash, str) or sha256(active_config.read_bytes()) != config_hash):
+        errors.append("identity-active-config-hash-mismatch")
     plist_relative = "launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
     if plist_relative not in artifacts:
         errors.append("identity-artifact-key-set-mismatch")
@@ -225,13 +281,13 @@ source "$SCRIPT_DIR/repo_agent_repos.sh"
 
 usage() {
   cat <<'USAGE'
-Usage: repo_agent_health.sh [--repair]
+Usage: repo_agent_health.sh
 
-Checks launchd, deployment parity and Fala candidate provenance, Fala DB
-freshness and safe run/process state, gh auth, disk space, stale locks, recent
-logs, active workers, and the watched GitHub/Kanban queues. With --repair it
-may remove stale local lock artifacts only when no mutator is active. It does
-not bootstrap, enable, or reload LaunchAgents; deployment and launchd changes
+Observational checks only: launchd, deployment parity and Fala candidate
+provenance, Fala DB freshness and safe run/process state, gh auth, disk space,
+stale locks, recent logs, active workers, and the watched GitHub/Kanban queues.
+It never removes lock artifacts, never mutates deployment state, and does not
+bootstrap, enable, or reload LaunchAgents; deployment and launchd changes
 remain explicit metadata-only or separately controlled operations.
 USAGE
 }
@@ -239,7 +295,9 @@ USAGE
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repair)
-      REPAIR=1
+      echo "unsupported argument: --repair (health is observational only)" >&2
+      usage >&2
+      exit 2
       ;;
     -h|--help)
       usage
@@ -316,7 +374,7 @@ while IFS= read -r repo_entry; do repos+=("$repo_entry"); done <<<"$repo_data"
 
 failures=0
 warnings=0
-parity_enabled="${HERMES_REPO_AGENT_PARITY_ENABLED:-0}"
+parity_enabled="${HERMES_REPO_AGENT_PARITY_ENABLED:-1}"
 if [[ "$parity_enabled" == 1 ]]; then
   parity_source_root="${HERMES_REPO_AGENT_PARITY_SOURCE_ROOT:-$SCRIPT_DIR}"
   parity_active_root="${HERMES_REPO_AGENT_PARITY_ACTIVE_ROOT:-$HOME/.hermes/scripts}"
@@ -350,20 +408,34 @@ for legacy_label in com.mikolaj92.hermes.repo-issue-intake com.mikolaj92.hermes.
     [[ $? -ne 2 ]] || failures=$((failures + 1))
   fi
 done
-health_loaded=0
+health_repair_loaded=0
+health_plist_invalid=0
 if launchctl_label_query "com.mikolaj92.hermes.repo-agent-health" >/dev/null; then
-  if grep -q -- '--repair' "$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-health.plist" 2>/dev/null; then health_loaded=1; fi
+  health_plist="$HOME/Library/LaunchAgents/com.mikolaj92.hermes.repo-agent-health.plist"
+  if health_repair="$(python3 - "$health_plist" <<'PY'
+import plistlib, sys
+try:
+    with open(sys.argv[1], "rb") as stream:
+        arguments = plistlib.load(stream).get("ProgramArguments")
+    if not isinstance(arguments, list) or any(not isinstance(value, str) for value in arguments):
+        raise ValueError("invalid ProgramArguments")
+    print("1" if "--repair" in arguments else "0")
+except (OSError, ValueError, plistlib.InvalidFileException):
+    raise SystemExit(1)
+PY
+  )"; then
+    [[ "$health_repair" != 1 ]] || health_repair_loaded=1
+  else
+    health_plist_invalid=1
+  fi
 else
   [[ $? -ne 2 ]] || failures=$((failures + 1))
 fi
-repair_mutator=0
-repair_allowed=1
-if [[ "$REPAIR" == 1 || "$health_loaded" == 1 ]]; then repair_mutator=1; fi
-if [[ "$REPAIR" == 1 && ("$legacy_loaded" -gt 0 || "$fala_loaded" == 1 || "$health_loaded" == 1) ]]; then
-  repair_allowed=0; log ERROR "repair-blocked active-mutator"; failures=$((failures + 1))
-elif [[ "$fala_loaded" == 1 && ("$legacy_loaded" -gt 0 || "$health_loaded" == 1) ]]; then
-  repair_allowed=0; log ERROR "dual-mutator active"; failures=$((failures + 1))
-else log OK "mutator-gate legacy_loaded=$legacy_loaded fala_loaded=$fala_loaded repair_allowed=$repair_allowed"; fi
+if [[ "$legacy_loaded" -gt 0 || "$health_repair_loaded" -eq 1 || "$health_plist_invalid" -eq 1 ]]; then
+  log ERROR "dual-mutator active legacy_loaded=$legacy_loaded health_repair_loaded=$health_repair_loaded health_plist_invalid=$health_plist_invalid fala_loaded=$fala_loaded"; failures=$((failures + 1))
+else
+  log OK "mutator-gate legacy_loaded=$legacy_loaded health_repair_loaded=$health_repair_loaded health_plist_invalid=$health_plist_invalid fala_loaded=$fala_loaded"
+fi
 current_target=""
 if [[ -L "$DEPLOYMENT_ROOT/current" ]]; then
   current_target="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$DEPLOYMENT_ROOT/current" 2>/dev/null || true)"
@@ -519,7 +591,6 @@ done
 while IFS= read -r lock; do
   [[ -n "$lock" ]] || continue
   log WARN "stale-lock path=$lock"; warnings=$((warnings + 1))
-  if [[ "$REPAIR" == 1 && "$repair_allowed" == 1 && "$legacy_loaded" == 0 && "$fala_loaded" == 0 ]]; then rmdir "$lock" 2>/dev/null && log OK "stale-lock-removed path=$lock" || log ERROR "stale-lock-remove-failed path=$lock"; fi
 done < <(find /tmp "$WORKTREE_ROOT" -maxdepth 4 -type d \( -name 'hermes-repo-*.lock' -o -name '.agent.lock' \) -mmin "+$STALE_LOCK_MINUTES" 2>/dev/null)
 
 active_worker_seen=0
@@ -529,7 +600,6 @@ while IFS= read -r pid_file; do
   if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then log OK "active-worker-lock pid=$pid path=$lock"; active_worker_seen=1
   else
     log WARN "dead-worker-lock pid=${pid:-missing} path=$lock"; warnings=$((warnings + 1))
-    if [[ "$REPAIR" == 1 && "$repair_allowed" == 1 && "$legacy_loaded" == 0 && "$fala_loaded" == 0 ]]; then rm -f "$pid_file" 2>/dev/null || log ERROR "dead-worker-remove-failed path=$pid_file"; fi
   fi
 done < <(find "$WORKTREE_ROOT" -maxdepth 5 -type f -path '*/.agent.lock/pid' 2>/dev/null)
 
@@ -542,5 +612,5 @@ for entry in "${repos[@]}"; do
 done
 fi
 
-log OK "summary failures=$failures warnings=$warnings repair=$REPAIR"
+log OK "summary failures=$failures warnings=$warnings"
 [[ "$failures" -eq 0 ]]

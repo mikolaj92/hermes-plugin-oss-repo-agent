@@ -5,6 +5,7 @@ import ctypes
 import json
 import plistlib
 import hashlib
+import os
 import subprocess
 import sys
 import tempfile
@@ -239,6 +240,204 @@ class DeploymentCandidateTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(self.commands.ConfigError, "HEAD does not match"):
                     self.commands._copy_candidate_source(ROOT.resolve(), root / "source", config, ROOT / "uv.lock")
+
+    def _tar_bytes(self, members: list[tuple]) -> bytes:
+        import io
+        import tarfile
+        import time
+
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as bundle:
+            for entry in members:
+                name, payload, kind, *rest = entry
+                explicit_mode = rest[0] if rest else None
+                info = tarfile.TarInfo(name=name)
+                info.mtime = int(time.time())
+                if kind == "dir":
+                    info.type = tarfile.DIRTYPE
+                    info.mode = explicit_mode if explicit_mode is not None else 0o755
+                    bundle.addfile(info)
+                elif kind == "reg":
+                    data = payload or b""
+                    info.type = tarfile.REGTYPE
+                    info.mode = explicit_mode if explicit_mode is not None else 0o644
+                    info.size = len(data)
+                    bundle.addfile(info, io.BytesIO(data))
+                elif kind == "symlink":
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = payload.decode("utf-8") if isinstance(payload, (bytes, bytearray)) else str(payload)
+                    bundle.addfile(info)
+                elif kind == "hardlink":
+                    info.type = tarfile.LNKTYPE
+                    info.linkname = payload.decode("utf-8") if isinstance(payload, (bytes, bytearray)) else str(payload)
+                    bundle.addfile(info)
+                elif kind == "fifo":
+                    info.type = tarfile.FIFOTYPE
+                    bundle.addfile(info)
+                elif kind == "chr":
+                    info.type = tarfile.CHRTYPE
+                    info.devmajor = 1
+                    info.devminor = 3
+                    bundle.addfile(info)
+                else:
+                    raise AssertionError(f"unknown member kind {kind}")
+        return buffer.getvalue()
+
+    def _extract_archive_bytes(self, archive: bytes, destination: Path) -> None:
+        import io
+        import tarfile
+
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+            self.commands._extract_git_archive(bundle, destination)
+
+    def test_safe_archive_extracts_regular_files_and_dirs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "out"
+            archive = self._tar_bytes(
+                [
+                    ("pkg", None, "dir"),
+                    ("pkg/hello.txt", b"hi\n", "reg"),
+                    ("pkg/nested/deep.txt", b"deep\n", "reg"),
+                ]
+            )
+            self._extract_archive_bytes(archive, destination)
+            self.assertEqual((destination / "pkg" / "hello.txt").read_text(encoding="utf-8"), "hi\n")
+            self.assertEqual((destination / "pkg" / "nested" / "deep.txt").read_text(encoding="utf-8"), "deep\n")
+
+    def test_archive_preserves_sanitized_executable_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "out"
+            archive = self._tar_bytes(
+                [
+                    ("bin/run.sh", b"#!/bin/sh\necho hi\n", "reg", 0o755),
+                    ("readme.txt", b"hi\n", "reg", 0o644),
+                    ("suid.sh", b"#!/bin/sh\n", "reg", 0o4755),
+                    ("writey.sh", b"#!/bin/sh\n", "reg", 0o777),
+                ]
+            )
+            self._extract_archive_bytes(archive, destination)
+            run = destination / "bin" / "run.sh"
+            self.assertEqual(run.stat().st_mode & 0o7777, 0o555)
+            self.assertTrue(os.access(run, os.X_OK))
+            self.assertEqual((destination / "readme.txt").stat().st_mode & 0o7777, 0o444)
+            self.assertEqual((destination / "suid.sh").stat().st_mode & 0o7777, 0o555)
+            self.assertFalse((destination / "suid.sh").stat().st_mode & 0o7000)
+            self.assertEqual((destination / "writey.sh").stat().st_mode & 0o7777, 0o555)
+            self.assertEqual((destination / "writey.sh").stat().st_mode & 0o222, 0)
+
+    def test_archive_symlink_member_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "out"
+            outside = Path(directory) / "outside.txt"
+            outside.write_text("secret\n", encoding="utf-8")
+            archive = self._tar_bytes(
+                [
+                    ("link", str(outside).encode("utf-8"), "symlink"),
+                ]
+            )
+            with self.assertRaisesRegex(self.commands.ConfigError, "unsafe path"):
+                self._extract_archive_bytes(archive, destination)
+            self.assertFalse((destination / "link").exists())
+
+    def test_archive_hardlink_member_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "out"
+            archive = self._tar_bytes(
+                [
+                    ("a.txt", b"body\n", "reg"),
+                    ("b.txt", b"a.txt", "hardlink"),
+                ]
+            )
+            with self.assertRaisesRegex(self.commands.ConfigError, "unsafe path"):
+                self._extract_archive_bytes(archive, destination)
+            self.assertTrue((destination / "a.txt").is_file())
+            self.assertFalse((destination / "b.txt").exists())
+
+    def test_archive_device_and_fifo_members_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "out"
+            for kind in ("fifo", "chr"):
+                archive = self._tar_bytes([("special", None, kind)])
+                with self.assertRaisesRegex(self.commands.ConfigError, "unsafe path"):
+                    self._extract_archive_bytes(archive, destination)
+                self.assertFalse(any(destination.iterdir()) if destination.exists() else True)
+
+    def test_archive_path_traversal_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "out"
+            outside = Path(directory) / "pwned.txt"
+            archive = self._tar_bytes(
+                [
+                    ("../pwned.txt", b"escaped\n", "reg"),
+                ]
+            )
+            with self.assertRaisesRegex(self.commands.ConfigError, "unsafe path"):
+                self._extract_archive_bytes(archive, destination)
+            self.assertFalse(outside.exists())
+
+    def test_archive_absolute_path_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "out"
+            archive = self._tar_bytes(
+                [
+                    ("/tmp/absolute-escape.txt", b"nope\n", "reg"),
+                ]
+            )
+            with self.assertRaisesRegex(self.commands.ConfigError, "unsafe path"):
+                self._extract_archive_bytes(archive, destination)
+
+    def test_archive_duplicate_path_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "out"
+            archive = self._tar_bytes(
+                [
+                    ("dup.txt", b"one\n", "reg"),
+                    ("dup.txt", b"two\n", "reg"),
+                ]
+            )
+            with self.assertRaisesRegex(self.commands.ConfigError, "unsafe path"):
+                self._extract_archive_bytes(archive, destination)
+            self.assertEqual((destination / "dup.txt").read_text(encoding="utf-8"), "one\n")
+
+    def test_archive_cannot_write_through_prior_file_as_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "out"
+            archive = self._tar_bytes(
+                [
+                    ("evil", b"not-a-dir\n", "reg"),
+                    ("evil/through.txt", b"should-not-land\n", "reg"),
+                ]
+            )
+            with self.assertRaisesRegex(self.commands.ConfigError, "unsafe path"):
+                self._extract_archive_bytes(archive, destination)
+            self.assertTrue((destination / "evil").is_file())
+            self.assertFalse((destination / "evil" / "through.txt").exists())
+
+    def test_copy_git_tree_rejects_symlink_archive_from_git(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "dest"
+            outside = root / "outside.txt"
+            outside.write_text("secret\n", encoding="utf-8")
+            archive = self._tar_bytes(
+                [
+                    ("link", str(outside).encode("utf-8"), "symlink"),
+                    ("ok.txt", b"ok\n", "reg"),
+                ]
+            )
+
+            def fake_run(argv, *args, **kwargs):
+                command = list(argv)
+                if command[:1] == ["git"] and "archive" in command:
+                    return subprocess.CompletedProcess(command, 0, archive, b"")
+                raise AssertionError(f"unexpected command: {command}")
+
+            with patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "unsafe path"):
+                    self.commands._copy_git_tree(root / "repo", "HEAD", destination)
+            self.assertFalse((destination / "link").exists())
+            self.assertFalse((destination / "ok.txt").exists())
+
 
 
     def test_wrong_fala_version_at_pinned_commit_is_rejected(self):
@@ -717,6 +916,62 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertFalse(any(call[:2] == ["launchctl", "bootstrap"] for call in calls))
             self.assertFalse((root / "current").exists())
 
+    def test_legacy_mutator_loaded_after_staging_aborts_before_cutover(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._render(root)
+
+            def successful_run(argv, **kwargs):
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
+                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+            ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(
+                self.commands.subprocess, "run", side_effect=successful_run
+            ):
+                self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
+
+            old_current = (root / "current").resolve()
+            launch_agent = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+            old_plist = launch_agent.read_bytes()
+            old_previous = (root / "previous.json").read_bytes()
+            second = self._render(root, config_path=root / "other.toml", db_path=root / "other.sqlite")
+            second_id = json.loads((second / "manifest.json").read_text(encoding="utf-8"))["candidate_id"]
+            calls: list[list[str]] = []
+            probe_count = 0
+
+            def fake_run(argv, **kwargs):
+                calls.append(list(argv))
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            def reprobing_assert():
+                nonlocal probe_count
+                probe_count += 1
+                if probe_count == 1:
+                    return {}
+                raise self.commands.ConfigError(
+                    f"legacy mutator labels are loaded: {self.commands.LEGACY_MUTATOR_LABELS[0]}"
+                )
+
+            with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
+                self.commands, "_assert_legacy_mutators_unloaded", side_effect=reprobing_assert
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "legacy mutator labels are loaded"):
+                    self.commands.deploy_fala(self.cfg, str(second), True, deployment_root=str(root))
+
+            self.assertEqual(probe_count, 2)
+            self.assertFalse(any(call[:2] == ["launchctl", "bootstrap"] for call in calls))
+            self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in calls))
+            self.assertEqual((root / "current").resolve(), old_current)
+            self.assertEqual(launch_agent.read_bytes(), old_plist)
+            self.assertEqual((root / "previous.json").read_bytes(), old_previous)
+            self.assertFalse((root / "versions" / second_id).exists())
+
+
     def test_existing_current_is_restored_after_cutover_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -953,6 +1208,29 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertTrue(any(call[:2] == ["launchctl", "bootout"] for call in calls))
             self.assertFalse((root / "current").exists())
             self.assertFalse((home / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist").exists())
+
+    def test_deploy_fala_rejects_symlink_deployment_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            real_root = base / "real"
+            real_root.mkdir()
+            candidate = self._render(real_root)
+            link_root = base / "link"
+            link_root.symlink_to(real_root, target_is_directory=True)
+            with self.assertRaisesRegex(self.commands.ConfigError, "deployment root must not be a symlink"):
+                self.commands.deploy_fala(self.cfg, str(candidate), False, deployment_root=str(link_root))
+            with self.assertRaisesRegex(self.commands.ConfigError, "deployment root must not be a symlink"):
+                self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(link_root))
+            self.assertFalse((real_root / "versions").exists())
+            self.assertFalse((real_root / "current").exists())
+
+    def test_deploy_fala_rejects_non_directory_deployment_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            file_root = base / "not-a-dir"
+            file_root.write_text("x", encoding="utf-8")
+            with self.assertRaisesRegex(self.commands.ConfigError, "deployment root must be a directory"):
+                self.commands.deploy_fala(self.cfg, "any-candidate", False, deployment_root=str(file_root))
 
 
 if __name__ == "__main__":

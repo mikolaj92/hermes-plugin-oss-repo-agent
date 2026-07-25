@@ -154,6 +154,42 @@ class DeploymentParityTests(unittest.TestCase):
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_validate_fala_candidate_rejects_symlink_deployment_root(self):
+        from tools.deployment_parity import validate_fala_candidate
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            real_root = base / "real"
+            real_root.mkdir()
+            candidates = real_root / "candidates"
+            candidates.mkdir()
+            candidate = candidates / "cafebabe"
+            candidate.mkdir()
+            (candidate / "manifest.json").write_text("{}", encoding="utf-8")
+            link_root = base / "link"
+            link_root.symlink_to(real_root, target_is_directory=True)
+            with self.assertRaises(DeploymentParityError) as raised:
+                validate_fala_candidate(candidate, deployment_root=link_root)
+            self.assertTrue(
+                any("deployment root must not be a symlink" in error for error in raised.exception.result["errors"])
+            )
+
+    def test_validate_fala_candidate_rejects_non_directory_deployment_root(self):
+        from tools.deployment_parity import validate_fala_candidate
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            file_root = base / "not-a-dir"
+            file_root.write_text("x", encoding="utf-8")
+            candidate = base / "candidates" / "cafebabe"
+            candidate.mkdir(parents=True)
+            (candidate / "manifest.json").write_text("{}", encoding="utf-8")
+            with self.assertRaises(DeploymentParityError) as raised:
+                validate_fala_candidate(candidate, deployment_root=file_root)
+            self.assertTrue(
+                any("deployment root must be a directory" in error for error in raised.exception.result["errors"])
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

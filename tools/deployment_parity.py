@@ -49,10 +49,13 @@ def _regular_file(path: Path) -> bool:
 
 
 def _root_path(path: Path, label: str, errors: list[str]) -> Path:
-    """Resolve a deployment root without allowing a symlinked root."""
+    """Resolve a deployment root without allowing a symlinked/non-directory root."""
     path = path.expanduser()
     if path.is_symlink():
         errors.append(f"{label} root must not be a symlink: {path}")
+        return path.resolve()
+    if not path.is_dir():
+        errors.append(f"{label} root must be a directory: {path}")
     return path.resolve()
 
 
@@ -449,7 +452,11 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
     if candidate.is_symlink():
         errors.append("Fala candidate must not be a symlink")
     if deployment_root is not None:
-        root = deployment_root.expanduser().resolve()
+        root_errors: list[str] = []
+        root = _root_path(deployment_root, "deployment", root_errors)
+        if root_errors:
+            errors.extend(root_errors)
+            raise DeploymentParityError({"ok": False, "candidate": str(candidate), "errors": errors})
         allowed = ((root / "candidates").resolve(), (root / "versions").resolve())
         if candidate.parent.resolve() not in allowed:
             errors.append(f"Fala candidate must be a direct child of candidates or versions: {candidate}")

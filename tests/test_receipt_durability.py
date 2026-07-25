@@ -145,11 +145,12 @@ class ReceiptDurabilityTests(unittest.TestCase):
             self.assertEqual(payload["process_id"], "input-process")
             self.assertEqual(payload["candidate"], "input-candidate")
     def _cleanup(self, path: Path, *, process_id: str = "cleanup-process", **overrides: object) -> dict:
+        ownership_receipt = str(path.parent / "dispatch-7.json")
         identity = {
             "task_id": "task-7",
             "repo": "owner/repo",
             "issue": 7,
-            "receipt_id": str(path),
+            "receipt_id": ownership_receipt,
             "branch": "ai/fix/7-cleanup",
             "clone_path": "/tmp/clone-owner-repo",
             "worktree_path": "/tmp/worktree-owner-repo",
@@ -209,9 +210,65 @@ class ReceiptDurabilityTests(unittest.TestCase):
             result = cleanup.write_cleanup_receipt({"input": {"receipt_path": str(path), "dry_run": False, "conduction": generic}, "config": {}})
             self.assertFalse(result["ok"])
             self.assertEqual(result["reason"], "cleanup_identity_missing")
-            missing = self._cleanup(path, task_id="")
+            missing_input = {
+                "task_id": "",
+                "repo": "owner/repo",
+                "issue": 7,
+                "receipt_id": str(Path(tmp) / "dispatch-7.json"),
+                "branch": "ai/fix/7-cleanup",
+                "clone_path": "/tmp/clone-owner-repo",
+                "worktree_path": "/tmp/worktree-owner-repo",
+                "receipt_path": str(path),
+                "dry_run": False,
+                "conduction": {
+                    "parse_issue_from_branch": {"ok": True, "status": "parsed", "issue": 7, "branch": "ai/fix/7-cleanup", "repo": "owner/repo"},
+                    "check_issue_closed": {"ok": True, "status": "checked", "closed": True, "repo": "owner/repo", "issue": 7},
+                    "check_no_open_pr": {"ok": True, "status": "checked", "safe_to_cleanup": True, "open_count": 0, "branch": "ai/fix/7-cleanup"},
+                    "remove_worktree": {"ok": True, "status": "already_absent", "mutated": False, "clone_path": "/tmp/clone-owner-repo", "worktree_path": "/tmp/worktree-owner-repo", "branch": "ai/fix/7-cleanup"},
+                    "delete_local_fix_branch": {"ok": True, "status": "already_absent", "mutated": False, "clone_path": "/tmp/clone-owner-repo", "branch": "ai/fix/7-cleanup"},
+                    "release_active_issue_claim": {"ok": True, "status": "already_absent", "mutated": False, "repo": "owner/repo", "issue": 7},
+                },
+            }
+            missing = cleanup.write_cleanup_receipt({"input": missing_input, "config": {}})
             self.assertFalse(missing["ok"])
             self.assertEqual(missing["reason"], "cleanup_identity_missing")
+
+    def test_mixed_entity_evidence_fails_closed_without_composing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cleanup.json"
+            identity = {
+                "task_id": "task-7",
+                "repo": "owner/repo",
+                "issue": 7,
+                "receipt_id": str(Path(tmp) / "dispatch-7.json"),
+                "branch": "ai/fix/7-cleanup",
+                "clone_path": "/tmp/clone-owner-repo",
+                "worktree_path": "/tmp/worktree-owner-repo",
+            }
+            evidence = {
+                "parse_issue_from_branch": {"ok": True, "status": "parsed", "issue": 7, "branch": identity["branch"], "task_id": identity["task_id"], "repo": identity["repo"]},
+                "check_issue_closed": {"ok": True, "status": "checked", "closed": True, "repo": identity["repo"], "issue": 7},
+                "check_no_open_pr": {"ok": True, "status": "checked", "safe_to_cleanup": True, "open_count": 0, "branch": identity["branch"]},
+                "remove_worktree": {"ok": True, "status": "already_absent", "mutated": False, "clone_path": identity["clone_path"], "worktree_path": identity["worktree_path"], "branch": identity["branch"]},
+                "delete_local_fix_branch": {"ok": True, "status": "already_absent", "mutated": False, "clone_path": identity["clone_path"], "branch": identity["branch"]},
+                "release_active_issue_claim": {"ok": True, "status": "already_absent", "mutated": False, "repo": "other/repo", "issue": 99},
+            }
+            result = cleanup.write_cleanup_receipt({
+                "input": {**identity, "receipt_path": str(path), "dry_run": False, "conduction": evidence},
+                "config": {},
+                "run_id": "cleanup-run",
+                "path_id": "cleanup",
+                "process_id": "cleanup-process",
+            })
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "cleanup_identity_missing")
+            self.assertFalse(path.exists())
+
+            consistent = self._cleanup(path, issue="7")
+            self.assertEqual(consistent["status"], "written")
+            payload = json.loads(path.read_text())
+            self.assertEqual(payload["entity"]["issue"], 7)
+            self.assertEqual(payload["entity"]["repo"], "owner/repo")
 
     def test_symlink_and_hardlink_receipts_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -230,16 +287,48 @@ class ReceiptDurabilityTests(unittest.TestCase):
     def test_cleanup_receipt_is_durable_and_preserves_request_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cleanup.json"
+            ownership = str(Path(tmp) / "dispatch-7.json")
             result = self._cleanup(path)
             self.assertEqual(result["status"], "written")
             payload = json.loads(path.read_text())
             self.assertEqual(payload["run_id"], "cleanup-run")
             self.assertEqual(payload["path_id"], "cleanup")
             self.assertEqual(payload["process_id"], "cleanup-process")
+            self.assertEqual(payload["entity"]["receipt"], ownership)
+            self.assertNotEqual(payload["entity"]["receipt"], str(path))
             same = self._cleanup(path)
             self.assertEqual(same["status"], "exists")
             self.assertFalse(same["mutated"])
             self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+
+    def test_distinct_ownership_and_output_receipts_correlate_without_identity_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ownership = Path(tmp) / "dispatch-7.json"
+            output = Path(tmp) / "cleanup-7.json"
+            result = self._cleanup(output, receipt_id=str(ownership))
+            self.assertEqual(result["status"], "written")
+            self.assertTrue(output.is_file())
+            payload = json.loads(output.read_text())
+            self.assertEqual(payload["entity"]["receipt"], str(ownership))
+            self.assertNotEqual(payload["entity"]["receipt"], str(output))
+            self.assertEqual(payload["entity"]["task"], "task-7")
+            self.assertEqual(payload["entity"]["issue"], 7)
+            self.assertEqual(payload["outcome"], "noop")
+
+            # Same ownership/output correlation remains idempotent.
+            same = self._cleanup(output, receipt_id=str(ownership))
+            self.assertEqual(same["status"], "exists")
+            self.assertFalse(same["mutated"])
+
+            # True identity conflict still fails closed before publication.
+            conflict = self._cleanup(
+                output,
+                receipt_id=str(ownership),
+                task_id="task-other",
+            )
+            self.assertFalse(conflict["ok"])
+            self.assertEqual(conflict["reason"], "cleanup_identity_missing")
+            self.assertEqual(json.loads(output.read_text())["entity"]["task"], "task-7")
 
     def test_cleanup_receipt_directory_fsync_failure_unpublishes_and_allows_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -356,32 +356,79 @@ def release_active_issue_claim(request: Request) -> Result:
     if not repo or issue <= 0:
         return fail("missing_claim_identity", failure_class="terminal", retry_safe=False, repo=repo, issue=issue)
     configured = Path(configured_claim_path).expanduser()
-    path = configured / "claim.json" if configured.exists() and configured.is_dir() else (configured if configured.suffix.lower() == ".json" else configured / "claim.json")
-    with claim_directory_lock(path):
-        if not path.exists():
-            return ok(status="already_absent", claim_path=str(path), repo=repo, issue=issue, mutated=False)
-        fd = -1
-        try:
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            before = os.fstat(fd)
-            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
-                raise ValueError("claim is not a single-link regular file")
-            with os.fdopen(fd, "r", encoding="utf-8") as handle:
-                fd = -1
-                payload = json.load(handle)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-            return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc))
-        finally:
-            if fd >= 0:
-                os.close(fd)
-        if not isinstance(payload, dict):
-            return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload)
+    is_directory_store = (configured.exists() and configured.is_dir()) or configured.suffix.lower() != ".json"
+    lock_path = configured / "claim.json" if is_directory_store else configured
+    with claim_directory_lock(lock_path):
+        def _load_claim_file(candidate: Path) -> tuple[dict[str, Any], os.stat_result]:
+            fd = -1
+            try:
+                fd = os.open(candidate, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                before = os.fstat(fd)
+                if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                    raise ValueError("claim is not a single-link regular file")
+                with os.fdopen(fd, "r", encoding="utf-8") as handle:
+                    fd = -1
+                    loaded = json.load(handle)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            if not isinstance(loaded, dict):
+                raise ValueError("claim payload is not an object")
+            return loaded, before
+
+        def _validate_claim_identity(candidate: Path, loaded: dict[str, Any]) -> Result | None:
+            claim_repo = str(loaded.get("repo") or "").strip()
+            claim_board = str(loaded.get("board") or "").strip()
+            claim_at = str(loaded.get("claimedAt") or "").strip()
+            claim_issue = loaded.get("issue")
+            if loaded.get("version") != 1 or not claim_repo or not claim_board or not claim_at or isinstance(claim_issue, bool) or not isinstance(claim_issue, int) or claim_issue <= 0:
+                return fail("claim_malformed", failure_class="terminal", retry_safe=False, claim_path=str(candidate), payload=loaded)
+            return None
+
+        payload: dict[str, Any]
+        before: os.stat_result
+        if is_directory_store:
+            try:
+                entries = sorted(configured.glob("*.json"))
+            except OSError as exc:
+                return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(configured), error=str(exc))
+            matches: list[tuple[Path, dict[str, Any], os.stat_result]] = []
+            for entry in entries:
+                try:
+                    loaded, metadata = _load_claim_file(entry)
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(entry), error=str(exc))
+                malformed = _validate_claim_identity(entry, loaded)
+                if malformed is not None:
+                    return malformed
+                if loaded.get("repo") == repo and loaded.get("issue") == issue:
+                    matches.append((entry, loaded, metadata))
+            if len(matches) > 1:
+                return fail(
+                    "claim_ambiguous",
+                    failure_class="terminal",
+                    retry_safe=False,
+                    claim_path=str(configured),
+                    repo=repo,
+                    issue=issue,
+                    matches=[str(claim_path) for claim_path, _, _ in matches],
+                )
+            if not matches:
+                return ok(status="already_absent", claim_path=str(lock_path), repo=repo, issue=issue, mutated=False)
+            path, payload, before = matches[0]
+        else:
+            path = lock_path
+            if not path.exists():
+                return ok(status="already_absent", claim_path=str(path), repo=repo, issue=issue, mutated=False)
+            try:
+                payload, before = _load_claim_file(path)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc))
+            malformed = _validate_claim_identity(path, payload)
+            if malformed is not None:
+                return malformed
         claim_repo = str(payload.get("repo") or "").strip()
-        claim_board = str(payload.get("board") or "").strip()
-        claim_at = str(payload.get("claimedAt") or "").strip()
         claim_issue = payload.get("issue")
-        if payload.get("version") != 1 or not claim_repo or not claim_board or not claim_at or isinstance(claim_issue, bool) or not isinstance(claim_issue, int) or claim_issue <= 0:
-            return fail("claim_malformed", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload)
         if claim_repo != repo:
             return fail("claim_repo_mismatch", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload, repo=repo)
         if claim_issue != issue:
@@ -513,48 +560,78 @@ def _publish_cleanup_receipt(p: Path, payload: dict[str, Any], path: str) -> Res
 
 def _cleanup_identity(data: dict[str, Any], cfg: dict[str, Any], payload: dict[str, Any], evidence: dict[str, dict[str, Any]], receipt_path: str) -> dict[str, Any] | None:
     payload_entity = payload.get("entity") if isinstance(payload.get("entity"), dict) else {}
+    sources: tuple[dict[str, Any], ...] = (data, cfg, payload_entity, *tuple(evidence.values()))
 
-    def value(*keys: str, evidence_names: tuple[str, ...] = ()) -> Any:
-        for source in (data, cfg, payload_entity):
+    aliases = {
+        "task": ("task_id", "task"),
+        "repo": ("repo",),
+        "issue": ("issue",),
+        "receipt": ("receipt_id", "receipt"),
+        "branch": ("branch",),
+        "clone_path": ("clone_path",),
+        "worktree_path": ("worktree_path",),
+        "pr_number": ("pr_number",),
+        "head_oid": ("head_oid",),
+        "base_sha": ("base_sha",),
+        "merge_oid": ("merge_oid",),
+        "origin_main_sha": ("origin_main_sha",),
+    }
+
+    def present(value: Any) -> bool:
+        return value is not None and bool(str(value).strip())
+
+    def task_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            return value.get("id") or value.get("task_id") or value.get("task")
+        return value
+
+    def values_for(keys: tuple[str, ...]) -> list[Any]:
+        values: list[Any] = []
+        for source in sources:
             for key in keys:
                 candidate = source.get(key)
-                if candidate is not None and str(candidate).strip():
-                    return candidate
-        for name in evidence_names:
-            blob = evidence.get(name) or {}
-            for key in keys:
-                candidate = blob.get(key)
-                if candidate is not None and str(candidate).strip():
-                    return candidate
-        return ""
+                if key in {"task", "task_id"}:
+                    candidate = task_value(candidate)
+                if not present(candidate):
+                    continue
+                if candidate not in values:
+                    values.append(candidate)
+        return values
 
-    identity = {
-        "task": value("task_id", "task"),
-        "repo": value("repo", evidence_names=("check_issue_closed", "remove_worktree", "release_active_issue_claim")),
-        "issue": value("issue", evidence_names=("parse_issue_from_branch", "check_issue_closed", "release_active_issue_claim")),
-        "receipt": value("receipt_id", "receipt", "receipt_path") or receipt_path,
-        "branch": value("branch", evidence_names=("parse_issue_from_branch", "remove_worktree", "delete_local_fix_branch")),
-        "clone_path": value("clone_path", evidence_names=("remove_worktree",)),
-        "worktree_path": value("worktree_path", evidence_names=("remove_worktree",)),
-    }
-    for key in ("pr_number", "head_oid", "base_sha", "merge_oid", "origin_main_sha"):
-        candidate = value(key, evidence_names=tuple(evidence))
-        if candidate not in (None, ""):
-            identity[key] = candidate
-    if any(not str(identity[key]).strip() for key in ("task", "repo", "receipt", "branch", "clone_path", "worktree_path")):
-        return None
-    raw_issue = identity["issue"]
-    if isinstance(raw_issue, bool):
-        return None
-    try:
-        if int(raw_issue) <= 0:
-            return None
-    except (TypeError, ValueError):
-        return None
-    for source in (data, cfg, payload_entity):
-        for key, expected in identity.items():
-            if key in source and source[key] not in (None, "") and str(source[key]).strip() != str(expected).strip():
+    identity: dict[str, Any] = {}
+    for key, keys in aliases.items():
+        candidates = values_for(keys)
+        # Ownership/provenance receipt stays distinct from the generated cleanup output path.
+        # Fall back to the output path only when no ownership receipt is available.
+        if key == "receipt" and not candidates and present(receipt_path):
+            candidates.append(receipt_path)
+        if not candidates:
+            continue
+        if key == "issue":
+            normalized: list[int] = []
+            for candidate in candidates:
+                if isinstance(candidate, bool):
+                    return None
+                try:
+                    number = int(candidate)
+                except (TypeError, ValueError):
+                    return None
+                if number <= 0:
+                    return None
+                if number not in normalized:
+                    normalized.append(number)
+            if len(normalized) != 1:
                 return None
+            identity[key] = normalized[0]
+            continue
+        normalized = [str(candidate).strip() for candidate in candidates]
+        if len(set(normalized)) != 1:
+            return None
+        identity[key] = normalized[0]
+
+    required = ("task", "repo", "receipt", "branch", "clone_path", "worktree_path")
+    if any(not str(identity.get(key, "")).strip() for key in required) or "issue" not in identity:
+        return None
     return identity
 
 

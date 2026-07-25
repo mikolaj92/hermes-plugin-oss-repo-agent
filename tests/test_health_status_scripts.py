@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import plistlib
 import shutil
 import sqlite3
 import subprocess
@@ -46,7 +47,7 @@ class HealthStatusScriptTests(unittest.TestCase):
         cls.holder = tempfile.TemporaryDirectory()
         cls.root = Path(cls.holder.name)
         cls.config = cls.root / "config.toml"
-        cls.config.write_text("mode = 'dry-run'\n", encoding="utf-8")
+        cls.config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['health', 'valid']\n", encoding="utf-8")
         cls.base_db = cls.root / "base.sqlite"
         cls._write_db(cls.base_db, mode="dry-run")
         lock_data = (ROOT / "uv.lock").read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
@@ -191,6 +192,7 @@ exit 0
                 "HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "0",
                 "HERMES_REPO_AGENT_FALA_MAX_RUN_AGE_SECONDS": "1800",
                 "HERMES_REPO_AGENT_MIN_FREE_GB": "0",
+                "HERMES_REPO_AGENT_PARITY_ENABLED": "0",
             }
         )
         (root / "repos.txt").write_text("offline/repo|offline-board|/tmp/offline-repo|1\n", encoding="utf-8")
@@ -204,6 +206,9 @@ exit 0
         versions.mkdir(parents=True, exist_ok=True)
         version = versions / self.candidate.name
         shutil.copytree(self.candidate, version)
+        managed_bin = root / "deployment" / "runtime" / self.candidate.name / ".venv" / "bin"
+        managed_bin.mkdir(parents=True, exist_ok=True)
+        (managed_bin / "python").symlink_to(sys.executable)
         self.commands._promote_version_runtime(version, root / "deployment", self.candidate.name)
         current = root / "deployment" / "current"
         current.symlink_to(version, target_is_directory=True)
@@ -266,6 +271,34 @@ exit 0
         completed = self._run("repo_agent_status.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("runtime-identity-process_type-mismatch", completed.stdout)
+
+    def test_status_rejects_policy_that_differs_from_embedded_config(self):
+        db = self.root / "tampered-status-policy.sqlite"
+        self._write_db(db, mode="dry-run")
+        layout = self._layout(db=db)
+        manifest_path = layout / "deployment" / "versions" / self.candidate.name / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["policy"]["automerge"] = True
+        manifest["identity"]["policy"]["automerge"] = True
+        manifest_path.chmod(0o644)
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        manifest_path.chmod(0o444)
+        completed = self._run("repo_agent_status.sh", db=db, deployment=layout / "deployment")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("identity-policy-unsafe", completed.stdout)
+
+    def test_status_rejects_safe_manifest_policy_with_unsafe_valid_toml(self):
+        db = self.root / "unsafe-status-config-policy.sqlite"
+        self._write_db(db, mode="dry-run")
+        layout = self._layout(db=db)
+        config = layout / "deployment" / "versions" / self.candidate.name / "source" / "config.toml"
+        config.chmod(0o644)
+        config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['status', 'valid']\n\n[automation]\nautomerge = true\n", encoding="utf-8")
+        config.chmod(0o444)
+        completed = self._run("repo_agent_status.sh", db=db, deployment=layout / "deployment")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("identity-policy-config-mismatch", completed.stdout)
+
     def test_health_rejects_latest_incomplete_run(self):
         db = self.root / "latest-incomplete.sqlite"
         self._write_db(db, mode="live")
@@ -378,7 +411,12 @@ exit 0
         for run_id in ("old-failed", "old-created", "old-cancel_requested"):
             self.assertIn(run_id, completed.stdout)
 
-    def test_health_marks_dual_mutator_and_repair_blocked(self):
+    def test_health_rejects_repair_argument(self):
+        completed = self._run("repo_agent_health.sh", args=("--repair",))
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("unsupported argument: --repair", completed.stderr)
+
+    def test_health_marks_dual_mutator(self):
         db = self.root / "mutators.sqlite"
         self._write_db(db, mode="dry-run")
         layout = self._layout(db=db)
@@ -391,15 +429,95 @@ exit 0
         )
         self.assertNotEqual(dual.returncode, 0)
         self.assertIn("dual-mutator active", dual.stdout + dual.stderr)
-        repair = self._run(
+
+    def test_health_rejects_loaded_repair_enabled_health_agent(self):
+        db = self.root / "repair-health.sqlite"
+        self._write_db(db, mode="dry-run")
+        layout = self._layout(db=db)
+        health_plist = layout / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-health.plist"
+        with health_plist.open("wb") as stream:
+            plistlib.dump({"ProgramArguments": ["repo_agent_health.sh", "--repair"]}, stream)
+        loaded = ",".join(("com.mikolaj92.hermes.repo-agent-fala-tick-all", "com.mikolaj92.hermes.repo-agent-health"))
+        completed = self._run(
             "repo_agent_health.sh",
             db=db,
             deployment=layout / "deployment",
             extra={"FAKE_LAUNCHCTL_LOADED": loaded},
-            args=("--repair",),
         )
-        self.assertNotEqual(repair.returncode, 0)
-        self.assertIn("repair-blocked active-mutator", repair.stdout + repair.stderr)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("health_repair_loaded=1", completed.stdout)
+
+    def test_health_rejects_policy_that_differs_from_config(self):
+        db = self.root / "tampered-health-policy.sqlite"
+        self._write_db(db, mode="dry-run")
+        layout = self._layout(db=db)
+        manifest_path = layout / "deployment" / "versions" / self.candidate.name / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["policy"]["automerge"] = True
+        manifest["identity"]["policy"]["automerge"] = True
+        manifest_path.chmod(0o644)
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        manifest_path.chmod(0o444)
+        completed = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("identity-policy-unsafe", completed.stdout)
+
+    def test_health_rejects_safe_manifest_policy_with_unsafe_valid_toml(self):
+        db = self.root / "unsafe-config-policy.sqlite"
+        self._write_db(db, mode="dry-run")
+        layout = self._layout(db=db)
+        baseline = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        self.assertNotIn("identity-policy-config-mismatch", baseline.stdout)
+        version = layout / "deployment" / "versions" / self.candidate.name
+        config = version / "source" / "config.toml"
+        config.chmod(0o644)
+        config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['health', 'valid']\n\n[automation]\nautomerge = true\n", encoding="utf-8")
+        config.chmod(0o444)
+        manifest_path = version / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["config_hash"] = hashlib.sha256(config.read_bytes()).hexdigest()
+        manifest["identity"]["config_hash"] = manifest["config_hash"]
+        manifest["artifacts"]["source/config.toml"] = {"sha256": manifest["config_hash"], "bytes": config.stat().st_size}
+        manifest_path.chmod(0o644)
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        manifest_path.chmod(0o444)
+        completed = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("identity-policy-config-mismatch", completed.stdout)
+
+    def test_health_reports_unavailable_managed_toml_parser(self):
+        db = self.root / "missing-toml-python.sqlite"
+        self._write_db(db, mode="dry-run")
+        layout = self._layout(db=db)
+        managed_python = layout / "deployment" / "runtime" / self.candidate.name / ".venv" / "bin" / "python"
+        managed_python.unlink()
+        completed = self._run(
+            "repo_agent_health.sh",
+            db=db,
+            deployment=layout / "deployment",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("toml-parser-unavailable", completed.stdout)
+
+    def test_health_parity_failure_increments_failures(self):
+        db = self.root / "parity-health.sqlite"
+        self._write_db(db, mode="dry-run")
+        layout = self._layout(db=db)
+        completed = self._run(
+            "repo_agent_health.sh",
+            db=db,
+            deployment=layout / "deployment",
+            extra={
+                "HERMES_REPO_AGENT_PARITY_ENABLED": "1",
+                "HERMES_REPO_AGENT_PARITY_SOURCE_ROOT": str(ROOT / "scripts"),
+                "HERMES_REPO_AGENT_PARITY_ACTIVE_ROOT": str(self.root / "missing-active-scripts"),
+                "HERMES_REPO_AGENT_PARITY_TEMPLATE_ROOT": str(ROOT / "templates" / "launchd"),
+                "HERMES_REPO_AGENT_PARITY_ACTIVE_PLIST_ROOT": str(layout / "home" / "Library" / "LaunchAgents"),
+                "HERMES_REPO_AGENT_PARITY_CONFIG_ROOT": str(self.root / "missing-active-config"),
+            },
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("deployment-parity mismatch", completed.stdout)
 
     def test_status_reports_fala_noop_activity(self):
         completed = self._run("repo_agent_status.sh", db=self.base_db)

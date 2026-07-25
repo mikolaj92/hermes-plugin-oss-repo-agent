@@ -115,8 +115,9 @@ if [[ -z "$current_target" || ! -f "$current_target/manifest.json" ]]; then
   status_failures=$((status_failures + 1))
 else
   fala_check=""
-  if fala_check="$(python3 - "$current_target" "$FALA_PLIST" "$FALA_REQUIRE_LIVE" "$DEPLOYMENT_ROOT" <<'PY'
-import hashlib, json, pathlib, plistlib, sys
+  managed_python="$DEPLOYMENT_ROOT/runtime/$(basename "$current_target")/.venv/bin/python"
+  if [[ "$managed_python" == /* && -x "$managed_python" ]] && "$managed_python" -c 'import sys,tomllib; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1 && fala_check="$("$managed_python" - "$current_target" "$FALA_PLIST" "$FALA_REQUIRE_LIVE" "$DEPLOYMENT_ROOT" <<'PY'
+import hashlib, json, pathlib, plistlib, sys, tomllib
 cand=pathlib.Path(sys.argv[1]).resolve(); installed=pathlib.Path(sys.argv[2]).expanduser(); require_live=sys.argv[3]=="1"; root=pathlib.Path(sys.argv[4]).expanduser().resolve(); errors=[]; plist_relative="launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"; pinned="69bc2ec9d4cdf61773114847c0c582fb2652296d"
 sha=lambda data: hashlib.sha256(data).hexdigest()
 def artifact_path(relative):
@@ -126,6 +127,10 @@ def artifact_path(relative):
     try: path.relative_to(cand)
     except ValueError: errors.append(f"artifact-path-escapes:{relative}"); return None
     return path
+def policy_from_toml_text(text):
+    root=tomllib.loads(text); automation=root.get("automation") or {}; executor=root.get("executor") or {}
+    if not isinstance(automation,dict) or not isinstance(executor,dict): raise ValueError("policy-table-invalid")
+    return {"automerge":automation.get("automerge",root.get("automerge",False)),"require_human_approval":automation.get("require_human_approval",root.get("require_human_approval",True)),"require_checks":automation.get("require_checks",root.get("require_checks",True)),"require_test_evidence":automation.get("require_test_evidence",root.get("require_test_evidence",True)),"executor_enabled":executor.get("enabled",False)}
 try:
     if cand.parent != (root/"versions").resolve(): errors.append("current-outside-versions")
     manifest=json.loads((cand/"manifest.json").read_text(encoding="utf-8"))
@@ -141,6 +146,17 @@ try:
     if set(identity)!=stable_keys: errors.append("manifest-identity-key-set-mismatch")
     for key,expected in identity.items():
         if key in stable_keys and manifest.get(key)!=expected: errors.append(f"identity-mismatch:{key}")
+    policy=manifest.get("policy"); policy_keys={"automerge","require_human_approval","require_checks","require_test_evidence","executor_enabled"}
+    if not isinstance(policy,dict) or set(policy)!=policy_keys or any(not isinstance(policy.get(key),bool) for key in policy_keys): errors.append("identity-policy-invalid")
+    elif policy!={"automerge":False,"require_human_approval":True,"require_checks":True,"require_test_evidence":True,"executor_enabled":False}: errors.append("identity-policy-unsafe")
+    try: expected_policy=policy_from_toml_text((cand/"source"/"config.toml").read_text(encoding="utf-8"))
+    except (OSError,UnicodeError,ValueError,tomllib.TOMLDecodeError): errors.append("identity-policy-config-unreadable"); expected_policy=None
+    if expected_policy is not None and isinstance(policy,dict) and set(policy)==policy_keys and all(isinstance(policy.get(key),bool) for key in policy_keys) and policy!=expected_policy: errors.append("identity-policy-config-mismatch")
+    active_config=pathlib.Path(str(manifest.get("config_path") or "")).expanduser()
+    if active_config.is_file() and not active_config.is_symlink():
+        try: active_policy=policy_from_toml_text(active_config.read_text(encoding="utf-8"))
+        except (OSError,UnicodeError,ValueError,tomllib.TOMLDecodeError): errors.append("identity-policy-active-config-unreadable"); active_policy=None
+        if active_policy is not None and isinstance(policy,dict) and set(policy)==policy_keys and all(isinstance(policy.get(key),bool) for key in policy_keys) and policy!=active_policy: errors.append("identity-policy-active-config-mismatch")
     mode=manifest.get("mode")
     manifest_args=manifest.get("program_arguments")
     if not isinstance(manifest_args,list) or any(not isinstance(value,str) for value in manifest_args):
@@ -206,8 +222,8 @@ try:
         if isinstance(declared_artifact,dict) and declared_artifact.get("bytes") != artifact.stat().st_size: errors.append(f"artifact-size-mismatch:{relative}")
     if errors: print(";".join(errors)); raise SystemExit(1)
     print(f"candidate_id={cid} plist_sha256={ph} mode={mode}")
-except (OSError,UnicodeError,TypeError,ValueError,json.JSONDecodeError,plistlib.InvalidFileException) as exc:
-    print(f"validation-error={type(exc).__name__}"); raise SystemExit(1)
+except (OSError,UnicodeError,TypeError,ValueError,json.JSONDecodeError,plistlib.InvalidFileException,tomllib.TOMLDecodeError) as exc:
+    print(f"validation-error={type(exc).__name__}:{exc}"); raise SystemExit(1)
 PY
   )"; then
     printf '  candidate gate=PASS current=%s %s\n' "$current_target" "$fala_check"

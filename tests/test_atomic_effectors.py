@@ -1440,6 +1440,116 @@ class CleanupTests(unittest.TestCase):
             self.assertEqual(out["reason"], "unlink_durability_unconfirmed")
             self.assertFalse(claim.exists())
 
+    def test_release_active_claim_directory_releases_exact_per_issue_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            target = directory / "claim-o_r-3.json"
+            other = directory / "claim-o_r-4.json"
+            target.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
+            other.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 4, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
+            out = cleanup.release_active_issue_claim(
+                req(
+                    {
+                        "claim_path": str(directory),
+                        "repo": "o/r",
+                        "issue": 3,
+                        "dry_run": False,
+                        "conduction": {
+                            "remove_worktree": {"ok": True, "status": "removed"},
+                            "check_issue_closed": {"ok": True, "closed": True},
+                            "check_no_open_pr": {"ok": True, "safe_to_cleanup": True},
+                            "delete_local_fix_branch": {"ok": True, "status": "deleted"},
+                        },
+                    }
+                )
+            )
+            self.assertEqual(out["status"], "released")
+            self.assertEqual(out["claim_path"], str(target))
+            self.assertFalse(target.exists())
+            self.assertTrue(other.exists())
+
+    def test_release_active_claim_directory_does_not_report_absent_for_per_issue_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            claim = directory / "claim-o_r-3.json"
+            claim.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
+            out = cleanup.release_active_issue_claim(
+                req(
+                    {
+                        "claim_path": str(directory),
+                        "repo": "o/r",
+                        "issue": 3,
+                        "dry_run": False,
+                        "conduction": {
+                            "remove_worktree": {"ok": True, "status": "removed"},
+                            "check_issue_closed": {"ok": True, "closed": True},
+                            "check_no_open_pr": {"ok": True, "safe_to_cleanup": True},
+                            "delete_local_fix_branch": {"ok": True, "status": "deleted"},
+                        },
+                    }
+                )
+            )
+            self.assertEqual(out["status"], "released")
+            self.assertFalse(claim.exists())
+
+    def test_release_active_claim_directory_fails_closed_on_ambiguous_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            first = directory / "claim-a.json"
+            second = directory / "claim-b.json"
+            payload = {"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}
+            first.write_text(json.dumps(payload), encoding="utf-8")
+            second.write_text(json.dumps(payload), encoding="utf-8")
+            out = cleanup.release_active_issue_claim(
+                req(
+                    {
+                        "claim_path": str(directory),
+                        "repo": "o/r",
+                        "issue": 3,
+                        "dry_run": False,
+                        "conduction": {
+                            "remove_worktree": {"ok": True, "status": "removed"},
+                            "check_issue_closed": {"ok": True, "closed": True},
+                            "check_no_open_pr": {"ok": True, "safe_to_cleanup": True},
+                            "delete_local_fix_branch": {"ok": True, "status": "deleted"},
+                        },
+                    }
+                )
+            )
+            self.assertFalse(out["ok"])
+            self.assertEqual(out["reason"], "claim_ambiguous")
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+
+    def test_release_active_claim_directory_fails_closed_on_corrupt_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            good = directory / "claim-o_r-3.json"
+            bad = directory / "claim-broken.json"
+            good.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
+            bad.write_text("{not-json", encoding="utf-8")
+            out = cleanup.release_active_issue_claim(
+                req(
+                    {
+                        "claim_path": str(directory),
+                        "repo": "o/r",
+                        "issue": 3,
+                        "dry_run": False,
+                        "conduction": {
+                            "remove_worktree": {"ok": True, "status": "removed"},
+                            "check_issue_closed": {"ok": True, "closed": True},
+                            "check_no_open_pr": {"ok": True, "safe_to_cleanup": True},
+                            "delete_local_fix_branch": {"ok": True, "status": "deleted"},
+                        },
+                    }
+                )
+            )
+            self.assertFalse(out["ok"])
+            self.assertEqual(out["reason"], "claim_corrupt")
+            self.assertTrue(good.exists())
+            self.assertTrue(bad.exists())
+
+
     def test_create_maintenance_dry(self) -> None:
         out = cleanup.create_maintenance_task(
             req(
