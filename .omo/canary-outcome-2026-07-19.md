@@ -222,3 +222,15 @@ The source defects identified by the earlier F2 review are closed. Definition of
 - The installed observational health plist is byte-identical to the canonical rendered source template and passes `plutil -lint`, but it is not loaded. No claim is made that copying its bytes changed launchd runtime state.
 
 No completion or promotion claim is made. Closure requires a launchd probe from a context where `gui/501` is authoritatively queryable (or authoritative evidence that the domain does not exist), then a fresh immutable candidate for `c93d9f2`, deployment/parity verification, and health/status with all configured gates unmodified.
+
+## Authoritative GUI-domain evidence review 2026-07-25
+
+**Final disposition remains: INCOMPLETE — DoD NOT MET.**
+
+- Apple `launchctl(1)` documents `gui/<uid>` as a user-login-domain selector, but exit `125` means only `Domain does not support specified action`; it is not a documented absent-domain result. The current process is in a background user domain created by `sshd-session`, so its `gui/501` result cannot establish global absence.
+- `/dev/console`, `SCDynamicStoreCopyConsoleUser`, `IOConsoleUsers`, and the current caller's CoreGraphics session cannot prove absence of fast-user-switched or other GUI login sessions for arbitrary UID `501`. The observed console belongs to root/UID `0`; `IOConsoleUsers` contains only UID `88` (`unknown`, `LoginDone=false`).
+- Independent probes confirm the boundary: `launchctl print user/501` succeeds and identifies `session = Background`; `launchctl print gui/501` and `launchctl print login/100040` return `125`; `launchctl asuser 501` returns `Operation not permitted`; noninteractive `sudo` is unavailable. No safe source change can reinterpret those results as absence.
+- Fresh verification retained fail-closed behavior: the three focused launch-domain regressions pass; `main`, `origin/main`, and the checkout remain clean at `aadebff77a7a2022d19afbcb183aaa0feb560eb3`. Active parity still reports drift for health/status, and source health/status both exit `1` on GUI-domain ambiguity. The configured disk gate also remains below `5 GiB` with approximately `3.4 GiB` available.
+- Deployment was not attempted because the pre-mutation exact-one-domain gate remains unknowable from this session. A new candidate or cutover cannot make that evidence authoritative and would violate the fail-closed deployment contract.
+
+Completion now requires an interactive GUI session for UID `501` (or another privileged context that can authoritatively query that login domain), plus sufficient free space for the unchanged production threshold. Then rerun the exact domain probe, build and activate the current immutable source revision, and execute the full parity/health/status/cleanup/inventory acceptance wave.
