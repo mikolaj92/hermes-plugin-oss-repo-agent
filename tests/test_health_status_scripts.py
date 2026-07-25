@@ -299,6 +299,37 @@ exit 0
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("identity-policy-config-mismatch", completed.stdout)
 
+    def test_status_uses_top_level_policy_precedence(self):
+        db = self.root / "status-policy-precedence.sqlite"
+        self._write_db(db, mode="dry-run")
+        layout = self._layout(db=db)
+        config = layout / "deployment" / "versions" / self.candidate.name / "source" / "config.toml"
+        config.chmod(0o644)
+        config.write_text("automerge = false\n\n[automation]\nautomerge = true\n", encoding="utf-8")
+        config.chmod(0o444)
+        completed = self._run("repo_agent_status.sh", db=db, deployment=layout / "deployment")
+        self.assertNotIn("identity-policy-config-mismatch", completed.stdout)
+
+    def test_health_uses_top_level_policy_precedence(self):
+        db = self.root / "health-policy-precedence.sqlite"
+        self._write_db(db, mode="dry-run")
+        layout = self._layout(db=db)
+        version = layout / "deployment" / "versions" / self.candidate.name
+        config = version / "source" / "config.toml"
+        config.chmod(0o644)
+        config.write_text("automerge = false\n\n[automation]\nautomerge = true\n", encoding="utf-8")
+        config.chmod(0o444)
+        manifest_path = version / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["config_hash"] = hashlib.sha256(config.read_bytes()).hexdigest()
+        manifest["identity"]["config_hash"] = manifest["config_hash"]
+        manifest["artifacts"]["source/config.toml"] = {"sha256": manifest["config_hash"], "bytes": config.stat().st_size}
+        manifest_path.chmod(0o644)
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        manifest_path.chmod(0o444)
+        completed = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        self.assertNotIn("identity-policy-config-mismatch", completed.stdout)
+
     def test_health_rejects_latest_incomplete_run(self):
         db = self.root / "latest-incomplete.sqlite"
         self._write_db(db, mode="live")

@@ -1202,9 +1202,28 @@ LEGACY_MUTATOR_LABELS = (
     "com.mikolaj92.hermes.repo-agent-cleanup",
     "com.mikolaj92.hermes.repo-agent-health",
 )
+LEGACY_SHELL_MUTATOR_LABELS = (
+    "com.mikolaj92.hermes.repo-issue-intake",
+    "com.mikolaj92.hermes.repo-issue-to-pr-dispatch",
+    "com.mikolaj92.hermes.repo-pr-triage",
+    "com.mikolaj92.hermes.repo-agent-cleanup",
+)
+LEGACY_HEALTH_LABEL = "com.mikolaj92.hermes.repo-agent-health"
 
 
-def _assert_legacy_mutators_unloaded() -> dict[str, dict[str, Any]]:
+def _legacy_plist_path(label: str) -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+
+
+def _legacy_health_repair_enabled(plist_path: Path) -> bool:
+    try:
+        return "--repair" in plist_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"unable to inspect health launchd plist: {exc}") from exc
+
+
+def _inspect_legacy_mutator_states() -> dict[str, dict[str, Any]]:
+    """Probe both launchd domains for every legacy label and reject ambiguity."""
     states: dict[str, dict[str, Any]] = {}
     for label in LEGACY_MUTATOR_LABELS:
         per_domain = {
@@ -1217,20 +1236,160 @@ def _assert_legacy_mutators_unloaded() -> dict[str, dict[str, Any]]:
         loaded = [state for state in available if state.get("loaded")]
         if len(loaded) > 1:
             raise ConfigError(f"legacy mutator label is loaded in multiple domains: {label}")
-        states[label] = loaded[0] if loaded else available[0]
-    health = states["com.mikolaj92.hermes.repo-agent-health"]
-    if health.get("loaded"):
-        health_plist = Path.home() / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-health.plist"
-        try:
-            repair_enabled = "--repair" in health_plist.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise ConfigError(f"unable to inspect health launchd plist: {exc}") from exc
-        if repair_enabled:
-            raise ConfigError("legacy repair-enabled health label is loaded")
-    loaded = [label for label, state in states.items() if state.get("loaded") and label != "com.mikolaj92.hermes.repo-agent-health"]
+        selected = loaded[0] if loaded else available[0]
+        entry: dict[str, Any] = {
+            "label": label,
+            "domain": selected["domain"],
+            "loaded": bool(selected.get("loaded")),
+            "available": selected.get("available", True),
+            "domains": per_domain,
+            "plist_path": None,
+            "plist_bytes": None,
+            "plist_sha256": None,
+            "repair_enabled": False,
+            "transition": False,
+        }
+        if entry["loaded"]:
+            plist_path = _legacy_plist_path(label)
+            if not plist_path.is_file():
+                raise ConfigError(f"loaded legacy label has no canonical installed plist: {label}")
+            try:
+                plist_bytes = plist_path.read_bytes()
+            except OSError as exc:
+                raise ConfigError(f"unable to snapshot legacy launchd plist {label}: {exc}") from exc
+            entry["plist_path"] = str(plist_path)
+            entry["plist_bytes"] = plist_bytes
+            entry["plist_sha256"] = _sha256_bytes(plist_bytes)
+            if label == LEGACY_HEALTH_LABEL:
+                entry["repair_enabled"] = _legacy_health_repair_enabled(plist_path)
+                entry["transition"] = bool(entry["repair_enabled"])
+            else:
+                entry["transition"] = True
+        states[label] = entry
+    return states
+
+
+def _assert_legacy_mutators_unloaded() -> dict[str, dict[str, Any]]:
+    """Fail closed when any transition-required legacy mutator remains loaded."""
+    states = _inspect_legacy_mutator_states()
+    health = states[LEGACY_HEALTH_LABEL]
+    if health.get("loaded") and health.get("repair_enabled"):
+        raise ConfigError("legacy repair-enabled health label is loaded")
+    loaded = [label for label in LEGACY_SHELL_MUTATOR_LABELS if states[label].get("loaded")]
     if loaded:
         raise ConfigError(f"legacy mutator labels are loaded: {', '.join(loaded)}")
     return states
+
+
+def _snapshot_legacy_mutators() -> dict[str, dict[str, Any]]:
+    """Capture exact loaded legacy states and plist bytes needed for restoration."""
+    return _inspect_legacy_mutator_states()
+
+
+def _legacy_transition_entries(states: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    return [states[label] for label in LEGACY_MUTATOR_LABELS if states.get(label, {}).get("transition")]
+
+
+def _legacy_state_summary(states: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        label_name: {
+            "label": entry["label"],
+            "domain": entry["domain"],
+            "loaded": entry["loaded"],
+            "available": entry.get("available", True),
+            "plist_path": entry.get("plist_path"),
+            "plist_sha256": entry.get("plist_sha256"),
+            "repair_enabled": entry.get("repair_enabled", False),
+            "transition": entry.get("transition", False),
+        }
+        for label_name, entry in states.items()
+    }
+
+
+def _bootout_legacy_mutators(states: dict[str, dict[str, Any]]) -> None:
+    """Boot out transition-required legacy labels and verify they are absent."""
+    if not states:
+        # Empty maps are treated as "no legacy inventory" for disposable fixtures/mocks.
+        return
+    for entry in _legacy_transition_entries(states):
+        label = str(entry["label"])
+        domain = str(entry["domain"])
+        _launchctl_bootout(domain, label, ignore_failure=False)
+        for observed_domain, observed_state in entry.get("domains", {}).items():
+            if observed_state.get("available") is False:
+                continue
+            _verify_launchctl_unloaded(label, observed_domain)
+    # Fresh all-label/both-domain re-probe closes races after the sequenced bootouts.
+    live = _inspect_legacy_mutator_states()
+    residual = [
+        label
+        for label, entry in live.items()
+        if (label in LEGACY_SHELL_MUTATOR_LABELS and entry.get("loaded"))
+        or (label == LEGACY_HEALTH_LABEL and entry.get("loaded") and entry.get("repair_enabled"))
+    ]
+    if residual:
+        raise ConfigError(f"legacy mutator labels remain loaded after bootout: {', '.join(residual)}")
+
+
+def _restore_legacy_mutators(states: dict[str, dict[str, Any]]) -> None:
+    """Restore previously loaded legacy labels from snapped canonical plist bytes."""
+    if not states:
+        return
+    errors: list[str] = []
+    for label in LEGACY_MUTATOR_LABELS:
+        entry = states.get(label) or {}
+        domains = entry.get("domains") or {}
+        try:
+            if not entry.get("transition"):
+                # Leave unrelated / observational state alone; only prove unloaded labels stay unloaded.
+                if entry.get("loaded"):
+                    continue
+                for observed_domain, observed_state in domains.items():
+                    if observed_state.get("available") is False:
+                        continue
+                    _verify_launchctl_unloaded(label, observed_domain)
+                continue
+            domain = str(entry["domain"])
+            plist_path = Path(str(entry["plist_path"]))
+            plist_bytes = entry.get("plist_bytes")
+            if not isinstance(plist_bytes, (bytes, bytearray)):
+                raise ConfigError(f"missing legacy launchd plist snapshot for {label}")
+            _atomic_write(plist_path, bytes(plist_bytes))
+            for observed_domain, observed_state in domains.items():
+                if observed_state.get("available") is False:
+                    continue
+                _launchctl_bootout(observed_domain, label, ignore_failure=True)
+                _verify_launchctl_unloaded(label, observed_domain)
+            subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)], check=True, capture_output=True, text=True)
+            subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{label}"], check=True, capture_output=True, text=True)
+            for observed_domain, observed_state in domains.items():
+                if observed_state.get("available") is False:
+                    continue
+                state = _launchctl_loaded_state(label, observed_domain)
+                if observed_domain == domain:
+                    if not state.get("loaded"):
+                        raise ConfigError(f"legacy launchd service not restored: {domain}/{label}")
+                elif state.get("loaded"):
+                    raise ConfigError(f"legacy launchd service loaded in unexpected domain after restore: {observed_domain}/{label}")
+        except (OSError, subprocess.CalledProcessError, ConfigError, TypeError, ValueError) as exc:
+            errors.append(f"{label}: {exc}")
+    if errors:
+        raise ConfigError("legacy launchd restore failed: " + "; ".join(errors))
+    live = _inspect_legacy_mutator_states()
+    for label, expected in states.items():
+        actual = live.get(label) or {}
+        if expected.get("transition"):
+            if not actual.get("loaded") or actual.get("domain") != expected.get("domain"):
+                raise ConfigError(
+                    f"legacy launchd topology mismatch after restore for {label}: "
+                    f"expected domain={expected.get('domain')} loaded=True, "
+                    f"found domain={actual.get('domain')} loaded={actual.get('loaded')}"
+                )
+            continue
+        if not expected.get("loaded") and actual.get("loaded") and (
+            label in LEGACY_SHELL_MUTATOR_LABELS or actual.get("repair_enabled")
+        ):
+            raise ConfigError(f"legacy launchd service unexpectedly loaded after restore: {label}")
 
 
 def _verify_candidate_copy(source: Path, version: Path) -> None:
@@ -1388,7 +1547,7 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
             subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True, text=True)
         except (OSError, subprocess.CalledProcessError) as exc:
             raise ConfigError(f"Fala plist lint failed: {exc}") from exc
-        _assert_legacy_mutators_unloaded()
+        legacy_states = _snapshot_legacy_mutators()
         label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
         domain_states = _launchctl_domain_states(label)
         domain = _launchctl_intended_domain(label, domain_states)
@@ -1404,6 +1563,7 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
             "candidate_id": old_current_target.name if old_current_target else None,
             "path": str(old_current_target) if old_current_target else None,
             "loaded_state": domain_states,
+            "legacy_loaded_state": {},
             "label": label,
             "domain": domain,
             "installed_plist": {
@@ -1454,7 +1614,8 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
         # Re-probe immediately before current/pointer and launchd cutover so a
         # legacy mutator that loaded during staging aborts before activation.
         try:
-            _assert_legacy_mutators_unloaded()
+            legacy_states = _snapshot_legacy_mutators()
+            previous["legacy_loaded_state"] = _legacy_state_summary(legacy_states)
         except Exception:
             if version_created:
                 for path in sorted(version.rglob("*"), key=lambda item: len(item.parts), reverse=True):
@@ -1471,6 +1632,7 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
             raise
 
         try:
+            _bootout_legacy_mutators(legacy_states)
             _atomic_write(previous_path, _canonical_json(previous))
             tmp_link = root / ".current.next"
             if tmp_link.exists() or tmp_link.is_symlink():
@@ -1489,11 +1651,11 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
         except (OSError, subprocess.CalledProcessError, ConfigError) as exc:
             rollback_errors: list[str] = []
 
-            def restore_step(label: str, operation: Callable[[], None]) -> None:
+            def restore_step(step_label: str, operation: Callable[[], None]) -> None:
                 try:
                     operation()
                 except (OSError, subprocess.CalledProcessError, ConfigError) as restore_exc:
-                    rollback_errors.append(f"{label}: {restore_exc}")
+                    rollback_errors.append(f"{step_label}: {restore_exc}")
 
             for observed_domain, observed_state in domain_states.items():
                 restore_step(
@@ -1522,6 +1684,7 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
                 restore_step("remove previous.json", lambda: previous_path.unlink())
                 restore_step("sync deployment root", lambda: _fsync_directory(root))
             restore_step("restore launchd state", lambda: _launchctl_restore_states(domain_states, target))
+            restore_step("restore legacy launchd state", lambda: _restore_legacy_mutators(legacy_states))
             if rollback_errors:
                 detail = "; ".join(rollback_errors)
                 raise ConfigError(
@@ -1533,4 +1696,5 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
         result["current"] = str(current)
         result["launch_agent"] = str(target)
         result["loaded_state"] = domain_states
+        result["legacy_loaded_state"] = previous["legacy_loaded_state"]
         return result

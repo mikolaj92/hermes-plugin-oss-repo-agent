@@ -130,7 +130,7 @@ def artifact_path(relative):
 def policy_from_toml_text(text):
     root=tomllib.loads(text); automation=root.get("automation") or {}; executor=root.get("executor") or {}
     if not isinstance(automation,dict) or not isinstance(executor,dict): raise ValueError("policy-table-invalid")
-    return {"automerge":automation.get("automerge",root.get("automerge",False)),"require_human_approval":automation.get("require_human_approval",root.get("require_human_approval",True)),"require_checks":automation.get("require_checks",root.get("require_checks",True)),"require_test_evidence":automation.get("require_test_evidence",root.get("require_test_evidence",True)),"executor_enabled":executor.get("enabled",False)}
+    return {"automerge":root.get("automerge",automation.get("automerge",False)),"require_human_approval":root.get("require_human_approval",automation.get("require_human_approval",True)),"require_checks":root.get("require_checks",automation.get("require_checks",True)),"require_test_evidence":root.get("require_test_evidence",automation.get("require_test_evidence",True)),"executor_enabled":executor.get("enabled",False)}
 try:
     if cand.parent != (root/"versions").resolve(): errors.append("current-outside-versions")
     manifest=json.loads((cand/"manifest.json").read_text(encoding="utf-8"))

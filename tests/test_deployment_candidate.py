@@ -500,21 +500,78 @@ class DeploymentCandidateTests(unittest.TestCase):
 
         def fake_state(label: str, domain: str):
             calls.append(domain)
-            return {"label": label, "domain": domain, "loaded": False}
+            return {"label": label, "domain": domain, "loaded": False, "available": True}
 
         with patch.object(self.commands, "_launchctl_loaded_state", side_effect=fake_state):
-            states = self.commands._assert_legacy_mutators_unloaded()
+            states = self.commands._snapshot_legacy_mutators()
         self.assertEqual(set(states), set(self.commands.LEGACY_MUTATOR_LABELS))
         self.assertEqual(calls.count(f"user/{self.commands.os.getuid()}"), len(self.commands.LEGACY_MUTATOR_LABELS))
         self.assertEqual(calls.count(f"gui/{self.commands.os.getuid()}"), len(self.commands.LEGACY_MUTATOR_LABELS))
+        self.assertFalse(any(entry["transition"] for entry in states.values()))
 
     def test_legacy_mutator_loaded_in_both_domains_fails_closed(self):
         def fake_state(label: str, domain: str):
-            return {"label": label, "domain": domain, "loaded": label == self.commands.LEGACY_MUTATOR_LABELS[0]}
+            return {"label": label, "domain": domain, "loaded": label == self.commands.LEGACY_MUTATOR_LABELS[0], "available": True}
 
         with patch.object(self.commands, "_launchctl_loaded_state", side_effect=fake_state):
             with self.assertRaisesRegex(self.commands.ConfigError, "multiple domains"):
-                self.commands._assert_legacy_mutators_unloaded()
+                self.commands._snapshot_legacy_mutators()
+
+    def test_observational_health_is_not_transitioned(self):
+        uid = self.commands.os.getuid()
+        health = self.commands.LEGACY_HEALTH_LABEL
+
+        def fake_state(label: str, domain: str):
+            loaded = label == health and domain == f"user/{uid}"
+            return {"label": label, "domain": domain, "loaded": loaded, "available": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            plist = home / "Library" / "LaunchAgents" / f"{health}.plist"
+            plist.parent.mkdir(parents=True)
+            plist.write_text('<?xml version="1.0"?><plist><dict><key>ProgramArguments</key><array><string>health</string></array></dict></plist>\n', encoding="utf-8")
+            with patch.object(self.commands.Path, "home", return_value=home), patch.object(
+                self.commands, "_launchctl_loaded_state", side_effect=fake_state
+            ):
+                states = self.commands._snapshot_legacy_mutators()
+                self.commands._bootout_legacy_mutators(states)
+            self.assertTrue(states[health]["loaded"])
+            self.assertFalse(states[health]["transition"])
+            self.assertFalse(states[health]["repair_enabled"])
+
+    def test_repair_health_is_transitioned(self):
+        uid = self.commands.os.getuid()
+        health = self.commands.LEGACY_HEALTH_LABEL
+        calls: list[list[str]] = []
+        booted: set[str] = set()
+
+        def fake_state(label: str, domain: str):
+            loaded = label == health and domain == f"user/{uid}" and label not in booted
+            return {"label": label, "domain": domain, "loaded": loaded, "available": True}
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            if argv[:2] == ["launchctl", "bootout"]:
+                booted.add(str(argv[2]).rsplit("/", 1)[-1])
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            plist = home / "Library" / "LaunchAgents" / f"{health}.plist"
+            plist.parent.mkdir(parents=True)
+            plist.write_text(
+                '<?xml version="1.0"?><plist><dict><key>ProgramArguments</key><array><string>health</string><string>--repair</string></array></dict></plist>\n',
+                encoding="utf-8",
+            )
+            with patch.object(self.commands.Path, "home", return_value=home), patch.object(
+                self.commands, "_launchctl_loaded_state", side_effect=fake_state
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run), patch.object(
+                self.commands, "_verify_launchctl_unloaded"
+            ):
+                states = self.commands._snapshot_legacy_mutators()
+                self.assertTrue(states[health]["transition"])
+                self.commands._bootout_legacy_mutators(states)
+            self.assertIn(["launchctl", "bootout", f"user/{uid}/{health}"], calls)
     def test_fala_gui_only_state_selects_gui_domain(self):
         label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
         uid = self.commands.os.getuid()
@@ -611,7 +668,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             root = Path(directory)
             candidate = self._render(root)
             candidate_id = json.loads((candidate / "manifest.json").read_text())["candidate_id"]
-            with patch.object(self.commands, "_assert_legacy_mutators_unloaded", return_value={}), patch.object(
+            with patch.object(self.commands, "_snapshot_legacy_mutators", return_value={}), patch.object(
                 self.commands, "_verify_candidate_copy", side_effect=self.commands.ConfigError("verification failed")
             ):
                 with self.assertRaises(self.commands.ConfigError):
@@ -635,7 +692,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "OK\n", "")
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
-                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+                self.commands, "_snapshot_legacy_mutators", return_value={}
             ), patch.object(self.commands, "_launchctl_domain_states", return_value=states), patch.object(
                 self.commands.subprocess, "run", side_effect=fake_run
             ):
@@ -667,7 +724,7 @@ class DeploymentCandidateTests(unittest.TestCase):
 
             with patch.object(self.commands, "_deployment_lock", side_effect=recording_lock), patch.object(
                 self.commands.Path, "home", return_value=root / "home"
-            ), patch.object(self.commands, "_assert_legacy_mutators_unloaded", return_value={}), patch.object(
+            ), patch.object(self.commands, "_snapshot_legacy_mutators", return_value={}), patch.object(
                 self.commands, "_verify_launchctl_exact"
             ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 result = self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
@@ -690,7 +747,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
-                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+                self.commands, "_snapshot_legacy_mutators", return_value={}
             ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
             bootouts = [i for i, call in enumerate(calls) if call[:2] == ["launchctl", "bootout"]]
@@ -710,7 +767,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "OK\n", "")
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
-                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+                self.commands, "_snapshot_legacy_mutators", return_value={}
             ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
 
@@ -727,7 +784,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             other_config = root / "other.toml"
             second = self._render(root, config_path=other_config, db_path=root / "other.sqlite")
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
-                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+                self.commands, "_snapshot_legacy_mutators", return_value={}
             ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 result = self.commands.deploy_fala(self.cfg, str(second), True, deployment_root=str(root))
 
@@ -748,7 +805,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "OK\n", "")
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
-                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+                self.commands, "_snapshot_legacy_mutators", return_value={}
             ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 result = self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
 
@@ -827,7 +884,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 1, "", "not loaded")
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
-            with patch.object(self.commands, "_assert_legacy_mutators_unloaded", return_value={}), patch.object(
+            with patch.object(self.commands, "_snapshot_legacy_mutators", return_value={}), patch.object(
                 self.commands, "_fsync_tree", side_effect=self.commands.ConfigError("version fsync failed")
             ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 with self.assertRaisesRegex(self.commands.ConfigError, "version fsync failed"):
@@ -858,7 +915,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 1, "", "not loaded")
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
-            with patch.object(self.commands, "_assert_legacy_mutators_unloaded", return_value={}), patch.object(
+            with patch.object(self.commands, "_snapshot_legacy_mutators", return_value={}), patch.object(
                 self.commands, "_fsync_directory", side_effect=fail_version_directory
             ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 with self.assertRaisesRegex(self.commands.ConfigError, "version directory fsync failed"):
@@ -908,7 +965,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 1, "", "not loaded")
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
-            with patch.object(self.commands, "_assert_legacy_mutators_unloaded", return_value={}), patch.object(
+            with patch.object(self.commands, "_snapshot_legacy_mutators", return_value={}), patch.object(
                 self.commands, "_fsync_directory", side_effect=fail_cutover
             ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 with self.assertRaisesRegex(self.commands.ConfigError, "cutover directory fsync failed"):
@@ -927,10 +984,10 @@ class DeploymentCandidateTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
-                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
-            ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(
-                self.commands.subprocess, "run", side_effect=successful_run
-            ):
+                self.commands, "_snapshot_legacy_mutators", return_value={}
+            ), patch.object(self.commands, "_bootout_legacy_mutators"), patch.object(
+                self.commands, "_verify_launchctl_exact"
+            ), patch.object(self.commands.subprocess, "run", side_effect=successful_run):
                 self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
 
             old_current = (root / "current").resolve()
@@ -948,17 +1005,17 @@ class DeploymentCandidateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 1, "", "not loaded")
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
-            def reprobing_assert():
+            def reprobing_snapshot():
                 nonlocal probe_count
                 probe_count += 1
                 if probe_count == 1:
                     return {}
                 raise self.commands.ConfigError(
-                    f"legacy mutator labels are loaded: {self.commands.LEGACY_MUTATOR_LABELS[0]}"
+                    f"legacy mutator labels are loaded: {self.commands.LEGACY_SHELL_MUTATOR_LABELS[0]}"
                 )
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
-                self.commands, "_assert_legacy_mutators_unloaded", side_effect=reprobing_assert
+                self.commands, "_snapshot_legacy_mutators", side_effect=reprobing_snapshot
             ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
                 with self.assertRaisesRegex(self.commands.ConfigError, "legacy mutator labels are loaded"):
                     self.commands.deploy_fala(self.cfg, str(second), True, deployment_root=str(root))
@@ -983,7 +1040,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
-                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+                self.commands, "_snapshot_legacy_mutators", return_value={}
             ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(self.commands.subprocess, "run", side_effect=successful_run):
                 self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
             old_target = (root / "current").resolve()
@@ -998,7 +1055,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
-                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+                self.commands, "_snapshot_legacy_mutators", return_value={}
             ), patch.object(self.commands.subprocess, "run", side_effect=failing_run):
                 with self.assertRaises(self.commands.ConfigError):
                     self.commands.deploy_fala(self.cfg, str(second), True, deployment_root=str(root))
@@ -1014,7 +1071,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
-                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+                self.commands, "_snapshot_legacy_mutators", return_value={}
             ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(
                 self.commands.subprocess, "run", side_effect=successful_run
             ):
@@ -1027,7 +1084,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             second = self._render(root, config_path=root / "other.toml", db_path=root / "other.sqlite")
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
-                self.commands, "_assert_legacy_mutators_unloaded", return_value={}
+                self.commands, "_snapshot_legacy_mutators", return_value={}
             ), patch.object(
                 self.commands, "_verify_launchctl_unloaded", side_effect=self.commands.ConfigError("unload verification uncertain")
             ), patch.object(self.commands.subprocess, "run", side_effect=successful_run):
@@ -1208,6 +1265,249 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertTrue(any(call[:2] == ["launchctl", "bootout"] for call in calls))
             self.assertFalse((root / "current").exists())
             self.assertFalse((home / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist").exists())
+
+    def _legacy_loaded_snapshot(self, home: Path, labels: list[str], *, repair: bool = True) -> dict[str, dict]:
+        uid = self.commands.os.getuid()
+        domain = f"user/{uid}"
+        agents = home / "Library" / "LaunchAgents"
+        agents.mkdir(parents=True, exist_ok=True)
+        states: dict[str, dict] = {}
+        for label in self.commands.LEGACY_MUTATOR_LABELS:
+            loaded = label in labels
+            entry = {
+                "label": label,
+                "domain": domain,
+                "loaded": loaded,
+                "available": True,
+                "domains": {
+                    domain: {"label": label, "domain": domain, "loaded": loaded, "available": True},
+                    f"gui/{uid}": {"label": label, "domain": f"gui/{uid}", "loaded": False, "available": False},
+                },
+                "plist_path": None,
+                "plist_bytes": None,
+                "plist_sha256": None,
+                "repair_enabled": False,
+                "transition": False,
+            }
+            if loaded:
+                plist = agents / f"{label}.plist"
+                body = '<?xml version="1.0"?><plist><dict><key>Label</key><string>%s</string><key>ProgramArguments</key><array><string>%s</string>%s</array></dict></plist>\n' % (
+                    label,
+                    label,
+                    "<string>--repair</string>" if label == self.commands.LEGACY_HEALTH_LABEL and repair else "",
+                )
+                data = body.encode("utf-8")
+                plist.write_bytes(data)
+                entry["plist_path"] = str(plist)
+                entry["plist_bytes"] = data
+                entry["plist_sha256"] = hashlib.sha256(data).hexdigest()
+                if label == self.commands.LEGACY_HEALTH_LABEL:
+                    entry["repair_enabled"] = repair
+                    entry["transition"] = repair
+                else:
+                    entry["transition"] = True
+            states[label] = entry
+        return states
+
+    def test_promotion_boots_out_loaded_legacy_before_fala_bootstrap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            home = root / "home"
+            legacy_label = self.commands.LEGACY_SHELL_MUTATOR_LABELS[0]
+            snapshot = self._legacy_loaded_snapshot(home, [legacy_label])
+            unloaded = self._legacy_loaded_snapshot(home, [])
+            calls: list[list[str]] = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(list(argv))
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                if argv[:2] == ["plutil", "-lint"]:
+                    return subprocess.CompletedProcess(argv, 0, "OK\n", "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch.object(self.commands.Path, "home", return_value=home), patch.object(
+                self.commands, "_snapshot_legacy_mutators", return_value=snapshot
+            ), patch.object(self.commands, "_inspect_legacy_mutator_states", return_value=unloaded), patch.object(
+                self.commands, "_verify_launchctl_exact"
+            ), patch.object(self.commands, "_verify_launchctl_unloaded"), patch.object(
+                self.commands.subprocess, "run", side_effect=fake_run
+            ):
+                result = self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+
+            self.assertTrue(result["promoted"])
+            legacy_bootouts = [
+                i for i, call in enumerate(calls)
+                if call[:2] == ["launchctl", "bootout"] and call[2].endswith(f"/{legacy_label}")
+            ]
+            fala_bootstraps = [
+                i for i, call in enumerate(calls)
+                if call[:2] == ["launchctl", "bootstrap"] and "repo-agent-fala-tick-all" in " ".join(call)
+            ]
+            self.assertTrue(legacy_bootouts)
+            self.assertTrue(fala_bootstraps)
+            self.assertLess(max(legacy_bootouts), min(fala_bootstraps))
+
+    def test_unknown_legacy_domain_aborts_without_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            calls: list[list[str]] = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(list(argv))
+                return subprocess.CompletedProcess(argv, 0, "OK\n", "")
+
+            def failing_snapshot():
+                raise self.commands.ConfigError(
+                    "unable to inspect launchd state for user/501/com.mikolaj92.hermes.repo-issue-intake: mysterious failure"
+                )
+
+            with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
+                self.commands, "_snapshot_legacy_mutators", side_effect=failing_snapshot
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "unable to inspect launchd state"):
+                    self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+
+            self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in calls))
+            self.assertFalse(any(call[:2] == ["launchctl", "bootstrap"] for call in calls))
+            self.assertFalse((root / "current").exists())
+
+    def test_dual_domain_legacy_state_aborts_without_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            calls: list[list[str]] = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(list(argv))
+                return subprocess.CompletedProcess(argv, 0, "OK\n", "")
+
+            def failing_snapshot():
+                raise self.commands.ConfigError(
+                    f"legacy mutator label is loaded in multiple domains: {self.commands.LEGACY_SHELL_MUTATOR_LABELS[0]}"
+                )
+
+            with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
+                self.commands, "_snapshot_legacy_mutators", side_effect=failing_snapshot
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "multiple domains"):
+                    self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+
+            self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in calls))
+            self.assertFalse(any(call[:2] == ["launchctl", "bootstrap"] for call in calls))
+            self.assertFalse((root / "current").exists())
+
+    def test_legacy_bootout_failure_aborts_before_fala_bootstrap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            home = root / "home"
+            legacy_label = self.commands.LEGACY_SHELL_MUTATOR_LABELS[0]
+            snapshot = self._legacy_loaded_snapshot(home, [legacy_label])
+            calls: list[list[str]] = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(list(argv))
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                if argv[:2] == ["plutil", "-lint"]:
+                    return subprocess.CompletedProcess(argv, 0, "OK\n", "")
+                if argv[:2] == ["launchctl", "bootout"] and argv[2].endswith(f"/{legacy_label}"):
+                    return subprocess.CompletedProcess(argv, 1, "", "bootout refused")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch.object(self.commands.Path, "home", return_value=home), patch.object(
+                self.commands, "_snapshot_legacy_mutators", return_value=snapshot
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "unable to bootout launchd service"):
+                    self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+
+            self.assertFalse(
+                any(
+                    call[:2] == ["launchctl", "bootstrap"] and "repo-agent-fala-tick-all" in " ".join(call)
+                    for call in calls
+                )
+            )
+            self.assertFalse((root / "current").exists())
+            self.assertFalse((home / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist").exists())
+
+    def test_fala_bootstrap_failure_restores_legacy_and_previous_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._render(root)
+            home = root / "home"
+
+            def successful_run(argv, **kwargs):
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch.object(self.commands.Path, "home", return_value=home), patch.object(
+                self.commands, "_snapshot_legacy_mutators", return_value={}
+            ), patch.object(self.commands, "_bootout_legacy_mutators"), patch.object(
+                self.commands, "_verify_launchctl_exact"
+            ), patch.object(self.commands.subprocess, "run", side_effect=successful_run):
+                self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
+
+            old_current = (root / "current").resolve()
+            launch_agent = home / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+            old_plist = launch_agent.read_bytes()
+            second = self._render(root, config_path=root / "other.toml", db_path=root / "other.sqlite")
+            legacy_label = self.commands.LEGACY_SHELL_MUTATOR_LABELS[0]
+            snapshot = self._legacy_loaded_snapshot(home, [legacy_label])
+            restored_snapshot = dict(snapshot)
+            restored_snapshot[legacy_label] = dict(snapshot[legacy_label])
+            legacy_plist = Path(snapshot[legacy_label]["plist_path"])
+            expected_legacy_bytes = snapshot[legacy_label]["plist_bytes"]
+            # Simulate a post-bootout filesystem wipe so restore must rewrite bytes.
+            legacy_plist.write_bytes(b"corrupted")
+            calls: list[list[str]] = []
+            restored = False
+
+            def failing_run(argv, **kwargs):
+                nonlocal restored
+                calls.append(list(argv))
+                if argv[:2] == ["launchctl", "print"]:
+                    parts = argv[2].split("/")
+                    domain = f"{parts[0]}/{parts[1]}"
+                    label = parts[2]
+                    if restored and label == legacy_label and domain == snapshot[legacy_label]["domain"]:
+                        return subprocess.CompletedProcess(argv, 0, "state = running\n", "")
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                if argv[:2] == ["plutil", "-lint"]:
+                    return subprocess.CompletedProcess(argv, 0, "OK\n", "")
+                if argv[:2] == ["launchctl", "bootstrap"] and "repo-agent-fala-tick-all" in " ".join(argv):
+                    raise subprocess.CalledProcessError(1, argv)
+                if argv[:2] == ["launchctl", "bootstrap"] and argv[-1] == str(legacy_plist):
+                    restored = True
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            def inspect_after_restore():
+                if restored:
+                    return restored_snapshot
+                return self._legacy_loaded_snapshot(home, [])
+
+            with patch.object(self.commands.Path, "home", return_value=home), patch.object(
+                self.commands, "_snapshot_legacy_mutators", return_value=snapshot
+            ), patch.object(self.commands, "_inspect_legacy_mutator_states", side_effect=inspect_after_restore), patch.object(
+                self.commands, "_verify_launchctl_unloaded"
+            ), patch.object(self.commands.subprocess, "run", side_effect=failing_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "rolled back after launchd failure"):
+                    self.commands.deploy_fala(self.cfg, str(second), True, deployment_root=str(root))
+
+            self.assertEqual((root / "current").resolve(), old_current)
+            self.assertEqual(launch_agent.read_bytes(), old_plist)
+            self.assertEqual(legacy_plist.read_bytes(), expected_legacy_bytes)
+            self.assertTrue(
+                any(
+                    call[:3] == ["launchctl", "bootstrap", snapshot[legacy_label]["domain"]] and call[-1] == str(legacy_plist)
+                    for call in calls
+                )
+            )
+            self.assertTrue(any(call[:2] == ["launchctl", "bootout"] and call[2].endswith(f"/{legacy_label}") for call in calls))
 
     def test_deploy_fala_rejects_symlink_deployment_root(self):
         with tempfile.TemporaryDirectory() as directory:
