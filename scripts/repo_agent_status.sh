@@ -45,6 +45,7 @@ launchctl_query() {
   local output
   if ! output="$(launchctl print "$1" 2>&1)"; then
     [[ "$output" == *"could not find service"* || "$output" == *"No such process"* || "$output" == *"Could not find service"* ]] && return 1
+    [[ "$output" == *"Domain does not support specified action"* ]] && return 3
     printf 'launchctl-error target=%s error=%s\n' "$1" "$output" >&2
     return 2
   fi
@@ -52,18 +53,25 @@ launchctl_query() {
 }
 uid="$(id -u)"
 launchctl_label_query() {
-  local label="$1" domain output found=""
+  local label="$1" domain output found="" available=0 query_status
   for domain in "user/$uid" "gui/$uid"; do
     if output="$(launchctl_query "$domain/$label")"; then
+      available=1
       if [[ -n "$found" ]]; then
         printf 'launchctl-ambiguous label=%s domains=user/%s,gui/%s\n' "$label" "$uid" "$uid" >&2
         return 2
       fi
       found="$output"
     else
-      [[ $? -ne 2 ]] || return 2
+      query_status=$?
+      [[ "$query_status" -eq 1 ]] && available=1
+      [[ "$query_status" -ne 2 ]] || return 2
     fi
   done
+  if [[ -z "$found" && "$available" -eq 0 ]]; then
+    printf 'launchctl-unavailable label=%s\n' "$label" >&2
+    return 2
+  fi
   [[ -n "$found" ]] || return 1
   printf '%s\n' "$found"
 }

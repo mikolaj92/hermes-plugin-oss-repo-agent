@@ -228,15 +228,15 @@ exit 0
         self.assertEqual(completed.returncode, 2)
         self.assertIn("invalid-env", completed.stderr)
 
-    def test_health_rejects_unsupported_launchctl_domain(self):
-        completed = self._run("repo_agent_health.sh", extra={"FAKE_LAUNCHCTL_GUI_AVAILABLE": "0"})
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("launchd-query-failed", completed.stdout)
+    def test_health_ignores_unsupported_secondary_launchctl_domain(self):
+        completed = self._run("repo_agent_health.sh", extra={"FAKE_LAUNCHCTL_GUI_AVAILABLE": "0", "FAKE_LAUNCHCTL_LOADED": "com.mikolaj92.hermes.repo-agent-fala-tick-all,com.mikolaj92.hermes.repo-agent-hermes-update"})
+        self.assertNotIn("launchd-query-failed", completed.stdout)
+        self.assertNotIn("launchctl-domain-unavailable", completed.stdout)
 
-    def test_status_rejects_unsupported_launchctl_domain(self):
-        completed = self._run("repo_agent_status.sh", extra={"FAKE_LAUNCHCTL_GUI_AVAILABLE": "0"})
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("launchctl-error", completed.stderr)
+    def test_status_ignores_unsupported_secondary_launchctl_domain(self):
+        completed = self._run("repo_agent_status.sh", extra={"FAKE_LAUNCHCTL_GUI_AVAILABLE": "0", "FAKE_LAUNCHCTL_LOADED": "com.mikolaj92.hermes.repo-agent-fala-tick-all"})
+        self.assertNotIn("launchctl-error", completed.stderr)
+        self.assertNotIn("launchctl-unavailable", completed.stderr)
 
     def test_health_marks_missing_current_and_db(self):
         completed = self._run("repo_agent_health.sh")

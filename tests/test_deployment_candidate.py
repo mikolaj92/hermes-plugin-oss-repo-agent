@@ -496,13 +496,13 @@ class DeploymentCandidateTests(unittest.TestCase):
             changed = self._render(root, mode="live")
             self.assertNotEqual(changed.name, original.name)
 
-    def test_unsupported_launchctl_domain_fails_closed(self):
+    def test_unsupported_launchctl_domain_is_unavailable(self):
         result = subprocess.CompletedProcess(
             ["launchctl", "print"], 125, "", "Domain does not support specified action\n"
         )
         with patch.object(self.commands.subprocess, "run", return_value=result):
-            with self.assertRaisesRegex(self.commands.ConfigError, "domain does not support"):
-                self.commands._launchctl_loaded_state("label", f"gui/{self.commands.os.getuid()}")
+            state = self.commands._launchctl_loaded_state("label", f"gui/{self.commands.os.getuid()}")
+        self.assertEqual(state, {"label": "label", "domain": f"gui/{self.commands.os.getuid()}", "loaded": False, "available": False})
 
     def test_legacy_mutators_probe_user_and_gui_domains(self):
         calls: list[str] = []
