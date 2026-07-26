@@ -1,0 +1,55 @@
+{
+  "failures": {
+    "ambiguous_repo": {
+      "status": "failed",
+      "stopped_reason": "ambiguous_repository_context",
+      "summary": {
+        "run_status": "failed",
+        "repo": "",
+        "pr_number": null,
+        "action": "skip",
+        "reason": "ambiguous_repository_context",
+        "failed_steps": [],
+        "worked": false
+      }
+    },
+    "missing_repos": {
+      "status": "idle",
+      "stopped_reason": "no_repositories",
+      "summary": {
+        "run_status": "idle",
+        "repo": "",
+        "pr_number": null,
+        "action": "skip",
+        "reason": "no_repositories",
+        "failed_steps": [],
+        "worked": false
+      }
+    },
+    "mismatched_repo_target": {
+      "status": "failed",
+      "stopped_reason": "repository_context_not_found",
+      "summary": {
+        "run_status": "failed",
+        "repo": "o/mismatch",
+        "pr_number": null,
+        "action": "skip",
+        "reason": "repository_context_not_found",
+        "failed_steps": [],
+        "worked": false
+      }
+    },
+    "cross_wired_cleanup_provenance": {
+      "status": "failed",
+      "stopped_reason": "cleanup_provenance_mismatch",
+      "summary": {
+        "run_status": "failed",
+        "reason": "cleanup_provenance_mismatch",
+        "repo": "o/temida",
+        "branch": "ai/fix/2",
+        "failed_steps": [],
+        "worked": false
+      }
+    }
+  }
+}

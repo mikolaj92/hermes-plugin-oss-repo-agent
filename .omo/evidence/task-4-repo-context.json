@@ -1,0 +1,71 @@
+{
+  "triage_tests_run": {
+    "command": "PYTHONPATH=src:. .venv/bin/python -m unittest tests.test_fala_triage_router -v",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "test_comment_handler_noop_when_merge_selected (tests.test_fala_triage_router.BranchDecisionGateTests.test_comment_handler_noop_when_merge_selected) ... ok\ntest_failed_claim_blocks_merge_receipt_and_close (tests.test_fala_triage_router.BranchDecisionGateTests.test_failed_claim_blocks_merge_receipt_and_close) ... ok\ntest_failed_decision_blocks_branch_mutation (tests.test_fala_triage_router.BranchDecisionGateTests.test_failed_decision_blocks_branch_mutation) ... ok\ntest_merge_handlers_noop_when_comment_selected (tests.test_fala_triage_router.BranchDecisionGateTests.test_merge_handlers_noop_when_comment_selected) ... ok\ntest_owner_required_merge_rejects_missing_author (tests.test_fala_triage_router.BranchDecisionGateTests.test_owner_required_merge_rejects_missing_author) ... ok\ntest_repair_handlers_noop_when_merge_selected (tests.test_fala_triage_router.BranchDecisionGateTests.test_repair_handlers_noop_when_merge_selected) ... ok\ntest_live_cleanup_fails_before_host_without_branch_identity (tests.test_fala_triage_router.CleanupRepositoryRoutingTests.test_live_cleanup_fails_before_host_without_branch_identity) ... ok\ntest_live_cleanup_uses_persisted_branch_identity (tests.test_fala_triage_router.CleanupRepositoryRoutingTests.test_live_cleanup_uses_persisted_branch_identity) ... ok\ntest_omitted_cleanup_selector_fails_before_host (tests.test_fala_triage_router.CleanupRepositoryRoutingTests.test_omitted_cleanup_selector_fails_before_host) ... ok\ntest_partial_cleanup_does_not_bypass_fala_after_graph_cancellation (tests.test_fala_triage_router.CleanupRepositoryRoutingTests.test_partial_cleanup_does_not_bypass_fala_after_graph_cancellation) ... ok\ntest_second_repo_context_reaches_cleanup_host (tests.test_fala_triage_router.CleanupRepositoryRoutingTests.test_second_repo_context_reaches_cleanup_host) ... ok\ntest_ambiguous_repo_context_fails_before_host (tests.test_fala_triage_router.TriagePackageFlowTests.test_ambiguous_repo_context_fails_before_host) ... ok\ntest_empty_repo_config_is_idle_without_host (tests.test_fala_triage_router.TriagePackageFlowTests.test_empty_repo_config_is_idle_without_host) ... ok\ntest_failed_process_evidence_is_preserved (tests.test_fala_triage_router.TriagePackageFlowTests.test_failed_process_evidence_is_preserved) ... ok\ntest_second_repo_context_is_selected_and_propagated (tests.test_fala_triage_router.TriagePackageFlowTests.test_second_repo_context_is_selected_and_propagated) ... ok\ntest_selected_merge_action_is_surfaced (tests.test_fala_triage_router.TriagePackageFlowTests.test_selected_merge_action_is_surfaced) ... ok\ntest_single_package_path_invocation (tests.test_fala_triage_router.TriagePackageFlowTests.test_single_package_path_invocation) ... ok\ntest_timed_out_process_keeps_exact_status (tests.test_fala_triage_router.TriagePackageFlowTests.test_timed_out_process_keeps_exact_status) ... ok\n\n----------------------------------------------------------------------\nRan 18 tests in 0.009s\n\nOK\n"
+  },
+  "intake_tests_run": {
+    "command": "PYTHONPATH=src:. .venv/bin/python -m unittest tests.test_fala_intake_flow.TickAllHostPathTests.test_multi_repo_auto_worker_does_not_inject_first_repo_context -v",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "test_multi_repo_auto_worker_does_not_inject_first_repo_context (tests.test_fala_intake_flow.TickAllHostPathTests.test_multi_repo_auto_worker_does_not_inject_first_repo_context) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nOK\n"
+  },
+  "lifecycle": {
+    "triage": {
+      "resolved_repo": "o/temida",
+      "board": "temida-board",
+      "clone_path": "/tmp/temida",
+      "result_summary": {
+        "repo": "o/temida",
+        "action": null,
+        "reason": "no_open_prs",
+        "pr_number": null,
+        "pr": null,
+        "failed_steps": [],
+        "run_status": "idle",
+        "worked": false,
+        "replayed": false
+      }
+    },
+    "cleanup": {
+      "resolved_repo": "o/temida",
+      "board": "temida-board",
+      "clone_path": "/tmp/temida",
+      "result_summary": {
+        "repo": "o/temida",
+        "branch": "ai/fix/2",
+        "closed": null,
+        "safe_to_cleanup": null,
+        "remove_status": null,
+        "delete_status": null,
+        "release_status": null,
+        "failed_steps": [],
+        "worked": false,
+        "run_status": "completed"
+      }
+    },
+    "issue_to_pr": {
+      "resolved_repo": null,
+      "board": "temida-board",
+      "clone_path": "/tmp/temida",
+      "result_summary": {
+        "board": "temida-board",
+        "task_id": "t-42",
+        "load_status": null,
+        "parse_status": null,
+        "pr_status": null,
+        "pr_number": null,
+        "pr_url": null,
+        "worked": false,
+        "outcome": "completed",
+        "failed_steps": [],
+        "run_status": "completed",
+        "repos": [
+          "o/first",
+          "o/temida"
+        ]
+      }
+    }
+  }
+}
