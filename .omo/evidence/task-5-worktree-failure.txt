@@ -1,0 +1,12 @@
+test_dirty_clone_fails_before_branch_mutation (tests.test_worktree_safety.TempGitSafetyTests.test_dirty_clone_fails_before_branch_mutation) ... ok
+test_path_collision_fails_before_git_mutation (tests.test_worktree_safety.TempGitSafetyTests.test_path_collision_fails_before_git_mutation) ... ok
+test_foreign_worktree_fails_closed (tests.test_worktree_safety.TempGitSafetyTests.test_foreign_worktree_fails_closed) ... ok
+test_stale_existing_branch_fails_closed (tests.test_worktree_safety.TempGitSafetyTests.test_stale_existing_branch_fails_closed) ... ok
+test_foreign_branch_is_not_deleted (tests.test_worktree_safety.TempGitSafetyTests.test_foreign_branch_is_not_deleted) ... ok
+test_repair_provenance_missing_or_mismatched_fails_closed (tests.test_worktree_safety.TempGitSafetyTests.test_repair_provenance_missing_or_mismatched_fails_closed) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 1.247s
+
+OK
+Exit Code: 0

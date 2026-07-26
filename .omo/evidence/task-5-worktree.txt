@@ -1,0 +1,9 @@
+test_create_and_cleanup_owned_worktree (tests.test_worktree_safety.TempGitSafetyTests.test_create_and_cleanup_owned_worktree) ... ok
+test_triage_repair_reuses_only_exact_conduction_provenance (tests.test_worktree_safety.TempGitSafetyTests.test_triage_repair_reuses_only_exact_conduction_provenance) ... ok
+test_live_shaped_repair_input_has_complete_provenance (tests.test_worktree_safety.TempGitSafetyTests.test_live_shaped_repair_input_has_complete_provenance) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.812s
+
+OK
+Exit Code: 0
