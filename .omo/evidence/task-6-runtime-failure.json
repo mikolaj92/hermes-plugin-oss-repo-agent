@@ -1,0 +1,38 @@
+{
+  "failure_journal_readback": [
+    {
+      "id": "run-fail:path:step1",
+      "step_id": "step1",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 1,
+      "output": {
+        "ok": true
+      },
+      "error": {}
+    },
+    {
+      "id": "run-fail:path:step2",
+      "step_id": "step2",
+      "status": "failed",
+      "attempt": 1,
+      "max_attempts": 1,
+      "output": {},
+      "error": {
+        "reason": "invalid_provenance",
+        "error": "validation failed"
+      }
+    },
+    {
+      "id": "run-fail:path:step3",
+      "step_id": "step3",
+      "status": "cancelled",
+      "attempt": 0,
+      "max_attempts": 1,
+      "output": {},
+      "error": {
+        "reason": "dead_upstream"
+      }
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "test_suite_status": {
+    "command": "PYTHONPATH=src:. .venv/bin/python -m unittest tests.test_fala_runtime_contract -v",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "test_authorization_bearer_diagnostics_are_redacted (tests.test_fala_runtime_contract.RuntimeFacadeTests.test_authorization_bearer_diagnostics_are_redacted) ... ok\ntest_host_and_journal_disagreement_fails_closed (tests.test_fala_runtime_contract.RuntimeFacadeTests.test_host_and_journal_disagreement_fails_closed) ... ok\ntest_malformed_journal_json_fails_closed (tests.test_fala_runtime_contract.RuntimeFacadeTests.test_malformed_journal_json_fails_closed) ... ok\ntest_matching_replay_metadata_preserves_host_keys (tests.test_fala_runtime_contract.RuntimeFacadeTests.test_matching_replay_metadata_preserves_host_keys) ... ok\ntest_non_object_journal_json_fails_closed (tests.test_fala_runtime_contract.RuntimeFacadeTests.test_non_object_journal_json_fails_closed) ... ok\ntest_normalizes_exact_journal_evidence (tests.test_fala_runtime_contract.RuntimeFacadeTests.test_normalizes_exact_journal_evidence) ... ok\ntest_persists_run_mode_metadata (tests.test_fala_runtime_contract.RuntimeFacadeTests.test_persists_run_mode_metadata) ... ok\ntest_replay_ignores_invocation_metadata_mismatch (tests.test_fala_runtime_contract.RuntimeFacadeTests.test_replay_ignores_invocation_metadata_mismatch) ... ok\ntest_repo_agent_effectors_use_host_python_without_overriding_custom_commands (tests.test_fala_runtime_contract.RuntimeFacadeTests.test_repo_agent_effectors_use_host_python_without_overriding_custom_commands) ... ok\ntest_secret_diagnostics_are_redacted (tests.test_fala_runtime_contract.RuntimeFacadeTests.test_secret_diagnostics_are_redacted) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.015s\n\nOK\n"
+  },
+  "deployment_parity_suite": {
+    "command": "PYTHONPATH=src:. .venv/bin/python -m unittest tests.test_deployment_parity -v",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "test_active_byte_drift_fails_closed (tests.test_deployment_parity.DeploymentParityTests.test_active_byte_drift_fails_closed) ... ok\ntest_active_plist_label_and_arguments_drift_fails_closed (tests.test_deployment_parity.DeploymentParityTests.test_active_plist_label_and_arguments_drift_fails_closed) ... ok\ntest_active_plist_root_ignores_unrelated_launchagents (tests.test_deployment_parity.DeploymentParityTests.test_active_plist_root_ignores_unrelated_launchagents) ... ok\ntest_cli_accepts_optional_roots (tests.test_deployment_parity.DeploymentParityTests.test_cli_accepts_optional_roots) ... ok\ntest_duplicate_template_identity_rejected (tests.test_deployment_parity.DeploymentParityTests.test_duplicate_template_identity_rejected) ... ok\ntest_extra_active_script_fails_closed (tests.test_deployment_parity.DeploymentParityTests.test_extra_active_script_fails_closed) ... ok\ntest_extra_source_script_fails_closed (tests.test_deployment_parity.DeploymentParityTests.test_extra_source_script_fails_closed) ... ok\ntest_fala_template_rejects_mutable_candidate_paths (tests.test_deployment_parity.DeploymentParityTests.test_fala_template_rejects_mutable_candidate_paths) ... ok\ntest_fala_template_requires_absolute_uv_and_canonical_arguments (tests.test_deployment_parity.DeploymentParityTests.test_fala_template_requires_absolute_uv_and_canonical_arguments) ... ok\ntest_fala_template_requires_exactly_one_mode_flag (tests.test_deployment_parity.DeploymentParityTests.test_fala_template_requires_exactly_one_mode_flag) ... ok\ntest_invalid_template_with_active_root_reports_parity_error (tests.test_deployment_parity.DeploymentParityTests.test_invalid_template_with_active_root_reports_parity_error) ... ok\ntest_noncanonical_template_root_rejected (tests.test_deployment_parity.DeploymentParityTests.test_noncanonical_template_root_rejected) ... ok\ntest_rendered_artifact_inventory_is_exact (tests.test_deployment_parity.DeploymentParityTests.test_rendered_artifact_inventory_is_exact) ... ok\ntest_source_and_active_scripts_and_launchd_arguments_match (tests.test_deployment_parity.DeploymentParityTests.test_source_and_active_scripts_and_launchd_arguments_match) ... ok\ntest_validate_fala_candidate_rejects_non_directory_deployment_root (tests.test_deployment_parity.DeploymentParityTests.test_validate_fala_candidate_rejects_non_directory_deployment_root) ... ok\ntest_validate_fala_candidate_rejects_symlink_deployment_root (tests.test_deployment_parity.DeploymentParityTests.test_validate_fala_candidate_rejects_symlink_deployment_root) ... ok\n\n----------------------------------------------------------------------\nRan 16 tests in 0.221s\n\nOK\n"
+  },
+  "happy_journal_readback": [
+    {
+      "id": "run-happy:path:step1",
+      "step_id": "step1",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 1,
+      "output": {
+        "ok": true
+      },
+      "error": {}
+    },
+    {
+      "id": "run-happy:path:step2",
+      "step_id": "step2",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 1,
+      "output": {
+        "ok": true
+      },
+      "error": {}
+    }
+  ]
+}
