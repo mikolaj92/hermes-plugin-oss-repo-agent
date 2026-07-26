@@ -34,5 +34,358 @@
       },
       "error": {}
     }
-  ]
+  ],
+  "empty_auto_worker_test": {
+    "command": "PYTHONPATH=src:. .venv/bin/python -m unittest tests.test_fala_intake_flow.TickAllHostPathTests.test_empty_auto_worker_is_idle_and_not_worked -v",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "test_empty_auto_worker_is_idle_and_not_worked (tests.test_fala_intake_flow.TickAllHostPathTests.test_empty_auto_worker_is_idle_and_not_worked) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nOK\n"
+  },
+  "multi_repo_auto_worker_test": {
+    "command": "PYTHONPATH=src:. .venv/bin/python -m unittest tests.test_fala_intake_flow.TickAllHostPathTests.test_multi_repo_auto_worker_does_not_inject_first_repo_context -v",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "test_multi_repo_auto_worker_does_not_inject_first_repo_context (tests.test_fala_intake_flow.TickAllHostPathTests.test_multi_repo_auto_worker_does_not_inject_first_repo_context) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nOK\n"
+  },
+  "shell_syntax_checks": [
+    {
+      "file": "scripts/repo_agent_status.sh",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "file": "scripts/repo_agent_hermes_update.sh",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "file": "scripts/repo_agent_health.sh",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "file": "scripts/repo_agent_smoke.sh",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "file": "scripts/repo_agent_repos.sh",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "git_shas": {
+    "head": "3ff022beb152c50091a55d588ad26e8a94a895b2",
+    "origin_main": "3ff022beb152c50091a55d588ad26e8a94a895b2",
+    "match": true
+  },
+  "happy_triage_flow_run": {
+    "run_id": "pr-triage-run",
+    "path_id": "pr_triage",
+    "dry_run": true,
+    "ticks": 3,
+    "stopped_reason": "completed",
+    "completed": [
+      {
+        "id": "run:list_ai_fix_prs",
+        "step_id": "list_ai_fix_prs",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "status": "listed",
+          "count": 1,
+          "prs": [
+            {
+              "number": 9,
+              "head": "ai/fix/2"
+            }
+          ]
+        },
+        "error": {}
+      },
+      {
+        "id": "run:decide_triage_action",
+        "step_id": "decide_triage_action",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "status": "decided",
+          "action": "merge"
+        },
+        "error": {}
+      }
+    ],
+    "failed": [],
+    "processes": [
+      {
+        "id": "run:list_ai_fix_prs",
+        "step_id": "list_ai_fix_prs",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "status": "listed",
+          "count": 1,
+          "prs": [
+            {
+              "number": 9,
+              "head": "ai/fix/2"
+            }
+          ]
+        },
+        "error": {}
+      },
+      {
+        "id": "run:decide_triage_action",
+        "step_id": "decide_triage_action",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "status": "decided",
+          "action": "merge"
+        },
+        "error": {}
+      }
+    ],
+    "summary": {
+      "repo": "o/temida",
+      "action": "merge",
+      "reason": null,
+      "pr_number": null,
+      "pr": null,
+      "failed_steps": [],
+      "run_status": "completed",
+      "worked": false,
+      "replayed": false
+    },
+    "fala_version": "0.7.9",
+    "status": "completed",
+    "action": "merge",
+    "follow_up": null
+  },
+  "happy_cleanup_flow_run": {
+    "run_id": "cleanup-20260726T055732Z-defee3a1",
+    "path_id": "cleanup",
+    "dry_run": true,
+    "ticks": 3,
+    "stopped_reason": "completed",
+    "completed": [
+      {
+        "id": "run:parse_issue_from_branch",
+        "step_id": "parse_issue_from_branch",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "ok": true,
+          "status": "parsed",
+          "issue": 2
+        },
+        "error": {}
+      },
+      {
+        "id": "run:check_issue_closed",
+        "step_id": "check_issue_closed",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "ok": true,
+          "status": "checked",
+          "closed": true
+        },
+        "error": {}
+      },
+      {
+        "id": "run:check_no_open_pr",
+        "step_id": "check_no_open_pr",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "ok": true,
+          "status": "checked",
+          "safe_to_cleanup": true
+        },
+        "error": {}
+      }
+    ],
+    "failed": [],
+    "processes": [
+      {
+        "id": "run:parse_issue_from_branch",
+        "step_id": "parse_issue_from_branch",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "ok": true,
+          "status": "parsed",
+          "issue": 2
+        },
+        "error": {}
+      },
+      {
+        "id": "run:check_issue_closed",
+        "step_id": "check_issue_closed",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "ok": true,
+          "status": "checked",
+          "closed": true
+        },
+        "error": {}
+      },
+      {
+        "id": "run:check_no_open_pr",
+        "step_id": "check_no_open_pr",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "ok": true,
+          "status": "checked",
+          "safe_to_cleanup": true
+        },
+        "error": {}
+      }
+    ],
+    "summary": {
+      "repo": "o/temida",
+      "branch": "ai/fix/2",
+      "closed": true,
+      "safe_to_cleanup": true,
+      "remove_status": null,
+      "delete_status": null,
+      "release_status": null,
+      "failed_steps": [],
+      "worked": false,
+      "run_status": "completed"
+    },
+    "fala_version": "0.7.9",
+    "status": "completed",
+    "action": null,
+    "follow_up": null
+  },
+  "happy_issue_to_pr_flow_run": {
+    "run_id": "issue-to-pr-20260726T055732Z-1ea059d8",
+    "path_id": "issue_to_pr",
+    "dry_run": true,
+    "ticks": 3,
+    "stopped_reason": "completed",
+    "completed": [
+      {
+        "id": "run:load_kanban_task",
+        "step_id": "load_kanban_task",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "status": "loaded",
+          "task": {
+            "id": "t-42",
+            "title": "hello"
+          }
+        },
+        "error": {}
+      },
+      {
+        "id": "run:parse_issue_ref",
+        "step_id": "parse_issue_ref",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "status": "parsed",
+          "issue": 42
+        },
+        "error": {}
+      },
+      {
+        "id": "run:write_dispatch_receipt",
+        "step_id": "write_dispatch_receipt",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "status": "written",
+          "ok": true
+        },
+        "error": {}
+      }
+    ],
+    "failed": [],
+    "processes": [
+      {
+        "id": "run:load_kanban_task",
+        "step_id": "load_kanban_task",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "status": "loaded",
+          "task": {
+            "id": "t-42",
+            "title": "hello"
+          }
+        },
+        "error": {}
+      },
+      {
+        "id": "run:parse_issue_ref",
+        "step_id": "parse_issue_ref",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "status": "parsed",
+          "issue": 42
+        },
+        "error": {}
+      },
+      {
+        "id": "run:write_dispatch_receipt",
+        "step_id": "write_dispatch_receipt",
+        "status": "succeeded",
+        "attempt": 1,
+        "max_attempts": 1,
+        "output": {
+          "status": "written",
+          "ok": true
+        },
+        "error": {}
+      }
+    ],
+    "summary": {
+      "board": "temida-board",
+      "task_id": "t-42",
+      "load_status": "loaded",
+      "parse_status": "parsed",
+      "pr_status": null,
+      "pr_number": null,
+      "pr_url": null,
+      "worked": false,
+      "outcome": "completed",
+      "failed_steps": [],
+      "run_status": "completed",
+      "repos": [
+        "o/first",
+        "o/temida"
+      ]
+    },
+    "fala_version": "0.7.9",
+    "status": "completed",
+    "action": null,
+    "follow_up": null
+  }
 }
