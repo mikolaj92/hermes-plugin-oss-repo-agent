@@ -1,249 +1,483 @@
 {
-  "happy_tests": [
+  "command": "PYTHONPATH=src:. .venv/bin/python -m unittest tests.test_receipt_durability -v",
+  "exit_code": 0,
+  "stdout": "",
+  "stderr": "test_cleanup_receipt_directory_fsync_failure_unpublishes_and_allows_retry (tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_directory_fsync_failure_unpublishes_and_allows_retry) ... ok\ntest_cleanup_receipt_failed_rollback_is_never_accepted_without_fsync (tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_failed_rollback_is_never_accepted_without_fsync) ... ok\ntest_cleanup_receipt_fsync_before_publication_fails_closed_and_cleans_temp (tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_fsync_before_publication_fails_closed_and_cleans_temp) ... ok\ntest_cleanup_receipt_is_durable_and_preserves_request_identity (tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_is_durable_and_preserves_request_identity) ... ok\ntest_cleanup_receipt_publish_race_does_not_clobber (tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_publish_race_does_not_clobber) ... ok\ntest_directory_fsync_failure_fails_closed_and_cleans_temp_for_both_writers (tests.test_receipt_durability.ReceiptDurabilityTests.test_directory_fsync_failure_fails_closed_and_cleans_temp_for_both_writers) ... ok\ntest_distinct_ownership_and_output_receipts_correlate_without_identity_missing (tests.test_receipt_durability.ReceiptDurabilityTests.test_distinct_ownership_and_output_receipts_correlate_without_identity_missing) ... ok\ntest_dry_run_remains_planned_without_creating_receipt (tests.test_receipt_durability.ReceiptDurabilityTests.test_dry_run_remains_planned_without_creating_receipt) ... ok\ntest_existing_identical_receipt_is_idempotent_and_conflict_does_not_clobber (tests.test_receipt_durability.ReceiptDurabilityTests.test_existing_identical_receipt_is_idempotent_and_conflict_does_not_clobber) ... ok\ntest_generic_ok_blobs_and_missing_identity_fail_closed (tests.test_receipt_durability.ReceiptDurabilityTests.test_generic_ok_blobs_and_missing_identity_fail_closed) ... ok\ntest_mixed_entity_evidence_fails_closed_without_composing (tests.test_receipt_durability.ReceiptDurabilityTests.test_mixed_entity_evidence_fails_closed_without_composing) ... ok\ntest_no_target_cleanup_fails_closed_after_any_mutation (tests.test_receipt_durability.ReceiptDurabilityTests.test_no_target_cleanup_fails_closed_after_any_mutation) ... ok\ntest_no_target_cleanup_skips_receipt_without_identity (tests.test_receipt_durability.ReceiptDurabilityTests.test_no_target_cleanup_skips_receipt_without_identity) ... ok\ntest_readback_mismatch_and_json_corruption_fail_closed_and_clean_temp (tests.test_receipt_durability.ReceiptDurabilityTests.test_readback_mismatch_and_json_corruption_fail_closed_and_clean_temp) ... ok\ntest_supplied_identifiers_survive_receipt_payload (tests.test_receipt_durability.ReceiptDurabilityTests.test_supplied_identifiers_survive_receipt_payload) ... ok\ntest_symlink_and_hardlink_receipts_fail_closed (tests.test_receipt_durability.ReceiptDurabilityTests.test_symlink_and_hardlink_receipts_fail_closed) ... ok\n\n----------------------------------------------------------------------\nRan 16 tests in 0.017s\n\nOK\n",
+  "lifecycle_sequences": [
     {
-      "command": "PYTHONPATH=src .venv/bin/python -m unittest tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_is_durable_and_preserves_request_identity -v",
-      "exit_code": 0,
-      "stdout": "",
-      "stderr": "test_cleanup_receipt_is_durable_and_preserves_request_identity (tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_is_durable_and_preserves_request_identity) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK\n"
-    },
-    {
-      "command": "PYTHONPATH=src .venv/bin/python -m unittest tests.test_receipt_durability.ReceiptDurabilityTests.test_distinct_ownership_and_output_receipts_correlate_without_identity_missing -v",
-      "exit_code": 0,
-      "stdout": "",
-      "stderr": "test_distinct_ownership_and_output_receipts_correlate_without_identity_missing (tests.test_receipt_durability.ReceiptDurabilityTests.test_distinct_ownership_and_output_receipts_correlate_without_identity_missing) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK\n"
-    }
-  ],
-  "produced_receipts": [
-    {
-      "run_id": "cleanup-run-1",
-      "result": {
-        "status": "written",
-        "ok": true,
-        "mutated": true,
-        "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/cleanup.json",
-        "payload": {
-          "phase": "CLEANUP_TERMINAL",
-          "outcome": "noop",
-          "run_id": "cleanup-run-1",
-          "path_id": "cleanup",
-          "process_id": "cleanup-proc-1",
-          "entity": {
-            "task": "task-7",
-            "repo": "owner/repo",
+      "sequence": 1,
+      "dispatch": {
+        "result": {
+          "status": "written",
+          "ok": true,
+          "mutated": true,
+          "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf29n6z6w/dispatch-1.json",
+          "payload": {
+            "phase": "DISPATCHED",
             "issue": 7,
-            "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/dispatch-7.json",
-            "branch": "ai/fix/7-cleanup",
-            "clone_path": "/tmp/clone-owner-repo",
-            "worktree_path": "/tmp/worktree-owner-repo"
+            "run_id": "",
+            "path_id": "",
+            "process_id": "",
+            "candidate": "",
+            "config": {},
+            "entity": {
+              "repo": null,
+              "issue": 7,
+              "branch": null,
+              "pr_number": null
+            },
+            "timestamp": "unspecified"
+          }
+        },
+        "payload": {
+          "candidate": "",
+          "config": {},
+          "entity": {
+            "branch": null,
+            "issue": 7,
+            "pr_number": null,
+            "repo": null
           },
-          "steps": {
-            "parse_issue_from_branch": {
-              "status": "parsed",
-              "mutated": false,
-              "reason": null,
-              "failure": null
+          "issue": 7,
+          "path_id": "",
+          "phase": "DISPATCHED",
+          "process_id": "",
+          "run_id": "",
+          "timestamp": "unspecified"
+        }
+      },
+      "merge": {
+        "result": {
+          "status": "written",
+          "ok": true,
+          "mutated": true,
+          "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf29n6z6w/merge-1.json",
+          "payload": {
+            "repo": "owner/repo",
+            "pr": 7,
+            "phase": "MERGED",
+            "headSha": "head-7",
+            "mergeSha": "merge-7",
+            "mergedAt": "2026-01-01T00:00:00Z",
+            "verified_provenance": {
+              "source": "github_pr_readback",
+              "state": "MERGED",
+              "repo": "owner/repo",
+              "number": 7,
+              "head_oid": "head-7",
+              "head_ref": "ai/fix/7",
+              "merge_oid": "merge-7",
+              "merged_at": "2026-01-01T00:00:00Z"
             },
-            "check_issue_closed": {
-              "status": "checked",
-              "mutated": false,
-              "reason": null,
-              "failure": null
+            "run_id": "",
+            "path_id": "",
+            "process_id": "",
+            "candidate": "",
+            "config": {},
+            "entity": {
+              "repo": "owner/repo",
+              "pr_number": 7,
+              "head_sha": "head-7",
+              "merge_sha": "merge-7",
+              "merged_at": "2026-01-01T00:00:00Z"
             },
-            "check_no_open_pr": {
-              "status": "checked",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            },
-            "remove_worktree": {
-              "status": "already_absent",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            },
-            "delete_local_fix_branch": {
-              "status": "already_absent",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            },
-            "release_active_issue_claim": {
-              "status": "already_absent",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            }
+            "timestamp": "unspecified"
+          },
+          "verified_provenance": {
+            "source": "github_pr_readback",
+            "state": "MERGED",
+            "repo": "owner/repo",
+            "number": 7,
+            "head_oid": "head-7",
+            "head_ref": "ai/fix/7",
+            "merge_oid": "merge-7",
+            "merged_at": "2026-01-01T00:00:00Z"
+          }
+        },
+        "payload": {
+          "candidate": "",
+          "config": {},
+          "entity": {
+            "head_sha": "head-7",
+            "merge_sha": "merge-7",
+            "merged_at": "2026-01-01T00:00:00Z",
+            "pr_number": 7,
+            "repo": "owner/repo"
+          },
+          "headSha": "head-7",
+          "mergeSha": "merge-7",
+          "mergedAt": "2026-01-01T00:00:00Z",
+          "path_id": "",
+          "phase": "MERGED",
+          "pr": 7,
+          "process_id": "",
+          "repo": "owner/repo",
+          "run_id": "",
+          "timestamp": "unspecified",
+          "verified_provenance": {
+            "head_oid": "head-7",
+            "head_ref": "ai/fix/7",
+            "merge_oid": "merge-7",
+            "merged_at": "2026-01-01T00:00:00Z",
+            "number": 7,
+            "repo": "owner/repo",
+            "source": "github_pr_readback",
+            "state": "MERGED"
           }
         }
       },
-      "payload": {
-        "entity": {
-          "branch": "ai/fix/7-cleanup",
-          "clone_path": "/tmp/clone-owner-repo",
-          "issue": 7,
-          "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/dispatch-7.json",
-          "repo": "owner/repo",
-          "task": "task-7",
-          "worktree_path": "/tmp/worktree-owner-repo"
+      "cleanup": {
+        "result": {
+          "status": "written",
+          "ok": true,
+          "mutated": true,
+          "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf29n6z6w/cleanup-1.json",
+          "payload": {
+            "phase": "CLEANUP_TERMINAL",
+            "outcome": "noop",
+            "run_id": "cleanup-run",
+            "path_id": "cleanup",
+            "process_id": "cleanup-process",
+            "entity": {
+              "task": "task-7",
+              "repo": "owner/repo",
+              "issue": 7,
+              "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf29n6z6w/dispatch-7.json",
+              "branch": "ai/fix/7-cleanup",
+              "clone_path": "/tmp/clone-owner-repo",
+              "worktree_path": "/tmp/worktree-owner-repo"
+            },
+            "steps": {
+              "parse_issue_from_branch": {
+                "status": "parsed",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              },
+              "check_issue_closed": {
+                "status": "checked",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              },
+              "check_no_open_pr": {
+                "status": "checked",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              },
+              "remove_worktree": {
+                "status": "already_absent",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              },
+              "delete_local_fix_branch": {
+                "status": "already_absent",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              },
+              "release_active_issue_claim": {
+                "status": "already_absent",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              }
+            }
+          }
         },
-        "outcome": "noop",
-        "path_id": "cleanup",
-        "phase": "CLEANUP_TERMINAL",
-        "process_id": "cleanup-proc-1",
-        "run_id": "cleanup-run-1",
-        "steps": {
-          "check_issue_closed": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "checked"
+        "payload": {
+          "entity": {
+            "branch": "ai/fix/7-cleanup",
+            "clone_path": "/tmp/clone-owner-repo",
+            "issue": 7,
+            "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf29n6z6w/dispatch-7.json",
+            "repo": "owner/repo",
+            "task": "task-7",
+            "worktree_path": "/tmp/worktree-owner-repo"
           },
-          "check_no_open_pr": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "checked"
-          },
-          "delete_local_fix_branch": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "already_absent"
-          },
-          "parse_issue_from_branch": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "parsed"
-          },
-          "release_active_issue_claim": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "already_absent"
-          },
-          "remove_worktree": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "already_absent"
+          "outcome": "noop",
+          "path_id": "cleanup",
+          "phase": "CLEANUP_TERMINAL",
+          "process_id": "cleanup-process",
+          "run_id": "cleanup-run",
+          "steps": {
+            "check_issue_closed": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "checked"
+            },
+            "check_no_open_pr": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "checked"
+            },
+            "delete_local_fix_branch": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "already_absent"
+            },
+            "parse_issue_from_branch": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "parsed"
+            },
+            "release_active_issue_claim": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "already_absent"
+            },
+            "remove_worktree": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "already_absent"
+            }
           }
         }
       }
     },
     {
-      "run_id": "cleanup-run-2",
-      "result": {
-        "status": "written",
-        "ok": true,
-        "mutated": true,
-        "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/cleanup-2.json",
-        "payload": {
-          "phase": "CLEANUP_TERMINAL",
-          "outcome": "noop",
-          "run_id": "cleanup-run-2",
-          "path_id": "cleanup",
-          "process_id": "cleanup-proc-2",
-          "entity": {
-            "task": "task-7",
-            "repo": "owner/repo",
+      "sequence": 2,
+      "dispatch": {
+        "result": {
+          "status": "written",
+          "ok": true,
+          "mutated": true,
+          "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf29n6z6w/dispatch-2.json",
+          "payload": {
+            "phase": "DISPATCHED",
             "issue": 7,
-            "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/dispatch-7.json",
-            "branch": "ai/fix/7-cleanup",
-            "clone_path": "/tmp/clone-owner-repo",
-            "worktree_path": "/tmp/worktree-owner-repo"
+            "run_id": "",
+            "path_id": "",
+            "process_id": "",
+            "candidate": "",
+            "config": {},
+            "entity": {
+              "repo": null,
+              "issue": 7,
+              "branch": null,
+              "pr_number": null
+            },
+            "timestamp": "unspecified"
+          }
+        },
+        "payload": {
+          "candidate": "",
+          "config": {},
+          "entity": {
+            "branch": null,
+            "issue": 7,
+            "pr_number": null,
+            "repo": null
           },
-          "steps": {
-            "parse_issue_from_branch": {
-              "status": "parsed",
-              "mutated": false,
-              "reason": null,
-              "failure": null
+          "issue": 7,
+          "path_id": "",
+          "phase": "DISPATCHED",
+          "process_id": "",
+          "run_id": "",
+          "timestamp": "unspecified"
+        }
+      },
+      "merge": {
+        "result": {
+          "status": "written",
+          "ok": true,
+          "mutated": true,
+          "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf29n6z6w/merge-2.json",
+          "payload": {
+            "repo": "owner/repo",
+            "pr": 7,
+            "phase": "MERGED",
+            "headSha": "head-7",
+            "mergeSha": "merge-7",
+            "mergedAt": "2026-01-01T00:00:00Z",
+            "verified_provenance": {
+              "source": "github_pr_readback",
+              "state": "MERGED",
+              "repo": "owner/repo",
+              "number": 7,
+              "head_oid": "head-7",
+              "head_ref": "ai/fix/7",
+              "merge_oid": "merge-7",
+              "merged_at": "2026-01-01T00:00:00Z"
             },
-            "check_issue_closed": {
-              "status": "checked",
-              "mutated": false,
-              "reason": null,
-              "failure": null
+            "run_id": "",
+            "path_id": "",
+            "process_id": "",
+            "candidate": "",
+            "config": {},
+            "entity": {
+              "repo": "owner/repo",
+              "pr_number": 7,
+              "head_sha": "head-7",
+              "merge_sha": "merge-7",
+              "merged_at": "2026-01-01T00:00:00Z"
             },
-            "check_no_open_pr": {
-              "status": "checked",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            },
-            "remove_worktree": {
-              "status": "already_absent",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            },
-            "delete_local_fix_branch": {
-              "status": "already_absent",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            },
-            "release_active_issue_claim": {
-              "status": "already_absent",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            }
+            "timestamp": "unspecified"
+          },
+          "verified_provenance": {
+            "source": "github_pr_readback",
+            "state": "MERGED",
+            "repo": "owner/repo",
+            "number": 7,
+            "head_oid": "head-7",
+            "head_ref": "ai/fix/7",
+            "merge_oid": "merge-7",
+            "merged_at": "2026-01-01T00:00:00Z"
+          }
+        },
+        "payload": {
+          "candidate": "",
+          "config": {},
+          "entity": {
+            "head_sha": "head-7",
+            "merge_sha": "merge-7",
+            "merged_at": "2026-01-01T00:00:00Z",
+            "pr_number": 7,
+            "repo": "owner/repo"
+          },
+          "headSha": "head-7",
+          "mergeSha": "merge-7",
+          "mergedAt": "2026-01-01T00:00:00Z",
+          "path_id": "",
+          "phase": "MERGED",
+          "pr": 7,
+          "process_id": "",
+          "repo": "owner/repo",
+          "run_id": "",
+          "timestamp": "unspecified",
+          "verified_provenance": {
+            "head_oid": "head-7",
+            "head_ref": "ai/fix/7",
+            "merge_oid": "merge-7",
+            "merged_at": "2026-01-01T00:00:00Z",
+            "number": 7,
+            "repo": "owner/repo",
+            "source": "github_pr_readback",
+            "state": "MERGED"
           }
         }
       },
-      "payload": {
-        "entity": {
-          "branch": "ai/fix/7-cleanup",
-          "clone_path": "/tmp/clone-owner-repo",
-          "issue": 7,
-          "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/dispatch-7.json",
-          "repo": "owner/repo",
-          "task": "task-7",
-          "worktree_path": "/tmp/worktree-owner-repo"
+      "cleanup": {
+        "result": {
+          "status": "written",
+          "ok": true,
+          "mutated": true,
+          "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf29n6z6w/cleanup-2.json",
+          "payload": {
+            "phase": "CLEANUP_TERMINAL",
+            "outcome": "noop",
+            "run_id": "cleanup-run",
+            "path_id": "cleanup",
+            "process_id": "cleanup-process",
+            "entity": {
+              "task": "task-7",
+              "repo": "owner/repo",
+              "issue": 7,
+              "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf29n6z6w/dispatch-7.json",
+              "branch": "ai/fix/7-cleanup",
+              "clone_path": "/tmp/clone-owner-repo",
+              "worktree_path": "/tmp/worktree-owner-repo"
+            },
+            "steps": {
+              "parse_issue_from_branch": {
+                "status": "parsed",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              },
+              "check_issue_closed": {
+                "status": "checked",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              },
+              "check_no_open_pr": {
+                "status": "checked",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              },
+              "remove_worktree": {
+                "status": "already_absent",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              },
+              "delete_local_fix_branch": {
+                "status": "already_absent",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              },
+              "release_active_issue_claim": {
+                "status": "already_absent",
+                "mutated": false,
+                "reason": null,
+                "failure": null
+              }
+            }
+          }
         },
-        "outcome": "noop",
-        "path_id": "cleanup",
-        "phase": "CLEANUP_TERMINAL",
-        "process_id": "cleanup-proc-2",
-        "run_id": "cleanup-run-2",
-        "steps": {
-          "check_issue_closed": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "checked"
+        "payload": {
+          "entity": {
+            "branch": "ai/fix/7-cleanup",
+            "clone_path": "/tmp/clone-owner-repo",
+            "issue": 7,
+            "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf29n6z6w/dispatch-7.json",
+            "repo": "owner/repo",
+            "task": "task-7",
+            "worktree_path": "/tmp/worktree-owner-repo"
           },
-          "check_no_open_pr": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "checked"
-          },
-          "delete_local_fix_branch": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "already_absent"
-          },
-          "parse_issue_from_branch": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "parsed"
-          },
-          "release_active_issue_claim": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "already_absent"
-          },
-          "remove_worktree": {
-            "failure": null,
-            "mutated": false,
-            "reason": null,
-            "status": "already_absent"
+          "outcome": "noop",
+          "path_id": "cleanup",
+          "phase": "CLEANUP_TERMINAL",
+          "process_id": "cleanup-process",
+          "run_id": "cleanup-run",
+          "steps": {
+            "check_issue_closed": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "checked"
+            },
+            "check_no_open_pr": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "checked"
+            },
+            "delete_local_fix_branch": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "already_absent"
+            },
+            "parse_issue_from_branch": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "parsed"
+            },
+            "release_active_issue_claim": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "already_absent"
+            },
+            "remove_worktree": {
+              "failure": null,
+              "mutated": false,
+              "reason": null,
+              "status": "already_absent"
+            }
           }
         }
       }

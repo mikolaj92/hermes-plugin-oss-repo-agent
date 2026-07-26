@@ -1,27 +1,7 @@
 {
-  "failure_tests": [
+  "failure_sequences": [
     {
-      "command": "PYTHONPATH=src .venv/bin/python -m unittest tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_directory_fsync_failure_unpublishes_and_allows_retry -v",
-      "exit_code": 0,
-      "stdout": "",
-      "stderr": "test_cleanup_receipt_directory_fsync_failure_unpublishes_and_allows_retry (tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_directory_fsync_failure_unpublishes_and_allows_retry) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK\n"
-    },
-    {
-      "command": "PYTHONPATH=src .venv/bin/python -m unittest tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_failed_rollback_is_never_accepted_without_fsync -v",
-      "exit_code": 0,
-      "stdout": "",
-      "stderr": "test_cleanup_receipt_failed_rollback_is_never_accepted_without_fsync (tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_failed_rollback_is_never_accepted_without_fsync) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK\n"
-    },
-    {
-      "command": "PYTHONPATH=src .venv/bin/python -m unittest tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_fsync_before_publication_fails_closed_and_cleans_temp -v",
-      "exit_code": 0,
-      "stdout": "",
-      "stderr": "test_cleanup_receipt_fsync_before_publication_fails_closed_and_cleans_temp (tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_fsync_before_publication_fails_closed_and_cleans_temp) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK\n"
-    }
-  ],
-  "produced_failure_attempts": [
-    {
-      "type": "conflict",
+      "case": "conflict",
       "result": {
         "status": "failed",
         "ok": false,
@@ -29,72 +9,39 @@
         "reason": "receipt_conflict",
         "failure_class": "terminal",
         "retry_safe": false,
-        "error": "receipt is not a private single-link regular file",
-        "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmp9ebnjcm4/cleanup.json"
+        "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpczarc6lp/dispatch-conflict.json"
+      },
+      "file_exists": true,
+      "file_content": {
+        "candidate": "",
+        "config": {},
+        "entity": {
+          "branch": null,
+          "issue": 7,
+          "pr_number": null,
+          "repo": null
+        },
+        "issue": 7,
+        "path_id": "",
+        "phase": "DISPATCHED",
+        "process_id": "",
+        "run_id": "",
+        "timestamp": "unspecified"
       }
     },
     {
-      "type": "mismatch_or_cancelled_dependency",
+      "case": "fsync_failure",
       "result": {
-        "status": "written",
-        "ok": true,
+        "status": "failed",
+        "ok": false,
         "mutated": true,
-        "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmp9ebnjcm4/fail_mismatch.json",
-        "payload": {
-          "phase": "CLEANUP_TERMINAL",
-          "outcome": "failure",
-          "run_id": "cleanup-run-mismatch",
-          "path_id": "cleanup",
-          "process_id": "cleanup-proc-mismatch",
-          "entity": {
-            "task": "task-7",
-            "repo": "owner/repo",
-            "issue": 7,
-            "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/dispatch-7.json",
-            "branch": "ai/fix/7-cleanup",
-            "clone_path": "/tmp/clone-owner-repo",
-            "worktree_path": "/tmp/worktree-owner-repo"
-          },
-          "steps": {
-            "parse_issue_from_branch": {
-              "status": "parsed",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            },
-            "check_issue_closed": {
-              "status": "failed",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            },
-            "check_no_open_pr": {
-              "status": "checked",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            },
-            "remove_worktree": {
-              "status": "already_absent",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            },
-            "delete_local_fix_branch": {
-              "status": "already_absent",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            },
-            "release_active_issue_claim": {
-              "status": "already_absent",
-              "mutated": false,
-              "reason": null,
-              "failure": null
-            }
-          }
-        }
-      }
+        "reason": "receipt_write_failed",
+        "failure_class": "terminal",
+        "retry_safe": false,
+        "error": "directory fsync failed; receipt rollback durability unconfirmed: ",
+        "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpczarc6lp/dispatch-fsync.json"
+      },
+      "file_exists": false
     }
   ]
 }
