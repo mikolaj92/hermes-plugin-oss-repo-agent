@@ -18,15 +18,15 @@ FALA_PINNED_COMMIT = "69bc2ec9d4cdf61773114847c0c582fb2652296d"
 # Every shell entrypoint copied to ~/.hermes/scripts is part of the deployment
 # contract. Keeping this list explicit makes a missing deployment fail closed.
 DEPLOYED_SCRIPTS = (
-    "repo_agent_health.sh",
-    "repo_agent_status.sh",
-    "repo_agent_hermes_update.sh",
-    "repo_agent_repos.sh",
-    "repo_agent_smoke.sh",
+    "lokay_health.sh",
+    "lokay_status.sh",
+    "lokay_hermes_update.sh",
+    "lokay_repos.sh",
+    "lokay_smoke.sh",
 )
 TEMPLATE_ENTRYPOINTS = {
-    "oss-repo-agent-health.plist.template": "repo_agent_health.sh",
-    "oss-repo-agent-hermes-update.plist.template": "repo_agent_hermes_update.sh",
+    "lokay-health.plist.template": "lokay_health.sh",
+    "lokay-hermes-update.plist.template": "lokay_hermes_update.sh",
 }
 
 
@@ -261,8 +261,8 @@ def _validate_active_plist_roots(
     errors: list[str],
 ) -> None:
     expected = {name: contracts[name] for template in templates if (name := _plist_name(template)) in contracts}
-    fala_name = "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
-    fala_template_name = "oss-repo-agent-fala-tick-all.plist"
+    fala_name = "com.mikolaj92.lokay.fala-tick-all.plist"
+    fala_template_name = "lokay-fala-tick-all.plist"
     for root_input in roots:
         root = root_input.expanduser()
         if root.is_symlink():
@@ -333,7 +333,7 @@ def validate(
     seen_labels: dict[str, Path] = {}
     seen_executors: dict[tuple[str, ...], Path] = {}
     seen_names: set[str] = set()
-    expected_names = set(TEMPLATE_ENTRYPOINTS) | {"oss-repo-agent-fala-tick-all.plist.template"}
+    expected_names = set(TEMPLATE_ENTRYPOINTS) | {"lokay-fala-tick-all.plist.template"}
     for template in templates:
         if template.name in seen_names:
             errors.append(f"duplicate launchd template entry: {template.name}")
@@ -376,10 +376,10 @@ def validate(
                 errors.append(f"launchd entrypoint mismatch: {template} points to {Path(executable).name}; expected {expected_name}")
             elif Path(executable).expanduser().resolve() != expected:
                 errors.append(f"launchd ProgramArguments path mismatch: {template} points to {executable}; expected {expected}")
-        elif template.name != "oss-repo-agent-fala-tick-all.plist.template":
+        elif template.name != "lokay-fala-tick-all.plist.template":
             errors.append(f"launchd executable is not a deployed script: {template}")
-        if template.name == "oss-repo-agent-fala-tick-all.plist.template":
-            if label != "com.mikolaj92.hermes.repo-agent-fala-tick-all":
+        if template.name == "lokay-fala-tick-all.plist.template":
+            if label != "com.mikolaj92.lokay.fala-tick-all":
                 errors.append(f"Fala launchd Label mismatch: {template}")
             if document.get("StartInterval") != 600 or document.get("ProcessType") != "Background" or document.get("RunAtLoad") is not False:
                 errors.append(f"Fala launchd schedule/process contract invalid: {template}")
@@ -470,7 +470,7 @@ def _validate_args(
     if not args:
         errors.append(f"Fala {label} ProgramArguments must not be empty")
         return None
-    expected = [args[0], "run", "--frozen", "--project", str(project), "repo-agent-tick-all", "--config", str(config), "--db", db_path, f"--{mode}", "--json"]
+    expected = [args[0], "run", "--frozen", "--project", str(project), "lokay-tick-all", "--config", str(config), "--db", db_path, f"--{mode}", "--json"]
     if len(args) != len(expected) or args != expected:
         errors.append(f"Fala {label} ProgramArguments do not match canonical contract")
     if args.count("--project") != 1 or args.count("--config") != 1 or args.count("--db") != 1:
@@ -533,6 +533,7 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         "config_artifact_path",
         "revision_path",
         "policy",
+        "repos",
     }
     manifest_required = stable_keys | {"candidate_id", "identity", "created_at", "program_arguments", "artifacts", "runtime_identity"}
     if manifest.get("schema") != 1:
@@ -566,10 +567,20 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         value = identity.get(key)
         if not isinstance(value, str) or not value or not Path(value).is_absolute() or "\x00" in value:
             errors.append(f"Fala {key} must be an absolute path")
+    repos_inventory = identity.get("repos")
+    if not isinstance(repos_inventory, list) or any(
+        not isinstance(r, dict)
+        or set(r) != {"repo", "board", "clone_path"}
+        or not isinstance(r["repo"], str)
+        or not isinstance(r["board"], str)
+        or not (isinstance(r["clone_path"], str) or r["clone_path"] is None)
+        for r in repos_inventory
+    ):
+        errors.append("Fala repos inventory is missing or invalid")
     paths: dict[str, Path | None] = {}
     for key in ("metadata_path", "lock_path", "config_artifact_path", "revision_path"):
         paths[key] = _relative_candidate_path(candidate, identity.get(key), key, errors)
-    plist_relative = "launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+    plist_relative = "launchd/com.mikolaj92.lokay.fala-tick-all.plist"
     plist_path = _relative_candidate_path(candidate, plist_relative, "plist path", errors)
     project = candidate / "source" / "project"
     config = candidate / "source" / "config.toml"
@@ -598,7 +609,7 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
     if not isinstance(artifacts, dict) or not artifacts or any(not isinstance(k, str) or not k for k in artifacts):
         errors.append("Fala manifest artifacts must be a non-empty object")
         artifacts = artifacts if isinstance(artifacts, dict) else {}
-    plist_relative = "launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+    plist_relative = "launchd/com.mikolaj92.lokay.fala-tick-all.plist"
     required_paths = {plist_relative, *(str(identity.get(key) or "") for key in ("metadata_path", "lock_path", "config_artifact_path", "revision_path"))}
     actual_artifacts = {str(path.relative_to(candidate)) for path in candidate.rglob("*") if path.is_file() and path != manifest_path}
     if set(artifacts) != actual_artifacts:
@@ -756,14 +767,14 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
             errors.append(f"bundled Fala metadata is not pinned to {FALA_TAG}")
         if 'fala = { path = "Fala", editable = true }' not in pyproject or "../Fala" in pyproject or 'editable = "Fala"' not in lock_text or "../Fala" in lock_text:
             errors.append("bundled Fala dependency path or lock provenance is invalid")
-    for required_relative in ("fala-package.toml", "src/repo_agent/effector.py"):
+    for required_relative in ("fala-package.toml", "src/lokay/effector.py"):
         required_file = project / required_relative
         if not _regular_file(required_file):
             errors.append(f"required Fala package artifact is missing: {required_relative}")
 
     try:
         document = plistlib.loads(plist_path.read_bytes() if plist_path else b"")
-        if not isinstance(document, dict) or document.get("Label") != "com.mikolaj92.hermes.repo-agent-fala-tick-all":
+        if not isinstance(document, dict) or document.get("Label") != "com.mikolaj92.lokay.fala-tick-all":
             errors.append("Fala plist Label is invalid")
         arguments = document.get("ProgramArguments") if isinstance(document, dict) else None
         if arguments != runtime_args:
@@ -800,7 +811,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--active-root", type=Path, required=True)
     parser.add_argument("--template-root", type=Path, action="append", required=True)
     parser.add_argument("--manifest", type=Path, help="write verified hashes as JSON")
-    # Optional roots accepted by repo_agent_health.sh for forward compatibility.
+    # Optional roots accepted by lokay_health.sh for forward compatibility.
     parser.add_argument("--active-plist-root", type=Path, default=None)
     parser.add_argument("--render-root", type=Path, default=None)
     parser.add_argument("--active-config-root", type=Path, default=None)

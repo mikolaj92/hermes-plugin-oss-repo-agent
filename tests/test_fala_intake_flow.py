@@ -9,11 +9,11 @@ from unittest import mock
 
 import fala
 
-from repo_agent.config import AgentConfig, RepoEntry
-from repo_agent.flows.intake import run_intake_flow
-from repo_agent.steps.claim import claim_github_issue
-from repo_agent.steps.kanban_intake import ensure_kanban_intake
-from repo_agent.steps.poll import poll_eligible_issues
+from lokay.config import AgentConfig, RepoEntry
+from lokay.flows.intake import run_intake_flow
+from lokay.steps.claim import claim_github_issue
+from lokay.steps.kanban_intake import ensure_kanban_intake
+from lokay.steps.poll import poll_eligible_issues
 
 
 class _Req(dict):
@@ -47,7 +47,7 @@ class PollStepTests(unittest.TestCase):
             },
         ]
 
-        with mock.patch("repo_agent.steps.poll.gh_json", return_value=issues):
+        with mock.patch("lokay.steps.poll.gh_json", return_value=issues):
             result = poll_eligible_issues(
                 _Req(
                     {
@@ -127,7 +127,7 @@ class ClaimKanbanDryRunTests(unittest.TestCase):
 class TickAllHostPathTests(unittest.TestCase):
     @staticmethod
     def _host(*, failed: bool = False):
-        from repo_agent.flows.runtime import HostPathRunResult, JournalProcess
+        from lokay.flows.runtime import HostPathRunResult, JournalProcess
 
         run_status = "failed" if failed else "completed"
         process_status = "failed" if failed else "succeeded"
@@ -149,14 +149,14 @@ class TickAllHostPathTests(unittest.TestCase):
         )
 
     def test_run_all_makes_one_auto_worker_host_call(self) -> None:
-        from repo_agent.tick_all import run_all
+        from lokay.tick_all import run_all
 
         cfg = AgentConfig(
             mode="dry-run",
             repos=(RepoEntry(repo="o/r", board="board-r", clone_path="/tmp/o-r"),),
         )
         runner = mock.AsyncMock(return_value=self._host())
-        with mock.patch("repo_agent.tick_all.run_package_path_async", new=runner):
+        with mock.patch("lokay.tick_all.run_package_path_async", new=runner):
             result = asyncio.run(
                 run_all(db_path=Path("/tmp/auto-worker.sqlite"), config=cfg, dry_run=True, limit=7)
             )
@@ -177,7 +177,7 @@ class TickAllHostPathTests(unittest.TestCase):
         self.assertEqual(result["processes"][0]["id"], "intake_poll")
         self.assertEqual(result["processes"][0]["output"]["status"], "planned")
     def test_multi_repo_auto_worker_does_not_inject_first_repo_context(self) -> None:
-        from repo_agent.tick_all import run_all
+        from lokay.tick_all import run_all
 
         cfg = AgentConfig(
             mode="dry-run",
@@ -187,7 +187,7 @@ class TickAllHostPathTests(unittest.TestCase):
             ),
         )
         runner = mock.AsyncMock(return_value=self._host())
-        with mock.patch("repo_agent.tick_all.run_package_path_async", new=runner):
+        with mock.patch("lokay.tick_all.run_package_path_async", new=runner):
             asyncio.run(run_all(db_path=Path("/tmp/auto-worker.sqlite"), config=cfg, dry_run=True, limit=7))
         inputs = runner.await_args.kwargs["effector_inputs"]
         for value in inputs.values():
@@ -198,8 +198,8 @@ class TickAllHostPathTests(unittest.TestCase):
 
 
     def test_empty_auto_worker_is_idle_and_not_worked(self) -> None:
-        from repo_agent.flows.runtime import HostPathRunResult, JournalProcess
-        from repo_agent.tick_all import run_all
+        from lokay.flows.runtime import HostPathRunResult, JournalProcess
+        from lokay.tick_all import run_all
 
         host = HostPathRunResult(
             run_id="auto-worker-idle",
@@ -219,7 +219,7 @@ class TickAllHostPathTests(unittest.TestCase):
             ),
         )
         runner = mock.AsyncMock(return_value=host)
-        with mock.patch("repo_agent.tick_all.run_package_path_async", new=runner):
+        with mock.patch("lokay.tick_all.run_package_path_async", new=runner):
             result = asyncio.run(
                 run_all(db_path=Path("/tmp/auto-worker-idle.sqlite"), config=AgentConfig(mode="dry-run"), dry_run=True)
             )
@@ -230,11 +230,11 @@ class TickAllHostPathTests(unittest.TestCase):
         self.assertFalse(result["any_failed"])
 
     def test_run_all_preserves_failed_process_evidence_and_nonzero_marker(self) -> None:
-        from repo_agent.tick_all import run_all
+        from lokay.tick_all import run_all
 
         cfg = AgentConfig(mode="dry-run")
         runner = mock.AsyncMock(return_value=self._host(failed=True))
-        with mock.patch("repo_agent.tick_all.run_package_path_async", new=runner):
+        with mock.patch("lokay.tick_all.run_package_path_async", new=runner):
             result = asyncio.run(
                 run_all(db_path=Path("/tmp/auto-worker-failed.sqlite"), config=cfg, dry_run=True)
             )

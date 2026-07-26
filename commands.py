@@ -26,17 +26,17 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
     import tomli as tomllib  # type: ignore
 from . import github_cli, kanban
-from .config import ConfigError, OssRepoAgentConfig, default_config_path, load_config
+from .config import ConfigError, LokayConfig, default_config_path, load_config
 from .executor import CommandSpec, Runner, planned_command
 
-INTAKE_ASSIGNEE = "repo-agent-intake"
+INTAKE_ASSIGNEE = "lokay-intake"
 FALA_PINNED_COMMIT = "69bc2ec9d4cdf61773114847c0c582fb2652296d"
 FALA_PINNED_VERSION = "0.7.9"
 
 
 def setup_parser(parser: ArgumentParser) -> None:
     parser.add_argument("--config", default=None)
-    subparsers = parser.add_subparsers(dest="oss_repo_agent_command")
+    subparsers = parser.add_subparsers(dest="lokay_command")
     subparsers.required = True
     init = subparsers.add_parser("init")
     init.add_argument("--repo", default="owner/example-repo")
@@ -89,7 +89,7 @@ def handle_cli(args: Namespace) -> int:
 
 
 def run_from_args(args: Namespace, runner: Runner | None = None) -> dict[str, Any]:
-    command = getattr(args, "oss_repo_agent_command")
+    command = getattr(args, "lokay_command")
     if command == "init":
         return init_project(
             getattr(args, "config", None),
@@ -156,9 +156,9 @@ def init_project(config_path: str | None, repo: str, board: str, clone_root: str
         "config": config_arg,
         "created": [config_arg],
         "next_commands": [
-            f"hermes oss-repo-agent --config {config_arg} validate",
-            f"hermes oss-repo-agent --config {config_arg} intake --limit 3",
-            f"hermes oss-repo-agent --config {config_arg} dispatch --max 2",
+            f"hermes lokay --config {config_arg} validate",
+            f"hermes lokay --config {config_arg} intake --limit 3",
+            f"hermes lokay --config {config_arg} dispatch --max 2",
         ],
         "safety": safety_guards(),
     }
@@ -210,7 +210,7 @@ def safety_guards() -> list[str]:
     ]
 
 
-def validate(cfg: OssRepoAgentConfig) -> dict[str, Any]:
+def validate(cfg: LokayConfig) -> dict[str, Any]:
     return {
         "ok": True,
         "mode": cfg.mode,
@@ -223,15 +223,15 @@ def validate(cfg: OssRepoAgentConfig) -> dict[str, Any]:
             "executor_enabled": cfg.executor.enabled,
         },
         "skills": [
-            "oss-repo-agent:repo-gh-cli-policy",
-            "oss-repo-agent:repo-audit-finding-format",
-            "oss-repo-agent:repo-fix-issue-pr",
-            "oss-repo-agent:repo-review-agent-pr",
+            "lokay:repo-gh-cli-policy",
+            "lokay:repo-audit-finding-format",
+            "lokay:repo-fix-issue-pr",
+            "lokay:repo-review-agent-pr",
         ],
     }
 
 
-def bootstrap(cfg: OssRepoAgentConfig, apply: bool) -> dict[str, Any]:
+def bootstrap(cfg: LokayConfig, apply: bool) -> dict[str, Any]:
     live = cfg.effective_live(apply)
     return {
         "ok": True,
@@ -245,7 +245,7 @@ def _issue_labels(issue: dict[str, Any]) -> set[str]:
     return {str(label.get("name", "")) for label in issue.get("labels", []) if isinstance(label, dict)}
 
 
-def _eligible_issue(issue: dict[str, Any], cfg: OssRepoAgentConfig) -> bool:
+def _eligible_issue(issue: dict[str, Any], cfg: LokayConfig) -> bool:
     labels = _issue_labels(issue)
     return not labels.intersection({cfg.labels.in_progress, cfg.labels.blocked, cfg.labels.pr_opened})
 
@@ -292,7 +292,7 @@ def _kanban_list_spec(board: str) -> CommandSpec:
     return CommandSpec(("hermes", "kanban", "--board", board, "list", "--json", "--sort", "created-desc"))
 
 
-def intake(cfg: OssRepoAgentConfig, live_flag: bool, limit: int, runner: Runner) -> dict[str, Any]:
+def intake(cfg: LokayConfig, live_flag: bool, limit: int, runner: Runner) -> dict[str, Any]:
     live = cfg.effective_live(live_flag)
     list_commands = [github_cli.issue_list(repo.repo, limit) for repo in cfg.repos]
     list_results: list[Any] = []
@@ -419,7 +419,7 @@ def intake(cfg: OssRepoAgentConfig, live_flag: bool, limit: int, runner: Runner)
     }
 
 
-def dispatch(cfg: OssRepoAgentConfig, live_flag: bool, run_executor: bool, max_tasks: int) -> dict[str, Any]:
+def dispatch(cfg: LokayConfig, live_flag: bool, run_executor: bool, max_tasks: int) -> dict[str, Any]:
     live = cfg.effective_live(live_flag)
     executor_runs = cfg.executor_runs(live_flag, run_executor)
     return {
@@ -452,7 +452,7 @@ def _claimable_pr(repo_name: str, pr: dict[str, Any], branch_prefix: str) -> boo
     return str(author.get("login") or "").lower() == owner.lower() and head.startswith(f"{branch_prefix.rstrip('/')}/")
 
 
-def pr_triage(cfg: OssRepoAgentConfig, live_flag: bool, comment: bool, runner: Runner) -> dict[str, Any]:
+def pr_triage(cfg: LokayConfig, live_flag: bool, comment: bool, runner: Runner) -> dict[str, Any]:
     live = cfg.effective_live(live_flag)
     list_commands = [github_cli.pr_list(repo.repo) for repo in cfg.repos]
     list_results: list[Any] = []
@@ -642,7 +642,7 @@ def _deployment_lock(root: Path):
 
 
 def _render_fala_plist(*, project_root: Path, config_path: Path, db_path: Path, mode: str, home: Path, uv_bin: str, log_dir: Path) -> bytes:
-    template = project_root / "templates" / "launchd" / "oss-repo-agent-fala-tick-all.plist.template"
+    template = project_root / "templates" / "launchd" / "lokay-fala-tick-all.plist.template"
     if not template.is_file():
         raise ConfigError(f"Fala launchd template not found: {template}")
     values = {
@@ -665,11 +665,11 @@ def _render_fala_plist(*, project_root: Path, config_path: Path, db_path: Path, 
     except plistlib.InvalidFileException as exc:
         raise ConfigError(f"invalid Fala launchd template: {exc}") from exc
     arguments = document.get("ProgramArguments")
-    required = [str(uv_bin), "run", "--frozen", "--project", str(project_root), "repo-agent-tick-all", "--config", str(config_path), "--db", str(db_path), f"--{mode}", "--json"]
+    required = [str(uv_bin), "run", "--frozen", "--project", str(project_root), "lokay-tick-all", "--config", str(config_path), "--db", str(db_path), f"--{mode}", "--json"]
     if arguments != required:
         raise ConfigError("Fala ProgramArguments do not match immutable candidate contract")
     if (
-        document.get("Label") != "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        document.get("Label") != "com.mikolaj92.lokay.fala-tick-all"
         or document.get("StartInterval") != 600
         or document.get("ProcessType") != "Background"
         or document.get("RunAtLoad") is not False
@@ -843,7 +843,7 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
 
 
 def render_launchd(
-    cfg: OssRepoAgentConfig,
+    cfg: LokayConfig,
     output: str,
     *,
     fala_db: str | None = None,
@@ -867,7 +867,7 @@ def render_launchd(
         except ValueError as exc:
             raise ConfigError(f"candidate output must be inside deployment candidates root: {candidates_root}") from exc
     config = Path(config_path).expanduser().absolute() if config_path else default_config_path().expanduser().absolute()
-    db = Path(fala_db).expanduser().absolute() if fala_db else Path.home() / ".hermes" / "oss-repo-agent" / "fala" / "state.sqlite"
+    db = Path(fala_db).expanduser().absolute() if fala_db else Path.home() / ".hermes" / "lokay" / "fala" / "state.sqlite"
     lock = project_root / "uv.lock"
     if not config.is_file() or not config.stat().st_size:
         raise ConfigError(f"Fala candidate source config is missing or empty: {config}")
@@ -941,6 +941,7 @@ def render_launchd(
         "config_artifact_path": "source/config.toml",
         "revision_path": "source/revision.txt",
         "policy": policy,
+        "repos": sorted([{"repo": entry.repo, "board": entry.board, "clone_path": entry.clone_path} for entry in cfg.repos], key=lambda x: x["repo"]),
     }
     candidate_id = _sha256_bytes(_canonical_json(identity))
     if candidate.name != candidate_id:
@@ -1052,7 +1053,7 @@ def render_launchd(
         revision_data = (revision + "\n").encode()
         document = plistlib.loads(plist_data)
         runtime_identity = _runtime_identity(document, plist_data)
-        _atomic_write(candidate / "launchd" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist", plist_data)
+        _atomic_write(candidate / "launchd" / "com.mikolaj92.lokay.fala-tick-all.plist", plist_data)
         _atomic_write(candidate / "source" / "metadata.json", source_data)
         _atomic_write(candidate / "source" / "revision.txt", revision_data)
         artifacts: dict[str, dict[str, Any]] = {}
@@ -1201,12 +1202,14 @@ LEGACY_MUTATOR_LABELS = (
     "com.mikolaj92.hermes.repo-pr-triage",
     "com.mikolaj92.hermes.repo-agent-cleanup",
     "com.mikolaj92.hermes.repo-agent-health",
+    "com.mikolaj92.hermes.repo-agent-fala-tick-all",
 )
 LEGACY_SHELL_MUTATOR_LABELS = (
     "com.mikolaj92.hermes.repo-issue-intake",
     "com.mikolaj92.hermes.repo-issue-to-pr-dispatch",
     "com.mikolaj92.hermes.repo-pr-triage",
     "com.mikolaj92.hermes.repo-agent-cleanup",
+    "com.mikolaj92.hermes.repo-agent-fala-tick-all",
 )
 LEGACY_HEALTH_LABEL = "com.mikolaj92.hermes.repo-agent-health"
 
@@ -1409,7 +1412,7 @@ def _verify_candidate_copy(source: Path, version: Path) -> None:
 
 def _promote_version_runtime(version: Path, deployment_root: Path, candidate_id: str) -> None:
     """Rebind runtime paths to this immutable version before installation."""
-    plist_path = version / "launchd" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+    plist_path = version / "launchd" / "com.mikolaj92.lokay.fala-tick-all.plist"
     manifest_path = version / "manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1461,7 +1464,7 @@ def _promote_version_runtime(version: Path, deployment_root: Path, candidate_id:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         raise ConfigError("Fala version manifest artifacts are missing")
-    plist_relative = "launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+    plist_relative = "launchd/com.mikolaj92.lokay.fala-tick-all.plist"
     artifacts[plist_relative] = {"sha256": _sha256_bytes(plist_data), "bytes": len(plist_data)}
     manifest["program_arguments"] = args
     manifest["runtime_identity"] = _runtime_identity(document, plist_data)
@@ -1481,7 +1484,7 @@ def _promote_version_runtime(version: Path, deployment_root: Path, candidate_id:
 
 def _verify_version_reuse(candidate: Path, version: Path) -> None:
     """Compare copied immutable bytes while allowing promotion-bound runtime metadata."""
-    excluded = {Path("manifest.json"), Path("launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist")}
+    excluded = {Path("manifest.json"), Path("launchd/com.mikolaj92.lokay.fala-tick-all.plist")}
     candidate_files = {path.relative_to(candidate) for path in candidate.rglob("*") if path.is_file()} - excluded
     version_files = {path.relative_to(version) for path in version.rglob("*") if path.is_file()} - excluded
     if candidate_files != version_files:
@@ -1501,7 +1504,7 @@ def _assert_deployment_root_inventory(root: Path) -> None:
         raise ConfigError(f"unexpected deployment root symlinks: {', '.join(unexpected)}")
 
 
-def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *, deployment_root: str | None = None) -> dict[str, Any]:
+def deploy_fala(cfg: LokayConfig, candidate_value: str, promote: bool, *, deployment_root: str | None = None) -> dict[str, Any]:
     candidate_arg = Path(candidate_value).expanduser()
     root = _candidate_root(candidate_arg, deployment_root)
     candidate = (candidate_arg if candidate_arg.is_absolute() else root / "candidates" / candidate_arg).absolute()
@@ -1542,13 +1545,13 @@ def deploy_fala(cfg: OssRepoAgentConfig, candidate_value: str, promote: bool, *,
                 raise ConfigError("deployment current manifest candidate_id mismatch")
             # Historical deployments may predate stricter provenance gates. Keep
             # the exact target for rollback without blocking a validated candidate.
-        plist = candidate / "launchd" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+        plist = candidate / "launchd" / "com.mikolaj92.lokay.fala-tick-all.plist"
         try:
             subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True, text=True)
         except (OSError, subprocess.CalledProcessError) as exc:
             raise ConfigError(f"Fala plist lint failed: {exc}") from exc
         legacy_states = _snapshot_legacy_mutators()
-        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        label = "com.mikolaj92.lokay.fala-tick-all"
         domain_states = _launchctl_domain_states(label)
         domain = _launchctl_intended_domain(label, domain_states)
         launch_agents = Path.home() / "Library" / "LaunchAgents"

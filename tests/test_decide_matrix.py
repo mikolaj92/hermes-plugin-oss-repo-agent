@@ -11,7 +11,7 @@ import json
 import unittest
 from unittest import mock
 
-from repo_agent.steps import issue_direction, triage
+from lokay.steps import issue_direction, triage
 
 
 def req(input_data=None, config=None):
@@ -93,7 +93,7 @@ class IssueDecideMatrixTests(unittest.TestCase):
                         title="Add a marketing landing page",
                         body="CSS polish only",
                     ),
-                    "repo_goal": "automate GitHub issue to PR merge lifecycle for hermes repo-agent",
+                    "repo_goal": "automate GitHub issue to PR merge lifecycle for hermes lokay",
                 }
             )
         )
@@ -106,9 +106,9 @@ class IssueDecideMatrixTests(unittest.TestCase):
                 {
                     "selected": self._selected(
                         title="Issue triage should comment on out-of-direction work",
-                        body="Hermes repo-agent PR merge lifecycle",
+                        body="Hermes lokay PR merge lifecycle",
                     ),
-                    "repo_goal": "automate GitHub issue PR merge lifecycle for hermes repo-agent",
+                    "repo_goal": "automate GitHub issue PR merge lifecycle for hermes lokay",
                 }
             )
         )
@@ -392,7 +392,7 @@ class PrDecideMatrixTests(unittest.TestCase):
             captured.append(list(cmd))
             return SimpleNamespace(stdout=json.dumps(gh_pr), stderr="", returncode=0)
 
-        with mock.patch("repo_agent.steps.triage.run_cmd", side_effect=fake_run):
+        with mock.patch("lokay.steps.triage.run_cmd", side_effect=fake_run):
             loaded = triage.load_pr_fields(
                 req({"repo": "owner/repo", "number": 8})
             )

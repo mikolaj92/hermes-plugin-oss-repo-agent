@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from repo_agent.steps import cleanup, issue_to_pr, triage
+from lokay.steps import cleanup, issue_to_pr, triage
 
 
 def request(data: dict) -> dict:
@@ -49,7 +49,7 @@ class ReceiptDurabilityTests(unittest.TestCase):
 
     def _merge(self, path: Path, payload: dict) -> dict:
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps(MERGE_VIEW), stderr="", returncode=0),
         ):
             return triage.write_merge_receipt(
@@ -65,8 +65,8 @@ class ReceiptDurabilityTests(unittest.TestCase):
 
     def test_directory_fsync_failure_fails_closed_and_cleans_temp_for_both_writers(self) -> None:
         writers = (
-            ("dispatch", self._dispatch, {"phase": "DISPATCHED", "issue": 1}, "repo_agent.steps.issue_to_pr.os.fsync"),
-            ("merge", self._merge, {"repo": "owner/repo", "pr": 7, "phase": "MERGED"}, "repo_agent.steps.triage.os.fsync"),
+            ("dispatch", self._dispatch, {"phase": "DISPATCHED", "issue": 1}, "lokay.steps.issue_to_pr.os.fsync"),
+            ("merge", self._merge, {"repo": "owner/repo", "pr": 7, "phase": "MERGED"}, "lokay.steps.triage.os.fsync"),
         )
         for name, writer, payload, fsync_path in writers:
             with self.subTest(writer=name), tempfile.TemporaryDirectory() as tmp:
@@ -333,7 +333,7 @@ class ReceiptDurabilityTests(unittest.TestCase):
     def test_cleanup_receipt_directory_fsync_failure_unpublishes_and_allows_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cleanup.json"
-            with mock.patch("repo_agent.steps.cleanup.os.fsync", side_effect=[None, OSError("directory fsync failed"), None]):
+            with mock.patch("lokay.steps.cleanup.os.fsync", side_effect=[None, OSError("directory fsync failed"), None]):
                 result = self._cleanup(path)
             self.assertFalse(result["ok"])
             self.assertEqual(result["reason"], "receipt_write_failed")
@@ -354,15 +354,15 @@ class ReceiptDurabilityTests(unittest.TestCase):
                 real_unlink(target)
 
             with (
-                mock.patch("repo_agent.steps.cleanup.os.fsync", side_effect=[None, OSError("directory fsync failed"), OSError("rollback fsync failed")]),
-                mock.patch("repo_agent.steps.cleanup.os.unlink", side_effect=fail_published_unlink),
+                mock.patch("lokay.steps.cleanup.os.fsync", side_effect=[None, OSError("directory fsync failed"), OSError("rollback fsync failed")]),
+                mock.patch("lokay.steps.cleanup.os.unlink", side_effect=fail_published_unlink),
             ):
                 result = self._cleanup(path)
             self.assertFalse(result["ok"])
             self.assertEqual(result["reason"], "receipt_write_failed")
             self.assertTrue(path.is_file())
 
-            with mock.patch("repo_agent.steps.cleanup.os.fsync", side_effect=OSError("durability still unconfirmed")):
+            with mock.patch("lokay.steps.cleanup.os.fsync", side_effect=OSError("durability still unconfirmed")):
                 retry = self._cleanup(path)
             self.assertFalse(retry["ok"])
             self.assertEqual(retry["reason"], "receipt_durability_unconfirmed")
@@ -370,7 +370,7 @@ class ReceiptDurabilityTests(unittest.TestCase):
     def test_cleanup_receipt_fsync_before_publication_fails_closed_and_cleans_temp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cleanup.json"
-            with mock.patch("repo_agent.steps.cleanup.os.fsync", side_effect=OSError("fsync failed")):
+            with mock.patch("lokay.steps.cleanup.os.fsync", side_effect=OSError("fsync failed")):
                 result = self._cleanup(path)
             self.assertFalse(result["ok"])
             self.assertEqual(result["reason"], "receipt_write_failed")
@@ -389,7 +389,7 @@ class ReceiptDurabilityTests(unittest.TestCase):
                 destination.write_text(competitor_payload)
                 raise FileExistsError
 
-            with mock.patch("repo_agent.steps.cleanup.os.link", side_effect=publish_competitor):
+            with mock.patch("lokay.steps.cleanup.os.link", side_effect=publish_competitor):
                 result = self._cleanup(path, process_id="loser")
             self.assertFalse(result["ok"])
             self.assertEqual(result["reason"], "receipt_conflict")

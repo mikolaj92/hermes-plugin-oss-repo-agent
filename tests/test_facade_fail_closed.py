@@ -19,12 +19,12 @@ def load_plugin():
         parent.__path__ = []
         sys.modules["hermes_plugins"] = parent
     spec = importlib.util.spec_from_file_location(
-        "hermes_plugins.oss_repo_agent",
+        "hermes_plugins.lokay",
         ROOT / "__init__.py",
         submodule_search_locations=[str(ROOT)],
     )
     module = importlib.util.module_from_spec(spec)
-    sys.modules["hermes_plugins.oss_repo_agent"] = module
+    sys.modules["hermes_plugins.lokay"] = module
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
@@ -58,7 +58,7 @@ class FacadeFailClosedTests(unittest.TestCase):
         cls.commands = load_plugin().commands
 
     def config(self, *, assignee=None):
-        return self.commands.OssRepoAgentConfig.from_mapping(
+        return self.commands.LokayConfig.from_mapping(
             {
                 "mode": "live",
                 "github": {"assignee": assignee} if assignee else {},

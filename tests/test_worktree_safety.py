@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from repo_agent.steps import cleanup, issue_to_pr
+from lokay.steps import cleanup, issue_to_pr
 
 
 def run_git(cwd: Path, *args: str) -> str:
@@ -105,7 +105,7 @@ class TempGitSafetyTests(unittest.TestCase):
     def test_stale_existing_branch_fails_closed(self) -> None:
         run_git(self.clone, "branch", self.branch, "origin/main")
         for key, value in (("task", "task-7"), ("issue", "7"), ("receipt", self.identity["receipt_path"]), ("repo", "owner/repo")):
-            run_git(self.clone, "config", f"branch.{self.branch}.repo-agent-{key}", value)
+            run_git(self.clone, "config", f"branch.{self.branch}.lokay-{key}", value)
         (self.seed / "README").write_text("two\n")
         run_git(self.seed, "add", "README")
         run_git(self.seed, "commit", "-m", "two")

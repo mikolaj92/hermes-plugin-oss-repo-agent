@@ -26,13 +26,13 @@ def load_plugin():
         parent.__path__ = []
         sys.modules["hermes_plugins"] = parent
     spec = importlib.util.spec_from_file_location(
-        "hermes_plugins.oss_repo_agent",
+        "hermes_plugins.lokay",
         ROOT / "__init__.py",
         submodule_search_locations=[str(ROOT)],
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    sys.modules["hermes_plugins.oss_repo_agent"] = module
+    sys.modules["hermes_plugins.lokay"] = module
     spec.loader.exec_module(module)
     return module
 
@@ -41,7 +41,7 @@ class DeploymentCandidateTests(unittest.TestCase):
     def setUp(self):
         self.module = load_plugin()
         self.commands = self.module.commands
-        self.cfg = self.commands.OssRepoAgentConfig.from_mapping({"repos": []})
+        self.cfg = self.commands.LokayConfig.from_mapping({"repos": []})
 
     def _fala_git_clean(self):
         project_root = ROOT.resolve()
@@ -111,13 +111,14 @@ class DeploymentCandidateTests(unittest.TestCase):
                 "require_test_evidence": True,
                 "executor_enabled": autonomous,
             },
+            "repos": [],
         }
         candidate_id = hashlib.sha256((json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
         candidate = root / "candidates" / candidate_id
         real_which = self.commands.shutil.which
         def fake_which(command, **kwargs):
             return "/usr/bin/uv" if command == "uv" else real_which(command, **kwargs)
-        cfg = self.commands.OssRepoAgentConfig.from_mapping(
+        cfg = self.commands.LokayConfig.from_mapping(
             {
                 "mode": mode,
                 "automation": {
@@ -184,7 +185,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertTrue(fala_src.is_dir())
             self.assertTrue(any(fala_src.rglob("*.py")))
             self.assertTrue((project / "fala-package.toml").is_file())
-            self.assertTrue((project / "src" / "repo_agent" / "effector.py").is_file())
+            self.assertTrue((project / "src" / "lokay" / "effector.py").is_file())
             self.assertFalse((project / "fala" / "packages" / "issue_intake.yaml").exists())
     def test_metadata_lock_hash_matches_bundled_lock_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -582,7 +583,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 self.commands._bootout_legacy_mutators(states)
             self.assertIn(["launchctl", "bootout", f"user/{uid}/{health}"], calls)
     def test_fala_gui_only_state_selects_gui_domain(self):
-        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        label = "com.mikolaj92.lokay.fala-tick-all"
         uid = self.commands.os.getuid()
         def fake_state(observed_label, domain):
             return {"label": observed_label, "domain": domain, "loaded": domain == f"gui/{uid}", "available": True}
@@ -591,7 +592,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(self.commands._launchctl_intended_domain(label, states), f"gui/{uid}")
 
     def test_fala_user_only_state_selects_user_domain(self):
-        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        label = "com.mikolaj92.lokay.fala-tick-all"
         uid = self.commands.os.getuid()
         def fake_state(observed_label, domain):
             return {"label": observed_label, "domain": domain, "loaded": domain == f"user/{uid}", "available": True}
@@ -600,7 +601,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(self.commands._launchctl_intended_domain(label, states), f"user/{uid}")
 
     def test_fala_unavailable_user_domain_selects_and_verifies_gui(self):
-        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        label = "com.mikolaj92.lokay.fala-tick-all"
         uid = self.commands.os.getuid()
         states = {
             f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False, "available": False},
@@ -611,7 +612,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.commands._verify_launchctl_exact(label, f"gui/{uid}")
 
     def test_fala_unavailable_intended_domain_fails_closed(self):
-        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        label = "com.mikolaj92.lokay.fala-tick-all"
         uid = self.commands.os.getuid()
         states = {
             f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False, "available": False},
@@ -622,7 +623,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 self.commands._verify_launchctl_exact(label, f"user/{uid}")
 
     def test_fala_duplicate_domains_fail_closed(self):
-        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        label = "com.mikolaj92.lokay.fala-tick-all"
         uid = self.commands.os.getuid()
         states = {
             f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": True},
@@ -632,7 +633,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.commands._launchctl_intended_domain(label, states)
 
     def test_fala_cutover_bootstraps_only_intended_domain(self):
-        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        label = "com.mikolaj92.lokay.fala-tick-all"
         uid = self.commands.os.getuid()
         states = {
             f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False},
@@ -655,7 +656,7 @@ class DeploymentCandidateTests(unittest.TestCase):
         self.assertIn(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], calls)
         self.assertNotIn(["launchctl", "bootstrap", f"user/{uid}", str(plist)], calls)
     def test_fala_gui_domain_state_restores_on_rollback(self):
-        label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+        label = "com.mikolaj92.lokay.fala-tick-all"
         uid = self.commands.os.getuid()
         states = {
             f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False},
@@ -689,7 +690,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             root = Path(directory)
             candidate = self._render(root)
             uid = self.commands.os.getuid()
-            label = "com.mikolaj92.hermes.repo-agent-fala-tick-all"
+            label = "com.mikolaj92.lokay.fala-tick-all"
             states = {
                 f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": True, "available": True},
                 f"gui/{uid}": {"label": label, "domain": f"gui/{uid}", "loaded": False, "available": False},
@@ -820,7 +821,7 @@ class DeploymentCandidateTests(unittest.TestCase):
 
             candidate_id = result["candidate_id"]
             version = root / "versions" / candidate_id
-            installed = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+            installed = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist"
             document = plistlib.loads(installed.read_bytes())
             arguments = document["ProgramArguments"]
             environment = document["EnvironmentVariables"]
@@ -878,7 +879,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(Path(version_manifest["runtime_identity"]["standard_out_path"]).parent, expected_log_dir)
             self.assertEqual(Path(version_manifest["runtime_identity"]["standard_error_path"]).parent, expected_log_dir)
             self.assertEqual(version_manifest["runtime_identity"]["plist_sha256"], hashlib.sha256(installed.read_bytes()).hexdigest())
-            plist_artifact = version_manifest["artifacts"]["launchd/com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"]
+            plist_artifact = version_manifest["artifacts"]["launchd/com.mikolaj92.lokay.fala-tick-all.plist"]
             self.assertEqual(plist_artifact["sha256"], hashlib.sha256(installed.read_bytes()).hexdigest())
             self.assertEqual(plist_artifact["bytes"], installed.stat().st_size)
     def test_durability_failure_prevents_cutover(self):
@@ -1000,7 +1001,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
 
             old_current = (root / "current").resolve()
-            launch_agent = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+            launch_agent = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist"
             old_plist = launch_agent.read_bytes()
             old_previous = (root / "previous.json").read_bytes()
             second = self._render(root, config_path=root / "other.toml", db_path=root / "other.sqlite")
@@ -1087,7 +1088,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
             old_current = (root / "current").resolve()
             import tools.deployment_parity as parity
-            launch_agent = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+            launch_agent = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist"
             old_plist = launch_agent.read_bytes()
             old_previous = (root / "previous.json").read_bytes()
             second = self._render(root, config_path=root / "other.toml", db_path=root / "other.sqlite")
@@ -1129,6 +1130,19 @@ class DeploymentCandidateTests(unittest.TestCase):
                 self._render(root, mode="live", autonomous=True)
             self.assertIn("Fala identity policy is unsafe for promotion", raised.exception.result["errors"])
 
+    def test_live_only_render_has_correct_argv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root, mode="live")
+            import tools.deployment_parity as parity
+            self.assertTrue(parity.validate_fala_candidate(candidate)["ok"])
+            manifest = json.loads(candidate.joinpath("manifest.json").read_text(encoding="utf-8"))
+            argv = manifest["program_arguments"]
+            self.assertIn("--live", argv)
+            self.assertNotIn("--dry-run", argv)
+            self.assertEqual(manifest["runtime_identity"]["start_interval"], 600)
+            self.assertFalse(manifest["runtime_identity"]["run_at_load"])
+
     def test_candidate_policy_is_required_and_safe(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1166,7 +1180,7 @@ class DeploymentCandidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             candidate = self._render(root)
-            parser = self.module.commands.ArgumentParser(prog="oss-repo-agent")
+            parser = self.module.commands.ArgumentParser(prog="lokay")
             self.module.commands.setup_parser(parser)
             args = parser.parse_args([
                 "validate-fala-candidate",
@@ -1228,15 +1242,15 @@ class DeploymentCandidateTests(unittest.TestCase):
             env = os.environ.copy()
             env.update(
                 {
-                    "HERMES_REPO_AGENT_FALA_DB": str(db_path),
-                    "HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "0",
-                    "HERMES_REPO_AGENT_REPOS_FILE": str(repos),
-                    "HERMES_REPO_AGENT_LOG_DIR": str(root / "logs"),
-                    "HERMES_REPO_AGENT_DEPLOYMENT_ROOT": str(root / "deployment"),
+                    "HERMES_LOKAY_FALA_DB": str(db_path),
+                    "HERMES_LOKAY_FALA_REQUIRE_LIVE": "0",
+                    "HERMES_LOKAY_REPOS_FILE": str(repos),
+                    "HERMES_LOKAY_LOG_DIR": str(root / "logs"),
+                    "HERMES_LOKAY_DEPLOYMENT_ROOT": str(root / "deployment"),
                 }
             )
             completed = subprocess.run(
-                ["bash", str(ROOT / "scripts" / "repo_agent_status.sh")],
+                ["bash", str(ROOT / "scripts" / "lokay_status.sh")],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -1279,7 +1293,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertTrue(any(call[:2] == ["launchctl", "print"] for call in calls))
             self.assertTrue(any(call[:2] == ["launchctl", "bootout"] for call in calls))
             self.assertFalse((root / "current").exists())
-            self.assertFalse((home / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist").exists())
+            self.assertFalse((home / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist").exists())
 
     def _legacy_loaded_snapshot(self, home: Path, labels: list[str], *, repair: bool = True) -> dict[str, dict]:
         uid = self.commands.os.getuid()
@@ -1358,7 +1372,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             ]
             fala_bootstraps = [
                 i for i, call in enumerate(calls)
-                if call[:2] == ["launchctl", "bootstrap"] and "repo-agent-fala-tick-all" in " ".join(call)
+                if call[:2] == ["launchctl", "bootstrap"] and "lokay-fala-tick-all" in " ".join(call)
             ]
             self.assertTrue(legacy_bootouts)
             self.assertTrue(fala_bootstraps)
@@ -1376,7 +1390,7 @@ class DeploymentCandidateTests(unittest.TestCase):
 
             def failing_snapshot():
                 raise self.commands.ConfigError(
-                    "unable to inspect launchd state for user/501/com.mikolaj92.hermes.repo-issue-intake: mysterious failure"
+                    "unable to inspect launchd state for user/501/com.mikolaj92.lokay.issue-intake: mysterious failure"
                 )
 
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
@@ -1441,12 +1455,12 @@ class DeploymentCandidateTests(unittest.TestCase):
 
             self.assertFalse(
                 any(
-                    call[:2] == ["launchctl", "bootstrap"] and "repo-agent-fala-tick-all" in " ".join(call)
+                    call[:2] == ["launchctl", "bootstrap"] and "lokay-fala-tick-all" in " ".join(call)
                     for call in calls
                 )
             )
             self.assertFalse((root / "current").exists())
-            self.assertFalse((home / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist").exists())
+            self.assertFalse((home / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist").exists())
 
     def test_fala_bootstrap_failure_restores_legacy_and_previous_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1467,7 +1481,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
 
             old_current = (root / "current").resolve()
-            launch_agent = home / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+            launch_agent = home / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist"
             old_plist = launch_agent.read_bytes()
             second = self._render(root, config_path=root / "other.toml", db_path=root / "other.sqlite")
             legacy_label = self.commands.LEGACY_SHELL_MUTATOR_LABELS[0]
@@ -1493,7 +1507,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 1, "", "not loaded")
                 if argv[:2] == ["plutil", "-lint"]:
                     return subprocess.CompletedProcess(argv, 0, "OK\n", "")
-                if argv[:2] == ["launchctl", "bootstrap"] and "repo-agent-fala-tick-all" in " ".join(argv):
+                if argv[:2] == ["launchctl", "bootstrap"] and "lokay-fala-tick-all" in " ".join(argv):
                     raise subprocess.CalledProcessError(1, argv)
                 if argv[:2] == ["launchctl", "bootstrap"] and argv[-1] == str(legacy_plist):
                     restored = True

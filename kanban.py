@@ -6,7 +6,7 @@ from .executor import CommandSpec
 from .schema import branch_for_issue, fix_key, issue_key, untrusted_github_block
 
 
-PLUGIN_NAME = "oss-repo-agent"
+PLUGIN_NAME = "lokay"
 
 
 @dataclass(frozen=True)

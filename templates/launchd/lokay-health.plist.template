@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Health is observational; repair remains an explicit manual script argument. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mikolaj92.lokay.health</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/mini-m4-main/.hermes/scripts/lokay_health.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>600</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>LimitLoadToSessionType</key>
+  <string>Background</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

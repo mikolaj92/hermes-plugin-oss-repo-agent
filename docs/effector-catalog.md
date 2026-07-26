@@ -8,7 +8,7 @@ come later. Every effector is an allowlisted subprocess adapter with:
 - upstream outputs under `request.input["conduction"][<effector_id>]`
 - output envelope: `{status, ok, mutated, dry_run, reason? , ...}`
 
-Machine-readable: `repo_agent.catalog.EFFECTORS` / `list_effectors()`.
+Machine-readable: `lokay.catalog.EFFECTORS` / `list_effectors()`.
 
 | id | domain | mutates | intent |
 |----|--------|---------|--------|
@@ -55,20 +55,20 @@ Machine-readable: `repo_agent.catalog.EFFECTORS` / `list_effectors()`.
 
 Defined declaratively in `fala-package.toml`; every edge is explicit
 `conduction` between subprocess effectors. `auto_worker` is the sole scheduled
-path and is invoked through `repo-agent-tick-all`:
+path and is invoked through `lokay-tick-all`:
 
 ```bash
-uv run repo-agent-tick-all --dry-run
-uv run repo-agent-tick-all --live
+uv run lokay-tick-all --dry-run
+uv run lokay-tick-all --live
 ```
 
 Individual ticks are manual diagnostics only:
 
 ```bash
-uv run repo-agent-tick-intake --dry-run
-uv run repo-agent-tick-dispatch --dry-run
-uv run repo-agent-tick-triage --dry-run
-uv run repo-agent-tick-cleanup --branch 'ai/fix/N-slug' --dry-run
+uv run lokay-tick-intake --dry-run
+uv run lokay-tick-dispatch --dry-run
+uv run lokay-tick-triage --dry-run
+uv run lokay-tick-cleanup --branch 'ai/fix/N-slug' --dry-run
 ```
 
 - `issue_intake`: poll → direction decide → reject comment → claim → kanban

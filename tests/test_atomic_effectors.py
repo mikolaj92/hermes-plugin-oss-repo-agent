@@ -11,12 +11,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from repo_agent.adapters_cli import CommandError
-from repo_agent.catalog import EFFECTORS, domains, list_effectors, load_all
-from repo_agent.steps import cleanup, issue_to_pr, repair, triage
-from repo_agent.steps.claim import _reserve_claim, claim_github_issue
-from repo_agent.steps.kanban_intake import ensure_kanban_intake
-from repo_agent.steps.poll import poll_eligible_issues
+from lokay.adapters_cli import CommandError
+from lokay.catalog import EFFECTORS, domains, list_effectors, load_all
+from lokay.steps import cleanup, issue_to_pr, repair, triage
+from lokay.steps.claim import _reserve_claim, claim_github_issue
+from lokay.steps.kanban_intake import ensure_kanban_intake
+from lokay.steps.poll import poll_eligible_issues
 
 
 def req(input_data=None, config=None):
@@ -86,7 +86,7 @@ class IntakeAlignedTests(unittest.TestCase):
                 "assignees": [],
             },
         ]
-        with mock.patch("repo_agent.steps.poll.gh_json", return_value=issues):
+        with mock.patch("lokay.steps.poll.gh_json", return_value=issues):
             out = poll_eligible_issues(
                 req(
                     {"repos": [{"repo": "o/r", "board": "b"}], "dry_run": True},
@@ -155,7 +155,7 @@ class IntakeAlignedTests(unittest.TestCase):
             _reserve_claim(Path(tmp) / "first.json", repo="o/r", issue=1, board="b", assignee="a")
             out = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 2}}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1}))
             self.assertEqual(out["reason"], "claim_capacity_exhausted")
-            with mock.patch("repo_agent.steps.claim.run_cmd", return_value=SimpleNamespace(stdout='{"assignees": [{"login": "a"}], "labels": [{"name": "ai:ready"}, {"name": "ai:in-progress"}]}')):
+            with mock.patch("lokay.steps.claim.run_cmd", return_value=SimpleNamespace(stdout='{"assignees": [{"login": "a"}], "labels": [{"name": "ai:ready"}, {"name": "ai:in-progress"}]}')):
                 reused = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 1}}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1}))
             self.assertTrue(reused["ok"])
             self.assertTrue(reused["reused"])
@@ -167,7 +167,7 @@ class IntakeAlignedTests(unittest.TestCase):
             existing, error, reused = _reserve_claim(path, repo="o/r", issue=2, board="b", assignee="a")
             self.assertEqual(error, "claim_busy")
             self.assertFalse(reused)
-            with mock.patch("repo_agent.steps.claim.os.fsync", side_effect=OSError("disk full")):
+            with mock.patch("lokay.steps.claim.os.fsync", side_effect=OSError("disk full")):
                 claim, fsync_error, reused = _reserve_claim(Path(tmp) / "second.json", repo="o/r", issue=2, board="b", assignee="a")
             self.assertTrue(fsync_error.startswith("claim_uncertain:"))
             self.assertFalse(reused)
@@ -176,21 +176,21 @@ class IntakeAlignedTests(unittest.TestCase):
     def test_claim_command_timeout_and_readback_mismatch_reconcile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             selected = {"repo": "o/r", "board": "b", "number": 3}
-            with mock.patch("repo_agent.steps.claim.run_cmd", side_effect=CommandError(["gh"], 1, "", "denied")):
+            with mock.patch("lokay.steps.claim.run_cmd", side_effect=CommandError(["gh"], 1, "", "denied")):
                 failed = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp}))
             self.assertEqual(failed["reason"], "claim_uncertain")
             self.assertTrue(failed["mutated"])
 
         with tempfile.TemporaryDirectory() as tmp:
             selected = {"repo": "o/r", "board": "b", "number": 4}
-            with mock.patch("repo_agent.steps.claim.run_cmd", side_effect=subprocess.TimeoutExpired(["gh"], 1)):
+            with mock.patch("lokay.steps.claim.run_cmd", side_effect=subprocess.TimeoutExpired(["gh"], 1)):
                 timed = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp}))
             self.assertEqual(timed["reason"], "claim_uncertain")
             self.assertEqual(timed["failure_class"], "reconcile_then_retry")
 
         with tempfile.TemporaryDirectory() as tmp:
             selected = {"repo": "o/r", "board": "b", "number": 5}
-            with mock.patch("repo_agent.steps.claim.run_cmd", return_value=SimpleNamespace(stdout='{"assignees": [], "labels": []}')):
+            with mock.patch("lokay.steps.claim.run_cmd", return_value=SimpleNamespace(stdout='{"assignees": [], "labels": []}')):
                 mismatch = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp}))
             self.assertEqual(mismatch["reason"], "claim_readback_mismatch")
             self.assertTrue(mismatch["mutated"])
@@ -256,7 +256,7 @@ class IssueToPrTests(unittest.TestCase):
 
     def test_verify_branch_has_commits(self) -> None:
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.rev_parse", side_effect=["aaa", "bbb"]
+            "lokay.steps.issue_to_pr.rev_parse", side_effect=["aaa", "bbb"]
         ):
             out = issue_to_pr.verify_branch_has_commits(
                 req(
@@ -273,7 +273,7 @@ class IssueToPrTests(unittest.TestCase):
 
     def test_verify_branch_no_commits(self) -> None:
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.rev_parse", side_effect=["same", "same"]
+            "lokay.steps.issue_to_pr.rev_parse", side_effect=["same", "same"]
         ):
             out = issue_to_pr.verify_branch_has_commits(
                 req({"worktree_path": "/wt", "clone_path": "/c", "dry_run": False})
@@ -325,7 +325,7 @@ class IssueToPrTests(unittest.TestCase):
         self.assertFalse(out["mutated"])
 
     def test_run_omp_uses_executor_command(self) -> None:
-        with mock.patch("repo_agent.steps.issue_to_pr.run_omp", return_value={"status": "planned", "prompt_len": 6}) as runner:
+        with mock.patch("lokay.steps.issue_to_pr.run_omp", return_value={"status": "planned", "prompt_len": 6}) as runner:
             out = issue_to_pr.run_omp_worker(
                 req(
                     {"worktree_path": "/wt", "prompt": "fix it", "dry_run": True},
@@ -348,22 +348,22 @@ class IssueToPrTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             wt = Path(tmp)
             with mock.patch(
-                "repo_agent.steps.issue_to_pr.git", side_effect=git_side_effect
+                "lokay.steps.issue_to_pr.git", side_effect=git_side_effect
             ), mock.patch(
-                "repo_agent.steps.issue_to_pr.rev_parse",
+                "lokay.steps.issue_to_pr.rev_parse",
                 side_effect=["head-before", "base", "head-after"],
             ), mock.patch(
-                "repo_agent.steps.issue_to_pr.run_omp",
+                "lokay.steps.issue_to_pr.run_omp",
                 return_value={
                     "status": "completed",
                     "returncode": 0,
                     "stdout_tail": "ok",
                 },
             ), mock.patch(
-                "repo_agent.steps.issue_to_pr._omp_diff_paths",
+                "lokay.steps.issue_to_pr._omp_diff_paths",
                 return_value=[],
             ), mock.patch(
-                "repo_agent.steps.issue_to_pr._escaped_omp_paths",
+                "lokay.steps.issue_to_pr._escaped_omp_paths",
                 return_value=[],
             ):
                 ok_out = issue_to_pr.run_omp_worker(
@@ -382,12 +382,12 @@ class IssueToPrTests(unittest.TestCase):
         self.assertTrue(ok_out["mutated"])
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch(
-                "repo_agent.steps.issue_to_pr.git", side_effect=git_side_effect
+                "lokay.steps.issue_to_pr.git", side_effect=git_side_effect
             ), mock.patch(
-                "repo_agent.steps.issue_to_pr.rev_parse",
+                "lokay.steps.issue_to_pr.rev_parse",
                 side_effect=["head-before", "base"],
             ), mock.patch(
-                "repo_agent.steps.issue_to_pr.run_omp",
+                "lokay.steps.issue_to_pr.run_omp",
                 side_effect=CommandError(["omp"], 1, "", "oom"),
             ):
                 bad = issue_to_pr.run_omp_worker(
@@ -420,10 +420,10 @@ class IssueToPrTests(unittest.TestCase):
             ]
 
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.hermes_kanban_json",
+            "lokay.steps.issue_to_pr.hermes_kanban_json",
             side_effect=list_side_effect,
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.run_cmd",
+            "lokay.steps.issue_to_pr.run_cmd",
             return_value=SimpleNamespace(
                 stdout="Created task t_fix_9\n", stderr="", returncode=0
             ),
@@ -444,7 +444,7 @@ class IssueToPrTests(unittest.TestCase):
         self.assertTrue(out["mutated"])
         self.assertEqual(out["task_id"], "t_fix_9")
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.hermes_kanban_json",
+            "lokay.steps.issue_to_pr.hermes_kanban_json",
             side_effect=CommandError(["hermes"], 1, "", "no board"),
         ):
             bad = issue_to_pr.create_fix_pr_task(
@@ -458,10 +458,10 @@ class IssueToPrTests(unittest.TestCase):
         )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.hermes_kanban_json",
+            "lokay.steps.issue_to_pr.hermes_kanban_json",
             return_value=[{"id": "t1", "status": "ready"}],
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.run_cmd",
+            "lokay.steps.issue_to_pr.run_cmd",
             return_value=SimpleNamespace(stdout="", stderr="", returncode=0),
         ):
             ok_out = issue_to_pr.complete_kanban_task(
@@ -470,10 +470,10 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(ok_out["status"], "completed")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.hermes_kanban_json",
+            "lokay.steps.issue_to_pr.hermes_kanban_json",
             return_value=[{"id": "t1", "status": "ready"}],
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.run_cmd",
+            "lokay.steps.issue_to_pr.run_cmd",
             side_effect=CommandError(["hermes"], 1, "", "gone"),
         ):
             bad = issue_to_pr.complete_kanban_task(
@@ -499,22 +499,22 @@ class IssueToPrTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, ".git").mkdir()
             with mock.patch(
-                "repo_agent.steps.issue_to_pr.status_porcelain", return_value=""
+                "lokay.steps.issue_to_pr.status_porcelain", return_value=""
             ), mock.patch(
-                "repo_agent.steps.issue_to_pr.remote_url", return_value="origin"
+                "lokay.steps.issue_to_pr.remote_url", return_value="origin"
             ), mock.patch(
-                "repo_agent.steps.issue_to_pr.remote_ref", return_value="deadbeef"
-            ), mock.patch("repo_agent.steps.issue_to_pr.git"):
+                "lokay.steps.issue_to_pr.remote_ref", return_value="deadbeef"
+            ), mock.patch("lokay.steps.issue_to_pr.git"):
                 ok_out = issue_to_pr.refresh_clone_base(
                     req({"clone_path": tmp, "base_branch": "main", "dry_run": False})
                 )
             self.assertEqual(ok_out["status"], "refreshed")
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.status_porcelain", return_value=""
+            "lokay.steps.issue_to_pr.status_porcelain", return_value=""
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.remote_url", return_value="origin"
+            "lokay.steps.issue_to_pr.remote_url", return_value="origin"
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.git",
+            "lokay.steps.issue_to_pr.git",
             side_effect=CommandError(["git"], 1, "", "fetch fail"),
         ):
             with tempfile.TemporaryDirectory() as tmp:
@@ -538,23 +538,23 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(dry["status"], "planned")
         self.assertIn("worktree_path", dry)
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.status_porcelain", return_value=""
+            "lokay.steps.issue_to_pr.status_porcelain", return_value=""
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.remote_url", return_value="origin"
+            "lokay.steps.issue_to_pr.remote_url", return_value="origin"
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.remote_ref", return_value="deadbeef"
+            "lokay.steps.issue_to_pr.remote_ref", return_value="deadbeef"
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.worktree_list", return_value=""
+            "lokay.steps.issue_to_pr.worktree_list", return_value=""
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.branch_exists", return_value=False
+            "lokay.steps.issue_to_pr.branch_exists", return_value=False
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.git"
+            "lokay.steps.issue_to_pr.git"
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.worktree_add"
+            "lokay.steps.issue_to_pr.worktree_add"
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.branch_config_set"
+            "lokay.steps.issue_to_pr.branch_config_set"
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.rev_parse", return_value="deadbeef"
+            "lokay.steps.issue_to_pr.rev_parse", return_value="deadbeef"
         ):
             with tempfile.TemporaryDirectory() as tmp:
                 Path(tmp, ".git").mkdir()
@@ -577,11 +577,11 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(out["status"], "prepared")
         self.assertEqual(out["head"], "deadbeef")
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.status_porcelain", return_value=""
+            "lokay.steps.issue_to_pr.status_porcelain", return_value=""
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.remote_url", return_value="origin"
+            "lokay.steps.issue_to_pr.remote_url", return_value="origin"
         ), mock.patch(
-            "repo_agent.steps.issue_to_pr.git",
+            "lokay.steps.issue_to_pr.git",
             side_effect=CommandError(["git"], 1, "", "no base"),
         ):
             with tempfile.TemporaryDirectory() as tmp:
@@ -620,7 +620,7 @@ class IssueToPrTests(unittest.TestCase):
                 )
             return SimpleNamespace(stdout="[]", stderr="", returncode=0)
 
-        with mock.patch("repo_agent.steps.issue_to_pr.run_cmd", side_effect=fake_run):
+        with mock.patch("lokay.steps.issue_to_pr.run_cmd", side_effect=fake_run):
             # first list empty then create then list with number
             calls = {"n": 0}
 
@@ -645,7 +645,7 @@ class IssueToPrTests(unittest.TestCase):
                 raise AssertionError(cmd)
 
             with mock.patch(
-                "repo_agent.steps.issue_to_pr.run_cmd", side_effect=side_effect
+                "lokay.steps.issue_to_pr.run_cmd", side_effect=side_effect
             ):
                 out = issue_to_pr.open_pull_request(
                     req(
@@ -662,7 +662,7 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(out["number"], 42)
         self.assertIn("pull/42", out["url"])
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.run_cmd",
+            "lokay.steps.issue_to_pr.run_cmd",
             side_effect=CommandError(["gh"], 1, "", "denied"),
         ):
             bad = issue_to_pr.open_pull_request(
@@ -676,7 +676,7 @@ class IssueToPrTests(unittest.TestCase):
         )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.run_cmd",
+            "lokay.steps.issue_to_pr.run_cmd",
             return_value=SimpleNamespace(stdout="", stderr="", returncode=0),
         ):
             ok_out = issue_to_pr.apply_pr_labels(
@@ -691,7 +691,7 @@ class IssueToPrTests(unittest.TestCase):
             )
         self.assertEqual(ok_out["status"], "labeled")
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.run_cmd",
+            "lokay.steps.issue_to_pr.run_cmd",
             side_effect=CommandError(["gh"], 1, "", "no label"),
         ):
             bad = issue_to_pr.apply_pr_labels(
@@ -714,14 +714,14 @@ class IssueToPrTests(unittest.TestCase):
             self.assertEqual(miss["reason"], "worktree_missing")
             Path(tmp, "f").write_text("x")
             with mock.patch(
-                "repo_agent.steps.issue_to_pr.is_dirty", return_value=True
+                "lokay.steps.issue_to_pr.is_dirty", return_value=True
             ):
                 dirty = issue_to_pr.check_worktree_dirty(
                     req({"worktree_path": tmp})
                 )
             self.assertTrue(dirty["dirty"])
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.worktree_list",
+            "lokay.steps.issue_to_pr.worktree_list",
             return_value="worktree /c\nHEAD abc\nbranch refs/heads/main\n\n"
             "worktree /c/wts/ai-fix-1\nHEAD def\nbranch refs/heads/ai/fix/1\n",
         ):
@@ -736,11 +736,11 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(dry["status"], "planned")
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch(
-                "repo_agent.steps.issue_to_pr.rev_parse", return_value="abc123"
+                "lokay.steps.issue_to_pr.rev_parse", return_value="abc123"
             ), mock.patch(
-                "repo_agent.steps.issue_to_pr.git_push_branch", return_value="pushed"
+                "lokay.steps.issue_to_pr.git_push_branch", return_value="pushed"
             ), mock.patch(
-                "repo_agent.steps.issue_to_pr.git",
+                "lokay.steps.issue_to_pr.git",
                 return_value="abc123\trefs/heads/ai/fix/1",
             ):
                 pushed = issue_to_pr.push_branch(
@@ -755,9 +755,9 @@ class IssueToPrTests(unittest.TestCase):
             self.assertEqual(pushed["status"], "pushed")
             self.assertTrue(pushed["mutated"])
             with mock.patch(
-                "repo_agent.steps.issue_to_pr.rev_parse", return_value="abc123"
+                "lokay.steps.issue_to_pr.rev_parse", return_value="abc123"
             ), mock.patch(
-                "repo_agent.steps.issue_to_pr.git_push_branch",
+                "lokay.steps.issue_to_pr.git_push_branch",
                 side_effect=CommandError(["git"], 1, "", "rejected"),
             ):
                 bad = issue_to_pr.push_branch(
@@ -778,7 +778,7 @@ class IssueToPrTests(unittest.TestCase):
         )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.run_cmd",
+            "lokay.steps.issue_to_pr.run_cmd",
             return_value=SimpleNamespace(stdout="", stderr="", returncode=0),
         ):
             ok_out = issue_to_pr.apply_issue_labels(
@@ -878,11 +878,11 @@ class TriageTests(unittest.TestCase):
         }))
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=[
                 SimpleNamespace(stdout=json.dumps({"comments": []}), stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="", returncode=0),
-                SimpleNamespace(stdout=json.dumps({"comments": [{"body": "blocked\n\n<!-- repo-agent:o/r:5:triage -->"}]}), stderr="", returncode=0),
+                SimpleNamespace(stdout=json.dumps({"comments": [{"body": "blocked\n\n<!-- lokay:o/r:5:triage -->"}]}), stderr="", returncode=0),
             ],
         ):
             ok_out = triage.comment_pr_once(triage_req("comment_block", {
@@ -894,7 +894,7 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(ok_out["status"], "commented")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=CommandError(["gh"], 1, "", "fail"),
         ):
             bad = triage.comment_pr_once(triage_req("comment_block", {"repo": "o/r", "number": 5, "body": "x", "dry_run": False}))
@@ -909,7 +909,7 @@ class TriageTests(unittest.TestCase):
         }))
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=[
                 SimpleNamespace(stdout=json.dumps({"state": "OPEN", "headRefOid": "abc"}), stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="", returncode=0),
@@ -925,7 +925,7 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(ok_out["status"], "merged")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=[
                 SimpleNamespace(stdout=json.dumps({"state": "OPEN", "headRefOid": "abc"}), stderr="", returncode=0),
                 CommandError(["gh"], 1, "", "not mergeable"),
@@ -955,7 +955,7 @@ class TriageTests(unittest.TestCase):
             },
         ]
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             return_value=SimpleNamespace(
                 stdout=json.dumps(prs), stderr="", returncode=0
             ),
@@ -964,7 +964,7 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(listed["count"], 1)
         self.assertEqual(listed["prs"][0]["number"], 1)
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=[
                 SimpleNamespace(stdout="[]", stderr="", returncode=0),
                 SimpleNamespace(stdout=json.dumps([{"number": 7, "headRefName": "ai/fix/7-x"}]), stderr="", returncode=0),
@@ -974,14 +974,14 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(multi["repo"], "o/second")
         self.assertEqual(multi["prs"][0]["repo"], "o/second")
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps({"number": 7, "title": "t", "state": "OPEN"}), stderr="", returncode=0),
         ) as view:
             loaded_multi = triage.load_pr_fields(req({"conduction": {"triage_list_ai_fix_prs": multi}}))
         self.assertEqual(loaded_multi["repo"], "o/second")
         self.assertIn("o/second", view.call_args.args[0])
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             return_value=SimpleNamespace(
                 stdout=json.dumps({"number": 9, "title": "t", "state": "OPEN"}),
                 stderr="",
@@ -994,7 +994,7 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(loaded["status"], "loaded")
         self.assertEqual(loaded["pr"]["number"], 9)
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=CommandError(["gh"], 1, "", "404"),
         ):
             bad = triage.load_pr_fields(req({"repo": "o/r", "number": 9}))
@@ -1004,7 +1004,7 @@ class TriageTests(unittest.TestCase):
         dry = triage.claim_pr_assignee(triage_req("merge", {"repo": "o/r", "number": 3, "dry_run": True}, {"assignee": "me"}))
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=[
                 SimpleNamespace(stdout=json.dumps({"assignees": []}), stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="", returncode=0),
@@ -1014,7 +1014,7 @@ class TriageTests(unittest.TestCase):
             claimed = triage.claim_pr_assignee(triage_req("merge", {"repo": "o/r", "number": 3, "dry_run": False}, {"assignee": "me"}))
         self.assertEqual(claimed["status"], "claimed")
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=[
                 SimpleNamespace(stdout=json.dumps({"assignees": []}), stderr="", returncode=0),
                 CommandError(["gh"], 1, "", "nope"),
@@ -1029,7 +1029,7 @@ class TriageTests(unittest.TestCase):
         }
         dry_c = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 7, "dry_run": True}))
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=[
                 SimpleNamespace(stdout=json.dumps({"state": "MERGED", "mergedAt": provenance["merged_at"], "headRefOid": provenance["head_oid"], "headRefName": provenance["head_ref"], "mergeCommit": {"oid": provenance["merge_oid"]}}), stderr="", returncode=0),
                 SimpleNamespace(stdout=json.dumps({"state": "OPEN"}), stderr="", returncode=0),
@@ -1040,7 +1040,7 @@ class TriageTests(unittest.TestCase):
             closed = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 7, "dry_run": False, "verified_provenance": provenance}))
         self.assertEqual(closed["status"], "closed")
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=[
                 SimpleNamespace(stdout=json.dumps({"state": "MERGED", "mergedAt": provenance["merged_at"], "headRefOid": provenance["head_oid"], "headRefName": provenance["head_ref"], "mergeCommit": {"oid": provenance["merge_oid"]}}), stderr="", returncode=0),
                 SimpleNamespace(stdout=json.dumps({"state": "OPEN"}), stderr="", returncode=0),
@@ -1054,7 +1054,7 @@ class TriageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "merge.json")
             with mock.patch(
-                "repo_agent.steps.triage.run_cmd",
+                "lokay.steps.triage.run_cmd",
                 return_value=SimpleNamespace(
                     stdout=json.dumps({"state": "MERGED", "mergedAt": provenance["merged_at"], "headRefOid": provenance["head_oid"], "headRefName": provenance["head_ref"], "mergeCommit": {"oid": provenance["merge_oid"]}}),
                     stderr="",
@@ -1083,7 +1083,7 @@ class TriageTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 stdout = "" if expected.endswith("read_failed") else json.dumps(view)
                 with mock.patch(
-                    "repo_agent.steps.triage.run_cmd",
+                    "lokay.steps.triage.run_cmd",
                     return_value=SimpleNamespace(stdout=stdout, stderr="", returncode=0),
                 ):
                     out = triage.merge_pull_request(triage_req("merge", base))
@@ -1093,7 +1093,7 @@ class TriageTests(unittest.TestCase):
             "headRefName": "ai/fix/4-x", "mergeCommit": {"oid": "merge-4"},
         }
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps(already), stderr="", returncode=0),
         ):
             out = triage.merge_pull_request(triage_req("merge", base))
@@ -1109,7 +1109,7 @@ class TriageTests(unittest.TestCase):
         }
         mismatched = dict(valid, merge_oid="forged-merge")
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps(already), stderr="", returncode=0),
         ):
             out = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 4, "dry_run": False, "verified_provenance": mismatched}))
@@ -1117,7 +1117,7 @@ class TriageTests(unittest.TestCase):
     def test_assignee_post_readback_absent_and_already_claimed(self) -> None:
         base = {"repo": "o/r", "number": 4, "assignee": "agent", "dry_run": False}
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=[
                 SimpleNamespace(stdout=json.dumps({"assignees": []}), stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="", returncode=0),
@@ -1127,16 +1127,16 @@ class TriageTests(unittest.TestCase):
             out = triage.claim_pr_assignee(triage_req("merge", base))
         self.assertEqual(out["reason"], "assignee_readback_mismatch")
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps({"assignees": [{"login": "agent"}]}), stderr="", returncode=0),
         ):
             out = triage.claim_pr_assignee(triage_req("merge", base))
         self.assertEqual(out["status"], "already_claimed")
 
     def test_comment_post_readback_absent_and_marker_idempotency(self) -> None:
-        marker = "<!-- repo-agent:o/r:4:triage -->"
+        marker = "<!-- lokay:o/r:4:triage -->"
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             side_effect=[
                 SimpleNamespace(stdout=json.dumps({"comments": []}), stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="", returncode=0),
@@ -1146,7 +1146,7 @@ class TriageTests(unittest.TestCase):
             out = triage.comment_pr_once(triage_req("comment_block", {"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False}))
         self.assertEqual(out["reason"], "comment_readback_mismatch")
         with mock.patch(
-            "repo_agent.steps.triage.run_cmd",
+            "lokay.steps.triage.run_cmd",
             return_value=SimpleNamespace(stdout=json.dumps({"comments": [{"body": f"blocked\\n\\n{marker}"}]}), stderr="", returncode=0),
         ):
             out = triage.comment_pr_once(triage_req("comment_block", {"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False}))
@@ -1161,7 +1161,7 @@ class TriageTests(unittest.TestCase):
         ):
             with self.subTest(handler=handler.__name__, payload=payload):
                 with mock.patch(
-                    "repo_agent.steps.triage.run_cmd",
+                    "lokay.steps.triage.run_cmd",
                     return_value=SimpleNamespace(stdout=payload, stderr="", returncode=0),
                 ):
                     data = {"repo": "o/r", "number": 4, "dry_run": False}
@@ -1233,9 +1233,9 @@ class RepairTests(unittest.TestCase):
             ]
 
         with mock.patch(
-            "repo_agent.steps.repair.hermes_kanban_json", side_effect=list_side_effect
+            "lokay.steps.repair.hermes_kanban_json", side_effect=list_side_effect
         ), mock.patch(
-            "repo_agent.steps.repair.run_cmd",
+            "lokay.steps.repair.run_cmd",
             return_value=SimpleNamespace(
                 stdout="Created t_rev_2\n", stderr="", returncode=0
             ),
@@ -1262,13 +1262,13 @@ class RepairTests(unittest.TestCase):
         )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
-            "repo_agent.steps.repair.hermes_kanban_json",
+            "lokay.steps.repair.hermes_kanban_json",
             side_effect=[
                 [{"id": "t1", "status": "ready"}],
                 [{"id": "t1", "status": "blocked"}],
             ],
         ), mock.patch(
-            "repo_agent.steps.repair.run_cmd",
+            "lokay.steps.repair.run_cmd",
             return_value=SimpleNamespace(stdout="", stderr="", returncode=0),
         ):
             ok_out = repair.block_kanban_task(
@@ -1284,13 +1284,13 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(ok_out["status"], "blocked")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
-            "repo_agent.steps.repair.hermes_kanban_json",
+            "lokay.steps.repair.hermes_kanban_json",
             side_effect=[
                 [{"id": "t1", "status": "ready"}],
                 [{"id": "t1", "status": "ready"}],
             ],
         ), mock.patch(
-            "repo_agent.steps.repair.run_cmd",
+            "lokay.steps.repair.run_cmd",
             side_effect=CommandError(["hermes"], 1, "", "no"),
         ):
             bad = repair.block_kanban_task(
@@ -1331,7 +1331,7 @@ class CleanupTests(unittest.TestCase):
 
     def test_check_no_open_pr(self) -> None:
         with mock.patch(
-            "repo_agent.steps.cleanup.run_cmd",
+            "lokay.steps.cleanup.run_cmd",
             return_value=SimpleNamespace(stdout="[]", stderr="", returncode=0),
         ):
             out = cleanup.check_no_open_pr_for_branch(
@@ -1436,7 +1436,7 @@ class CleanupTests(unittest.TestCase):
             directory = Path(tmp)
             claim = directory / "claim.json"
             claim.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
-            with mock.patch("repo_agent.steps.cleanup.os.fsync") as fsync:
+            with mock.patch("lokay.steps.cleanup.os.fsync") as fsync:
                 out = cleanup.release_active_issue_claim(req({"claim_path": str(directory), "repo": "o/r", "issue": 3, "dry_run": False, "conduction": {"remove_worktree": {"ok": True, "status": "removed"}, "check_issue_closed": {"ok": True, "closed": True}, "check_no_open_pr": {"ok": True, "safe_to_cleanup": True}, "delete_local_fix_branch": {"ok": True, "status": "deleted"}}}))
             self.assertEqual(out["status"], "released")
             self.assertFalse(claim.exists())
@@ -1447,7 +1447,7 @@ class CleanupTests(unittest.TestCase):
             directory = Path(tmp)
             claim = directory / "claim.json"
             claim.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
-            with mock.patch("repo_agent.steps.cleanup.os.fsync", side_effect=OSError("disk full")):
+            with mock.patch("lokay.steps.cleanup.os.fsync", side_effect=OSError("disk full")):
                 out = cleanup.release_active_issue_claim(req({"claim_path": str(directory), "repo": "o/r", "issue": 3, "dry_run": False, "conduction": {"remove_worktree": {"ok": True, "status": "removed"}, "check_issue_closed": {"ok": True, "closed": True}, "check_no_open_pr": {"ok": True, "safe_to_cleanup": True}, "delete_local_fix_branch": {"ok": True, "status": "deleted"}}}))
             self.assertFalse(out["ok"])
             self.assertEqual(out["reason"], "unlink_durability_unconfirmed")
@@ -1578,7 +1578,7 @@ class CleanupTests(unittest.TestCase):
 
     def test_check_issue_closed_paths(self) -> None:
         with mock.patch(
-            "repo_agent.steps.cleanup.run_cmd",
+            "lokay.steps.cleanup.run_cmd",
             return_value=SimpleNamespace(
                 stdout=json.dumps({"state": "CLOSED"}), stderr="", returncode=0
             ),
@@ -1589,7 +1589,7 @@ class CleanupTests(unittest.TestCase):
         self.assertTrue(closed["closed"])
         self.assertEqual(closed["state"], "CLOSED")
         with mock.patch(
-            "repo_agent.steps.cleanup.run_cmd",
+            "lokay.steps.cleanup.run_cmd",
             return_value=SimpleNamespace(
                 stdout=json.dumps({"state": "OPEN"}), stderr="", returncode=0
             ),
@@ -1599,7 +1599,7 @@ class CleanupTests(unittest.TestCase):
             )
         self.assertFalse(open_["closed"])
         with mock.patch(
-            "repo_agent.steps.cleanup.run_cmd",
+            "lokay.steps.cleanup.run_cmd",
             side_effect=CommandError(["gh"], 1, "", "404"),
         ):
             bad = cleanup.check_issue_closed(req({"repo": "o/r", "issue": 3}))
@@ -1611,10 +1611,10 @@ class CleanupTests(unittest.TestCase):
         )
         self.assertEqual(dry["status"], "planned")
         with mock.patch(
-            "repo_agent.steps.cleanup.branch_exists", side_effect=[True, False]
+            "lokay.steps.cleanup.branch_exists", side_effect=[True, False]
         ), mock.patch(
-            "repo_agent.steps.cleanup._cleanup_owner_matches", return_value=True
-        ), mock.patch("repo_agent.steps.cleanup.delete_local_branch"):
+            "lokay.steps.cleanup._cleanup_owner_matches", return_value=True
+        ), mock.patch("lokay.steps.cleanup.delete_local_branch"):
             ok_out = cleanup.delete_local_fix_branch(
                 req(
                     {
@@ -1628,11 +1628,11 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(ok_out["status"], "deleted")
         self.assertTrue(ok_out["mutated"])
         with mock.patch(
-            "repo_agent.steps.cleanup.branch_exists", return_value=True
+            "lokay.steps.cleanup.branch_exists", return_value=True
         ), mock.patch(
-            "repo_agent.steps.cleanup._cleanup_owner_matches", return_value=True
+            "lokay.steps.cleanup._cleanup_owner_matches", return_value=True
         ), mock.patch(
-            "repo_agent.steps.cleanup.delete_local_branch",
+            "lokay.steps.cleanup.delete_local_branch",
             side_effect=CommandError(["git"], 1, "", "not found"),
         ):
             bad = cleanup.delete_local_fix_branch(
@@ -1641,11 +1641,11 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(bad["reason"], "delete_failed")
 
         with mock.patch(
-            "repo_agent.steps.cleanup.branch_exists", side_effect=[True, False]
+            "lokay.steps.cleanup.branch_exists", side_effect=[True, False]
         ), mock.patch(
-            "repo_agent.steps.cleanup._cleanup_owner_matches", return_value=True
+            "lokay.steps.cleanup._cleanup_owner_matches", return_value=True
         ), mock.patch(
-            "repo_agent.steps.cleanup.delete_local_branch",
+            "lokay.steps.cleanup.delete_local_branch",
             side_effect=CommandError(["git"], 1, "", "interrupted"),
         ):
             reconciled = cleanup.delete_local_fix_branch(
@@ -1656,12 +1656,12 @@ class CleanupTests(unittest.TestCase):
         self.assertTrue(reconciled["mutated"])
 
         with mock.patch(
-            "repo_agent.steps.cleanup.branch_exists",
+            "lokay.steps.cleanup.branch_exists",
             side_effect=[True, CommandError(["git"], 1, "", "readback failed")],
         ), mock.patch(
-            "repo_agent.steps.cleanup._cleanup_owner_matches", return_value=True
+            "lokay.steps.cleanup._cleanup_owner_matches", return_value=True
         ), mock.patch(
-            "repo_agent.steps.cleanup.delete_local_branch",
+            "lokay.steps.cleanup.delete_local_branch",
             side_effect=CommandError(["git"], 1, "", "interrupted"),
         ):
             uncertain = cleanup.delete_local_fix_branch(
@@ -1674,7 +1674,7 @@ class CleanupTests(unittest.TestCase):
 class AdapterFailurePathTests(unittest.TestCase):
     def test_load_kanban_task_list_failure(self) -> None:
         with mock.patch(
-            "repo_agent.steps.issue_to_pr.hermes_kanban_json",
+            "lokay.steps.issue_to_pr.hermes_kanban_json",
             side_effect=CommandError(["hermes"], 1, "", "boom"),
         ):
             out = issue_to_pr.load_kanban_task(req({"board": "b"}))

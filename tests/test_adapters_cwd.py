@@ -6,14 +6,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from repo_agent.adapters_cli import run_cmd
-from repo_agent.adapters_omp import run_omp
+from lokay.adapters_cli import run_cmd
+from lokay.adapters_omp import run_omp
 
 
 class AdapterCwdTests(unittest.TestCase):
     def test_run_cmd_forwards_cwd_to_subprocess(self) -> None:
         completed = subprocess.CompletedProcess(["tool"], 0, "out", "")
-        with mock.patch("repo_agent.adapters_cli.subprocess.run", return_value=completed) as run:
+        with mock.patch("lokay.adapters_cli.subprocess.run", return_value=completed) as run:
             result = run_cmd(["tool"], cwd=Path("/tmp/worktree"), timeout=7.5)
 
         self.assertIs(result, completed)
@@ -24,7 +24,7 @@ class AdapterCwdTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(["omp"], 0, "done", "")
         with tempfile.TemporaryDirectory() as directory:
             worktree = Path(directory)
-            with mock.patch("repo_agent.adapters_omp.run_cmd", return_value=completed) as run:
+            with mock.patch("lokay.adapters_omp.run_cmd", return_value=completed) as run:
                 result = run_omp(
                     prompt="fix",
                     cwd=worktree,
@@ -57,7 +57,7 @@ class AdapterCwdTests(unittest.TestCase):
         )
 
     def test_run_omp_dry_run_does_not_invoke_subprocess(self) -> None:
-        with mock.patch("repo_agent.adapters_omp.run_cmd") as run:
+        with mock.patch("lokay.adapters_omp.run_cmd") as run:
             result = run_omp(
                 prompt="fix",
                 cwd="relative/worktree",

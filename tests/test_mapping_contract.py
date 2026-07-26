@@ -23,14 +23,14 @@ class MappingContractTests(unittest.TestCase):
         self.assertIn("GitHub owns repository facts", doc)
         self.assertIn("Hermes Kanban owns", doc)
         self.assertIn("auto_worker", doc)
-        self.assertIn("repo-agent-tick-all", doc)
+        self.assertIn("lokay-tick-all", doc)
         self.assertIn("individual path ticks are manual", doc)
         self.assertNotIn("repo_issue_intake.sh", doc)
-        self.assertNotIn("repo_agent_backfill.sh", doc)
+        self.assertNotIn("lokay_backfill.sh", doc)
 
     def test_readme_declares_single_scheduled_mutator(self):
         readme = self.read("README.md")
-        self.assertIn("repo-agent-tick-all", readme)
+        self.assertIn("lokay-tick-all", readme)
         self.assertIn("only scheduled mutator", readme)
         self.assertIn("manual diagnostic", readme)
 

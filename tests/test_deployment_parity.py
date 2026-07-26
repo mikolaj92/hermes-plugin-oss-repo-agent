@@ -65,7 +65,7 @@ class DeploymentParityTests(unittest.TestCase):
         active_plist.mkdir()
         from tools.deployment_parity import _render_template
         for template in (templates / "launchd").glob("*.plist.template"):
-            installed_name = "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist" if "fala-tick-all" in template.name else template.name.removesuffix(".template")
+            installed_name = "com.mikolaj92.lokay.fala-tick-all.plist" if "fala-tick-all" in template.name else template.name.removesuffix(".template")
             active_plist.joinpath(installed_name).write_text(
                 _render_template(template.read_text(encoding="utf-8"), active.parent.parent, active),
                 encoding="utf-8",
@@ -79,11 +79,11 @@ class DeploymentParityTests(unittest.TestCase):
         self.addCleanup(holder.cleanup)
         active_plist = Path(holder.name) / "active-launchd"
         active_plist.mkdir()
-        template = templates / "launchd" / "oss-repo-agent-health.plist.template"
+        template = templates / "launchd" / "lokay-health.plist.template"
         from tools.deployment_parity import _render_template
         rendered = _render_template(template.read_text(encoding="utf-8"), active.parent.parent, active)
-        rendered = rendered.replace("com.mikolaj92.hermes.repo-agent-health", "com.example.legacy").replace("repo_agent_health.sh", "repo_agent_status.sh")
-        (active_plist / "oss-repo-agent-health.plist").write_text(rendered, encoding="utf-8")
+        rendered = rendered.replace("com.mikolaj92.lokay.health", "com.example.legacy").replace("lokay_health.sh", "lokay_status.sh")
+        (active_plist / "lokay-health.plist").write_text(rendered, encoding="utf-8")
         with self.assertRaises(DeploymentParityError) as raised:
             validate(source, active, [templates / "launchd"], active_plist_roots=[active_plist])
         errors = raised.exception.result["errors"]
@@ -94,7 +94,7 @@ class DeploymentParityTests(unittest.TestCase):
         self.addCleanup(holder.cleanup)
         active_plist = Path(holder.name) / "active-launchd"
         active_plist.mkdir()
-        template = templates / "launchd" / "oss-repo-agent-health.plist.template"
+        template = templates / "launchd" / "lokay-health.plist.template"
         template.write_text("not a plist", encoding="utf-8")
         with self.assertRaises(DeploymentParityError) as raised:
             validate(source, active, [templates / "launchd"], active_plist_roots=[active_plist])
@@ -103,7 +103,7 @@ class DeploymentParityTests(unittest.TestCase):
     def test_active_byte_drift_fails_closed(self):
         holder, source, active, templates = self.make_deployment()
         self.addCleanup(holder.cleanup)
-        drifted = active / "repo_agent_smoke.sh"
+        drifted = active / "lokay_smoke.sh"
         drifted.write_text(drifted.read_text(encoding="utf-8") + "\n# drift\n", encoding="utf-8")
         with self.assertRaises(DeploymentParityError) as raised:
             validate(source, active, [templates / "launchd"])
@@ -112,7 +112,7 @@ class DeploymentParityTests(unittest.TestCase):
     def test_fala_template_requires_absolute_uv_and_canonical_arguments(self):
         holder, source, active, templates = self.make_deployment()
         self.addCleanup(holder.cleanup)
-        template = templates / "launchd" / "oss-repo-agent-fala-tick-all.plist.template"
+        template = templates / "launchd" / "lokay-fala-tick-all.plist.template"
         template.write_text(template.read_text(encoding="utf-8").replace("{{UV_BIN}}", "uv"), encoding="utf-8")
         with self.assertRaises(DeploymentParityError) as raised:
             validate(source, active, [templates / "launchd"])
@@ -121,7 +121,7 @@ class DeploymentParityTests(unittest.TestCase):
     def test_fala_template_rejects_mutable_candidate_paths(self):
         holder, source, active, templates = self.make_deployment()
         self.addCleanup(holder.cleanup)
-        template = templates / "launchd" / "oss-repo-agent-fala-tick-all.plist.template"
+        template = templates / "launchd" / "lokay-fala-tick-all.plist.template"
         text = template.read_text(encoding="utf-8").replace("{{PROJECT_ROOT}}", str(active.parent / "candidates" / "candidate" / "source" / "project"))
         template.write_text(text, encoding="utf-8")
         with self.assertRaises(DeploymentParityError) as raised:
@@ -131,7 +131,7 @@ class DeploymentParityTests(unittest.TestCase):
     def test_fala_template_requires_exactly_one_mode_flag(self):
         holder, source, active, templates = self.make_deployment()
         self.addCleanup(holder.cleanup)
-        template = templates / "launchd" / "oss-repo-agent-fala-tick-all.plist.template"
+        template = templates / "launchd" / "lokay-fala-tick-all.plist.template"
         text = template.read_text(encoding="utf-8").replace(
             "    <string>{{MODE_ARG}}</string>",
             "    <string>--dry-run</string>\n    <string>--live</string>",

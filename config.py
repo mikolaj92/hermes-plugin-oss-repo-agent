@@ -130,7 +130,7 @@ class RepoConfig:
 
 
 @dataclass(frozen=True)
-class OssRepoAgentConfig:
+class LokayConfig:
     version: int = 1
     mode: str = "dry-run"
     clone_root: str | None = None
@@ -150,7 +150,7 @@ class OssRepoAgentConfig:
     repos: tuple[RepoConfig, ...] = ()
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "OssRepoAgentConfig":
+    def from_mapping(cls, data: Mapping[str, Any]) -> "LokayConfig":
         automation = data.get("automation") if isinstance(data.get("automation"), Mapping) else {}
         paths = data.get("paths") if isinstance(data.get("paths"), Mapping) else {}
         mode = str(data.get("mode", "dry-run"))
@@ -207,10 +207,10 @@ class OssRepoAgentConfig:
 
 
 def default_config_path() -> Path:
-    configured = os.environ.get("HERMES_OSS_REPO_AGENT_CONFIG")
+    configured = os.environ.get("HERMES_LOKAY_CONFIG")
     if configured:
         return Path(configured).expanduser()
-    return Path.home() / ".hermes" / "oss-repo-agent" / "config.yaml"
+    return Path.home() / ".hermes" / "lokay" / "config.yaml"
 
 
 def _parse_scalar(value: str) -> Any:
@@ -319,7 +319,7 @@ def _load_simple_yaml(text: str) -> dict[str, Any]:
     return loaded
 
 
-def load_config(path: str | os.PathLike[str] | None = None) -> OssRepoAgentConfig:
+def load_config(path: str | os.PathLike[str] | None = None) -> LokayConfig:
     config_path = Path(path).expanduser() if path else default_config_path()
     if not config_path.exists():
         raise ConfigError(f"config not found: {config_path}")
@@ -340,4 +340,4 @@ def load_config(path: str | os.PathLike[str] | None = None) -> OssRepoAgentConfi
             data = yaml.safe_load(text) or {}
     if not isinstance(data, Mapping):
         raise ConfigError("config root must be a mapping")
-    return OssRepoAgentConfig.from_mapping(data)
+    return LokayConfig.from_mapping(data)

@@ -17,7 +17,7 @@ agent work. The adapter reconciles the two without inventing a second workflow.
 
 | GitHub condition | Kanban mapping | Notes |
 | --- | --- | --- |
-| Open actionable issue | `[issue] owner/repo#N` assigned to `repo-agent-intake` | Intake claims the GitHub issue first when configured. |
+| Open actionable issue | `[issue] owner/repo#N` assigned to `lokay-intake` | Intake claims the GitHub issue first when configured. |
 | Existing non-done `[issue]`, `[fix-pr]`, or `[fix-pr-review]` | No new task | Duplicate prevention uses title/body matching plus idempotency keys. |
 | Closed issue with open Kanban intake/fix work | Complete stale task | GitHub closure wins over Kanban ready/blocked state. |
 | `frozen` in title/body/labels | Block/no fixer task | Frozen work remains visible but does not spawn PR work. |
@@ -59,15 +59,15 @@ agent work. The adapter reconciles the two without inventing a second workflow.
 ## Reconciliation
 
 The GitHub/Kanban mapping is executed by the composed Fala `auto_worker` path.
-Schedule only `repo-agent-tick-all`; individual path ticks are manual
+Schedule only `lokay-tick-all`; individual path ticks are manual
 diagnostics and are not operational schedulers.
 
 ```bash
-uv run repo-agent-tick-all --dry-run
-uv run repo-agent-tick-all --live
+uv run lokay-tick-all --dry-run
+uv run lokay-tick-all --live
 ```
 
-Use `repo-agent-tick-intake`, `repo-agent-tick-dispatch`,
-`repo-agent-tick-triage`, or `repo-agent-tick-cleanup` only to inspect one
+Use `lokay-tick-intake`, `lokay-tick-dispatch`,
+`lokay-tick-triage`, or `lokay-tick-cleanup` only to inspect one
 correlation path manually. Legacy shell intake/dispatch/triage/cleanup,
 backfill, webhook, and cron entrypoints are removed.

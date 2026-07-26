@@ -1,7 +1,7 @@
 [project]
-name = "hermes-plugin-oss-repo-agent"
+name = "lokay"
 version = "0.2.1"
-description = "Guarded GitHub issue-to-PR automation for Hermes, orchestrated by Fala"
+description = "Lokay — guarded GitHub issue-to-PR automation for Hermes, orchestrated by Fala"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
@@ -14,25 +14,25 @@ dependencies = [
 dev = ["pytest>=8.0.0"]
 
 [project.scripts]
-repo-agent-tick-intake = "repo_agent.tick_intake:main"
-repo-agent-tick-dispatch = "repo_agent.tick_dispatch:main"
-repo-agent-tick-triage = "repo_agent.tick_triage:main"
-repo-agent-tick-cleanup = "repo_agent.tick_cleanup:main"
-repo-agent-tick-all = "repo_agent.tick_all:main"
+lokay-tick-intake = "lokay.tick_intake:main"
+lokay-tick-dispatch = "lokay.tick_dispatch:main"
+lokay-tick-triage = "lokay.tick_triage:main"
+lokay-tick-cleanup = "lokay.tick_cleanup:main"
+lokay-tick-all = "lokay.tick_all:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/repo_agent"]
+packages = ["src/lokay"]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
 
 [tool.uv.sources]
 # Sibling checkout on mini-m4-0 / local OSS layout:
-#   Developer/Fala + Developer/hermes-plugin-oss-repo-agent
+#   Developer/Fala + Developer/lokay
 fala = { path = "../Fala", editable = true }
 
 [tool.pytest.ini_options]

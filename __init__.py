@@ -15,11 +15,11 @@ SKILLS = (
 
 def register(ctx):
     ctx.register_cli_command(
-        "oss-repo-agent",
-        "Manage guarded GitHub issue and PR automation",
+        "lokay",
+        "Manage guarded GitHub issue and PR automation (Lokay)",
         commands.setup_parser,
         commands.handle_cli,
-        description="Generic OSS repository agent workflow",
+        description="Lokay: generic OSS repository agent workflow",
     )
     base = Path(__file__).parent / "skills"
     for name, description in SKILLS:

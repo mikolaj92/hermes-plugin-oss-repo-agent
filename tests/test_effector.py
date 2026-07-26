@@ -9,7 +9,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from repo_agent import effector
+from lokay import effector
 
 
 class EffectorBoundaryTests(unittest.TestCase):

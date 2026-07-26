@@ -18,12 +18,12 @@ def load_plugin():
         parent.__path__ = []
         sys.modules["hermes_plugins"] = parent
     spec = importlib.util.spec_from_file_location(
-        "hermes_plugins.oss_repo_agent",
+        "hermes_plugins.lokay",
         PLUGIN_ROOT / "__init__.py",
         submodule_search_locations=[str(PLUGIN_ROOT)],
     )
     module = importlib.util.module_from_spec(spec)
-    sys.modules["hermes_plugins.oss_repo_agent"] = module
+    sys.modules["hermes_plugins.lokay"] = module
     spec.loader.exec_module(module)
     return module
 
@@ -68,11 +68,11 @@ def write_config(path):
     return path
 
 
-class OssInitAndDryRunTests(unittest.TestCase):
+class LokayInitAndDryRunTests(unittest.TestCase):
     def setUp(self):
         self.module = load_plugin()
         self.commands = self.module.commands
-        self.config = importlib.import_module("hermes_plugins.oss_repo_agent.config")
+        self.config = importlib.import_module("hermes_plugins.lokay.config")
 
     def parser(self):
         parser = ArgumentParser()
@@ -89,7 +89,7 @@ class OssInitAndDryRunTests(unittest.TestCase):
             "--board",
             "example-board",
         ])
-        self.assertEqual(args.oss_repo_agent_command, "init")
+        self.assertEqual(args.lokay_command, "init")
 
     def test_init_bypasses_config_loading_and_writes_starter_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,7 +171,7 @@ class OssInitAndDryRunTests(unittest.TestCase):
             self.assertEqual(result["planned_work"][0]["repo"], "owner/example-repo")
             self.assertFalse(result["planned_work"][0]["mutation"])
             self.assertIn("Kanban", result["planned_work"][0]["action"])
-            self.assertEqual(self.commands.INTAKE_ASSIGNEE, "repo-agent-intake")
+            self.assertEqual(self.commands.INTAKE_ASSIGNEE, "lokay-intake")
             self.assertTrue(result["safety_guards"])
 
     def test_dispatch_dry_run_reinforces_executor_and_merge_safety(self):

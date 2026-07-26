@@ -20,11 +20,11 @@ The local path dependency is `../Fala`; verify it is checked out at commit
 ```bash
 cd ../Fala && git fetch --tags && git checkout 69bc2ec9d4cdf61773114847c0c582fb2652296d && cd -
 uv sync
-uv run repo-agent-tick-intake --dry-run
+uv run lokay-tick-intake --dry-run
 ```
 
 For scheduled operation use only:
 
 ```bash
-uv run repo-agent-tick-all --dry-run
+uv run lokay-tick-all --dry-run
 ```

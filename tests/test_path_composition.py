@@ -30,7 +30,7 @@ class PackageStructureTests(unittest.TestCase):
                 self.assertNotIn(effector["id"], effector_ids)
                 effector_ids.add(effector["id"])
                 self.assertEqual(effector["adapter"]["kind"], "subprocess")
-                self.assertTrue(effector["config"]["handler"].startswith("repo_agent.steps."))
+                self.assertTrue(effector["config"]["handler"].startswith("lokay.steps."))
                 self.assertTrue(
                     set(effector.get("conduction", [])).issubset(path_effector_ids),
                     effector["id"],

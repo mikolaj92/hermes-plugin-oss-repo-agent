@@ -1,5 +1,5 @@
-# oss-repo-agent
-<!-- hermes-repo-agent: issue-5 closed-loop test 20260717 -->
+# Lokay
+<!-- hermes-lokay: issue-5 closed-loop test 20260717 -->
 
 Safe dry-run-first OSS maintainer automation for Hermes.
 
@@ -23,7 +23,7 @@ The explicit mapping contract lives in
 ## Install
 
 ```bash
-hermes plugins install mikolaj92/hermes-plugin-oss-repo-agent --enable
+hermes plugins install mikolaj92/lokay --enable
 ```
 
 This repository is a standalone Hermes plugin: `plugin.yaml` and `__init__.py`
@@ -37,22 +37,22 @@ The deployment renderer creates an immutable Fala candidate and never installs
 LaunchAgents or changes `deployment/current`:
 
 ```bash
-hermes oss-repo-agent --config ~/.hermes/oss-repo-agent/config.toml render-launchd \
-  --output ~/.hermes/oss-repo-agent/deployment/candidates/<candidate-id> \
-  --fala-db ~/.hermes/oss-repo-agent/fala/state.sqlite --mode dry-run
+hermes lokay --config ~/.hermes/lokay/config.toml render-launchd \
+  --output ~/.hermes/lokay/deployment/candidates/<candidate-id> \
+  --fala-db ~/.hermes/lokay/fala/state.sqlite --mode dry-run
 ```
 
 Validate the candidate with parity and `plutil -lint` before separately
-controlled promotion. `repo-agent-tick-all` / `auto_worker` is the sole
+controlled promotion. `lokay-tick-all` / `auto_worker` is the sole
 scheduled mutator. Individual Fala ticks are manual diagnostics only and must
 not be installed as separate scheduled jobs.
 
 ## 3-minute happy path
 
 ```bash
-hermes oss-repo-agent --config config.yaml init
-hermes oss-repo-agent --config config.yaml validate
-uv run repo-agent-tick-all --dry-run
+hermes lokay --config config.yaml init
+hermes lokay --config config.yaml validate
+uv run lokay-tick-all --dry-run
 ```
 
 Expected dry-run signals:
@@ -64,52 +64,52 @@ Expected dry-run signals:
 
 The plugin registers:
 
-- CLI namespace: `hermes oss-repo-agent ...`
+- CLI namespace: `hermes lokay ...`
 - Skills:
-  - `oss-repo-agent:repo-gh-cli-policy`
-  - `oss-repo-agent:repo-audit-finding-format`
-  - `oss-repo-agent:repo-fix-issue-pr`
-  - `oss-repo-agent:repo-review-agent-pr`
+  - `lokay:repo-gh-cli-policy`
+  - `lokay:repo-audit-finding-format`
+  - `lokay:repo-fix-issue-pr`
+  - `lokay:repo-review-agent-pr`
 
 ## Commands
 
 ```bash
-hermes oss-repo-agent --config <config.json-or-yaml> init
-hermes oss-repo-agent --config <config.json-or-yaml> validate
-hermes oss-repo-agent --config <config> render-launchd --output <dir>
-uv run repo-agent-tick-all --dry-run
-uv run repo-agent-tick-all --live
+hermes lokay --config <config.json-or-yaml> init
+hermes lokay --config <config.json-or-yaml> validate
+hermes lokay --config <config> render-launchd --output <dir>
+uv run lokay-tick-all --dry-run
+uv run lokay-tick-all --live
 ```
 
-`repo-agent-tick-all` / `auto_worker` is the only scheduled mutator. Use
-`repo-agent-tick-intake`, `repo-agent-tick-dispatch`,
-`repo-agent-tick-triage`, or `repo-agent-tick-cleanup` only as manual
+`lokay-tick-all` / `auto_worker` is the only scheduled mutator. Use
+`lokay-tick-intake`, `lokay-tick-dispatch`,
+`lokay-tick-triage`, or `lokay-tick-cleanup` only as manual
 diagnostic runs while investigating one correlation path; they are not
 deployment or scheduling instructions. Legacy shell scripts, backfill,
 webhook, and cron entrypoints are removed and are not runnable paths.
 
 Runtime defaults:
 
-- `HERMES_REPO_AGENT_ASSIGNEE=mikolaj92`
-- `HERMES_KANBAN_INTAKE_ASSIGNEE=repo-agent-intake`
-- `HERMES_KANBAN_FIXER_ASSIGNEE=repo-agent-fixer`
-- `HERMES_OMP_TIMEOUT_SECONDS=1800`
-- `HERMES_ISSUE_TO_PR_OMP_MODEL=omniroute/omp/default`
-- `HERMES_ISSUE_TO_PR_OMP_THINKING=medium`
-- `HERMES_ISSUE_TO_PR_MAX_OMP_AGENTS=3`
-- `HERMES_PR_REQUIRE_TEST_EVIDENCE=1`
-- `HERMES_REPO_CLEANUP_DELETE_LOCAL_BRANCHES=1`
-- `HERMES_REPO_AGENT_UPDATE_DRY_RUN=1`
-- `HERMES_STALE_LOCK_MINUTES=180`
-- `HERMES_REPO_AGENT_MIN_FREE_GB=5`
-- `HERMES_REPO_AGENT_REPOS_FILE` optional pipe-delimited repo registry override:
+- `HERMES_LOKAY_ASSIGNEE=mikolaj92`
+- `HERMES_LOKAY_KANBAN_INTAKE_ASSIGNEE=lokay-intake`
+- `HERMES_LOKAY_KANBAN_FIXER_ASSIGNEE=lokay-fixer`
+- `HERMES_LOKAY_OMP_TIMEOUT_SECONDS=1800`
+- `HERMES_LOKAY_ISSUE_TO_PR_OMP_MODEL=omniroute/omp/default`
+- `HERMES_LOKAY_ISSUE_TO_PR_OMP_THINKING=medium`
+- `HERMES_LOKAY_ISSUE_TO_PR_MAX_OMP_AGENTS=3`
+- `HERMES_LOKAY_PR_REQUIRE_TEST_EVIDENCE=1`
+- `HERMES_LOKAY_CLEANUP_DELETE_LOCAL_BRANCHES=1`
+- `HERMES_LOKAY_UPDATE_DRY_RUN=1`
+- `HERMES_LOKAY_STALE_LOCK_MINUTES=180`
+- `HERMES_LOKAY_MIN_FREE_GB=5`
+- `HERMES_LOKAY_REPOS_FILE` optional pipe-delimited repo registry override:
   `owner/repo|board|clone_path|priority`
 
 ## Configuration
 
-Default path: `~/.hermes/oss-repo-agent/config.yaml`
+Default path: `~/.hermes/lokay/config.yaml`
 
-Override with `HERMES_OSS_REPO_AGENT_CONFIG` or `--config`.
+Override with `HERMES_LOKAY_CONFIG` or `--config`.
 
 Start from [`config.example.yaml`](config.example.yaml), or let `init` create a local starter config.
 
@@ -128,7 +128,7 @@ Start from [`config.example.yaml`](config.example.yaml), or let `init` create a 
 ```bash
 python3 -m unittest discover -s tests
 python3 tools/hygiene_check.py .
-scripts/repo_agent_smoke.sh
+scripts/lokay_smoke.sh
 ```
 
 <!-- hermes e2e closed-loop test 20260717 -->

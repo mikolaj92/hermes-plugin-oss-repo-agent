@@ -7,11 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from repo_agent.config import AgentConfig, RepoEntry
-from repo_agent.flows.common import PathRunResult
-from repo_agent.flows.runtime import HostPathRunResult, JournalProcess
-from repo_agent.flows.triage import run_pr_triage_decide, run_triage_flow
-from repo_agent.flows.cleanup import run_cleanup_flow
+from lokay.config import AgentConfig, RepoEntry
+from lokay.flows.common import PathRunResult
+from lokay.flows.runtime import HostPathRunResult, JournalProcess
+from lokay.flows.triage import run_pr_triage_decide, run_triage_flow
+from lokay.flows.cleanup import run_cleanup_flow
 
 
 
@@ -62,7 +62,7 @@ class TriagePackageFlowTests(unittest.TestCase):
 
         async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
             runner = mock.AsyncMock(return_value=host)
-            with mock.patch("repo_agent.flows.triage.run_package_path_async", new=runner):
+            with mock.patch("lokay.flows.triage.run_package_path_async", new=runner):
                 result = await run_pr_triage_decide(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True, repo="o/temida")
             return result, runner
 
@@ -77,7 +77,7 @@ class TriagePackageFlowTests(unittest.TestCase):
 
         async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
             runner = mock.AsyncMock()
-            with mock.patch("repo_agent.flows.triage.run_package_path_async", new=runner):
+            with mock.patch("lokay.flows.triage.run_package_path_async", new=runner):
                 result = await run_pr_triage_decide(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True)
             return result, runner
 
@@ -102,7 +102,7 @@ class TriagePackageFlowTests(unittest.TestCase):
 
         async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
             runner = mock.AsyncMock(return_value=host)
-            with mock.patch("repo_agent.flows.triage.run_package_path_async", new=runner):
+            with mock.patch("lokay.flows.triage.run_package_path_async", new=runner):
                 result = await run_triage_flow(
                     db_path=Path(tempfile.mktemp()),
                     config=self.cfg,
@@ -144,7 +144,7 @@ class TriagePackageFlowTests(unittest.TestCase):
 
         async def scenario() -> PathRunResult:
             with mock.patch(
-                "repo_agent.flows.triage.run_package_path_async",
+                "lokay.flows.triage.run_package_path_async",
                 new=mock.AsyncMock(return_value=host),
             ):
                 return await run_pr_triage_decide(
@@ -178,7 +178,7 @@ class TriagePackageFlowTests(unittest.TestCase):
 
         async def scenario() -> PathRunResult:
             with mock.patch(
-                "repo_agent.flows.triage.run_package_path_async",
+                "lokay.flows.triage.run_package_path_async",
                 new=mock.AsyncMock(return_value=host),
             ):
                 return await run_triage_flow(
@@ -224,7 +224,7 @@ class TriagePackageFlowTests(unittest.TestCase):
 
         async def scenario() -> PathRunResult:
             with mock.patch(
-                "repo_agent.flows.triage.run_package_path_async",
+                "lokay.flows.triage.run_package_path_async",
                 new=mock.AsyncMock(return_value=host),
             ):
                 return await run_triage_flow(
@@ -245,7 +245,7 @@ class TriagePackageFlowTests(unittest.TestCase):
 
         async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
             runner = mock.AsyncMock()
-            with mock.patch("repo_agent.flows.triage.run_package_path_async", new=runner):
+            with mock.patch("lokay.flows.triage.run_package_path_async", new=runner):
                 result = await run_triage_flow(
                     db_path=Path(tempfile.mktemp()),
                     config=cfg,
@@ -262,7 +262,7 @@ class TriagePackageFlowTests(unittest.TestCase):
 
 class BranchDecisionGateTests(unittest.TestCase):
     def test_merge_handlers_noop_when_comment_selected(self) -> None:
-        from repo_agent.steps import triage
+        from lokay.steps import triage
 
         request = {
             "input": {
@@ -292,7 +292,7 @@ class BranchDecisionGateTests(unittest.TestCase):
                 self.assertFalse(out.get("mutated"))
 
     def test_failed_claim_blocks_merge_receipt_and_close(self) -> None:
-        from repo_agent.steps import triage
+        from lokay.steps import triage
         request = {
             "input": {"repo": "o/r", "number": 3, "issue": 3, "dry_run": False, "conduction": {
                 "decide_triage_action": {"status": "decided", "action": "merge"},
@@ -307,7 +307,7 @@ class BranchDecisionGateTests(unittest.TestCase):
                 self.assertFalse(out["mutated"])
 
     def test_owner_required_merge_rejects_missing_author(self) -> None:
-        from repo_agent.steps import triage
+        from lokay.steps import triage
         out = triage.decide_triage_action({"input": {
             "repo": "o/r", "require_owner": True, "automerge": True,
             "checks_pass": True, "evidence_pass": True,
@@ -317,7 +317,7 @@ class BranchDecisionGateTests(unittest.TestCase):
         self.assertEqual(out["action"], "skip")
 
     def test_comment_handler_noop_when_merge_selected(self) -> None:
-        from repo_agent.steps import triage
+        from lokay.steps import triage
 
         out = triage.comment_pr_once(
             {
@@ -342,7 +342,7 @@ class BranchDecisionGateTests(unittest.TestCase):
         self.assertFalse(out.get("worked"))
 
     def test_failed_decision_blocks_branch_mutation(self) -> None:
-        from repo_agent.steps import triage
+        from lokay.steps import triage
 
         out = triage.claim_pr_assignee(
             {
@@ -366,7 +366,7 @@ class BranchDecisionGateTests(unittest.TestCase):
         self.assertFalse(out.get("mutated"))
 
     def test_repair_handlers_noop_when_merge_selected(self) -> None:
-        from repo_agent.steps import repair
+        from lokay.steps import repair
 
         request = {
             "input": {
@@ -405,7 +405,7 @@ class CleanupRepositoryRoutingTests(unittest.TestCase):
 
         async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
             runner = mock.AsyncMock(return_value=host)
-            with mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=runner):
+            with mock.patch("lokay.flows.cleanup.run_package_path_async", new=runner):
                 result = await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True, repo="o/temida", branch="ai/fix/2")
             return result, runner
 
@@ -420,7 +420,7 @@ class CleanupRepositoryRoutingTests(unittest.TestCase):
 
         async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
             runner = mock.AsyncMock()
-            with mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=runner):
+            with mock.patch("lokay.flows.cleanup.run_package_path_async", new=runner):
                 result = await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True, branch="ai/fix/2")
             return result, runner
 
@@ -435,7 +435,7 @@ class CleanupRepositoryRoutingTests(unittest.TestCase):
 
         async def scenario() -> mock.AsyncMock:
             runner = mock.AsyncMock(return_value=host)
-            with mock.patch("repo_agent.flows.cleanup.branch_config_get", side_effect=lambda clone, branch, key: persisted[key.removeprefix("repo-agent-")]), mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=runner):
+            with mock.patch("lokay.flows.cleanup.branch_config_get", side_effect=lambda clone, branch, key: persisted[key.removeprefix("lokay-")]), mock.patch("lokay.flows.cleanup.run_package_path_async", new=runner):
                 await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=False, repo="o/temida", branch="ai/fix/2")
             return runner
 
@@ -451,7 +451,7 @@ class CleanupRepositoryRoutingTests(unittest.TestCase):
 
         async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
             runner = mock.AsyncMock()
-            with mock.patch("repo_agent.flows.cleanup.branch_config_get", return_value=""), mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=runner):
+            with mock.patch("lokay.flows.cleanup.branch_config_get", return_value=""), mock.patch("lokay.flows.cleanup.run_package_path_async", new=runner):
                 result = await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=False, repo="o/temida", branch="ai/fix/2")
             return result, runner
 
@@ -478,7 +478,7 @@ class CleanupRepositoryRoutingTests(unittest.TestCase):
         )
 
         async def scenario() -> PathRunResult:
-            with mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=mock.AsyncMock(return_value=host)):
+            with mock.patch("lokay.flows.cleanup.run_package_path_async", new=mock.AsyncMock(return_value=host)):
                 return await run_cleanup_flow(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True, repo="o/temida", branch="ai/fix/2", receipt_path="/tmp/cleanup.json")
 
         result = asyncio.run(scenario())

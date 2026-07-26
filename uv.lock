@@ -21,7 +21,7 @@ requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=8.
 provides-extras = ["dev"]
 
 [[package]]
-name = "hermes-plugin-oss-repo-agent"
+name = "lokay"
 version = "0.2.1"
 source = { editable = "." }
 dependencies = [

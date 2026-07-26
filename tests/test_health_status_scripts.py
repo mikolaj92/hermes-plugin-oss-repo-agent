@@ -27,13 +27,13 @@ def load_plugin():
         parent.__path__ = []
         sys.modules["hermes_plugins"] = parent
     spec = importlib.util.spec_from_file_location(
-        "hermes_plugins.oss_repo_agent",
+        "hermes_plugins.lokay",
         ROOT / "__init__.py",
         submodule_search_locations=[str(ROOT)],
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    sys.modules["hermes_plugins.oss_repo_agent"] = module
+    sys.modules["hermes_plugins.lokay"] = module
     spec.loader.exec_module(module)
     return module
 
@@ -43,7 +43,7 @@ class HealthStatusScriptTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_plugin()
         cls.commands = cls.module.commands
-        cls.cfg = cls.commands.OssRepoAgentConfig.from_mapping({"mode": "dry-run", "repos": []})
+        cls.cfg = cls.commands.LokayConfig.from_mapping({"mode": "dry-run", "repos": []})
         cls.holder = tempfile.TemporaryDirectory()
         cls.root = Path(cls.holder.name)
         cls.config = cls.root / "config.toml"
@@ -72,6 +72,13 @@ class HealthStatusScriptTests(unittest.TestCase):
                 "require_test_evidence": True,
                 "executor_enabled": False,
             },
+            "repos": sorted(
+                [
+                    {"repo": entry.repo, "board": entry.board, "clone_path": entry.clone_path}
+                    for entry in cls.cfg.repos
+                ],
+                key=lambda x: x["repo"],
+            ),
         }
         candidate_id = hashlib.sha256((json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
         candidate = cls.root / "deployment" / "candidates" / candidate_id
@@ -183,16 +190,16 @@ exit 0
             {
                 "HOME": str(home),
                 "PATH": str(fake) + os.pathsep + env.get("PATH", ""),
-                "HERMES_REPO_AGENT_REPOS_FILE": str(root / "repos.txt"),
-                "HERMES_REPO_AGENT_LOG_DIR": str(root / "logs"),
-                "HERMES_REPO_AGENT_HEALTH_LOG": str(root / "logs" / "health.log"),
-                "HERMES_REPO_AGENT_DEPLOYMENT_ROOT": str(deployment or (root / "deployment")),
-                "HERMES_REPO_AGENT_FALA_DB": str(db or (root / "missing.sqlite")),
-                "HERMES_REPO_AGENT_FALA_PLIST": str(home / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"),
-                "HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "0",
-                "HERMES_REPO_AGENT_FALA_MAX_RUN_AGE_SECONDS": "1800",
-                "HERMES_REPO_AGENT_MIN_FREE_GB": "0",
-                "HERMES_REPO_AGENT_PARITY_ENABLED": "0",
+                "HERMES_LOKAY_REPOS_FILE": str(root / "repos.txt"),
+                "HERMES_LOKAY_LOG_DIR": str(root / "logs"),
+                "HERMES_LOKAY_HEALTH_LOG": str(root / "logs" / "health.log"),
+                "HERMES_LOKAY_DEPLOYMENT_ROOT": str(deployment or (root / "deployment")),
+                "HERMES_LOKAY_FALA_DB": str(db or (root / "missing.sqlite")),
+                "HERMES_LOKAY_FALA_PLIST": str(home / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist"),
+                "HERMES_LOKAY_FALA_REQUIRE_LIVE": "0",
+                "HERMES_LOKAY_FALA_MAX_RUN_AGE_SECONDS": "1800",
+                "HERMES_LOKAY_MIN_FREE_GB": "0",
+                "HERMES_LOKAY_PARITY_ENABLED": "0",
             }
         )
         (root / "repos.txt").write_text("offline/repo|offline-board|/tmp/offline-repo|1\n", encoding="utf-8")
@@ -208,38 +215,50 @@ exit 0
         shutil.copytree(self.candidate, version)
         managed_bin = root / "deployment" / "runtime" / self.candidate.name / ".venv" / "bin"
         managed_bin.mkdir(parents=True, exist_ok=True)
-        (managed_bin / "python").symlink_to(sys.executable)
+        managed_python = Path(sys.executable)
+        # Health/status validation requires Python >= 3.12 (tomllib + runtime gate).
+        for candidate in (
+            ROOT / ".venv" / "bin" / "python3.12",
+            ROOT / ".venv" / "bin" / "python",
+            Path("/opt/homebrew/bin/python3.12"),
+            Path("/usr/local/bin/python3.12"),
+            managed_python,
+        ):
+            if candidate.is_file():
+                managed_python = candidate.resolve()
+                break
+        (managed_bin / "python").symlink_to(managed_python)
         self.commands._promote_version_runtime(version, root / "deployment", self.candidate.name)
         current = root / "deployment" / "current"
         current.symlink_to(version, target_is_directory=True)
         if installed_copy:
             installed = root / "home" / "Library" / "LaunchAgents"
             installed.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(version / "launchd" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist", installed / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist")
+            shutil.copy2(version / "launchd" / "com.mikolaj92.lokay.fala-tick-all.plist", installed / "com.mikolaj92.lokay.fala-tick-all.plist")
         return root
 
     def test_health_rejects_malformed_environment(self):
-        completed = self._run("repo_agent_health.sh", extra={"HERMES_STALE_LOCK_MINUTES": "not-a-number"})
+        completed = self._run("lokay_health.sh", extra={"HERMES_LOKAY_STALE_LOCK_MINUTES": "not-a-number"})
         self.assertEqual(completed.returncode, 2)
         self.assertIn("invalid-env", completed.stderr)
 
     def test_status_rejects_malformed_environment(self):
-        completed = self._run("repo_agent_status.sh", extra={"HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "maybe"})
+        completed = self._run("lokay_status.sh", extra={"HERMES_LOKAY_FALA_REQUIRE_LIVE": "maybe"})
         self.assertEqual(completed.returncode, 2)
         self.assertIn("invalid-env", completed.stderr)
 
     def test_health_ignores_unsupported_secondary_launchctl_domain(self):
-        completed = self._run("repo_agent_health.sh", extra={"FAKE_LAUNCHCTL_GUI_AVAILABLE": "0", "FAKE_LAUNCHCTL_LOADED": "com.mikolaj92.hermes.repo-agent-fala-tick-all,com.mikolaj92.hermes.repo-agent-hermes-update"})
+        completed = self._run("lokay_health.sh", extra={"FAKE_LAUNCHCTL_GUI_AVAILABLE": "0", "FAKE_LAUNCHCTL_LOADED": "com.mikolaj92.lokay.fala-tick-all,com.mikolaj92.lokay.hermes-update"})
         self.assertNotIn("launchd-query-failed", completed.stdout)
         self.assertNotIn("launchctl-domain-unavailable", completed.stdout)
 
     def test_status_ignores_unsupported_secondary_launchctl_domain(self):
-        completed = self._run("repo_agent_status.sh", extra={"FAKE_LAUNCHCTL_GUI_AVAILABLE": "0", "FAKE_LAUNCHCTL_LOADED": "com.mikolaj92.hermes.repo-agent-fala-tick-all"})
+        completed = self._run("lokay_status.sh", extra={"FAKE_LAUNCHCTL_GUI_AVAILABLE": "0", "FAKE_LAUNCHCTL_LOADED": "com.mikolaj92.lokay.fala-tick-all"})
         self.assertNotIn("launchctl-error", completed.stderr)
         self.assertNotIn("launchctl-unavailable", completed.stderr)
 
     def test_health_marks_missing_current_and_db(self):
-        completed = self._run("repo_agent_health.sh")
+        completed = self._run("lokay_health.sh")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("fala-deployment invalid-current", completed.stdout)
         self.assertIn("fala-db missing", completed.stdout)
@@ -251,7 +270,7 @@ exit 0
         version_manifest = layout / "deployment" / "versions" / self.candidate.name / "manifest.json"
         version_manifest.chmod(0o644)
         version_manifest.write_text("{}\n", encoding="utf-8")
-        completed = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        completed = self._run("lokay_health.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("fala-deployment candidate-invalid", completed.stdout)
 
@@ -269,7 +288,7 @@ exit 0
         self._write_db(db, mode="dry-run")
         layout = self._layout(db=db)
         self._tamper_runtime_identity(layout)
-        completed = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        completed = self._run("lokay_health.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("runtime-identity-process_type-mismatch", completed.stdout)
 
@@ -278,7 +297,7 @@ exit 0
         self._write_db(db, mode="dry-run")
         layout = self._layout(db=db)
         self._tamper_runtime_identity(layout)
-        completed = self._run("repo_agent_status.sh", db=db, deployment=layout / "deployment")
+        completed = self._run("lokay_status.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("runtime-identity-process_type-mismatch", completed.stdout)
 
@@ -293,7 +312,7 @@ exit 0
         manifest_path.chmod(0o644)
         manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
         manifest_path.chmod(0o444)
-        completed = self._run("repo_agent_status.sh", db=db, deployment=layout / "deployment")
+        completed = self._run("lokay_status.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("identity-policy-unsafe", completed.stdout)
 
@@ -305,7 +324,7 @@ exit 0
         config.chmod(0o644)
         config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['status', 'valid']\n\n[automation]\nautomerge = true\n", encoding="utf-8")
         config.chmod(0o444)
-        completed = self._run("repo_agent_status.sh", db=db, deployment=layout / "deployment")
+        completed = self._run("lokay_status.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("identity-policy-config-mismatch", completed.stdout)
 
@@ -317,7 +336,7 @@ exit 0
         config.chmod(0o644)
         config.write_text("automerge = false\n\n[automation]\nautomerge = true\n", encoding="utf-8")
         config.chmod(0o444)
-        completed = self._run("repo_agent_status.sh", db=db, deployment=layout / "deployment")
+        completed = self._run("lokay_status.sh", db=db, deployment=layout / "deployment")
         self.assertNotIn("identity-policy-config-mismatch", completed.stdout)
 
     def test_health_uses_top_level_policy_precedence(self):
@@ -337,7 +356,7 @@ exit 0
         manifest_path.chmod(0o644)
         manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
         manifest_path.chmod(0o444)
-        completed = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        completed = self._run("lokay_health.sh", db=db, deployment=layout / "deployment")
         self.assertNotIn("identity-policy-config-mismatch", completed.stdout)
 
     def test_health_rejects_latest_incomplete_run(self):
@@ -347,10 +366,10 @@ exit 0
             connection.execute("UPDATE runs SET status='created' WHERE id='latest'")
         layout = self._layout(db=db)
         completed = self._run(
-            "repo_agent_health.sh",
+            "lokay_health.sh",
             db=db,
             deployment=layout / "deployment",
-            extra={"HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "1"},
+            extra={"HERMES_LOKAY_FALA_REQUIRE_LIVE": "1"},
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("latest-run-not-completed:created", completed.stdout)
@@ -362,10 +381,10 @@ exit 0
             connection.execute("UPDATE runs SET status='active' WHERE id='latest'")
         layout = self._layout(db=db)
         completed = self._run(
-            "repo_agent_status.sh",
+            "lokay_status.sh",
             db=db,
             deployment=layout / "deployment",
-            extra={"HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "1"},
+            extra={"HERMES_LOKAY_FALA_REQUIRE_LIVE": "1"},
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("latest-run-not-completed:active", completed.stdout)
@@ -377,10 +396,10 @@ exit 0
                 connection.execute("UPDATE runs SET status=? WHERE id='latest'", (status,))
             layout = self._layout(db=db)
             completed = self._run(
-                "repo_agent_health.sh",
+                "lokay_health.sh",
                 db=db,
                 deployment=layout / "deployment",
-                extra={"HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "1"},
+                extra={"HERMES_LOKAY_FALA_REQUIRE_LIVE": "1"},
             )
             self.assertNotEqual(completed.returncode, 0, status)
             self.assertIn(f"latest-run-not-completed:{status}", completed.stdout)
@@ -390,10 +409,10 @@ exit 0
         self._write_db(db, mode="dry-run")
         layout = self._layout(db=db)
         completed = self._run(
-            "repo_agent_health.sh",
+            "lokay_health.sh",
             db=db,
             deployment=layout / "deployment",
-            extra={"HERMES_REPO_AGENT_FALA_REQUIRE_LIVE": "1"},
+            extra={"HERMES_LOKAY_FALA_REQUIRE_LIVE": "1"},
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("production-gate-requires-live", completed.stdout)
@@ -402,9 +421,9 @@ exit 0
         db = self.root / "nonzero-fala.sqlite"
         self._write_db(db, mode="dry-run")
         layout = self._layout(db=db)
-        loaded = ",".join(("com.mikolaj92.hermes.repo-agent-fala-tick-all",))
+        loaded = ",".join(("com.mikolaj92.lokay.fala-tick-all",))
         completed = self._run(
-            "repo_agent_status.sh",
+            "lokay_status.sh",
             db=db,
             deployment=layout / "deployment",
             extra={
@@ -420,12 +439,12 @@ exit 0
         layout = self._layout(db=db)
         loaded = ",".join(
             (
-                "com.mikolaj92.hermes.repo-agent-fala-tick-all",
+                "com.mikolaj92.lokay.fala-tick-all",
                 "com.mikolaj92.hermes.repo-issue-intake",
             )
         )
         completed = self._run(
-            "repo_agent_status.sh",
+            "lokay_status.sh",
             db=db,
             deployment=layout / "deployment",
             extra={"FAKE_LAUNCHCTL_LOADED": loaded},
@@ -436,24 +455,24 @@ exit 0
         db = self.root / "plist-mismatch.sqlite"
         self._write_db(db, mode="dry-run")
         layout = self._layout(db=db)
-        installed = layout / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+        installed = layout / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist"
         installed.chmod(0o644)
         installed.write_bytes(installed.read_bytes() + b"\n")
-        completed = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        completed = self._run("lokay_health.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("installed-plist-not-current", completed.stdout)
 
     def test_status_marks_unresolved_historical_runs(self):
         db = self.root / "historical.sqlite"
         self._write_db(db, mode="dry-run", historical=True)
-        completed = self._run("repo_agent_status.sh", db=db)
+        completed = self._run("lokay_status.sh", db=db)
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("unresolved-runs:", completed.stdout)
         for run_id in ("old-failed", "old-created", "old-cancel_requested"):
             self.assertIn(run_id, completed.stdout)
 
     def test_health_rejects_repair_argument(self):
-        completed = self._run("repo_agent_health.sh", args=("--repair",))
+        completed = self._run("lokay_health.sh", args=("--repair",))
         self.assertEqual(completed.returncode, 2)
         self.assertIn("unsupported argument: --repair", completed.stderr)
 
@@ -461,9 +480,9 @@ exit 0
         db = self.root / "mutators.sqlite"
         self._write_db(db, mode="dry-run")
         layout = self._layout(db=db)
-        loaded = ",".join(("com.mikolaj92.hermes.repo-agent-fala-tick-all", "com.mikolaj92.hermes.repo-issue-intake"))
+        loaded = ",".join(("com.mikolaj92.lokay.fala-tick-all", "com.mikolaj92.hermes.repo-issue-intake"))
         dual = self._run(
-            "repo_agent_health.sh",
+            "lokay_health.sh",
             db=db,
             deployment=layout / "deployment",
             extra={"FAKE_LAUNCHCTL_LOADED": loaded},
@@ -477,10 +496,10 @@ exit 0
         layout = self._layout(db=db)
         health_plist = layout / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-health.plist"
         with health_plist.open("wb") as stream:
-            plistlib.dump({"ProgramArguments": ["repo_agent_health.sh", "--repair"]}, stream)
-        loaded = ",".join(("com.mikolaj92.hermes.repo-agent-fala-tick-all", "com.mikolaj92.hermes.repo-agent-health"))
+            plistlib.dump({"ProgramArguments": ["lokay_health.sh", "--repair"]}, stream)
+        loaded = ",".join(("com.mikolaj92.lokay.fala-tick-all", "com.mikolaj92.hermes.repo-agent-health"))
         completed = self._run(
-            "repo_agent_health.sh",
+            "lokay_health.sh",
             db=db,
             deployment=layout / "deployment",
             extra={"FAKE_LAUNCHCTL_LOADED": loaded},
@@ -499,7 +518,7 @@ exit 0
         manifest_path.chmod(0o644)
         manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
         manifest_path.chmod(0o444)
-        completed = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        completed = self._run("lokay_health.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("identity-policy-unsafe", completed.stdout)
 
@@ -507,7 +526,7 @@ exit 0
         db = self.root / "unsafe-config-policy.sqlite"
         self._write_db(db, mode="dry-run")
         layout = self._layout(db=db)
-        baseline = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        baseline = self._run("lokay_health.sh", db=db, deployment=layout / "deployment")
         self.assertNotIn("identity-policy-config-mismatch", baseline.stdout)
         version = layout / "deployment" / "versions" / self.candidate.name
         config = version / "source" / "config.toml"
@@ -522,7 +541,7 @@ exit 0
         manifest_path.chmod(0o644)
         manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
         manifest_path.chmod(0o444)
-        completed = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
+        completed = self._run("lokay_health.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("identity-policy-config-mismatch", completed.stdout)
 
@@ -533,7 +552,7 @@ exit 0
         managed_python = layout / "deployment" / "runtime" / self.candidate.name / ".venv" / "bin" / "python"
         managed_python.unlink()
         completed = self._run(
-            "repo_agent_health.sh",
+            "lokay_health.sh",
             db=db,
             deployment=layout / "deployment",
         )
@@ -545,23 +564,23 @@ exit 0
         self._write_db(db, mode="dry-run")
         layout = self._layout(db=db)
         completed = self._run(
-            "repo_agent_health.sh",
+            "lokay_health.sh",
             db=db,
             deployment=layout / "deployment",
             extra={
-                "HERMES_REPO_AGENT_PARITY_ENABLED": "1",
-                "HERMES_REPO_AGENT_PARITY_SOURCE_ROOT": str(ROOT / "scripts"),
-                "HERMES_REPO_AGENT_PARITY_ACTIVE_ROOT": str(self.root / "missing-active-scripts"),
-                "HERMES_REPO_AGENT_PARITY_TEMPLATE_ROOT": str(ROOT / "templates" / "launchd"),
-                "HERMES_REPO_AGENT_PARITY_ACTIVE_PLIST_ROOT": str(layout / "home" / "Library" / "LaunchAgents"),
-                "HERMES_REPO_AGENT_PARITY_CONFIG_ROOT": str(self.root / "missing-active-config"),
+                "HERMES_LOKAY_PARITY_ENABLED": "1",
+                "HERMES_LOKAY_PARITY_SOURCE_ROOT": str(ROOT / "scripts"),
+                "HERMES_LOKAY_PARITY_ACTIVE_ROOT": str(self.root / "missing-active-scripts"),
+                "HERMES_LOKAY_PARITY_TEMPLATE_ROOT": str(ROOT / "templates" / "launchd"),
+                "HERMES_LOKAY_PARITY_ACTIVE_PLIST_ROOT": str(layout / "home" / "Library" / "LaunchAgents"),
+                "HERMES_LOKAY_PARITY_CONFIG_ROOT": str(self.root / "missing-active-config"),
             },
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("deployment-parity mismatch", completed.stdout)
 
     def test_status_reports_fala_noop_activity(self):
-        completed = self._run("repo_agent_status.sh", db=self.base_db)
+        completed = self._run("lokay_status.sh", db=self.base_db)
         self.assertIn("Recent Fala Runs", completed.stdout)
         self.assertIn("run_id=latest", completed.stdout)
         self.assertIn("activity=noop", completed.stdout)
@@ -581,7 +600,7 @@ exit 0
                     "{}", "{}", now, now, "{}",
                 ),
             )
-        completed = self._run("repo_agent_status.sh", db=db)
+        completed = self._run("lokay_status.sh", db=db)
         self.assertIn("run_id=latest", completed.stdout)
         self.assertIn("activity=worked", completed.stdout)
 
@@ -600,7 +619,7 @@ exit 0
                     "{}", "{}", now, now, "{}",
                 ),
             )
-        completed = self._run("repo_agent_status.sh", db=db)
+        completed = self._run("lokay_status.sh", db=db)
         self.assertIn("run_id=latest", completed.stdout)
         self.assertIn("activity=noop", completed.stdout)
 
@@ -608,12 +627,12 @@ exit 0
         db = self.root / "runtime-log.sqlite"
         self._write_db(db, mode="dry-run")
         layout = self._layout(db=db)
-        installed = layout / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.hermes.repo-agent-fala-tick-all.plist"
+        installed = layout / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist"
         import plistlib
         with installed.open("rb") as stream:
             runtime_log = plistlib.load(stream)["StandardOutPath"]
-        completed = self._run("repo_agent_health.sh", db=db, deployment=layout / "deployment")
-        self.assertIn(f"missing-log label=com.mikolaj92.hermes.repo-agent-fala-tick-all path={runtime_log}", completed.stdout)
+        completed = self._run("lokay_health.sh", db=db, deployment=layout / "deployment")
+        self.assertIn(f"missing-log label=com.mikolaj92.lokay.fala-tick-all path={runtime_log}", completed.stdout)
 
 if __name__ == "__main__":
     unittest.main()

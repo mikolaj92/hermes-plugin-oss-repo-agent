@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: hermes-plugin-oss-repo-agent
+          path: lokay
       - uses: actions/checkout@v4
         with:
           repository: mikolaj92/Fala
@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install package and Fala
-        working-directory: hermes-plugin-oss-repo-agent
+        working-directory: lokay
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ../Fala
@@ -36,12 +36,12 @@ jobs:
             -o ../Fala/mojo/fala/native/libfala_process_host.dylib \
             ../Fala/mojo/fala/native_process_host.c
       - name: Run unit suite
-        working-directory: hermes-plugin-oss-repo-agent
+        working-directory: lokay
         env:
           FALA_HOME: ${{ github.workspace }}/Fala
           PYTHONPATH: src:.
           CONDA_PREFIX: ${{ github.workspace }}/Fala/.pixi/envs/default
         run: python -m unittest discover -s tests -v
       - name: Hygiene
-        working-directory: hermes-plugin-oss-repo-agent
+        working-directory: lokay
         run: python tools/hygiene_check.py .

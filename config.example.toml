@@ -20,7 +20,7 @@ automerge = false
 require_human_approval = true
 require_checks = true
 require_test_evidence = true
-fixer_assignee = "repo-agent-fixer"
+fixer_assignee = "lokay-fixer"
 merge_method = "merge"
 
 [direction]
@@ -39,11 +39,11 @@ thinking = "medium"
 timeout_seconds = 7200
 
 [paths]
-worktree_root = "~/.hermes/worktrees/repo-agent"
-dispatch_receipts = "~/.hermes/state/repo-agent-dispatch"
-task_receipts = "~/.hermes/state/repo-agent-receipts"
-merge_receipts = "~/.hermes/state/repo-agent-merge"
-active_issue = "~/.hermes/state/repo-agent-active"
+worktree_root = "~/.hermes/worktrees/lokay"
+dispatch_receipts = "~/.hermes/state/lokay-dispatch"
+task_receipts = "~/.hermes/state/lokay-receipts"
+merge_receipts = "~/.hermes/state/lokay-merge"
+active_issue = "~/.hermes/state/lokay-active"
 
 [[repos]]
 repo = "owner/example-repo"

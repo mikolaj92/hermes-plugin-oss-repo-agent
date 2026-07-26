@@ -7,9 +7,9 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from repo_agent.steps.claim import claim_github_issue
-from repo_agent.steps.issue_direction import comment_issue_once, decide_issue_action
-from repo_agent.steps.kanban_intake import ensure_kanban_intake
+from lokay.steps.claim import claim_github_issue
+from lokay.steps.issue_direction import comment_issue_once, decide_issue_action
+from lokay.steps.kanban_intake import ensure_kanban_intake
 
 
 def req(input_data=None, config=None):
@@ -49,7 +49,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
             req(
                 {
                     "conduction": {"poll": poll},
-                    "repo_goal": "automate GitHub issue PR merge lifecycle for hermes repo-agent",
+                    "repo_goal": "automate GitHub issue PR merge lifecycle for hermes lokay",
                     "dry_run": False,
                 }
             )
@@ -58,7 +58,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
         self.assertEqual(decide["reason"], "out_of_direction_goal")
 
         with mock.patch(
-            "repo_agent.steps.issue_direction.run_cmd",
+            "lokay.steps.issue_direction.run_cmd",
             side_effect=[
                 SimpleNamespace(stdout=json.dumps({"comments": []}), stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="", returncode=0),
@@ -106,7 +106,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
                         "claim": claim,
                     },
                 },
-                config={"kanban_intake_assignee": "repo-agent-intake"},
+                config={"kanban_intake_assignee": "lokay-intake"},
             )
         )
         self.assertEqual(kanban["status"], "noop")
@@ -114,13 +114,13 @@ class IssueDirectionIntakeTests(unittest.TestCase):
     def test_accept_aligned_issue_claims(self) -> None:
         poll = self._poll(
             title="Harden issue PR merge lifecycle receipts",
-            body="Hermes repo-agent automation for GitHub issue merge",
+            body="Hermes lokay automation for GitHub issue merge",
         )
         decide = decide_issue_action(
             req(
                 {
                     "conduction": {"poll": poll},
-                    "repo_goal": "automate GitHub issue PR merge lifecycle for hermes repo-agent",
+                    "repo_goal": "automate GitHub issue PR merge lifecycle for hermes lokay",
                     "dry_run": False,
                 }
             )
@@ -165,7 +165,7 @@ class IssueDirectionIntakeTests(unittest.TestCase):
             )
         )
         self.assertEqual(planned["status"], "planned")
-        self.assertIn("repo-agent:owner/repo:99:issue-direction", planned["comment_marker"])
+        self.assertIn("lokay:owner/repo:99:issue-direction", planned["comment_marker"])
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from repo_agent import tick_cleanup
+from lokay import tick_cleanup
 
 
 class TickCleanupTests(unittest.TestCase):
@@ -44,14 +44,14 @@ class TickCleanupTests(unittest.TestCase):
                 "--base-sha", "1" * 40, "--head-oid", "2" * 40, "--merge-oid", "3" * 40, "--origin-main-sha", "4" * 40,
                 "--authorize-remote-retention", "--dry-run",
             ]
-            with mock.patch.object(tick_cleanup, "load_config", return_value=cfg), mock.patch.object(tick_cleanup, "ensure_fala_paths", return_value=(root / "fala.sqlite", None)), mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=run_path), mock.patch.object(tick_cleanup, "print_path_result", return_value=0):
+            with mock.patch.object(tick_cleanup, "load_config", return_value=cfg), mock.patch.object(tick_cleanup, "ensure_fala_paths", return_value=(root / "fala.sqlite", None)), mock.patch("lokay.flows.cleanup.run_package_path_async", new=run_path), mock.patch.object(tick_cleanup, "print_path_result", return_value=0):
                 self.assertEqual(tick_cleanup.main(argv), 0)
 
             inputs = captured["kwargs"]["effector_inputs"]["reconcile_no_target_cleanup"]
             config = captured["kwargs"]["effector_configs"]["reconcile_no_target_cleanup"]
             self.assertEqual(inputs["claim_path"], str(root / "active"))
             paths.active_issue = str(root / "active.json")
-            with mock.patch.object(tick_cleanup, "load_config", return_value=cfg), mock.patch.object(tick_cleanup, "ensure_fala_paths", return_value=(root / "fala.sqlite", None)), mock.patch("repo_agent.flows.cleanup.run_package_path_async", new=run_path), mock.patch.object(tick_cleanup, "print_path_result", return_value=0):
+            with mock.patch.object(tick_cleanup, "load_config", return_value=cfg), mock.patch.object(tick_cleanup, "ensure_fala_paths", return_value=(root / "fala.sqlite", None)), mock.patch("lokay.flows.cleanup.run_package_path_async", new=run_path), mock.patch.object(tick_cleanup, "print_path_result", return_value=0):
                 self.assertEqual(tick_cleanup.main(argv), 0)
             inputs = captured["kwargs"]["effector_inputs"]["reconcile_no_target_cleanup"]
             config = captured["kwargs"]["effector_configs"]["reconcile_no_target_cleanup"]

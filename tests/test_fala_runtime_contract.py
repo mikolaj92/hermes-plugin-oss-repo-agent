@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from repo_agent.flows.runtime import (
+from lokay.flows.runtime import (
     RuntimeFacadeError,
     read_journal_processes,
     run_package_path,
@@ -66,7 +66,7 @@ class RuntimeFacadeTests(unittest.TestCase):
                     {"id": "run-1:path:dependent", "status": "cancelled"},
                 ],
             }
-            with patch("repo_agent.flows.runtime.host_run_package", return_value=host) as runner:
+            with patch("lokay.flows.runtime.host_run_package", return_value=host) as runner:
                 result = run_package_path(
                     db_path=db,
                     package_path=Path(tmp) / "package.toml",
@@ -83,7 +83,7 @@ class RuntimeFacadeTests(unittest.TestCase):
         self.assertEqual(failed.error, {"reason": "semantic failure"})
         runner.assert_called_once()
 
-    def test_repo_agent_effectors_use_host_python_without_overriding_custom_commands(self) -> None:
+    def test_lokay_effectors_use_host_python_without_overriding_custom_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             package = root / "package.toml"
@@ -94,11 +94,11 @@ id = "path"
 
 [[correlation_paths.effectors]]
 id = "repo_step"
-adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector", "extra"] }
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector", "extra"] }
 
 [[correlation_paths.effectors]]
 id = "repo_step_auto"
-adapter = { kind = "subprocess", command = ["python3", "-m", "repo_agent.effector"] }
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"] }
 
 [[correlation_paths.effectors]]
 id = "custom"
@@ -115,7 +115,7 @@ adapter = { kind = "subprocess", command = ["python3", "custom.py"] }
                 "ticks": 1,
                 "processes": [{"id": "run-1:path:repo_step", "status": "succeeded"}],
             }
-            with patch("repo_agent.flows.runtime.host_run_package", return_value=host) as runner:
+            with patch("lokay.flows.runtime.host_run_package", return_value=host) as runner:
                 run_package_path(
                     db_path=db,
                     package_path=package,
@@ -128,7 +128,7 @@ adapter = { kind = "subprocess", command = ["python3", "custom.py"] }
             runner.call_args.kwargs["command_overrides"],
             {
                 "repo_step": ("explicit-python", "worker.py"),
-                "repo_step_auto": (sys.executable, "-m", "repo_agent.effector"),
+                "repo_step_auto": (sys.executable, "-m", "lokay.effector"),
             },
         )
 
@@ -146,7 +146,7 @@ adapter = { kind = "subprocess", command = ["python3", "custom.py"] }
                 "ticks": 1,
                 "processes": [{"id": "run-1:path:success", "status": "succeeded"}],
             }
-            with patch("repo_agent.flows.runtime.host_run_package", return_value=host):
+            with patch("lokay.flows.runtime.host_run_package", return_value=host):
                 run_package_path(
                     db_path=db,
                     package_path=Path(tmp) / "package.toml",
@@ -177,7 +177,7 @@ adapter = { kind = "subprocess", command = ["python3", "custom.py"] }
                 "ticks": 0,
                 "processes": [{"id": "run-1:path:success", "status": "succeeded"}],
             }
-            with patch("repo_agent.flows.runtime.host_run_package", return_value=host):
+            with patch("lokay.flows.runtime.host_run_package", return_value=host):
                 result = run_package_path(
                     db_path=db,
                     package_path=Path(tmp) / "package.toml",
@@ -209,7 +209,7 @@ adapter = { kind = "subprocess", command = ["python3", "custom.py"] }
                 "ticks": 0,
                 "processes": [{"id": "run-1:path:success", "status": "succeeded"}],
             }
-            with patch("repo_agent.flows.runtime.host_run_package", return_value=host):
+            with patch("lokay.flows.runtime.host_run_package", return_value=host):
                 result = run_package_path(
                     db_path=db,
                     package_path=Path(tmp) / "package.toml",
@@ -255,7 +255,7 @@ adapter = { kind = "subprocess", command = ["python3", "custom.py"] }
                 "processes": [{"id": "run-1:path:work", "status": "succeeded"}],
             }
             with (
-                patch("repo_agent.flows.runtime.host_run_package", return_value=host),
+                patch("lokay.flows.runtime.host_run_package", return_value=host),
                 self.assertRaisesRegex(RuntimeFacadeError, "disagree"),
             ):
                 run_package_path(
