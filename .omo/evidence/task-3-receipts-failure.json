@@ -1,0 +1,47 @@
+{
+  "status": "failed",
+  "ok": false,
+  "mutated": false,
+  "reason": "cleanup_identity_missing",
+  "failure_class": "terminal",
+  "retry_safe": false,
+  "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf9twgohm/cleanup.json",
+  "steps": {
+    "parse_issue_from_branch": {
+      "status": "parsed",
+      "mutated": false,
+      "reason": null,
+      "failure": null
+    },
+    "check_issue_closed": {
+      "status": "checked",
+      "mutated": false,
+      "reason": null,
+      "failure": null
+    },
+    "check_no_open_pr": {
+      "status": "checked",
+      "mutated": false,
+      "reason": null,
+      "failure": null
+    },
+    "remove_worktree": {
+      "status": "already_absent",
+      "mutated": false,
+      "reason": null,
+      "failure": null
+    },
+    "delete_local_fix_branch": {
+      "status": "already_absent",
+      "mutated": false,
+      "reason": null,
+      "failure": null
+    },
+    "release_active_issue_claim": {
+      "status": "already_absent",
+      "mutated": false,
+      "reason": null,
+      "failure": null
+    }
+  }
+}
