@@ -1,0 +1,11 @@
+Task 1 baseline verification follow-up — 2026-07-25
+
+Command:
+PYTHONPATH=src:. .venv/bin/python -m unittest tests.test_worktree_safety tests.test_receipt_durability
+
+Output:
+.........................
+----------------------------------------------------------------------
+Ran 25 tests in 2.132s
+
+OK
