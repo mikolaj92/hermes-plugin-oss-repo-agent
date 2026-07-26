@@ -1,54 +1,252 @@
 {
-  "entity": {
-    "branch": "ai/fix/7-cleanup",
-    "clone_path": "/tmp/clone-owner-repo",
-    "issue": 7,
-    "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpf9twgohm/dispatch-7.json",
-    "repo": "owner/repo",
-    "task": "task-7",
-    "worktree_path": "/tmp/worktree-owner-repo"
-  },
-  "outcome": "noop",
-  "path_id": "cleanup",
-  "phase": "CLEANUP_TERMINAL",
-  "process_id": "cleanup-process-happy",
-  "run_id": "cleanup-run-happy",
-  "steps": {
-    "check_issue_closed": {
-      "failure": null,
-      "mutated": false,
-      "reason": null,
-      "status": "checked"
+  "happy_tests": [
+    {
+      "command": "PYTHONPATH=src .venv/bin/python -m unittest tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_is_durable_and_preserves_request_identity -v",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "test_cleanup_receipt_is_durable_and_preserves_request_identity (tests.test_receipt_durability.ReceiptDurabilityTests.test_cleanup_receipt_is_durable_and_preserves_request_identity) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK\n"
     },
-    "check_no_open_pr": {
-      "failure": null,
-      "mutated": false,
-      "reason": null,
-      "status": "checked"
-    },
-    "delete_local_fix_branch": {
-      "failure": null,
-      "mutated": false,
-      "reason": null,
-      "status": "already_absent"
-    },
-    "parse_issue_from_branch": {
-      "failure": null,
-      "mutated": false,
-      "reason": null,
-      "status": "parsed"
-    },
-    "release_active_issue_claim": {
-      "failure": null,
-      "mutated": false,
-      "reason": null,
-      "status": "already_absent"
-    },
-    "remove_worktree": {
-      "failure": null,
-      "mutated": false,
-      "reason": null,
-      "status": "already_absent"
+    {
+      "command": "PYTHONPATH=src .venv/bin/python -m unittest tests.test_receipt_durability.ReceiptDurabilityTests.test_distinct_ownership_and_output_receipts_correlate_without_identity_missing -v",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "test_distinct_ownership_and_output_receipts_correlate_without_identity_missing (tests.test_receipt_durability.ReceiptDurabilityTests.test_distinct_ownership_and_output_receipts_correlate_without_identity_missing) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK\n"
     }
-  }
+  ],
+  "produced_receipts": [
+    {
+      "run_id": "cleanup-run-1",
+      "result": {
+        "status": "written",
+        "ok": true,
+        "mutated": true,
+        "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/cleanup.json",
+        "payload": {
+          "phase": "CLEANUP_TERMINAL",
+          "outcome": "noop",
+          "run_id": "cleanup-run-1",
+          "path_id": "cleanup",
+          "process_id": "cleanup-proc-1",
+          "entity": {
+            "task": "task-7",
+            "repo": "owner/repo",
+            "issue": 7,
+            "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/dispatch-7.json",
+            "branch": "ai/fix/7-cleanup",
+            "clone_path": "/tmp/clone-owner-repo",
+            "worktree_path": "/tmp/worktree-owner-repo"
+          },
+          "steps": {
+            "parse_issue_from_branch": {
+              "status": "parsed",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            },
+            "check_issue_closed": {
+              "status": "checked",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            },
+            "check_no_open_pr": {
+              "status": "checked",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            },
+            "remove_worktree": {
+              "status": "already_absent",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            },
+            "delete_local_fix_branch": {
+              "status": "already_absent",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            },
+            "release_active_issue_claim": {
+              "status": "already_absent",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            }
+          }
+        }
+      },
+      "payload": {
+        "entity": {
+          "branch": "ai/fix/7-cleanup",
+          "clone_path": "/tmp/clone-owner-repo",
+          "issue": 7,
+          "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/dispatch-7.json",
+          "repo": "owner/repo",
+          "task": "task-7",
+          "worktree_path": "/tmp/worktree-owner-repo"
+        },
+        "outcome": "noop",
+        "path_id": "cleanup",
+        "phase": "CLEANUP_TERMINAL",
+        "process_id": "cleanup-proc-1",
+        "run_id": "cleanup-run-1",
+        "steps": {
+          "check_issue_closed": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "checked"
+          },
+          "check_no_open_pr": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "checked"
+          },
+          "delete_local_fix_branch": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "already_absent"
+          },
+          "parse_issue_from_branch": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "parsed"
+          },
+          "release_active_issue_claim": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "already_absent"
+          },
+          "remove_worktree": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "already_absent"
+          }
+        }
+      }
+    },
+    {
+      "run_id": "cleanup-run-2",
+      "result": {
+        "status": "written",
+        "ok": true,
+        "mutated": true,
+        "receipt_path": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/cleanup-2.json",
+        "payload": {
+          "phase": "CLEANUP_TERMINAL",
+          "outcome": "noop",
+          "run_id": "cleanup-run-2",
+          "path_id": "cleanup",
+          "process_id": "cleanup-proc-2",
+          "entity": {
+            "task": "task-7",
+            "repo": "owner/repo",
+            "issue": 7,
+            "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/dispatch-7.json",
+            "branch": "ai/fix/7-cleanup",
+            "clone_path": "/tmp/clone-owner-repo",
+            "worktree_path": "/tmp/worktree-owner-repo"
+          },
+          "steps": {
+            "parse_issue_from_branch": {
+              "status": "parsed",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            },
+            "check_issue_closed": {
+              "status": "checked",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            },
+            "check_no_open_pr": {
+              "status": "checked",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            },
+            "remove_worktree": {
+              "status": "already_absent",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            },
+            "delete_local_fix_branch": {
+              "status": "already_absent",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            },
+            "release_active_issue_claim": {
+              "status": "already_absent",
+              "mutated": false,
+              "reason": null,
+              "failure": null
+            }
+          }
+        }
+      },
+      "payload": {
+        "entity": {
+          "branch": "ai/fix/7-cleanup",
+          "clone_path": "/tmp/clone-owner-repo",
+          "issue": 7,
+          "receipt": "/var/folders/h_/yhf3sh0x0c3103k40nxvsc980000gn/T/tmpa1hfipvh/dispatch-7.json",
+          "repo": "owner/repo",
+          "task": "task-7",
+          "worktree_path": "/tmp/worktree-owner-repo"
+        },
+        "outcome": "noop",
+        "path_id": "cleanup",
+        "phase": "CLEANUP_TERMINAL",
+        "process_id": "cleanup-proc-2",
+        "run_id": "cleanup-run-2",
+        "steps": {
+          "check_issue_closed": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "checked"
+          },
+          "check_no_open_pr": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "checked"
+          },
+          "delete_local_fix_branch": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "already_absent"
+          },
+          "parse_issue_from_branch": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "parsed"
+          },
+          "release_active_issue_claim": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "already_absent"
+          },
+          "remove_worktree": {
+            "failure": null,
+            "mutated": false,
+            "reason": null,
+            "status": "already_absent"
+          }
+        }
+      }
+    }
+  ]
 }
