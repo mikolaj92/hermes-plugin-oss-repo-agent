@@ -1,0 +1,12 @@
+Task 2 happy-path QA triage evidence — 2026-07-25
+
+Command:
+PYTHONPATH=src:. .venv/bin/python -m unittest tests.test_decide_matrix.PrDecideMatrixTests.test_approval_and_mergeability_matrix -v
+
+Output:
+test_approval_and_mergeability_matrix (tests.test_decide_matrix.PrDecideMatrixTests.test_approval_and_mergeability_matrix) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.000s
+
+OK

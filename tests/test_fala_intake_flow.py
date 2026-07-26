@@ -166,6 +166,7 @@ class TickAllHostPathTests(unittest.TestCase):
         self.assertEqual(runner.await_args.kwargs["max_ticks"], 40)
         effector_inputs = runner.await_args.kwargs["effector_inputs"]
         self.assertEqual(effector_inputs["triage_list_ai_fix_prs"]["limit"], 7)
+        self.assertTrue(effector_inputs["triage_decide_triage_action"]["require_human_approval"])
         self.assertTrue(effector_inputs["cleanup_remove_worktree"]["require_safe"])
         self.assertTrue(effector_inputs["dispatch_prepare_worktree"]["dry_run"])
         self.assertNotIn("clone_path", effector_inputs["dispatch_prepare_worktree"])

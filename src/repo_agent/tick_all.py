@@ -90,7 +90,7 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "") -
         "triage_load_pr_fields": {"dry_run": dry_run},
         "triage_evaluate_checks": {"dry_run": dry_run, "require_checks": cfg.automation.require_checks},
         "triage_evaluate_test_evidence": {"dry_run": dry_run, "require_test_evidence": cfg.automation.require_test_evidence},
-        "triage_decide_triage_action": {"dry_run": dry_run, "automerge": cfg.automation.automerge, "branch_prefix": cfg.branch_prefix, "base_branch": cfg.base_branch},
+        "triage_decide_triage_action": {"dry_run": dry_run, "automerge": cfg.automation.automerge, "branch_prefix": cfg.branch_prefix, "base_branch": cfg.base_branch, "require_human_approval": cfg.automation.require_human_approval},
         "triage_claim_pr": {**common},
         "triage_merge": {**common},
         "triage_write_merge_receipt": {"dry_run": dry_run, "receipt_path": merge_receipt},

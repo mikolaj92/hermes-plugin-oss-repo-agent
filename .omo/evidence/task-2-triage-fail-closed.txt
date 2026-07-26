@@ -1,0 +1,12 @@
+Task 2 fail-closed QA triage evidence — 2026-07-25
+
+Command:
+PYTHONPATH=src:. .venv/bin/python -m unittest tests.test_decide_matrix.PrDecideMatrixTests.test_malformed_required_approval_blocks_merge -v
+
+Output:
+test_malformed_required_approval_blocks_merge (tests.test_decide_matrix.PrDecideMatrixTests.test_malformed_required_approval_blocks_merge) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.000s
+
+OK
