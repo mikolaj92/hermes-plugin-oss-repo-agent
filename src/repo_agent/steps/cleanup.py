@@ -58,7 +58,7 @@ def _cleanup_provenance(data: dict[str, object], cfg: dict[str, object], branch:
     return {
         "task": str(data.get("task_id") or cfg.get("task_id") or parsed.get("task_id") or "").strip(),
         "issue": str(data.get("issue") or cfg.get("issue") or parsed.get("issue") or "").strip(),
-        "receipt": str(data.get("receipt_id") or cfg.get("receipt_id") or parsed.get("receipt_id") or receipt.get("receipt_path") or "").strip(),
+        "receipt": str(data.get("receipt_id") or data.get("receipt_path") or cfg.get("receipt_id") or cfg.get("receipt_path") or parsed.get("receipt_id") or parsed.get("receipt_path") or receipt.get("receipt_path") or "").strip(),
         "repo": str(data.get("repo") or cfg.get("repo") or parsed.get("repo") or "").strip(),
         "branch": branch,
     }

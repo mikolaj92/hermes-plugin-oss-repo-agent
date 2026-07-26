@@ -19,7 +19,7 @@ def request(data: dict, config: dict | None = None) -> dict:
 class TempGitSafetyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        root = Path(self.tmp.name)
+        root = Path(self.tmp.name).resolve()
         self.remote = root / "remote.git"
         self.seed = root / "seed"
         self.clone = root / "clone"
