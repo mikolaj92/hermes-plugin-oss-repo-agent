@@ -963,7 +963,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 with self.assertRaisesRegex(self.commands.ConfigError, "candidate parent fsync failed"):
                     self._render(root)
             self.assertFalse(any(candidate_parent.iterdir()) if candidate_parent.exists() else False)
-        
+
     def test_cutover_directory_fsync_failure_prevents_launchctl_mutation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

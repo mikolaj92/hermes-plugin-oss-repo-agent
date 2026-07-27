@@ -828,6 +828,177 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(out["decision"], "terminal_conflict")
         self.assertEqual(out["conflict"], "verified_head_mismatch")
 
+    def test_verified_push_restart_resumes_pending_without_second_omp_or_push(self) -> None:
+        """Controlled restart after verified push: one OMP, one push, no duplicates."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "state.sqlite"
+            import sqlite3
+            with sqlite3.connect(db) as connection:
+                connection.execute(
+                    "CREATE TABLE processes (run_id TEXT, id TEXT, status TEXT, input_json TEXT, output_json TEXT, error_json TEXT, metadata TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO processes VALUES (?,?,?,?,?,?,?)",
+                    (
+                        "run-a",
+                        "run-a:auto_worker:triage_verify_repair_push_oid",
+                        "succeeded",
+                        json.dumps({"candidate_id": "candidate-a"}),
+                        json.dumps({"ok": True, "status": "verified", "remote_oid": "b" * 40}),
+                        "{}",
+                        json.dumps({"__adapter_binding": {"cwd": str(root)}}),
+                    ),
+                )
+            context = {
+                "repo": "o/r",
+                "issue": "1",
+                "pr_number": "1",
+                "branch": "ai/fix/1",
+                "clone_path": str(root / "clone"),
+                "worktree_root": str(root / "worktrees"),
+                "repair_state_root": str(root / "receipts"),
+                "candidate": "candidate-a",
+                "run_id": "run-a",
+                "db_path": str(db),
+                "enabled": True,
+                "live": True,
+                "dry_run": False,
+            }
+            first_decision = repair.decide_repair_attempt(req({
+                **context,
+                "number": 1,
+                "verified_head": "a" * 40,
+                "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+            }))
+            self.assertEqual(first_decision["status"], "invoke")
+            reserved = repair.reserve_repair_attempt(req({
+                **context,
+                "number": 1,
+                "verified_head": "a" * 40,
+                "conduction": {"decide_repair_attempt": first_decision},
+            }))
+            self.assertEqual(reserved["status"], "reserved")
+            verified_reservation = repair.verify_repair_attempt_reservation(req({
+                **context,
+                "number": 1,
+                "verified_head": "a" * 40,
+                "conduction": {"reserve_repair_attempt": reserved},
+            }))
+            self.assertTrue(verified_reservation["verified"])
+            with mock.patch("lokay.steps.repair.run_omp", return_value={"status": "completed", "stdout": "ok"}) as run_omp:
+                invoked = repair.invoke_repair_omp(req({
+                    **context,
+                    "prompt": "fix checks",
+                    "worktree_path": str(root / "worktrees" / "wt"),
+                    "conduction": {
+                        "decide_repair_attempt": first_decision,
+                        "verify_repair_attempt_reservation": verified_reservation,
+                        "read_repair_omp_preconditions": {
+                            "ok": True,
+                            "status": "ready",
+                            "worktree_path": str(root / "worktrees" / "wt"),
+                            "pre_head": "a" * 40,
+                        },
+                    },
+                }))
+            self.assertEqual(invoked["status"], "invoked")
+            run_omp.assert_called_once()
+            with mock.patch("lokay.steps.repair.git_push_branch", return_value="pushed") as push:
+                pushed = repair.push_repair_branch(req({
+                    **context,
+                    "conduction": {
+                        "decide_repair_attempt": first_decision,
+                        "decide_repair_push": {
+                            "ok": True,
+                            "status": "push",
+                            "should_push": True,
+                            "before_oid": "a" * 40,
+                            "local_oid": "b" * 40,
+                            "branch": "ai/fix/1",
+                        },
+                    },
+                }))
+            self.assertEqual(pushed["status"], "pushed")
+            push.assert_called_once()
+            receipt_payload = {
+                "phase": "REPAIR_COMPLETED",
+                "before_oid": "a" * 40,
+                "after_oid": "b" * 40,
+                "candidate": "candidate-a",
+                "checks": [{"identity": "ci", "conclusion": "FAILURE"}],
+                "run": {"run_id": "run-a", "status": "completed", "omp_process_id": "omp-a", "receipt_process_id": "verify-a"},
+                "provenance": {
+                    "repo": "o/r",
+                    "pr_number": 1,
+                    "branch": "ai/fix/1",
+                    "local_branch": repair._repair_context(req(context))["local_branch"],
+                    "worktree_path": repair._repair_context(req(context))["worktree_path"],
+                    "task_id": "",
+                    "issue": "1",
+                    "receipt": repair._repair_context(req(context))["receipt"],
+                },
+            }
+            receipt_path = repair._repair_attempt_receipt(req(context), receipt_payload)
+            published = repair.publish_repair_receipt(req({
+                **context,
+                "conduction": {
+                    "build_repair_receipt": {
+                        "ok": True,
+                        "status": "built",
+                        "payload": receipt_payload,
+                        "receipt_path": receipt_path,
+                    },
+                    "decide_repair_attempt": first_decision,
+                },
+            }))
+            self.assertEqual(published["status"], "written")
+            completed = repair.read_repair_completed_receipt(req({
+                "repo": "o/r",
+                "number": 1,
+                "verified_head": "a" * 40,
+                "candidate": "candidate-b",
+                "run_id": "run-b",
+                "repair_state_root": context["repair_state_root"],
+            }))
+            self.assertEqual(completed["status"], "found")
+            restart = repair.decide_repair_attempt(req({
+                "enabled": True,
+                "live": True,
+                "dry_run": False,
+                "repo": "o/r",
+                "number": 1,
+                "verified_head": "a" * 40,
+                "candidate": "candidate-b",
+                "run_id": "run-b",
+                "checks": [{"name": "ci", "conclusion": "PENDING"}],
+                "conduction": {"read_repair_completed_receipt": completed},
+            }))
+            self.assertEqual(restart["status"], "already_repaired")
+            self.assertFalse(restart["authorize"])
+            with mock.patch("lokay.steps.repair.run_omp") as run_omp_restart, mock.patch("lokay.steps.repair.git_push_branch") as push_restart:
+                blocked_omp = repair.invoke_repair_omp(req({
+                    "prompt": "fix checks",
+                    "worktree_path": str(root / "worktrees" / "wt"),
+                    "dry_run": False,
+                    "conduction": {
+                        "decide_repair_attempt": restart,
+                        "verify_repair_attempt_reservation": {"ok": True, "verified": True},
+                        "read_repair_omp_preconditions": {"ok": True, "status": "ready", "worktree_path": str(root / "worktrees" / "wt"), "pre_head": "a" * 40},
+                    },
+                }))
+                blocked_push = repair.push_repair_branch(req({
+                    "dry_run": False,
+                    "conduction": {
+                        "decide_repair_attempt": restart,
+                        "decide_repair_push": {"ok": True, "status": "push", "should_push": True, "before_oid": "a" * 40, "local_oid": "b" * 40},
+                    },
+                }))
+            self.assertEqual(blocked_omp["status"], "noop")
+            self.assertEqual(blocked_push["status"], "noop")
+            run_omp_restart.assert_not_called()
+            push_restart.assert_not_called()
+
     def test_repair_reservation_restart_blocks_changed_checks_and_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = {"enabled": True, "live": True, "dry_run": False, "repo": "o/r", "number": 1, "verified_head": "head-a", "candidate": "candidate-a", "run_id": "run-a", "repair_state_root": tmp, "checks": [{"name": "ci", "conclusion": "FAILURE"}]}
