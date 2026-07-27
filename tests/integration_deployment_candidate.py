@@ -862,6 +862,16 @@ class DeploymentCandidateTests(unittest.TestCase):
             ):
                 self.assertTrue(getattr(library, symbol))
             self.assertEqual(len(list((version / "source" / "project" / "Fala" / "python" / "fala" / "__mojocache__").glob("_native.hash-*.so"))), 1)
+            import importlib.util
+            deployed_build = version / "source" / "project" / "Fala" / "python" / "fala" / "_build.py"
+            spec = importlib.util.spec_from_file_location("deployed_fala_build", deployed_build)
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module._PACKAGE_DIR = deployed_build.parent
+            expected_native = deployed_build.parent / "__mojocache__" / f"_native.hash-{module._source_hash(version / 'source' / 'project' / 'Fala')}.so"
+            self.assertTrue(expected_native.is_file(), f"expected {expected_native.name}; built {[path.name for path in expected_native.parent.glob('_native.hash-*.so')]}")
             self.assertNotIn(str(root / "candidates"), " ".join(arguments))
             self.assertEqual(arguments[arguments.index("--project") + 1], str((version / "source" / "project").resolve()))
             self.assertEqual(arguments[arguments.index("--config") + 1], str((version / "source" / "config.toml").resolve()))

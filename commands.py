@@ -1048,6 +1048,7 @@ def render_launchd(
             + list((fala_root / "mojo" / "fala").rglob("*.mojo"))
             + list((fala_root / "vendor" / "EmberJson").rglob("*.mojo"))
             + list((fala_root / "vendor" / "sqlite.fire").rglob("*.mojo"))
+            + list((fala_root / "mojo" / "fala").glob("native_process_host.[ch]"))
         )
         digest = hashlib.sha256()
         for path in mojo_sources:
