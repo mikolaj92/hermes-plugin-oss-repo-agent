@@ -171,7 +171,7 @@ async def run_pr_triage_decide(
     board = str(context["board"])
     clone_path = str(context["clone_path"])
     receipt = str(Path(cfg.paths.merge_receipts) / f"merge-{resolved_repo.replace('/', '_')}-{pr_number or 'auto'}-{rid}.json")
-    repair_root = Path(cfg.paths.task_receipts) / "repair"
+    repair_root = Path(cfg.paths.task_receipts)
     repair_receipt = str(repair_root / f"repair-{resolved_repo.replace('/', '_')}-{pr_number or 'auto'}-{rid}.json")
     step_config = _step_config(
         cfg,

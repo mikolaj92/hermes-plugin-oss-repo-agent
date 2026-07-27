@@ -86,8 +86,15 @@ def _repair_cleanup_identity(request: Request, sources: tuple[Mapping[str, Any],
         if isinstance(provenance, Mapping):
             repair.append({**candidate, **provenance})
         payload = candidate.get("payload")
-        if isinstance(payload, Mapping) and isinstance(payload.get("provenance"), Mapping):
-            repair.append({**candidate, **payload, **payload["provenance"]})
+        if isinstance(payload, Mapping):
+            flattened = {**candidate, **payload}
+            config = payload.get("config")
+            if isinstance(config, Mapping):
+                flattened.update(config)
+            nested = payload.get("provenance")
+            if isinstance(nested, Mapping):
+                flattened.update(nested)
+            repair.append(flattened)
     source = next((item for item in repair if item.get("local_branch") or item.get("worktree_path")), None)
     if source is None:
         return None
@@ -110,14 +117,15 @@ def _repair_cleanup_identity(request: Request, sources: tuple[Mapping[str, Any],
     if not path or (expected_path and Path(path).resolve() != Path(expected_path).resolve()):
         return None
     receipt = str(_identity_value(merged, "receipt", "receipt_path") or "").strip()
-    remote_oid = str(source.get("remote_oid") or source.get("after_oid") or "").strip()
+    remote_oid = str(_identity_value(merged, "remote_oid", "after_oid") or "").strip()
     target_branch = str(source.get("target_branch") or branch).strip()
-    if not (repo and issue > 0 and pr > 0 and branch and receipt and remote_oid and target_branch == branch):
+    clone_path = str(_identity_value(merged, "clone_path") or "").strip()
+    if not (repo and issue > 0 and pr > 0 and branch and receipt and remote_oid and clone_path and target_branch == branch):
         return None
     return {"repo": repo, "issue": issue, "pr_number": pr, "branch": branch,
             "local_branch": local_branch, "worktree_path": path, "receipt": receipt,
-            "remote_oid": remote_oid, "target_branch": target_branch,
-            "task": str(source.get("task_id") or source.get("task") or "").strip()}
+            "remote_oid": remote_oid, "target_branch": target_branch, "clone_path": clone_path,
+            "task": str(_identity_value(merged, "task_id", "task") or "").strip()}
 
 
 def _verified_cleanup_identity(request: Request, lanes: Mapping[str, dict[str, Any]]) -> dict[str, Any] | None:
@@ -191,8 +199,6 @@ def _verified_cleanup_identity(request: Request, lanes: Mapping[str, dict[str, A
     required = ("repo", "issue", "pr_number", "branch", "head_oid")
     if any(key not in identity or identity[key] in (None, "") for key in required):
         return None
-    # Verified provenance and lifecycle identity must agree with the exposed
-    # identity; never authorize cleanup from a mismatched receipt.
     if provenance.get("repo") not in (None, identity["repo"]):
         return None
     if provenance.get("number") not in (None, identity["pr_number"]):
@@ -201,19 +207,22 @@ def _verified_cleanup_identity(request: Request, lanes: Mapping[str, dict[str, A
         return None
     if provenance.get("head_ref") not in (None, identity["branch"]):
         return None
+    # Verified provenance and lifecycle identity must agree with the exposed
     repair_identity = _repair_cleanup_identity(request, tuple(repair_candidates))
     if repair_identity is not None:
         for key in ("board", "clone_path", "priority"):
             value = _identity_value(tuple(lanes.values()), key)
             if value not in (None, ""):
+                if repair_identity.get(key) not in (None, "") and str(repair_identity[key]) != str(value):
+                    return None
                 repair_identity[key] = value
         # A repair receipt identifies owned local state, but only terminal merge/lifecycle
         # evidence authorizes deleting it.
         if identity is not None and all(str(identity.get(key) or "") == str(repair_identity.get(key) or "") for key in ("repo", "issue", "pr_number", "branch")) and str(identity.get("head_oid") or "") == str(repair_identity.get("remote_oid") or ""):
             repair_identity["head_oid"] = identity["head_oid"]
             return repair_identity
-    return identity
 
+    return identity
 
 def aggregate_lane_results(request: Request) -> Result:
     """Join terminal intake, dispatch, triage, and lifecycle lane receipts."""

@@ -75,8 +75,33 @@ class PackageStructureTests(unittest.TestCase):
                 prefix = "triage_" if path["id"] == "auto_worker" else ""
                 by_id = {effector["id"]: effector for effector in effectors}
                 self.assertEqual(by_id[f"{prefix}read_existing_repair_pr"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}verify_repair_push_oid"])
-                self.assertEqual(by_id[f"{prefix}update_repair_branch_provenance"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}verify_repair_receipt"])
+                self.assertEqual(
+                    by_id[f"{prefix}build_repair_receipt"]["conduction"],
+                    [
+                        f"{prefix}decide_repair_attempt",
+                        f"{prefix}verify_existing_repair_pr",
+                        f"{prefix}verify_repair_push_oid",
+                        f"{prefix}verify_repair_omp_postconditions",
+                        f"{prefix}invoke_repair_omp",
+                    ],
+                )
+                self.assertEqual(
+                    by_id[f"{prefix}verify_repair_receipt"]["conduction"],
+                    [f"{prefix}decide_repair_attempt", f"{prefix}publish_repair_receipt", f"{prefix}build_repair_receipt"],
+                )
+                self.assertEqual(by_id[f"{prefix}update_repair_branch_provenance"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}verify_repair_receipt", f"{prefix}verify_repair_push_oid"])
                 self.assertEqual(by_id[f"{prefix}verify_updated_repair_branch_provenance"]["conduction"], [f"{prefix}update_repair_branch_provenance"])
+                expected_completed = [f"{prefix}load_pr_fields", f"{prefix}read_repair_remote_head"]
+                if path["id"] == "auto_worker":
+                    expected_completed.append("lifecycle_decide_lifecycle_transition")
+                self.assertEqual(by_id[f"{prefix}read_repair_completed_receipt"]["conduction"], expected_completed)
+                self.assertIn(f"{prefix}read_repair_completed_receipt", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
+                self.assertEqual(by_id[f"{prefix}read_repair_attempt_recovery_evidence"]["conduction"], [f"{prefix}read_repair_attempt_state"])
+                self.assertEqual(by_id[f"{prefix}claim_repair_attempt_recovery"]["conduction"], [f"{prefix}read_repair_attempt_recovery_evidence"])
+                self.assertEqual(by_id[f"{prefix}verify_repair_attempt_recovery"]["conduction"], [f"{prefix}claim_repair_attempt_recovery"])
+                self.assertIn(f"{prefix}verify_repair_attempt_recovery", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
+                self.assertEqual(by_id[f"{prefix}reserve_repair_attempt"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}verify_repair_attempt_recovery"])
+                self.assertEqual(by_id[f"{prefix}verify_repair_attempt_reservation"]["conduction"], [f"{prefix}reserve_repair_attempt", f"{prefix}verify_repair_attempt_recovery"])
 
             if path["id"] == "auto_worker":
                 self.assertTrue(

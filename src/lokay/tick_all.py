@@ -88,6 +88,7 @@ def _step_config(cfg: Any, *, dry_run: bool, **extra: Any) -> dict[str, Any]:
         "repair_receipt_root": str(raw.get("repair_receipt_root") or task_receipts),
         "repair_state_root": str(raw.get("repair_state_root") or raw.get("repair_receipt_root") or task_receipts),
         "lifecycle_receipt_root": str(raw.get("lifecycle_receipt_root") or task_receipts),
+        "repair_recovery": raw.get("repair_recovery") if isinstance(raw.get("repair_recovery"), dict) and raw.get("repair_recovery") else None,
         "db_path": str(extra.get("db_path") or ""),
         "paths": {
             "active_issue": active_issue,
@@ -154,9 +155,12 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
         "triage_read_review_tasks": {}, "triage_find_review_marker": {}, "triage_create_review_task": {}, "triage_reconcile_review_task": {},
         "triage_build_repair_prompt": {},
         # Repair attempt state is immutable and never shares dispatch/merge receipts.
-        "triage_read_repair_attempt_state": {}, "triage_decide_repair_attempt": {}, "triage_reserve_repair_attempt": {},
-        "triage_verify_repair_attempt_reservation": {}, "triage_read_repair_context": {}, "triage_read_repair_remote_head": {},
+        "triage_read_repair_attempt_state": {}, "triage_read_repair_completed_receipt": {}, "triage_read_repair_attempt_recovery_evidence": {},
+        "triage_claim_repair_attempt_recovery": {}, "triage_verify_repair_attempt_recovery": {},
+        "triage_decide_repair_attempt": {}, "triage_reserve_repair_attempt": {}, "triage_verify_repair_attempt_reservation": {},
+        "triage_read_repair_context": {}, "triage_read_repair_remote_head": {},
         "triage_read_repair_worktree_inventory": {}, "triage_read_repair_branch_provenance": {},
+        "triage_read_repair_creation_evidence": {},
         "triage_decide_repair_worktree_ownership": {}, "triage_create_repair_branch": {},
         "triage_write_repair_branch_provenance": {}, "triage_add_repair_worktree": {}, "triage_verify_repair_worktree": {},
         "triage_read_repair_omp_preconditions": {}, "triage_invoke_repair_omp": {},

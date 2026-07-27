@@ -82,6 +82,9 @@ def branch_exists(clone_path: str, branch: str) -> bool:
 def delete_local_branch(clone_path: str, branch: str, *, force: bool = False) -> None:
     flag = "-D" if force else "-d"
     git(["branch", flag, branch], cwd=clone_path)
+def delete_local_branch_if_head(clone_path: str | Path, branch: str, expected_oid: str) -> None:
+    """Delete a local branch only when its current ref equals ``expected_oid``."""
+    git(["update-ref", "-d", f"refs/heads/{branch}", expected_oid], cwd=clone_path)
 
 
 def rev_parse(clone_path: str, rev: str = "HEAD") -> str:

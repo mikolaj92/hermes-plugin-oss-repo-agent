@@ -434,7 +434,51 @@ class RepairTests(unittest.TestCase):
             conduction["read_repair_branch_provenance"] = {"ok": True, "status": "read", "exists": False, "provenance": {}}
             out = repair.decide_repair_worktree_ownership(req({**broken, "conduction": conduction}))
             self.assertFalse(out["ok"], missing)
+    def test_interrupted_repair_branch_requires_exact_creation_evidence(self) -> None:
+        context = {
+            "repo": "owner/repo", "issue": "10", "pr_number": "11", "branch": "ai/fix/10",
+            "clone_path": "/clone", "worktree_root": "/worktrees", "repair_state_root": "/state",
+            "candidate": "c" * 64, "run_id": "current-run", "db_path": "/journal.sqlite",
+        }
+        resolved = repair._repair_context(req(context))
+        remote_oid = "a" * 40
+        base = {
+            "read_repair_context": {"ok": True, "status": "read", **resolved},
+            "read_repair_remote_head": {"ok": True, "status": "read", "remote_oid": remote_oid},
+            "read_repair_worktree_inventory": {"ok": True, "status": "read", "worktrees": []},
+            "read_repair_branch_provenance": {"ok": True, "status": "read", "exists": True, "branch_head": remote_oid, "provenance": {}},
+        }
+        denied = repair.decide_repair_worktree_ownership(req({**context, "conduction": {**base, "read_repair_creation_evidence": {"ok": True, "status": "absent", "verified": False}}}))
+        self.assertFalse(denied["ok"])
+        self.assertEqual(denied["reason"], "foreign_repair_branch_ownership")
+        verified = {"ok": True, "status": "verified", "verified": True, "remote_oid": remote_oid}
+        recovered = repair.decide_repair_worktree_ownership(req({**context, "conduction": {**base, "read_repair_creation_evidence": verified}}))
+        self.assertTrue(recovered["ok"])
+        self.assertTrue(recovered["recover_branch"])
+        stale = dict(base["read_repair_branch_provenance"], branch_head="b" * 40)
+        rejected = repair.decide_repair_worktree_ownership(req({**context, "conduction": {**base, "read_repair_branch_provenance": stale, "read_repair_creation_evidence": verified}}))
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["reason"], "foreign_repair_branch_ownership")
+
+    def test_repair_setup_context_survives_atomic_conduction(self) -> None:
+        context = {
+            "repo": "owner/repo",
+            "issue": "10",
+            "pr_number": "11",
+            "branch": "ai/fix/10",
+            "clone_path": "/clone",
+            "worktree_root": "/worktrees",
+            "repair_state_root": "/state",
+        }
+        created = repair._repair_context(req(context))
+        downstream = repair._repair_context(req({
+            "worktree_root": "/worktrees",
+            "repair_state_root": "/state",
+            "conduction": {"create_repair_branch": {"ok": True, "status": "created", **created}},
+        }))
+        self.assertEqual(downstream, created)
     def test_repair_ownership_receipt_is_stable_and_collision_safe(self) -> None:
+
         base = {"repo": "owner/repo", "pr_number": 11, "branch": "ai/fix/10", "repair_state_root": "/state", "run_id": "run-one"}
         first = repair._repair_context(req(base))["receipt"]
         second = repair._repair_context(req({**base, "run_id": "run-two"}))["receipt"]
@@ -527,10 +571,119 @@ class RepairTests(unittest.TestCase):
             return {"before_oid": before, "after_oid": after, "candidate": "candidate", "run": {"run_id": run_id, "omp_process_id": f"omp-{run_id}", "receipt_process_id": "verify-repair"}, "provenance": {"repo": context["repo"], "pr_number": 11}}
         first = repair._repair_attempt_receipt(req(data), payload("a" * 40, "b" * 40, "run-b"))
         second = repair._repair_attempt_receipt(req(data), payload("b" * 40, "c" * 40, "run-c"))
+        same_head = repair._repair_attempt_receipt(req(data), payload("a" * 40, "d" * 40, "run-d"))
         self.assertNotEqual(first, second)
+        self.assertEqual(first, same_head)
         self.assertTrue(first.startswith("/state/repair-receipts/owner__repo/11/"))
         self.assertTrue(second.startswith("/state/repair-receipts/owner__repo/11/"))
         self.assertNotEqual(first, context["receipt"])
+
+    def test_same_head_repair_receipt_conflict_is_no_clobber(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = {
+                "repo": "owner/repo",
+                "issue": 10,
+                "pr_number": 11,
+                "branch": "ai/fix/10",
+                "repair_state_root": str(root),
+                "dry_run": False,
+            }
+            context = repair._repair_context(req(data))
+            first_payload = {
+                "phase": "REPAIR_COMPLETED",
+                "before_oid": "a" * 40,
+                "after_oid": "b" * 40,
+                "candidate": "candidate-a",
+                "run": {"run_id": "run-a", "status": "completed", "omp_process_id": "omp-a", "receipt_process_id": "verify-a"},
+                "provenance": {
+                    "repo": context["repo"],
+                    "pr_number": 11,
+                    "branch": context["branch"],
+                    "local_branch": context["local_branch"],
+                    "worktree_path": context["worktree_path"],
+                    "task_id": context["task_id"],
+                    "issue": context["issue"],
+                    "receipt": context["receipt"],
+                },
+            }
+            second_payload = dict(first_payload)
+            second_payload["after_oid"] = "c" * 40
+            second_payload["run"] = {
+                "run_id": "run-b",
+                "status": "completed",
+                "omp_process_id": "omp-b",
+                "receipt_process_id": "verify-b",
+            }
+            path = repair._repair_attempt_receipt(req(data), first_payload)
+            self.assertEqual(path, repair._repair_attempt_receipt(req(data), second_payload))
+            first = repair.publish_repair_receipt(req({
+                **data,
+                "conduction": {
+                    "build_repair_receipt": {
+                        "ok": True,
+                        "status": "built",
+                        "payload": first_payload,
+                        "receipt_path": path,
+                    },
+                    "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True},
+                },
+            }))
+            self.assertEqual(first["status"], "written")
+            original = Path(path).read_text(encoding="utf-8")
+            conflict = repair.publish_repair_receipt(req({
+                **data,
+                "conduction": {
+                    "build_repair_receipt": {
+                        "ok": True,
+                        "status": "built",
+                        "payload": second_payload,
+                        "receipt_path": path,
+                    },
+                    "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True},
+                },
+            }))
+            self.assertEqual(conflict["status"], "failed")
+            self.assertEqual(conflict["reason"], "receipt_conflict")
+            self.assertEqual(Path(path).read_text(encoding="utf-8"), original)
+    def test_malformed_completed_receipt_blocks_second_omp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity = {
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": "head-a",
+                "candidate": "candidate-a",
+                "run_id": "run-a",
+            }
+            path = repair._repair_completed_receipt_path(req({"repair_state_root": str(root)}), identity)
+            assert path is not None
+            path.parent.mkdir(parents=True)
+            path.write_text("not-json", encoding="utf-8")
+            completed = repair.read_repair_completed_receipt(req({
+                "repo": "o/r",
+                "number": 1,
+                "verified_head": "head-a",
+                "candidate": "candidate-a",
+                "run_id": "run-a",
+                "repair_state_root": str(root),
+            }))
+            self.assertEqual(completed["status"], "failed")
+            self.assertEqual(completed["reason"], "repair_completed_receipt_malformed")
+            decision = repair.decide_repair_attempt(req({
+                "enabled": True,
+                "live": True,
+                "dry_run": False,
+                "repo": "o/r",
+                "number": 1,
+                "verified_head": "head-a",
+                "candidate": "candidate-a",
+                "run_id": "run-a",
+                "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+                "conduction": {"read_repair_completed_receipt": completed},
+            }))
+            self.assertNotEqual(decision.get("status"), "invoke")
+            self.assertFalse(decision.get("authorize", False))
 
 
 
@@ -678,6 +831,236 @@ class RepairTests(unittest.TestCase):
             out = repair.invoke_repair_omp(req({"dry_run": False, "conduction": {"decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True}, "read_repair_omp_preconditions": {"status": "ready", "ok": True, "worktree_path": "/tmp", "pre_head": "head"}}}))
             self.assertEqual(out["reason"], "repair_attempt_reservation_required")
             run.assert_not_called()
+
+    def test_repair_attempt_recovery_inactive_without_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = {
+                "repo": "o/r",
+                "number": 1,
+                "verified_head": "head-a",
+                "candidate": "old-candidate",
+                "run_id": "old-run",
+                "repair_state_root": str(root),
+            }
+            identity = {
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": "head-a",
+                "candidate": "old-candidate",
+                "run_id": "old-run",
+            }
+            reservation = {
+                **identity,
+                "status": "reserved",
+                "attempted": True,
+                "kind": "repair_attempt_reservation",
+                "checks": [],
+            }
+            path = repair._repair_reservation_path(req(base), identity)
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(reservation, sort_keys=True) + "\n", encoding="utf-8")
+            state = repair.read_repair_attempt_state(req({
+                "repo": "o/r", "number": 1, "verified_head": "head-a",
+                "candidate": "new-candidate", "run_id": "new-run", "repair_state_root": str(root),
+            }))
+            self.assertEqual(state["status"], "found")
+            evidence = repair.read_repair_attempt_recovery_evidence(req({
+                "repo": "o/r", "number": 1, "verified_head": "head-a",
+                "candidate": "new-candidate", "run_id": "new-run", "repair_state_root": str(root),
+                "conduction": {"read_repair_attempt_state": state},
+            }))
+            self.assertEqual(evidence["status"], "inactive")
+            claim = repair.claim_repair_attempt_recovery(req({
+                "conduction": {"read_repair_attempt_recovery_evidence": evidence},
+            }))
+            self.assertEqual(claim["status"], "inactive")
+            verified = repair.verify_repair_attempt_recovery(req({
+                "conduction": {"claim_repair_attempt_recovery": claim},
+            }))
+            self.assertEqual(verified["status"], "inactive")
+            decision = repair.decide_repair_attempt(req({
+                "enabled": True, "live": True, "dry_run": False,
+                "repo": "o/r", "number": 1, "verified_head": "head-a",
+                "candidate": "new-candidate", "run_id": "new-run",
+                "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+                "conduction": {
+                    "read_repair_attempt_state": state,
+                    "verify_repair_attempt_recovery": verified,
+                },
+            }))
+            self.assertEqual(decision["status"], "already_repaired")
+            self.assertFalse(decision["authorize"])
+
+    def test_repair_attempt_recovery_rejects_invoke_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity = {
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": "head-a",
+                "candidate": "old-candidate",
+                "run_id": "old-run",
+            }
+            reservation = {**identity, "status": "reserved", "attempted": True, "kind": "repair_attempt_reservation", "checks": []}
+            path = root / "repair-attempts" / "o__r" / "1" / "reservation.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(reservation, sort_keys=True) + "\n", encoding="utf-8")
+            state = {
+                "ok": True,
+                "status": "found",
+                "attempt_state": reservation,
+                "reservation_path": str(path),
+            }
+            evidence = repair.read_repair_attempt_recovery_evidence(req({
+                "repo": "o/r", "number": 1, "verified_head": "head-a",
+                "candidate": "new-candidate", "run_id": "new-run",
+                "db_path": str(root / "state.sqlite"),
+                "repair_recovery": {
+                    "run_id": "old-run",
+                    "process_id": "old-run:auto_worker:triage_invoke_repair_omp",
+                    "candidate": "old-candidate",
+                    "path_id": "auto_worker",
+                    "effector_id": "triage_invoke_repair_omp",
+                    "repo": "o/r",
+                    "pr_number": 1,
+                    "verified_head": "head-a",
+                },
+                "conduction": {"read_repair_attempt_state": state},
+            }))
+            self.assertEqual(evidence["status"], "failed")
+            self.assertEqual(evidence["reason"], "repair_attempt_recovery_mismatch")
+
+    def test_repair_attempt_recovery_claim_exists_without_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            claim_path = root / "claim.json"
+            claim = {
+                "kind": "repair_attempt_recovery_claim",
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": "head-a",
+                "reservation_run_id": "old-run",
+                "reservation_candidate": "old-candidate",
+                "evidence_process_id": "old-run:auto_worker:triage_verify_repair_attempt_reservation",
+                "recovery_run_id": "new-run",
+                "recovery_candidate": "new-candidate",
+            }
+            claim_path.write_text(json.dumps({"different": True}, sort_keys=True) + "\n", encoding="utf-8")
+            claimed = repair.claim_repair_attempt_recovery(req({
+                "dry_run": False,
+                "conduction": {
+                    "read_repair_attempt_recovery_evidence": {
+                        "ok": True,
+                        "status": "validated",
+                        "recovery_claim": claim,
+                        "recovery_claim_path": str(claim_path),
+                    }
+                },
+            }))
+            self.assertEqual(claimed["status"], "exists")
+            self.assertFalse(claimed["mutated"])
+            self.assertEqual(claimed["recovery_claim"], claim)
+            verified = repair.verify_repair_attempt_recovery(req({
+                "dry_run": False,
+                "conduction": {"claim_repair_attempt_recovery": claimed},
+            }))
+            self.assertEqual(verified["status"], "failed")
+            self.assertEqual(verified["reason"], "repair_attempt_recovery_claim_mismatch")
+
+    def test_repair_attempt_recovery_authorizes_composite_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity = {
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": "head-a",
+                "candidate": "old-candidate",
+                "run_id": "old-run",
+            }
+            reservation = {
+                **identity,
+                "status": "reserved",
+                "attempted": True,
+                "kind": "repair_attempt_reservation",
+                "checks": [{"identity": "ci", "conclusion": "FAILURE"}],
+            }
+            path = root / "repair-attempts" / "o__r" / "1" / "reservation.json"
+            path.parent.mkdir(parents=True)
+            original = json.dumps(reservation, sort_keys=True) + "\n"
+            path.write_text(original, encoding="utf-8")
+            claim = {
+                "kind": "repair_attempt_recovery_claim",
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": "head-a",
+                "reservation_run_id": "old-run",
+                "reservation_candidate": "old-candidate",
+                "evidence_process_id": "old-run:auto_worker:triage_verify_repair_attempt_reservation",
+                "recovery_run_id": "new-run",
+                "recovery_candidate": "new-candidate",
+            }
+            claim_path = repair._repair_recovery_claim_path(path, claim["evidence_process_id"])
+            claim_path.write_text(json.dumps(claim, sort_keys=True) + "\n", encoding="utf-8")
+            state = {
+                "ok": True,
+                "status": "found",
+                "attempt_state": reservation,
+                "reservation_path": str(path),
+            }
+            verified = {
+                "ok": True,
+                "status": "verified",
+                "recovery_verified": True,
+                "recovery_claim": claim,
+                "recovery_claim_path": str(claim_path),
+            }
+            decision = repair.decide_repair_attempt(req({
+                "enabled": True, "live": True, "dry_run": False,
+                "repo": "o/r", "number": 1, "verified_head": "head-a",
+                "candidate": "new-candidate", "run_id": "new-run",
+                "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+                "conduction": {
+                    "read_repair_attempt_state": state,
+                    "verify_repair_attempt_recovery": verified,
+                },
+            }))
+            self.assertEqual(decision["status"], "invoke")
+            self.assertTrue(decision["authorize"])
+            self.assertEqual(decision["reason"], "verified_failed_attempt_recovery")
+            reserved = repair.reserve_repair_attempt(req({
+                "enabled": True, "live": True, "dry_run": False,
+                "repo": "o/r", "number": 1, "verified_head": "head-a",
+                "candidate": "new-candidate", "run_id": "new-run",
+                "repair_state_root": str(root),
+                "conduction": {
+                    "decide_repair_attempt": decision,
+                    "verify_repair_attempt_recovery": verified,
+                },
+            }))
+            self.assertEqual(reserved["status"], "recovered")
+            self.assertFalse(reserved["mutated"])
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+            verified_reservation = repair.verify_repair_attempt_reservation(req({
+                "repo": "o/r", "number": 1, "verified_head": "head-a",
+                "candidate": "new-candidate", "run_id": "new-run",
+                "conduction": {
+                    "reserve_repair_attempt": reserved,
+                    "verify_repair_attempt_recovery": verified,
+                },
+            }))
+            self.assertEqual(verified_reservation["status"], "verified")
+            self.assertTrue(verified_reservation["recovered"])
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_repair_attempt_recovery_claim_paths_differ_by_evidence_process(self) -> None:
+        path = Path("/tmp/reservation.json")
+        first = repair._repair_recovery_claim_path(path, "old-run:auto_worker:triage_verify_repair_attempt_reservation")
+        second = repair._repair_recovery_claim_path(path, "later-run:auto_worker:triage_verify_repair_attempt_reservation")
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.name.startswith("reservation.recovery."))
+        self.assertTrue(second.name.startswith("reservation.recovery."))
+
 
 
 

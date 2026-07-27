@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 import hashlib
+import json
 import os
+import sqlite3
 
 from lokay.adapters_cli import CommandError, hermes_kanban_json, run_cmd
 from lokay.envelope import (
@@ -144,6 +146,8 @@ def _repair_state_root(request: Request) -> Path | None:
 
 def _repair_reservation_path(request: Request, identity: dict[str, object]) -> Path:
     root = _repair_state_root(request)
+    if root is None:
+        raise ValueError("missing repair state root")
     key = f"{identity['repo']}:{identity['pr_number']}:{identity['verified_head']}".encode()
     digest = hashlib.sha256(key).hexdigest()[:32]
     return root / "repair-attempts" / str(identity["repo"]).replace("/", "__") / str(identity["pr_number"]) / f"{digest}.json"
@@ -164,6 +168,258 @@ def _reservation_identity(payload: object) -> dict[str, object] | None:
     if "check_run_id" in payload:
         identity["check_run_id"] = payload["check_run_id"]
     return identity
+
+def _repair_recovery_claim_path(reservation_path: Path, evidence_process_id: str) -> Path:
+    digest = hashlib.sha256(evidence_process_id.encode()).hexdigest()[:32]
+    return reservation_path.with_name(f"{reservation_path.stem}.recovery.{digest}.json")
+
+
+def _write_exclusive_json(path: Path, payload: dict[str, object]) -> bool:
+    """Publish one durable JSON claim; return false when it already exists."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    parent_fd = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    return True
+
+def _repair_completed_receipt_path(request: Request, identity: dict[str, object]) -> Path | None:
+    """Return the deterministic completed-receipt path for repo/PR/before-head."""
+    root = _repair_state_root(request)
+    if root is None:
+        return None
+    repo = str(identity.get("repo") or "")
+    pr_number = identity.get("pr_number")
+    verified_head = str(identity.get("verified_head") or "")
+    if not repo or pr_number in (None, "") or not verified_head:
+        return None
+    key = f"{repo}:{pr_number}:{verified_head}".encode()
+    digest = hashlib.sha256(key).hexdigest()[:32]
+    return root / "repair-receipts" / repo.replace("/", "__") / str(pr_number) / f"{digest}.json"
+
+
+def _repair_completed_receipt(
+    request: Request,
+    identity: dict[str, object],
+) -> tuple[str, dict[str, object]] | None | Result:
+    """Return found receipt, None when absent, or a fail Result for malformed evidence."""
+    path = _repair_completed_receipt_path(request, identity)
+    if path is None:
+        return fail(
+            "missing_repair_completed_receipt_path",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_repair_completed_receipt",
+            **{key: identity.get(key) for key in ("repo", "pr_number", "verified_head") if key in identity},
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return fail(
+            "repair_completed_receipt_read_failed",
+            failure_class="retryable_read",
+            retry_safe=True,
+            operation="read_repair_completed_receipt",
+            error=str(exc),
+            receipt_path=str(path),
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail(
+            "repair_completed_receipt_malformed",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_repair_completed_receipt",
+            error=str(exc),
+            receipt_path=str(path),
+        )
+    if not isinstance(payload, dict):
+        return fail(
+            "repair_completed_receipt_malformed",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_repair_completed_receipt",
+            receipt_path=str(path),
+        )
+    provenance = payload.get("provenance")
+    run = payload.get("run")
+    valid = bool(
+        isinstance(provenance, dict)
+        and isinstance(run, dict)
+        and str(provenance.get("repo") or "") == str(identity["repo"])
+        and str(provenance.get("pr_number") or "") == str(identity["pr_number"])
+        and str(payload.get("before_oid") or "") == str(identity["verified_head"])
+        and str(run.get("status") or "") == "completed"
+        and str(run.get("run_id") or "")
+        and str(run.get("omp_process_id") or "")
+        and str(run.get("receipt_process_id") or "")
+        and str(payload.get("candidate") or "")
+        and str(payload.get("after_oid") or "")
+        and str(payload.get("after_oid")) != str(identity["verified_head"])
+    )
+    if not valid:
+        return fail(
+            "repair_completed_receipt_mismatch",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_repair_completed_receipt",
+            receipt_path=str(path),
+        )
+    return str(path), payload
+
+def _repair_restart_recovery(request: Request, state: dict[str, object], reservation_path: Path) -> Result:
+    """Read and validate one exact failed read-only pre-OMP process row."""
+    data, cfg = input_of(request), cfg_of(request)
+    recovery = data.get("attempt_recovery") or data.get("repair_recovery") or cfg.get("attempt_recovery") or cfg.get("repair_recovery")
+    if not recovery:
+        return ok(status="inactive", operation="read_repair_attempt_recovery_evidence", recovery_active=False, mutated=False)
+    if not isinstance(recovery, dict):
+        return fail("invalid_repair_attempt_recovery", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
+    run_id = str(recovery.get("run_id") or "").strip()
+    process_id = str(recovery.get("process_id") or "").strip()
+    candidate = str(recovery.get("candidate") or "").strip()
+    path_id = str(recovery.get("path_id") or "").strip()
+    effector_id = str(recovery.get("effector_id") or "").strip()
+    expected_process_id = f"{run_id}:{path_id}:{effector_id}"
+    allowed = {
+        ("auto_worker", "triage_verify_repair_attempt_reservation"),
+        ("pr_triage", "verify_repair_attempt_reservation"),
+    }
+    if (
+        (path_id, effector_id) not in allowed
+        or not run_id
+        or process_id != expected_process_id
+        or run_id != str(state.get("run_id") or "")
+        or candidate != str(state.get("candidate") or "")
+        or str(recovery.get("repo") or "") != str(state.get("repo") or "")
+        or str(recovery.get("pr_number") or "") != str(state.get("pr_number") or "")
+        or str(recovery.get("verified_head") or "") != str(state.get("verified_head") or "")
+    ):
+        return fail("repair_attempt_recovery_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
+    db_path = str(data.get("db_path") or cfg.get("db_path") or "").strip()
+    if not db_path:
+        return fail("invalid_repair_attempt_recovery", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+            rows = connection.execute(
+                "SELECT run_id,id,status,input_json,output_json,error_json,metadata FROM processes WHERE run_id=? AND id=?",
+                (run_id, process_id),
+            ).fetchall()
+        if len(rows) != 1:
+            return fail("repair_attempt_recovery_not_unique", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence", count=len(rows))
+        row_run, row_id, status, raw_input, raw_output, raw_error, raw_metadata = rows[0]
+        process_input = json.loads(raw_input)
+        process_output = json.loads(raw_output)
+        process_error = json.loads(raw_error)
+        metadata = json.loads(raw_metadata)
+    except (OSError, sqlite3.Error, TypeError, json.JSONDecodeError) as exc:
+        return fail("repair_attempt_recovery_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_attempt_recovery_evidence", error=str(exc))
+    conduction = process_input.get("conduction") if isinstance(process_input, dict) else None
+    reserve_key = "triage_reserve_repair_attempt" if path_id == "auto_worker" else "reserve_repair_attempt"
+    reservation = conduction.get(reserve_key) if isinstance(conduction, dict) else None
+    reservation_values = reservation.get("reservation") if isinstance(reservation, dict) else None
+    binding = metadata.get("__adapter_binding") if isinstance(metadata, dict) else None
+    expected_cwd = (Path(db_path).resolve().parent.parent / "deployment" / "versions" / candidate / "source" / "project").resolve()
+    valid = bool(
+        row_run == run_id
+        and row_id == process_id
+        and status == "failed"
+        and isinstance(process_output, dict)
+        and not process_output
+        and isinstance(process_error, dict)
+        and process_error.get("code") == "adapter_failed"
+        and process_error.get("mutated") is not True
+        and isinstance(reservation, dict)
+        and reservation.get("ok") is True
+        and reservation.get("mutated") is True
+        and str(reservation.get("reservation_path") or "") == str(reservation_path)
+        and isinstance(reservation_values, dict)
+        and _reservation_identity(reservation_values) == _reservation_identity(state)
+        and str(process_input.get("candidate") or "") == candidate
+        and str(process_input.get("candidate_id") or "") == candidate
+        and isinstance(binding, dict)
+        and Path(str(binding.get("cwd") or "")).resolve() == expected_cwd
+    )
+    if not valid:
+        return fail("repair_attempt_recovery_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
+    current_identity, identity_error = _repair_identity(request)
+    if current_identity is None:
+        return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence", conflict=identity_error)
+    claim = {
+        "kind": "repair_attempt_recovery_claim",
+        "repo": state["repo"],
+        "pr_number": state["pr_number"],
+        "verified_head": state["verified_head"],
+        "reservation_run_id": state["run_id"],
+        "reservation_candidate": state["candidate"],
+        "evidence_process_id": process_id,
+        "recovery_run_id": current_identity["run_id"],
+        "recovery_candidate": current_identity["candidate"],
+    }
+    return ok(status="validated", operation="read_repair_attempt_recovery_evidence", recovery_claim=claim, recovery_claim_path=str(_repair_recovery_claim_path(reservation_path, process_id)), reservation_path=str(reservation_path), mutated=False)
+
+
+def read_repair_attempt_recovery_evidence(request: Request) -> Result:
+    """Validate configured recovery against the immutable reservation and process journal."""
+    source = cond_blob(request, "read_repair_attempt_state")
+    state = source.get("attempt_state")
+    path = str(source.get("reservation_path") or "")
+    if source.get("status") == "absent":
+        return ok(status="inactive", operation="read_repair_attempt_recovery_evidence", recovery_active=False, mutated=False)
+    if source.get("ok") is not True or not isinstance(state, dict) or not path:
+        return fail("repair_attempt_state_required", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
+    return _repair_restart_recovery(request, state, Path(path))
+
+def claim_repair_attempt_recovery(request: Request) -> Result:
+    """Publish the one immutable recovery transition."""
+    evidence = cond_blob(request, "read_repair_attempt_recovery_evidence")
+    if evidence.get("status") == "inactive":
+        return ok(status="inactive", operation="claim_repair_attempt_recovery", recovery_active=False, mutated=False)
+    if evidence.get("ok") is not True or evidence.get("status") != "validated":
+        return fail("repair_attempt_recovery_evidence_required", failure_class="terminal", retry_safe=False, operation="claim_repair_attempt_recovery")
+    claim = evidence.get("recovery_claim")
+    path = str(evidence.get("recovery_claim_path") or "")
+    if not isinstance(claim, dict) or not path:
+        return fail("invalid_repair_attempt_recovery_claim", failure_class="terminal", retry_safe=False, operation="claim_repair_attempt_recovery")
+    if dry_run_flag(request):
+        return planned(operation="claim_repair_attempt_recovery", recovery_claim=claim, recovery_claim_path=path)
+    try:
+        if not _write_exclusive_json(Path(path), claim):
+            return ok(status="exists", operation="claim_repair_attempt_recovery", recovery_claim=claim, recovery_claim_path=path, mutated=False)
+    except (OSError, TypeError, ValueError) as exc:
+        return fail("repair_attempt_recovery_claim_failed", failure_class="terminal", retry_safe=False, operation="claim_repair_attempt_recovery", error=str(exc), recovery_claim_path=path, mutated=True)
+    return ok(status="claimed", operation="claim_repair_attempt_recovery", recovery_claim=claim, recovery_claim_path=path, mutated=True)
+
+
+def verify_repair_attempt_recovery(request: Request) -> Result:
+    """Read back the immutable recovery transition before authorization."""
+    claimed = cond_blob(request, "claim_repair_attempt_recovery")
+    if claimed.get("status") == "inactive":
+        return ok(status="inactive", operation="verify_repair_attempt_recovery", recovery_active=False, mutated=False)
+    expected = claimed.get("recovery_claim")
+    path = str(claimed.get("recovery_claim_path") or "")
+    if claimed.get("ok") is not True or claimed.get("status") not in {"claimed", "exists", "planned"} or not isinstance(expected, dict) or not path:
+        return fail("repair_attempt_recovery_claim_required", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_recovery")
+    if dry_run_flag(request):
+        return planned(operation="verify_repair_attempt_recovery", recovery_claim=expected, recovery_claim_path=path)
+    try:
+        actual = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("repair_attempt_recovery_claim_readback_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_recovery", error=str(exc), recovery_claim_path=path)
+    if actual != expected:
+        return fail("repair_attempt_recovery_claim_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_recovery", recovery_claim_path=path)
+    return ok(status="verified", operation="verify_repair_attempt_recovery", recovery_verified=True, recovery_claim=actual, recovery_claim_path=path, mutated=False)
 
 
 def read_repair_attempt_state(request: Request) -> Result:
@@ -193,18 +449,36 @@ def read_repair_attempt_state(request: Request) -> Result:
     return ok(status="found", operation="read_repair_attempt_state", attempt_state=payload, reservation_path=str(path), **identity)
 
 
+def read_repair_completed_receipt(request: Request) -> Result:
+    """Read one durable completed repair receipt for the current head identity."""
+    identity, error = _repair_identity(request)
+    if identity is None:
+        return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="read_repair_completed_receipt", conflict=error)
+    completed = _repair_completed_receipt(request, identity)
+    if isinstance(completed, dict):
+        return completed
+    if completed is None:
+        return ok(status="absent", operation="read_repair_completed_receipt", receipt=None, receipt_path=None, **identity)
+    receipt_path, receipt = completed
+    return ok(status="found", operation="read_repair_completed_receipt", receipt=receipt, receipt_path=receipt_path, **identity)
+
 def reserve_repair_attempt(request: Request) -> Result:
     """Atomically reserve the immutable head before invoking OMP."""
     gated = _repair_execution_gate(request, "reserve_repair_attempt")
     if gated:
         return gated
     decision = cond_blob(request, "decide_repair_attempt")
+    recovery = cond_blob(request, "verify_repair_attempt_recovery")
+    if decision.get("reason") == "verified_failed_attempt_recovery":
+        if recovery.get("ok") is not True or recovery.get("status") != "verified" or recovery.get("recovery_verified") is not True:
+            return fail("repair_attempt_recovery_verification_required", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt")
+        return ok(status="recovered", operation="reserve_repair_attempt", reservation_path=str(decision.get("reservation_path") or ""), recovery_claim=recovery.get("recovery_claim"), recovery_claim_path=recovery.get("recovery_claim_path"), mutated=False)
     if decision.get("authorize") is not True:
         return noop(str(decision.get("reason") or "repair_attempt_not_authorized"), operation="reserve_repair_attempt")
     identity, error = _repair_identity(request)
     if identity is None:
         return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", conflict=error)
-    if not str(_repair_state_root(request)):
+    if _repair_state_root(request) is None:
         return fail("missing_repair_state_root", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", **identity)
     path = _repair_reservation_path(request, identity)
     payload = {**identity, "checks": decision.get("checks") or [], "status": "reserved", "attempted": True, "kind": "repair_attempt_reservation"}
@@ -243,8 +517,11 @@ def reserve_repair_attempt(request: Request) -> Result:
 
 
 def verify_repair_attempt_reservation(request: Request) -> Result:
-    """Read back the immutable reservation immediately before OMP."""
+    """Read the immutable reservation and bind it to a normal or recovered attempt."""
     source = cond_blob(request, "reserve_repair_attempt")
+    idle = upstream_noop(request, "reserve_repair_attempt")
+    if idle:
+        return noop(str(idle.get("reason") or "repair_attempt_not_authorized"), operation="verify_repair_attempt_reservation")
     path = str(input_of(request).get("reservation_path") or source.get("reservation_path") or "")
     if not path:
         return fail("missing_repair_attempt_reservation", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation")
@@ -254,10 +531,32 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
         return fail("repair_attempt_reservation_readback_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", error=str(exc), reservation_path=path)
     identity, error = _repair_identity(request)
     stored = _reservation_identity(payload)
-    if identity is None or stored is None or any(str(stored.get(key)) != str(identity.get(key)) for key in ("repo", "pr_number", "verified_head", "candidate", "run_id")):
+    if identity is None or stored is None:
         return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict=error)
     if payload.get("status") != "reserved" or payload.get("attempted") is not True:
         return fail("repair_attempt_reservation_invalid", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
+    if source.get("status") == "recovered":
+        recovery = cond_blob(request, "verify_repair_attempt_recovery")
+        claim = source.get("recovery_claim")
+        valid = bool(
+            recovery.get("ok") is True
+            and recovery.get("status") == "verified"
+            and recovery.get("recovery_verified") is True
+            and isinstance(claim, dict)
+            and claim == recovery.get("recovery_claim")
+            and str(claim.get("repo") or "") == str(stored["repo"])
+            and str(claim.get("pr_number") or "") == str(stored["pr_number"])
+            and str(claim.get("verified_head") or "") == str(stored["verified_head"])
+            and str(claim.get("reservation_candidate") or "") == str(stored["candidate"])
+            and str(claim.get("reservation_run_id") or "") == str(stored["run_id"])
+            and str(claim.get("recovery_candidate") or "") == str(identity["candidate"])
+            and str(claim.get("recovery_run_id") or "") == str(identity["run_id"])
+        )
+        if not valid:
+            return fail("repair_attempt_recovery_claim_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
+        return ok(status="verified", operation="verify_repair_attempt_reservation", verified=True, recovered=True, reservation=payload, recovery_claim=claim, reservation_path=path, mutated=False)
+    if any(str(stored.get(key)) != str(identity.get(key)) for key in ("repo", "pr_number", "verified_head", "candidate", "run_id")):
+        return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict=error)
     return ok(status="verified", operation="verify_repair_attempt_reservation", verified=True, reservation=payload, reservation_path=path, mutated=False)
 
 
@@ -297,13 +596,55 @@ def decide_repair_attempt(request: Request) -> Result:
     checks, check_error, pending = _repair_checks(request)
     if checks is None:
         return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict=check_error, **identity)
+    completed = cond_blob(request, "read_repair_completed_receipt")
+    if completed and completed.get("ok") is not True:
+        return fail(
+            str(completed.get("reason") or "repair_completed_receipt_failed"),
+            failure_class=str(completed.get("failure_class") or "terminal"),
+            retry_safe=bool(completed.get("retry_safe")),
+            decision="terminal_conflict",
+            authorize=False,
+            conflict=str(completed.get("reason") or "repair_completed_receipt_failed"),
+            receipt_path=completed.get("receipt_path"),
+            **identity,
+        )
+    if completed.get("status") not in {None, "", "absent", "found"}:
+        return fail(
+            "repair_completed_receipt_invalid",
+            failure_class="terminal",
+            retry_safe=False,
+            decision="terminal_conflict",
+            authorize=False,
+            conflict="repair_completed_receipt_invalid",
+            **identity,
+        )
+    if completed.get("ok") is True and completed.get("status") == "found" and isinstance(completed.get("receipt"), dict):
+        receipt = completed["receipt"]
+        if any(str(completed.get(key) or "") != str(identity[key]) for key in ("repo", "pr_number", "verified_head")):
+            return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict="completed_receipt_identity_mismatch", **identity)
+        state = {
+            "repo": identity["repo"],
+            "pr_number": identity["pr_number"],
+            "verified_head": identity["verified_head"],
+            "candidate": receipt.get("candidate") or identity["candidate"],
+            "run_id": ((receipt.get("run") or {}) if isinstance(receipt.get("run"), dict) else {}).get("run_id") or identity["run_id"],
+            "status": "completed",
+            "attempted": True,
+            "checks": receipt.get("checks") or checks,
+        }
+        return ok(status="already_repaired", decision="already_repaired", authorize=False, reason="attempt_already_recorded", attempt_state=state, receipt_path=completed.get("receipt_path"), receipt=receipt, **identity)
     state = _repair_state(request)
     if state:
         for key in ("repo", "pr_number", "verified_head"):
             if key in state and str(state.get(key)) != str(identity[key]):
                 return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict=f"{key}_mismatch", **identity)
         prior_status = str(state.get("status") or state.get("decision") or "").lower()
-        # Check conclusions and run/candidate IDs can evolve; head reservation cannot.
+        recovery = cond_blob(request, "verify_repair_attempt_recovery")
+        if recovery.get("ok") is True and recovery.get("status") == "verified" and recovery.get("recovery_verified") is True:
+            claim = recovery.get("recovery_claim")
+            if not isinstance(claim, dict) or any(str(claim.get(key) or "") != str(identity[value]) for key, value in (("repo", "repo"), ("pr_number", "pr_number"), ("verified_head", "verified_head"), ("recovery_candidate", "candidate"), ("recovery_run_id", "run_id"))):
+                return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict="repair_recovery_identity_mismatch", **identity)
+            return ok(status="invoke", decision="invoke", authorize=True, reason="verified_failed_attempt_recovery", checks=checks, attempt_state=_repair_attempt_state(identity, checks), reservation_path=str(cond_blob(request, "read_repair_attempt_state").get("reservation_path") or ""), recovery_claim=claim, recovery_claim_path=recovery.get("recovery_claim_path"), **identity)
         if prior_status in {"pending", "waiting", "awaiting_checks", "running", "authorized"}:
             return ok(status="pending", decision="wait", authorize=False, reason="awaiting_checks", **identity)
         if prior_status in {"reserved", "repaired", "succeeded", "completed", "invoked", "failed", "already_repaired"} or state.get("attempted") is True:
@@ -602,9 +943,12 @@ from lokay.adapters_git import (
 )
 
 _REPAIR_CONTEXT_ALIASES = (
-     "build_repair_prompt", "triage_build_repair_prompt", "read_repair_context",
-     "read_repair_remote_head", "read_repair_worktree_inventory",
-     "read_repair_branch_provenance", "decide_repair_worktree_ownership",
+    "build_repair_prompt", "triage_build_repair_prompt", "read_repair_context",
+    "read_repair_remote_head", "read_repair_worktree_inventory",
+    "read_repair_branch_provenance", "read_repair_creation_evidence",
+    "decide_repair_worktree_ownership", "create_repair_branch",
+    "write_repair_branch_provenance", "add_repair_worktree",
+    "prepare_repair_worktree", "verify_repair_worktree",
 )
 
 def _repair_blobs(request: Request) -> list[dict[str, Any]]:
@@ -657,7 +1001,7 @@ def _repair_ownership_receipt(request: Request, repo: str, pr_number: str, branc
 def _repair_context(request: Request) -> dict[str, str]:
      data = input_of(request)
      cfg = cfg_of(request)
-     root = str(data.get("worktree_root") or cfg.get("worktree_root") or "").strip()
+     root = _repair_field(request, "worktree_root")
      branch = _repair_field(request, "branch", "head_ref_name")
      repo = _repair_field(request, "repo")
      pr_number = _repair_field(request, "pr_number", "number")
@@ -749,52 +1093,121 @@ def read_repair_worktree_inventory(request: Request) -> Result:
      return ok(status="read", operation="read_repair_worktree_inventory", worktrees=rows, **context)
 
 def read_repair_branch_provenance(request: Request) -> Result:
-     upstream = _repair_upstream(request, "read_repair_branch_provenance", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory")
-     if upstream:
-         return upstream
-     context = _repair_context(request)
-     try:
-         exists = branch_exists(context["clone_path"], context["local_branch"])
-         provenance: dict[str, str] = {}
-         if exists:
-             for key in ("task", "issue", "repo", "pr", "receipt", "repair_receipt", "remote_oid", "target_branch"):
-                 try:
-                     provenance[key] = branch_config_get(context["clone_path"], context["local_branch"], f"lokay-{key}").strip()
-                 except CommandError:
-                     provenance[key] = ""
-     except (CommandError, OSError) as exc:
-         return fail("repair_branch_provenance_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_branch_provenance", error=str(exc), **context)
-     return ok(status="read", operation="read_repair_branch_provenance", exists=exists, provenance=provenance, **context)
+    upstream = _repair_upstream(request, "read_repair_branch_provenance", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory")
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    try:
+        exists = branch_exists(context["clone_path"], context["local_branch"])
+        provenance: dict[str, str] = {}
+        branch_head = ""
+        if exists:
+            branch_head = rev_parse(context["clone_path"], context["local_branch"])
+            for key in ("task", "issue", "repo", "pr", "receipt", "repair_receipt", "remote_oid", "target_branch"):
+                try:
+                    provenance[key] = branch_config_get(context["clone_path"], context["local_branch"], f"lokay-{key}").strip()
+                except CommandError:
+                    provenance[key] = ""
+    except (CommandError, OSError) as exc:
+        return fail("repair_branch_provenance_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_branch_provenance", error=str(exc), **context)
+    return ok(status="read", operation="read_repair_branch_provenance", exists=exists, provenance=provenance, branch_head=branch_head, **context)
+def read_repair_creation_evidence(request: Request) -> Result:
+    """Read one explicitly configured, exact prior branch-creation process."""
+    upstream = _repair_upstream(request, "read_repair_creation_evidence", "read_repair_context", "read_repair_remote_head", "read_repair_branch_provenance")
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    branch_read = cond_blob(request, "read_repair_branch_provenance")
+    if not branch_read.get("exists") or any((branch_read.get("provenance") or {}).values()):
+        return ok(status="not_needed", operation="read_repair_creation_evidence", verified=False, **context)
+    recovery = input_of(request).get("repair_recovery") or cfg_of(request).get("repair_recovery")
+    if not isinstance(recovery, dict):
+        return ok(status="absent", operation="read_repair_creation_evidence", verified=False, **context)
+    run_id = str(recovery.get("run_id") or "").strip()
+    process_id = str(recovery.get("process_id") or "").strip()
+    candidate = str(recovery.get("candidate") or "").strip()
+    db_path = str(input_of(request).get("db_path") or cfg_of(request).get("db_path") or "").strip()
+    path_id = str(recovery.get("path_id") or "").strip()
+    effector_id = str(recovery.get("effector_id") or "").strip()
+    allowed = {
+        ("auto_worker", "triage_create_repair_branch"),
+        ("pr_triage", "create_repair_branch"),
+    }
+    if (path_id, effector_id) not in allowed:
+        return fail("invalid_repair_recovery_identity", failure_class="terminal", retry_safe=False, operation="read_repair_creation_evidence")
+    expected_process_id = f"{run_id}:{path_id}:{effector_id}"
+    if not run_id or process_id != expected_process_id or len(candidate) != 64 or not db_path:
+        return fail("invalid_repair_recovery_identity", failure_class="terminal", retry_safe=False, operation="read_repair_creation_evidence")
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+            rows = connection.execute(
+                "SELECT run_id,id,status,input_json,output_json,metadata FROM processes WHERE run_id=? AND id=?",
+                (run_id, process_id),
+            ).fetchall()
+        if len(rows) != 1:
+            return fail("repair_creation_evidence_not_unique", failure_class="terminal", retry_safe=False, operation="read_repair_creation_evidence", count=len(rows))
+        row_run, row_id, status, raw_input, raw_output, raw_metadata = rows[0]
+        process_input = json.loads(raw_input)
+        process_output = json.loads(raw_output)
+        metadata = json.loads(raw_metadata)
+    except (OSError, sqlite3.Error, TypeError, json.JSONDecodeError) as exc:
+        return fail("repair_creation_evidence_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_creation_evidence", error=str(exc))
+    values = process_output.get("values") if isinstance(process_output, dict) else None
+    binding = metadata.get("__adapter_binding") if isinstance(metadata, dict) else None
+    decision = (process_input.get("conduction") or {}).get("triage_decide_repair_worktree_ownership") if isinstance(process_input, dict) else None
+    remote_oid = str(cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
+    exact = {
+        "repo": context["repo"], "issue": context["issue"], "pr_number": context["pr_number"],
+        "branch": context["branch"], "local_branch": context["local_branch"], "remote_oid": remote_oid,
+        "clone_path": context["clone_path"], "worktree_path": context["worktree_path"], "receipt": context["receipt"],
+    }
+    expected_cwd = f"/versions/{candidate}/source/project"
+    valid = bool(
+        row_run == run_id and row_id == process_id and status == "succeeded"
+        and isinstance(values, dict) and values.get("ok") is True and values.get("status") == "created" and values.get("mutated") is True
+        and isinstance(decision, dict) and decision.get("status") == "create" and decision.get("reuse") is False
+        and all(str(values.get(key) or "") == str(value) for key, value in exact.items())
+        and all(str(decision.get(key) or "") == str(value) for key, value in exact.items())
+        and str(process_input.get("candidate") or "") == candidate
+        and str(process_input.get("candidate_id") or "") == candidate
+        and isinstance(binding, dict) and str(binding.get("cwd") or "") == expected_cwd
+    )
+    if not valid:
+        return fail("repair_creation_evidence_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_creation_evidence")
+    return ok(status="verified", operation="read_repair_creation_evidence", verified=True, run_id=run_id, process_id=process_id, candidate=candidate, remote_oid=remote_oid, **context)
+
 
 def decide_repair_worktree_ownership(request: Request) -> Result:
-     upstream = _repair_upstream(request, "decide_repair_worktree_ownership", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance")
-     if upstream:
-         return upstream
-     context = _repair_context(request)
-     remote = cond_blob(request, "read_repair_remote_head")
-     inventory = cond_blob(request, "read_repair_worktree_inventory")
-     branch_read = cond_blob(request, "read_repair_branch_provenance")
-     remote_oid = str(remote.get("remote_oid") or _repair_field(request, "remote_oid"))
-     if not remote_oid:
-         return fail("missing_repair_remote_oid", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership")
-     expected = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": remote_oid, "target_branch": context["branch"]}
-     if not all(expected[key] for key in ("issue", "repo", "pr", "remote_oid", "target_branch")):
-         return fail("missing_repair_ownership_evidence", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected=expected)
-     actual = dict(branch_read.get("provenance") or {})
-     if branch_read.get("exists") and any(actual.get(key) != value for key, value in expected.items() if value or key == "task" and actual.get(key)):
-         return fail("foreign_repair_branch_ownership", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected=expected, actual=actual)
-     rows = inventory.get("worktrees") if isinstance(inventory.get("worktrees"), list) else []
-     target = Path(context["worktree_path"]).resolve()
-     matching = [row for row in rows if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == target]
-     if matching and any(str(row.get("branch") or "") != context["local_branch"] for row in matching):
-         return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
-     if matching and str(matching[0].get("head") or "") != remote_oid:
-         return fail("stale_repair_remote_head", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected_head=remote_oid, actual_head=matching[0].get("head"))
-     if target.exists() or target.is_symlink():
-         if not matching:
-             return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
-     reuse = bool(branch_read.get("exists") and matching and str(matching[0].get("branch") or "") == context["local_branch"])
-     return ok(status="reuse" if reuse else "create", operation="decide_repair_worktree_ownership", should_prepare=True, reuse=reuse, remote_oid=remote_oid, expected=expected, **context)
+    upstream = _repair_upstream(request, "decide_repair_worktree_ownership", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance", "read_repair_creation_evidence")
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    context_error = _repair_context_error(context)
+    if context_error:
+        return fail(context_error, failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership")
+    remote = cond_blob(request, "read_repair_remote_head")
+    inventory = cond_blob(request, "read_repair_worktree_inventory")
+    branch_read = cond_blob(request, "read_repair_branch_provenance")
+    evidence = cond_blob(request, "read_repair_creation_evidence")
+    remote_oid = str(remote.get("remote_oid") or _repair_field(request, "remote_oid"))
+    if not remote_oid:
+        return fail("missing_repair_remote_oid", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership")
+    expected = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": remote_oid, "target_branch": context["branch"]}
+    actual = dict(branch_read.get("provenance") or {})
+    recover_branch = bool(branch_read.get("exists") and not any(actual.values()) and evidence.get("verified") is True and str(evidence.get("remote_oid") or "") == remote_oid and str(branch_read.get("branch_head") or "") == remote_oid)
+    if branch_read.get("exists") and not recover_branch and any(actual.get(key) != value for key, value in expected.items() if value or key == "task" and actual.get(key)):
+        return fail("foreign_repair_branch_ownership", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected=expected, actual=actual)
+    rows = inventory.get("worktrees") if isinstance(inventory.get("worktrees"), list) else []
+    target = Path(context["worktree_path"]).resolve()
+    matching = [row for row in rows if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == target]
+    if matching and any(str(row.get("branch") or "") != context["local_branch"] for row in matching):
+        return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
+    if matching and str(matching[0].get("head") or "") != remote_oid:
+        return fail("stale_repair_remote_head", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected_head=remote_oid, actual_head=matching[0].get("head"))
+    if (target.exists() or target.is_symlink()) and not matching:
+        return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
+    reuse = bool(branch_read.get("exists") and matching and str(matching[0].get("branch") or "") == context["local_branch"])
+    return ok(status="reuse" if reuse else "recover" if recover_branch else "create", operation="decide_repair_worktree_ownership", should_prepare=True, reuse=reuse, recover_branch=recover_branch, remote_oid=remote_oid, expected=expected, **context)
 
 def create_repair_branch(request: Request) -> Result:
      upstream = _repair_upstream(request, "create_repair_branch", "decide_repair_worktree_ownership")
@@ -804,6 +1217,8 @@ def create_repair_branch(request: Request) -> Result:
      context = _repair_context(request)
      if decision.get("reuse") is True:
          return ok(status="reused", operation="create_repair_branch", mutated=False, **context)
+     if decision.get("recover_branch") is True:
+         return ok(status="recovered", operation="create_repair_branch", mutated=False, remote_oid=str(decision.get("remote_oid") or ""), **context)
      remote_oid = str(decision.get("remote_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
      if not remote_oid:
          return fail("missing_repair_remote_oid", failure_class="terminal", retry_safe=False, operation="create_repair_branch")
@@ -1179,15 +1594,14 @@ def verify_existing_repair_pr(request: Request) -> Result:
 
 
 def _repair_attempt_receipt(request: Request, payload: dict[str, Any]) -> str:
-    root = _repair_state_root(request)
     provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
-    run = payload.get("run") if isinstance(payload.get("run"), dict) else {}
-    parts = (provenance.get("repo"), provenance.get("pr_number"), payload.get("before_oid"), payload.get("after_oid"), run.get("run_id"), run.get("omp_process_id"), run.get("receipt_process_id"), payload.get("candidate"))
-    if root is None or any(value in (None, "") for value in parts):
-        return ""
-    digest = hashlib.sha256("\0".join(str(value or "") for value in parts).encode()).hexdigest()
-    return str(root / "repair-receipts" / str(provenance["repo"]).replace("/", "__") / str(provenance["pr_number"]) / f"{digest}.json")
-
+    identity = {
+        "repo": provenance.get("repo"),
+        "pr_number": provenance.get("pr_number"),
+        "verified_head": payload.get("before_oid"),
+    }
+    path = _repair_completed_receipt_path(request, identity)
+    return str(path) if path is not None else ""
 
 def build_repair_receipt(request: Request) -> Result:
     gated = _repair_execution_gate(request, "build_repair_receipt", "verify_existing_repair_pr")
@@ -1246,7 +1660,6 @@ def publish_repair_receipt(request: Request) -> Result:
             return _publish_cleanup_receipt(Path(path), payload, path)
     except (OSError, ValueError) as exc:
         return fail("repair_receipt_write_failed", failure_class="terminal", retry_safe=False, operation="publish_repair_receipt", error=str(exc), receipt_path=path)
-
 
 def verify_repair_receipt(request: Request) -> Result:
     gated = _repair_execution_gate(request, "verify_repair_receipt", "publish_repair_receipt")
