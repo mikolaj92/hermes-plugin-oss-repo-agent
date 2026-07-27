@@ -281,7 +281,7 @@ def _repair_completed_receipt(
 def _repair_restart_recovery(request: Request, state: dict[str, object], reservation_path: Path) -> Result:
     """Read and validate one exact failed read-only pre-OMP process row."""
     data, cfg = input_of(request), cfg_of(request)
-    recovery = data.get("attempt_recovery") or data.get("repair_recovery") or cfg.get("attempt_recovery") or cfg.get("repair_recovery")
+    recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
     if not recovery:
         return ok(status="inactive", operation="read_repair_attempt_recovery_evidence", recovery_active=False, mutated=False)
     if not isinstance(recovery, dict):
@@ -1120,13 +1120,19 @@ def read_repair_creation_evidence(request: Request) -> Result:
     branch_read = cond_blob(request, "read_repair_branch_provenance")
     if not branch_read.get("exists") or any((branch_read.get("provenance") or {}).values()):
         return ok(status="not_needed", operation="read_repair_creation_evidence", verified=False, **context)
-    recovery = input_of(request).get("repair_recovery") or cfg_of(request).get("repair_recovery")
+    data, cfg = input_of(request), cfg_of(request)
+    recovery = (
+        data.get("repair_creation_recovery")
+        or data.get("creation_recovery")
+        or cfg.get("repair_creation_recovery")
+        or cfg.get("creation_recovery")
+    )
     if not isinstance(recovery, dict):
         return ok(status="absent", operation="read_repair_creation_evidence", verified=False, **context)
     run_id = str(recovery.get("run_id") or "").strip()
     process_id = str(recovery.get("process_id") or "").strip()
     candidate = str(recovery.get("candidate") or "").strip()
-    db_path = str(input_of(request).get("db_path") or cfg_of(request).get("db_path") or "").strip()
+    db_path = str(data.get("db_path") or cfg.get("db_path") or "").strip()
     path_id = str(recovery.get("path_id") or "").strip()
     effector_id = str(recovery.get("effector_id") or "").strip()
     allowed = {
@@ -1154,14 +1160,17 @@ def read_repair_creation_evidence(request: Request) -> Result:
         return fail("repair_creation_evidence_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_creation_evidence", error=str(exc))
     values = process_output.get("values") if isinstance(process_output, dict) else None
     binding = metadata.get("__adapter_binding") if isinstance(metadata, dict) else None
-    decision = (process_input.get("conduction") or {}).get("triage_decide_repair_worktree_ownership") if isinstance(process_input, dict) else None
+    conduction = process_input.get("conduction") if isinstance(process_input, dict) else None
+    decision = None
+    if isinstance(conduction, dict):
+        decision = conduction.get("triage_decide_repair_worktree_ownership") or conduction.get("decide_repair_worktree_ownership")
     remote_oid = str(cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
     exact = {
         "repo": context["repo"], "issue": context["issue"], "pr_number": context["pr_number"],
         "branch": context["branch"], "local_branch": context["local_branch"], "remote_oid": remote_oid,
         "clone_path": context["clone_path"], "worktree_path": context["worktree_path"], "receipt": context["receipt"],
     }
-    expected_cwd = f"/versions/{candidate}/source/project"
+    expected_cwd = (Path(db_path).resolve().parent.parent / "deployment" / "versions" / candidate / "source" / "project").resolve()
     valid = bool(
         row_run == run_id and row_id == process_id and status == "succeeded"
         and isinstance(values, dict) and values.get("ok") is True and values.get("status") == "created" and values.get("mutated") is True
@@ -1170,12 +1179,11 @@ def read_repair_creation_evidence(request: Request) -> Result:
         and all(str(decision.get(key) or "") == str(value) for key, value in exact.items())
         and str(process_input.get("candidate") or "") == candidate
         and str(process_input.get("candidate_id") or "") == candidate
-        and isinstance(binding, dict) and str(binding.get("cwd") or "") == expected_cwd
+        and isinstance(binding, dict) and Path(str(binding.get("cwd") or "")).resolve() == expected_cwd
     )
     if not valid:
         return fail("repair_creation_evidence_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_creation_evidence")
     return ok(status="verified", operation="read_repair_creation_evidence", verified=True, run_id=run_id, process_id=process_id, candidate=candidate, remote_oid=remote_oid, **context)
-
 
 def decide_repair_worktree_ownership(request: Request) -> Result:
     upstream = _repair_upstream(request, "decide_repair_worktree_ownership", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance", "read_repair_creation_evidence")

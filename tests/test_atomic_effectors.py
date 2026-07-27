@@ -916,7 +916,7 @@ class RepairTests(unittest.TestCase):
                 "repo": "o/r", "number": 1, "verified_head": "head-a",
                 "candidate": "new-candidate", "run_id": "new-run",
                 "db_path": str(root / "state.sqlite"),
-                "repair_recovery": {
+                "attempt_recovery": {
                     "run_id": "old-run",
                     "process_id": "old-run:auto_worker:triage_invoke_repair_omp",
                     "candidate": "old-candidate",

@@ -88,7 +88,8 @@ def _step_config(cfg: Any, *, dry_run: bool, **extra: Any) -> dict[str, Any]:
         "repair_receipt_root": str(raw.get("repair_receipt_root") or task_receipts),
         "repair_state_root": str(raw.get("repair_state_root") or raw.get("repair_receipt_root") or task_receipts),
         "lifecycle_receipt_root": str(raw.get("lifecycle_receipt_root") or task_receipts),
-        "repair_recovery": raw.get("repair_recovery") if isinstance(raw.get("repair_recovery"), dict) and raw.get("repair_recovery") else None,
+        "attempt_recovery": raw.get("attempt_recovery") if isinstance(raw.get("attempt_recovery"), dict) and raw.get("attempt_recovery") else None,
+        "repair_creation_recovery": raw.get("repair_creation_recovery") if isinstance(raw.get("repair_creation_recovery"), dict) and raw.get("repair_creation_recovery") else None,
         "db_path": str(extra.get("db_path") or ""),
         "paths": {
             "active_issue": active_issue,
