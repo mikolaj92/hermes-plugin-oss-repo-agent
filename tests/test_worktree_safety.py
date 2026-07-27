@@ -138,9 +138,10 @@ class TempGitSafetyTests(unittest.TestCase):
         self.assertEqual(run_git(path, "branch", "--show-current"), "foreign/branch")
 
     def test_stale_existing_branch_fails_closed(self) -> None:
+        from lokay.adapters_git import branch_config_set
         run_git(self.clone, "branch", self.branch, "origin/main")
         for key, value in (("task", "task-7"), ("issue", "7"), ("receipt", self.identity["receipt_path"]), ("repo", "owner/repo")):
-            run_git(self.clone, "config", f"branch.{self.branch}.lokay-{key}", value)
+            branch_config_set(self.clone, self.branch, f"lokay-{key}", value)
         (self.seed / "README").write_text("two\n")
         run_git(self.seed, "add", "README")
         run_git(self.seed, "commit", "-m", "two")

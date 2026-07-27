@@ -278,7 +278,7 @@ def _repair_completed_receipt(
         )
     return str(path), payload
 
-def _repair_restart_recovery(request: Request, state: dict[str, object], reservation_path: Path) -> Result:
+def _repair_restart_recovery(request: Request, state: dict[str, object], reservation_path: Path, current: dict[str, object] | None = None) -> Result:
     """Read and validate one exact failed read-only pre-OMP process row."""
     data, cfg = input_of(request), cfg_of(request)
     recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
@@ -353,9 +353,17 @@ def _repair_restart_recovery(request: Request, state: dict[str, object], reserva
     )
     if not valid:
         return fail("repair_attempt_recovery_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
-    current_identity, identity_error = _repair_identity(request)
-    if current_identity is None:
-        return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence", conflict=identity_error)
+    current = current or {}
+    recovery_run_id = str(current.get("run_id") or input_of(request).get("run_id") or cfg_of(request).get("run_id") or "").strip()
+    recovery_candidate = str(current.get("candidate") or input_of(request).get("candidate") or input_of(request).get("candidate_id") or cfg_of(request).get("candidate") or "").strip()
+    if (
+        not recovery_run_id
+        or not recovery_candidate
+        or str(current.get("repo") or state.get("repo") or "") != str(state.get("repo") or "")
+        or str(current.get("pr_number") or state.get("pr_number") or "") != str(state.get("pr_number") or "")
+        or str(current.get("verified_head") or state.get("verified_head") or "") != str(state.get("verified_head") or "")
+    ):
+        return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence", conflict="missing_repair_provenance")
     claim = {
         "kind": "repair_attempt_recovery_claim",
         "repo": state["repo"],
@@ -364,8 +372,8 @@ def _repair_restart_recovery(request: Request, state: dict[str, object], reserva
         "reservation_run_id": state["run_id"],
         "reservation_candidate": state["candidate"],
         "evidence_process_id": process_id,
-        "recovery_run_id": current_identity["run_id"],
-        "recovery_candidate": current_identity["candidate"],
+        "recovery_run_id": recovery_run_id,
+        "recovery_candidate": recovery_candidate,
     }
     return ok(status="validated", operation="read_repair_attempt_recovery_evidence", recovery_claim=claim, recovery_claim_path=str(_repair_recovery_claim_path(reservation_path, process_id)), reservation_path=str(reservation_path), mutated=False)
 
@@ -379,7 +387,14 @@ def read_repair_attempt_recovery_evidence(request: Request) -> Result:
         return ok(status="inactive", operation="read_repair_attempt_recovery_evidence", recovery_active=False, mutated=False)
     if source.get("ok") is not True or not isinstance(state, dict) or not path:
         return fail("repair_attempt_state_required", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
-    return _repair_restart_recovery(request, state, Path(path))
+    current = {
+        "run_id": str(source.get("run_id") or input_of(request).get("run_id") or cfg_of(request).get("run_id") or "").strip(),
+        "candidate": str(source.get("candidate") or input_of(request).get("candidate") or input_of(request).get("candidate_id") or cfg_of(request).get("candidate") or "").strip(),
+        "repo": str(source.get("repo") or state.get("repo") or "").strip(),
+        "pr_number": source.get("pr_number") if source.get("pr_number") not in (None, "") else state.get("pr_number"),
+        "verified_head": str(source.get("verified_head") or state.get("verified_head") or "").strip(),
+    }
+    return _repair_restart_recovery(request, state, Path(path), current)
 
 def claim_repair_attempt_recovery(request: Request) -> Result:
     """Publish the one immutable recovery transition."""

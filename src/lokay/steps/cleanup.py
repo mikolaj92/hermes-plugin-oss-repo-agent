@@ -539,7 +539,7 @@ def read_branch_ownership(request: Request) -> Result:
     clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
     if not clone or not branch:
         return fail("missing_branch_ownership_context", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch)
-    pattern = rf"^branch\.{re.escape(branch)}\.lokay-(task|issue|receipt|repo)$"
+    pattern = rf"^branch\.{re.escape(_branch_config_section(branch))}\.lokay-(task|issue|receipt|repo)$"
     try:
         raw = git(["config", "--local", "--get-regexp", pattern], cwd=clone)
     except CommandError as exc:
@@ -547,7 +547,7 @@ def read_branch_ownership(request: Request) -> Result:
             return fail("branch_ownership_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, branch=branch)
         raw = ""
     ownership: dict[str, str] = {}
-    prefix = f"branch.{branch}.lokay-"
+    prefix = f"branch.{_branch_config_section(branch)}.lokay-"
     for line in raw.splitlines():
         key, separator, value = line.partition(" ")
         if not separator or not key.startswith(prefix):

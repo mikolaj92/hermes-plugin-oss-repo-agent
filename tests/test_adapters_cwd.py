@@ -78,7 +78,7 @@ class AdapterCwdTests(unittest.TestCase):
         absent = CommandError(["git"], 5, "", "")
         with mock.patch("lokay.adapters_git.git", side_effect=absent) as git:
             branch_config_unset("/clone", "ai/fix/10", "lokay-task")
-        git.assert_called_once_with(["config", "--local", "--unset-all", "branch.ai/fix/10.lokay-task"], cwd="/clone")
+        git.assert_called_once_with(["config", "--local", "--unset-all", "branch.lokay-24e19e846be74e2980d5328f750cb552332801776a1555b372ccad8e97556a67.lokay-task"], cwd="/clone")
 
     def test_branch_config_unset_reraises_real_failure(self) -> None:
         failure = CommandError(["git"], 1, "", "broken")

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from lokay.adapters_cli import CommandError, run_cmd
+import hashlib
 
 
 def git(args: list[str], *, cwd: str | Path | None = None, timeout: float = 120.0) -> str:
@@ -29,21 +30,35 @@ def local_branch_head(clone_path: str | Path, branch: str) -> str:
     return git(["rev-parse", "--verify", f"refs/heads/{branch}"], cwd=clone_path)
 
 
+def _branch_config_section(branch: str) -> str:
+    """Return a collision-safe git-config subsection for any branch name.
+
+    Git rejects '/' inside branch.* subsections when set via `git config`.
+    Encode the full branch with sha256 so slashy refs remain unique and valid.
+    """
+    digest = hashlib.sha256(branch.encode("utf-8")).hexdigest()
+    return f"lokay-{digest}"
+
+
+def _branch_config_key(branch: str, key: str) -> str:
+    return f"branch.{_branch_config_section(branch)}.{key}"
+
+
 def branch_config_get(clone_path: str | Path, branch: str, key: str) -> str:
-    return git(["config", "--local", "--get", f"branch.{branch}.{key}"], cwd=clone_path)
+    return git(["config", "--local", "--get", _branch_config_key(branch, key)], cwd=clone_path)
 
 
 def branch_config_set(clone_path: str | Path, branch: str, key: str, value: str) -> None:
-    git(["config", "--local", f"branch.{branch}.{key}", value], cwd=clone_path)
+    git(["config", "--local", _branch_config_key(branch, key), value], cwd=clone_path)
+
 
 def branch_config_unset(clone_path: str | Path, branch: str, key: str) -> None:
     """Remove every value for an optional branch key; absence is already success."""
     try:
-        git(["config", "--local", "--unset-all", f"branch.{branch}.{key}"], cwd=clone_path)
+        git(["config", "--local", "--unset-all", _branch_config_key(branch, key)], cwd=clone_path)
     except CommandError as exc:
         if exc.returncode != 5:
             raise
-
 
 def remote_url(clone_path: str | Path, remote: str = "origin") -> str:
     return git(["remote", "get-url", remote], cwd=clone_path)
