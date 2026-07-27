@@ -14,6 +14,7 @@ import tarfile
 import tempfile
 from contextlib import contextmanager
 from argparse import ArgumentParser, Namespace
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -1162,11 +1163,14 @@ def _launchctl_bootout(domain: str, label: str, *, ignore_failure: bool = False)
 
 
 def _verify_launchctl_unloaded(label: str, domain: str) -> None:
-    state = _launchctl_loaded_state(label, domain)
-    if state.get("available") is False:
-        return
-    if state.get("loaded"):
-        raise ConfigError(f"launchd service remains loaded: {domain}/{label}")
+    deadline = time.monotonic() + 5
+    while True:
+        state = _launchctl_loaded_state(label, domain)
+        if state.get("available") is False or not state.get("loaded"):
+            return
+        if time.monotonic() >= deadline:
+            raise ConfigError(f"launchd service remains loaded: {domain}/{label}")
+        time.sleep(0.1)
 
 def _launchctl_domain_states(label: str) -> dict[str, dict[str, Any]]:
     """Inspect a label in both supported per-user launchd domains."""
