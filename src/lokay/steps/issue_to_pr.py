@@ -770,6 +770,9 @@ def invoke_omp(request: Request) -> Result:
 def verify_omp_postconditions(request: Request) -> Result:
     terminal = _atomic_terminal(request, "verify_omp_postconditions", "invoke_omp")
     if terminal: return terminal
+    idle = upstream_noop(request, "invoke_omp", "read_omp_preconditions")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_omp_postconditions")
     data = input_of(request); path = str(data.get("worktree_path") or ""); before = str(data.get("pre_head") or cond_get(request, "pre_head", "read_omp_preconditions") or "")
     try: head = rev_parse(path); paths = _escaped_omp_paths(path, _omp_diff_paths(path))
     except (CommandError, OSError, ValueError) as exc: return fail("omp_postcondition_failed", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", error=str(exc))
@@ -779,6 +782,11 @@ def verify_omp_postconditions(request: Request) -> Result:
 
 
 def read_worktree_head(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_worktree_head", "verify_omp_postconditions")
+    if terminal: return terminal
+    idle = upstream_noop(request, "verify_omp_postconditions")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_worktree_head")
     path = str(input_of(request).get("worktree_path") or "")
     try: head = rev_parse(path)
     except CommandError as exc: return fail("worktree_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_worktree_head", error=str(exc))
@@ -786,6 +794,11 @@ def read_worktree_head(request: Request) -> Result:
 
 
 def read_base_head(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_base_head", "read_worktree_head")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_worktree_head")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_base_head")
     return read_base_ref(request)
 
 

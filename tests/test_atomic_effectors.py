@@ -306,6 +306,19 @@ class IssueToPrTests(unittest.TestCase):
         omp = issue_to_pr.invoke_omp(req({"worktree_path": "/wt", "prompt": "fix", "dry_run": True, "conduction": {"read_omp_preconditions": omp_pre}}))
         self.assertEqual(omp["status"], "planned")
 
+    def test_omp_postcondition_read_chain_propagates_noop(self) -> None:
+        no_selection = {"status": "noop", "ok": True, "mutated": False, "reason": "no_selected_issue"}
+        verified = issue_to_pr.verify_omp_postconditions(req({"conduction": {"dispatch_invoke_omp": no_selection}}))
+        worktree = issue_to_pr.read_worktree_head(req({"conduction": {"dispatch_verify_omp_postconditions": verified}}))
+        base = issue_to_pr.read_base_head(req({"conduction": {"dispatch_read_worktree_head": worktree}}))
+        self.assertEqual([verified["status"], worktree["status"], base["status"]], ["noop", "noop", "noop"])
+        self.assertEqual(base["reason"], "no_selected_issue")
+        failed = {"status": "failed", "ok": False, "mutated": False, "reason": "omp_diff_path_escape"}
+        terminal = issue_to_pr.read_worktree_head(req({"conduction": {"dispatch_verify_omp_postconditions": failed}}))
+        self.assertEqual(terminal["reason"], "upstream_failed")
+        self.assertEqual(terminal["upstream_effector"], "dispatch_verify_omp_postconditions")
+        self.assertFalse(terminal["retry_safe"])
+
     def test_push_pr_and_receipt_dry_chains(self) -> None:
         push_read = {"status": "read", "ok": True, "worktree_path": "/wt", "branch": "ai/fix/1", "local_oid": "abc"}
         pushed = issue_to_pr.push_branch(req({"worktree_path": "/wt", "branch": "ai/fix/1", "dry_run": True, "conduction": {"read_push_head": push_read}}))
@@ -348,6 +361,14 @@ class RepairTests(unittest.TestCase):
 
 
 class TriageTests(unittest.TestCase):
+    def test_verify_merge_receipt_propagates_publisher_noop(self) -> None:
+        published = {"status": "noop", "ok": True, "mutated": False, "reason": "not_selected", "action": "skip"}
+        out = triage.verify_merge_receipt(req({"receipt_path": "/missing/receipt.json", "dry_run": False, "conduction": {"triage_publish_merge_receipt": published}}))
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "not_selected")
+        self.assertEqual(out["operation"], "verify_merge_receipt")
+        self.assertFalse(out["mutated"])
+
     def test_evaluate_checks_pass_and_fail(self) -> None:
         good = triage.evaluate_checks(req({"pr": {"statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS", "state": "SUCCESS"}]}}))
         self.assertTrue(good["pass_"])

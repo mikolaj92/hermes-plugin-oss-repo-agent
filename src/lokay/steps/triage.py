@@ -997,7 +997,7 @@ def verify_merge_receipt(request: Request) -> Result:
     terminal = _atomic_terminal(request, "verify_merge_receipt", "publish_merge_receipt")
     if terminal is not None:
         return terminal
-    idle = _upstream_noop(request, "publish_merge_receipt")
+    idle = _upstream_noop(request, "verify_merge_receipt", "publish_merge_receipt")
     if idle is not None:
         return idle
     source = cond_blob(request, "publish_merge_receipt"); path = str(input_of(request).get("receipt_path") or source.get("receipt_path") or "")
