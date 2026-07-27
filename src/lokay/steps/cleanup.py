@@ -18,7 +18,7 @@ from lokay.adapters_cli import CommandError, hermes_kanban_json, run_cmd
 from lokay.adapters_git import (
     branch_config_get,
     branch_exists,
-    delete_local_branch,
+    delete_local_branch as git_delete_local_branch,
     is_dirty,
     local_branch_head,
     parse_worktree_porcelain,
@@ -53,8 +53,8 @@ def _task_marker_matches(task: object, marker: str) -> bool:
 
 def _cleanup_provenance(data: dict[str, object], cfg: dict[str, object], branch: str, conduction: dict[str, object] | None = None) -> dict[str, str]:
     conduction = conduction or {}
-    parsed = next((conduction[key] for key in ("cleanup_parse_issue_from_branch", "parse_issue_from_branch", "dispatch_parse_issue_ref", "parse_issue_ref") if isinstance(conduction.get(key), dict)), {})
-    receipt = next((conduction[key] for key in ("dispatch_write_dispatch_receipt", "write_dispatch_receipt") if isinstance(conduction.get(key), dict)), {})
+    parsed = next((conduction[key] for key in ("parse_cleanup_issue_number", "dispatch_parse_issue_ref") if isinstance(conduction.get(key), dict)), {})
+    receipt = next((conduction[key] for key in ("dispatch_write_dispatch_receipt",) if isinstance(conduction.get(key), dict)), {})
     return {
         "task": str(data.get("task_id") or cfg.get("task_id") or parsed.get("task_id") or "").strip(),
         "issue": str(data.get("issue") or cfg.get("issue") or parsed.get("issue") or "").strip(),
@@ -81,57 +81,6 @@ def _task_id(task: dict[str, object]) -> object:
     return task.get("id") or task.get("task_id")
 
 
-def parse_issue_from_branch(request: Request) -> Result:
-    """Resolve one merged ai/fix branch and its local ownership identity."""
-    data = input_of(request)
-    cfg = cfg_of(request)
-    aliases = (
-        "triage_close_linked_issue", "triage_load_pr_fields",
-        "dispatch_prepare_worktree", "dispatch_parse_issue_ref",
-        "triage_repair_prepare_worktree", "triage_repair_push_branch", "repair_push_branch",
-    )
-    blobs = [cond_blob(request, name) for name in aliases]
-    sources: list[dict[str, Any]] = [data, cfg, *[blob for blob in blobs if blob]]
-    for blob in tuple(sources):
-        for key in ("verified_provenance", "pr", "payload", "entity"):
-            nested = blob.get(key)
-            if isinstance(nested, dict):
-                sources.append(nested)
-                entity = nested.get("entity")
-                if isinstance(entity, dict):
-                    sources.append(entity)
-
-    def first(*keys: str) -> str:
-        return next((str(source.get(key)).strip() for source in sources for key in keys if source.get(key) not in (None, "")), "")
-
-    branch = first("branch", "head_ref", "headRefName")
-    if not branch:
-        return noop("no_branch", branch="")
-    match = re.search(r"(?:^|/)ai/fix/(\d+)", branch) or re.search(r"/(\d+)(?:-|$)", branch)
-    if not match:
-        return fail("unparseable_branch", failure_class="terminal", retry_safe=False, branch=branch, idempotency_key=f"cleanup:branch:{branch}:parse")
-    issue = int(match.group(1))
-    repo = first("repo")
-    clone_path = first("clone_path")
-    if not clone_path and repo:
-        matches = [str(entry.get("clone_path") or "") for entry in cfg.get("repos", []) if isinstance(entry, dict) and entry.get("repo") == repo]
-        if len(matches) == 1:
-            clone_path = matches[0]
-    identity: dict[str, Any] = {"repo": repo, "clone_path": clone_path}
-    if clone_path:
-        for output_key, config_key in (("task_id", "task"), ("receipt_id", "receipt"), ("recorded_repo", "repo"), ("recorded_issue", "issue")):
-            try:
-                identity[output_key] = branch_config_get(clone_path, branch, f"lokay-{config_key}").strip()
-            except CommandError:
-                identity[output_key] = ""
-        if identity["recorded_repo"] and repo and identity["recorded_repo"] != repo:
-            return fail("cleanup_provenance_mismatch", failure_class="terminal", retry_safe=False, branch=branch, repo=repo, recorded_repo=identity["recorded_repo"])
-        if identity["recorded_issue"] and identity["recorded_issue"] != str(issue):
-            return fail("cleanup_provenance_mismatch", failure_class="terminal", retry_safe=False, branch=branch, issue=issue, recorded_issue=identity["recorded_issue"])
-    worktree_path = first("worktree_path")
-    if not worktree_path and cfg.get("worktree_root"):
-        worktree_path = str(Path(str(cfg["worktree_root"])) / re.sub(r"[^a-zA-Z0-9._/-]+", "-", branch))
-    return ok(status="parsed", issue=issue, branch=branch, worktree_path=worktree_path, **{key: value for key, value in identity.items() if value})
 
 
 def check_issue_closed(request: Request) -> Result:
@@ -140,8 +89,8 @@ def check_issue_closed(request: Request) -> Result:
 
     data = input_of(request)
     cfg = cfg_of(request)
-    parsed = cond_blob(request, "parse_issue_from_branch", "parse", "cleanup_parse_issue_from_branch")
-    upstream = upstream_noop(request, "parse_issue_from_branch", "cleanup_parse_issue_from_branch")
+    parsed = cond_blob(request, "parse_cleanup_issue_number")
+    upstream = upstream_noop(request, "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
     if upstream:
         return noop(str(upstream.get("reason") or "no_branch"), **{k: v for k, v in upstream.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}})
     repo = str(data.get("repo") or parsed.get("repo") or cfg.get("repo") or "")
@@ -174,10 +123,10 @@ def check_no_open_pr_for_branch(request: Request) -> Result:
 
     data = input_of(request)
     cfg = cfg_of(request)
-    upstream = upstream_noop(request, "parse_issue_from_branch", "cleanup_parse_issue_from_branch")
+    upstream = upstream_noop(request, "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
     if upstream:
         return noop(str(upstream.get("reason") or "no_branch"), **{k: v for k, v in upstream.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}})
-    parsed = cond_blob(request, "parse_issue_from_branch", "parse", "cleanup_parse_issue_from_branch")
+    parsed = cond_blob(request, "parse_cleanup_issue_number")
     repo = str(data.get("repo") or parsed.get("repo") or cfg.get("repo") or "")
     branch = str(data.get("branch") or parsed.get("branch") or cfg.get("branch") or "")
     gh = str(cfg.get("gh_cli") or "gh")
@@ -202,297 +151,41 @@ def check_no_open_pr_for_branch(request: Request) -> Result:
 
 
 def remove_worktree(request: Request) -> Result:
-    """Remove one git worktree path (force optional)."""
-    data = input_of(request)
-    dry = dry_run_flag(request)
-    cfg = cfg_of(request)
-    closed_blob = cond_blob(request, "check_issue_closed", "cleanup_check_issue_closed")
-    open_pr_blob = cond_blob(request, "check_no_open_pr", "check_no_open_pr_for_branch", "cleanup_check_no_open_pr")
-    require_safe = bool(data.get("require_safe", cfg.get("require_safe", True)))
+    """Remove the already-read, owned, clean worktree."""
+    data, cfg = input_of(request), cfg_of(request)
     cleanup_key = f"cleanup:worktree:{data.get('clone_path') or cfg.get('clone_path') or ''}:{data.get('worktree_path') or cfg.get('worktree_path') or ''}:remove"
-    for guard_name, guard in (("check_issue_closed", closed_blob), ("check_no_open_pr", open_pr_blob)):
-        if not guard or guard.get("status") in _TERMINAL_PROCESS_STATUSES:
-            guard_class = str(guard.get("failure_class") or "terminal") if isinstance(guard, dict) else "terminal"
-            guard_retry_safe = bool(guard.get("retry_safe", False)) if isinstance(guard, dict) else False
-            return fail("cleanup_guard_failed", failure_class=guard_class, retry_safe=guard_retry_safe, guard=guard_name, guard_output=guard, clone_path=str(data.get("clone_path") or cfg.get("clone_path") or ""), worktree_path=str(data.get("worktree_path") or cfg.get("worktree_path") or ""), idempotency_key=cleanup_key)
-    upstream = upstream_noop(request, "check_issue_closed", "check_no_open_pr", "parse_issue_from_branch", "cleanup_check_issue_closed", "cleanup_check_no_open_pr", "cleanup_parse_issue_from_branch")
+    upstream = _cleanup_upstream_failure(request, "remove_worktree", "verify_cleanup_guards", "read_worktree_ownership", "read_worktree_cleanliness")
     if upstream:
-        return noop(str(upstream.get("reason") or "cleanup_not_ready"))
-    if require_safe and (closed_blob or open_pr_blob):
-        if closed_blob and closed_blob.get("closed") is False:
-            return noop("issue_still_open", closed=False, issue=closed_blob.get("issue"))
-        if open_pr_blob and open_pr_blob.get("safe_to_cleanup") is False:
-            return noop("open_pr_exists", safe_to_cleanup=False, open_count=open_pr_blob.get("open_count"))
-    prepared = cond_blob(request, "dispatch_prepare_worktree", "prepare_worktree", "triage_repair_prepare_worktree")
-    parsed = cond_blob(request, "dispatch_parse_issue_ref", "parse_issue_from_branch", "cleanup_parse_issue_from_branch")
-    clone_path = str(data.get("clone_path") or cfg.get("clone_path") or prepared.get("clone_path") or parsed.get("clone_path") or "")
-    worktree_path = str(data.get("worktree_path") or cfg.get("worktree_path") or prepared.get("worktree_path") or "")
-    force = bool(data.get("force", False))
+        return upstream
+    idle = _cleanup_upstream_noop(request, "remove_worktree", "verify_cleanup_guards", "read_worktree_ownership", "read_worktree_cleanliness", "validate_cleanup_identity", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    guard = cond_blob(request, "verify_cleanup_guards")
+    if guard.get("ok") is not True:
+        return fail("cleanup_guard_failed", failure_class=str(guard.get("failure_class") or "terminal"), retry_safe=bool(guard.get("retry_safe", False)), guard="verify_cleanup_guards", guard_output=guard, idempotency_key=cleanup_key)
+    ownership = cond_blob(request, "read_worktree_ownership")
+    if ownership.get("ok") is not True:
+        return fail("worktree_ownership_read_failed", failure_class=str(ownership.get("failure_class") or "terminal"), retry_safe=bool(ownership.get("retry_safe", False)), evidence=ownership, idempotency_key=cleanup_key)
+    cleanliness = cond_blob(request, "read_worktree_cleanliness")
+    if cleanliness.get("ok") is not True:
+        return fail("worktree_cleanliness_read_failed", failure_class=str(cleanliness.get("failure_class") or "terminal"), retry_safe=bool(cleanliness.get("retry_safe", False)), evidence=cleanliness, idempotency_key=cleanup_key)
+    if cleanliness.get("dirty") is True or cleanliness.get("clean") is not True:
+        return fail("worktree_dirty", failure_class="terminal", retry_safe=False, clone_path=ownership.get("clone_path"), worktree_path=ownership.get("worktree_path"), mutated=False, idempotency_key=cleanup_key)
+    clone_path = str(data.get("clone_path") or cfg.get("clone_path") or ownership.get("clone_path") or "").strip()
+    worktree_path = str(data.get("worktree_path") or cfg.get("worktree_path") or ownership.get("worktree_path") or "").strip()
     if not clone_path or not worktree_path:
         return fail("missing_clone_or_worktree", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=worktree_path, idempotency_key=cleanup_key)
-    worktree = Path(worktree_path).resolve()
-    if dry:
-        return planned(clone_path=clone_path, worktree_path=str(worktree), force=force)
-    if not worktree.exists():
-        expected_branch = str(data.get("branch") or cfg.get("branch") or parsed.get("branch") or prepared.get("branch") or "")
-        if not expected_branch:
-            return fail("worktree_missing", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, idempotency_key=cleanup_key)
-        expected = _cleanup_provenance(data, cfg, expected_branch, data.get("conduction") if isinstance(data.get("conduction"), dict) else None)
-        try:
-            if status_porcelain(clone_path).strip():
-                return fail("clone_dirty", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), mutated=False)
-            if not branch_exists(clone_path, expected_branch) or not _cleanup_owner_matches(clone_path, expected_branch, expected):
-                return fail("worktree_provenance_unavailable", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
-        except CommandError as exc:
-            return fail("worktree_provenance_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
-        return ok(status="already_absent", clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, idempotency_key=cleanup_key, mutated=False, retry_safe=True)
-    expected_branch = str(data.get("branch") or cfg.get("branch") or parsed.get("branch") or prepared.get("branch") or "")
-    expected = _cleanup_provenance(data, cfg, expected_branch, data.get("conduction") if isinstance(data.get("conduction"), dict) else None)
+    if dry_run_flag(request):
+        return planned(clone_path=clone_path, worktree_path=str(Path(worktree_path).resolve()), force=bool(data.get("force", False)))
     try:
-        if status_porcelain(clone_path).strip():
-            return fail("clone_dirty", failure_class="terminal", retry_safe=False, clone_path=clone_path, mutated=False)
-        rows = parse_worktree_porcelain(worktree_list(clone_path))
+        worktree_remove(clone_path, worktree_path, force=bool(data.get("force", False)))
     except CommandError as exc:
-        return fail("worktree_provenance_read_failed", failure_class="retryable_read", retry_safe=True, mutated=False, error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, idempotency_key=cleanup_key)
-    matches = [row for row in rows if str(Path(row.get("path") or "").resolve()) == str(worktree)]
-    if not matches:
-        return fail("worktree_provenance_mismatch", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
-    row = matches[0]
-    if row.get("locked") or str(row.get("branch") or "") != expected_branch:
-        return fail("foreign_worktree_ownership", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, actual_branch=row.get("branch"), locked=bool(row.get("locked")), mutated=False, idempotency_key=cleanup_key)
-    if not _cleanup_owner_matches(clone_path, expected_branch, expected):
-        return fail("foreign_worktree_ownership", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
-    if is_dirty(str(worktree)):
-        return fail("worktree_dirty", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
-    try:
-        worktree_remove(clone_path, str(worktree), force=force)
-    except CommandError as exc:
-        try:
-            remaining = parse_worktree_porcelain(worktree_list(clone_path))
-        except CommandError as readback_exc:
-            return fail("remove_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(readback_exc), remove_error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=True, idempotency_key=cleanup_key)
-        still_present = any(str(Path(row.get("path") or "").resolve()) == str(worktree) for row in remaining)
-        if still_present:
-            return fail("remove_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=False, idempotency_key=cleanup_key)
-        return ok(status="removed", clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, idempotency_key=cleanup_key, mutated=True, retry_safe=True, reconciled=True)
-    try:
-        remaining = parse_worktree_porcelain(worktree_list(clone_path))
-    except CommandError as exc:
-        return fail("remove_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=True, idempotency_key=cleanup_key)
-    if any(str(Path(row.get("path") or "").resolve()) == str(worktree) for row in remaining):
-        return fail("remove_not_confirmed", failure_class="reconcile_then_retry", retry_safe=False, clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, mutated=True, idempotency_key=cleanup_key)
-    return ok(status="removed", clone_path=clone_path, worktree_path=str(worktree), branch=expected_branch, idempotency_key=cleanup_key, mutated=True, retry_safe=True)
+        return fail("remove_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), clone_path=clone_path, worktree_path=worktree_path, mutated=True, idempotency_key=cleanup_key)
+    return ok(status="removed", clone_path=clone_path, worktree_path=worktree_path, branch=ownership.get("branch"), idempotency_key=cleanup_key, mutated=True, retry_safe=True)
 
 
-def delete_local_fix_branch(request: Request) -> Result:
-    """Delete local branch only (never remote)."""
-    data = input_of(request)
-    dry = dry_run_flag(request)
-    cfg = cfg_of(request)
-    parsed = cond_blob(request, "parse_issue_from_branch", "parse", "cleanup_parse_issue_from_branch")
-    removed = cond_blob(request, "remove_worktree", "cleanup_remove_worktree")
-    clone_path = str(data.get("clone_path") or parsed.get("clone_path") or cfg.get("clone_path") or "")
-    branch = str(data.get("branch") or parsed.get("branch") or cfg.get("branch") or "")
-    force = bool(data.get("force", True))
-    if dry:
-        return planned(clone_path=clone_path, branch=branch, force=force)
-    if removed and removed.get("status") in {"noop", *_TERMINAL_PROCESS_STATUSES}:
-        return noop("skipped_after_remove_guard", upstream_reason=removed.get("reason"), upstream_status=removed.get("status"))
-    if removed and (removed.get("ok") is not True or removed.get("status") not in {"removed", "already_absent"}):
-        return fail("remove_worktree_evidence_missing", failure_class="terminal", retry_safe=False, evidence=removed)
-    if not removed and not all(data.get(key) for key in ("task_id", "issue", "receipt_path", "repo")):
-        return fail("remove_worktree_evidence_missing", failure_class="terminal", retry_safe=False, evidence=removed)
-    if not clone_path or not branch:
-        return fail("missing_clone_or_branch", failure_class="terminal", retry_safe=False, clone_path=clone_path, branch=branch, idempotency_key=f"cleanup:branch:{clone_path}:{branch}:delete")
-    key = f"branch:{clone_path}:{branch}:delete"
-    expected = _cleanup_provenance(data, cfg, branch, data.get("conduction") if isinstance(data.get("conduction"), dict) else None)
-    try:
-        if not branch_exists(clone_path, branch):
-            return ok(status="already_absent", clone_path=clone_path, branch=branch, idempotency_key=key, mutated=False)
-        if not _cleanup_owner_matches(clone_path, branch, expected):
-            return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, clone_path=clone_path, branch=branch, mutated=False, idempotency_key=key)
-    except CommandError as exc:
-        return fail("branch_provenance_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone_path, branch=branch, mutated=False, idempotency_key=key)
-    try:
-        delete_local_branch(clone_path, branch, force=force)
-    except CommandError as exc:
-        try:
-            still_exists = branch_exists(clone_path, branch)
-        except CommandError as readback_exc:
-            return fail("delete_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(readback_exc), delete_error=str(exc), branch=branch, idempotency_key=key, mutated=True)
-        if still_exists:
-            return fail("delete_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), branch=branch, idempotency_key=key, mutated=False)
-        return ok(status="deleted", branch=branch, idempotency_key=key, mutated=True, retry_safe=True, reconciled=True)
-    try:
-        if branch_exists(clone_path, branch):
-            return fail("delete_not_confirmed", failure_class="reconcile_then_retry", retry_safe=False, branch=branch, idempotency_key=key, mutated=True)
-    except CommandError as exc:
-        return fail("delete_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), branch=branch, idempotency_key=key, mutated=True)
-    return ok(status="deleted", branch=branch, idempotency_key=key, mutated=True, retry_safe=True)
 
 
-def release_active_issue_claim(request: Request) -> Result:
-    """Remove an active-issue claim only after every cleanup guard succeeds."""
-    import json
-
-    data = input_of(request)
-    cfg = cfg_of(request)
-    dry = dry_run_flag(request)
-    raw_conduction = data.get("conduction")
-    if not isinstance(raw_conduction, dict) or not raw_conduction:
-        return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False)
-
-    def evidence(*names: str) -> dict[str, object] | None:
-        for name in names:
-            blob = raw_conduction.get(name)
-            if isinstance(blob, dict):
-                return blob
-        return None
-
-    parsed = evidence("parse_issue_from_branch", "cleanup_parse_issue_from_branch")
-    if parsed is not None and parsed.get("ok") is True and parsed.get("reason") == "no_branch":
-        return noop("no_branch")
-    removed = evidence("remove_worktree", "cleanup_remove_worktree")
-    closed = evidence("check_issue_closed", "cleanup_check_issue_closed")
-    no_open_pr = evidence("check_no_open_pr", "cleanup_check_no_open_pr")
-    deleted = evidence("delete_local_fix_branch", "cleanup_delete_local_fix_branch")
-    if dry:
-        for name in ("parse_issue_from_branch", "cleanup_parse_issue_from_branch", "remove_worktree", "cleanup_remove_worktree", "check_issue_closed", "cleanup_check_issue_closed", "check_no_open_pr", "cleanup_check_no_open_pr", "delete_local_fix_branch", "cleanup_delete_local_fix_branch"):
-            blob = evidence(name)
-            if blob is not None and blob.get("status") in {"noop", "planned"}:
-                details = {k: v for k, v in blob.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}}
-                return noop(str(blob.get("reason") or "cleanup_planned"), **details)
-    if removed is None:
-        return fail("remove_worktree_evidence_missing", failure_class="terminal", retry_safe=False)
-    if removed.get("ok") is not True or removed.get("status") not in {"removed", "already_absent"}:
-        return fail("remove_worktree_not_successful", failure_class="terminal", retry_safe=False, evidence=removed)
-    if closed is None:
-        return fail("check_issue_closed_evidence_missing", failure_class="terminal", retry_safe=False)
-    if closed.get("ok") is not True or closed.get("closed") is not True:
-        return fail("issue_not_closed", failure_class="terminal", retry_safe=False, evidence=closed)
-    if no_open_pr is None:
-        return fail("check_no_open_pr_evidence_missing", failure_class="terminal", retry_safe=False)
-    if no_open_pr.get("ok") is not True or no_open_pr.get("safe_to_cleanup") is not True:
-        return fail("open_pr_cleanup_unsafe", failure_class="terminal", retry_safe=False, evidence=no_open_pr)
-    if deleted is None:
-        return fail("delete_local_fix_branch_evidence_missing", failure_class="terminal", retry_safe=False)
-    if deleted.get("ok") is not True or deleted.get("status") not in {"deleted", "already_absent"}:
-        return fail("delete_local_fix_branch_not_successful", failure_class="terminal", retry_safe=False, evidence=deleted)
-
-    configured_claim_path = str(data.get("claim_path") or cfg.get("active_issue_path") or "").strip()
-    repo = str(data.get("repo") or closed.get("repo") or "").strip()
-    raw_issue = data.get("issue") or (parsed or {}).get("issue") or closed.get("issue")
-    if isinstance(raw_issue, bool):
-        issue = 0
-    else:
-        try:
-            issue = int(raw_issue)
-        except (TypeError, ValueError):
-            issue = 0
-    if not configured_claim_path:
-        return fail("missing_claim_path", failure_class="terminal", retry_safe=False)
-    if not repo or issue <= 0:
-        return fail("missing_claim_identity", failure_class="terminal", retry_safe=False, repo=repo, issue=issue)
-    configured = Path(configured_claim_path).expanduser()
-    is_directory_store = (configured.exists() and configured.is_dir()) or configured.suffix.lower() != ".json"
-    lock_path = configured / "claim.json" if is_directory_store else configured
-    with claim_directory_lock(lock_path):
-        def _load_claim_file(candidate: Path) -> tuple[dict[str, Any], os.stat_result]:
-            fd = -1
-            try:
-                fd = os.open(candidate, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                before = os.fstat(fd)
-                if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
-                    raise ValueError("claim is not a single-link regular file")
-                with os.fdopen(fd, "r", encoding="utf-8") as handle:
-                    fd = -1
-                    loaded = json.load(handle)
-            finally:
-                if fd >= 0:
-                    os.close(fd)
-            if not isinstance(loaded, dict):
-                raise ValueError("claim payload is not an object")
-            return loaded, before
-
-        def _validate_claim_identity(candidate: Path, loaded: dict[str, Any]) -> Result | None:
-            claim_repo = str(loaded.get("repo") or "").strip()
-            claim_board = str(loaded.get("board") or "").strip()
-            claim_at = str(loaded.get("claimedAt") or "").strip()
-            claim_issue = loaded.get("issue")
-            if loaded.get("version") != 1 or not claim_repo or not claim_board or not claim_at or isinstance(claim_issue, bool) or not isinstance(claim_issue, int) or claim_issue <= 0:
-                return fail("claim_malformed", failure_class="terminal", retry_safe=False, claim_path=str(candidate), payload=loaded)
-            return None
-
-        payload: dict[str, Any]
-        before: os.stat_result
-        if is_directory_store:
-            try:
-                entries = sorted(configured.glob("*.json"))
-            except OSError as exc:
-                return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(configured), error=str(exc))
-            matches: list[tuple[Path, dict[str, Any], os.stat_result]] = []
-            for entry in entries:
-                try:
-                    loaded, metadata = _load_claim_file(entry)
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-                    return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(entry), error=str(exc))
-                malformed = _validate_claim_identity(entry, loaded)
-                if malformed is not None:
-                    return malformed
-                if loaded.get("repo") == repo and loaded.get("issue") == issue:
-                    matches.append((entry, loaded, metadata))
-            if len(matches) > 1:
-                return fail(
-                    "claim_ambiguous",
-                    failure_class="terminal",
-                    retry_safe=False,
-                    claim_path=str(configured),
-                    repo=repo,
-                    issue=issue,
-                    matches=[str(claim_path) for claim_path, _, _ in matches],
-                )
-            if not matches:
-                return ok(status="already_absent", claim_path=str(lock_path), repo=repo, issue=issue, mutated=False)
-            path, payload, before = matches[0]
-        else:
-            path = lock_path
-            if not path.exists():
-                return ok(status="already_absent", claim_path=str(path), repo=repo, issue=issue, mutated=False)
-            try:
-                payload, before = _load_claim_file(path)
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-                return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc))
-            malformed = _validate_claim_identity(path, payload)
-            if malformed is not None:
-                return malformed
-        claim_repo = str(payload.get("repo") or "").strip()
-        claim_issue = payload.get("issue")
-        if claim_repo != repo:
-            return fail("claim_repo_mismatch", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload, repo=repo)
-        if claim_issue != issue:
-            return fail("claim_issue_mismatch", failure_class="terminal", retry_safe=False, claim_path=str(path), payload=payload, issue=issue)
-        if dry:
-            return planned(claim_path=str(path), payload=payload, repo=repo, issue=issue)
-        try:
-            current = os.lstat(path)
-            if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
-                raise ValueError("claim inode changed during release")
-            path.unlink()
-        except OSError as exc:
-            return fail("unlink_failed", failure_class="reconcile_then_retry", retry_safe=False, claim_path=str(path), error=str(exc), mutated=True)
-        except ValueError as exc:
-            return fail("claim_changed", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc), mutated=False)
-        try:
-            parent_fd = os.open(str(path.parent), os.O_RDONLY)
-            try:
-                os.fsync(parent_fd)
-            finally:
-                os.close(parent_fd)
-        except OSError as exc:
-            return fail("unlink_durability_unconfirmed", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc), mutated=True)
-        if path.exists():
-            return fail("claim_changed", failure_class="terminal", retry_safe=False, claim_path=str(path), error="claim still exists after release", mutated=True)
-        return ok(status="released", claim_path=str(path), repo=repo, issue=issue, mutated=True)
 
 
 @contextmanager
@@ -674,12 +367,12 @@ def _cleanup_identity(data: dict[str, Any], cfg: dict[str, Any], payload: dict[s
 
 
 def _cleanup_evidence_contract(evidence: dict[str, dict[str, Any]]) -> str | None:
-    parse = evidence["parse_issue_from_branch"]
+    parse = evidence["parse_cleanup_issue_number"]
     closed = evidence["check_issue_closed"]
-    no_open_pr = evidence["check_no_open_pr"]
+    no_open_pr = evidence["check_no_open_pr_for_branch"]
     removed = evidence["remove_worktree"]
-    deleted = evidence["delete_local_fix_branch"]
-    released = evidence["release_active_issue_claim"]
+    deleted = evidence["delete_local_branch"]
+    released = evidence["release_claim_file"]
     if parse.get("ok") is not True or closed.get("ok") is not True or no_open_pr.get("ok") is not True:
         return None
     if closed.get("status") != "checked" or closed.get("closed") is not True:
@@ -689,109 +382,587 @@ def _cleanup_evidence_contract(evidence: dict[str, dict[str, Any]]) -> str | Non
     if parse.get("status") == "parsed" and removed.get("status") == "removed" and deleted.get("status") == "deleted" and released.get("status") == "released":
         if all(blob.get("ok") is True for blob in (removed, deleted, released)):
             return "success"
-    if parse.get("status") == "parsed" and removed.get("status") == "already_absent" and deleted.get("status") == "already_absent" and released.get("status") == "already_absent":
-        if all(blob.get("ok") is True for blob in (removed, deleted, released)):
-            return "noop"
     return None
 
 
-def write_cleanup_receipt(request: Request) -> Result:
+def _cleanup_upstream_failure(request: Request, operation: str, *ids: str) -> Result | None:
+    """Return a fail-closed terminal peer result for a cleanup operation."""
+    from lokay.envelope import terminal_upstream
+
+    return terminal_upstream(request, operation, *ids)
+def _cleanup_upstream_noop(request: Request, operation: str, *ids: str) -> Result | None:
+    """Return a canonical upstream no-target noop for a cleanup operation."""
+    upstream = upstream_noop(request, *ids)
+    if upstream:
+        return noop(str(upstream.get("reason") or "no_branch"), operation=operation)
+    return None
+
+
+def resolve_cleanup_branch_source(request: Request) -> Result:
+    """Purely resolve the authoritative branch source from input or peers."""
+    data, cfg = input_of(request), cfg_of(request)
+    upstream = _cleanup_upstream_failure(request, "resolve_cleanup_branch_source", "triage_close_linked_issue")
+    if upstream:
+        return upstream
+    conduction = data.get("conduction") if isinstance(data.get("conduction"), dict) else {}
+    sources = [data, cfg]
+    for name in ("triage_close_linked_issue", "triage_load_pr_fields", "dispatch_prepare_worktree", "dispatch_parse_issue_ref"):
+        blob = conduction.get(name)
+        if isinstance(blob, dict):
+            sources.append(blob)
+            for key in ("payload", "entity", "verified_provenance"):
+                nested = blob.get(key)
+                if isinstance(nested, dict):
+                    sources.append(nested)
+    branch = next((str(source.get(key)).strip() for source in sources for key in ("branch", "head_ref", "headRefName") if source.get(key) not in (None, "")), "")
+    if not branch:
+        return noop("no_branch", branch="")
+    return ok(status="resolved", branch=branch, source="input_or_conduction")
+
+
+def parse_cleanup_issue_number(request: Request) -> Result:
+    """Purely parse the issue number encoded in a cleanup branch."""
     data = input_of(request)
-    cfg = cfg_of(request)
+    upstream = _cleanup_upstream_failure(request, "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if upstream:
+        return upstream
+    source = cond_blob(request, "resolve_cleanup_branch_source")
+    branch = str(data.get("branch") or source.get("branch") or "").strip()
+    if not branch:
+        return noop("no_branch", branch="")
+    match = re.search(r"(?:^|/)ai/fix/([1-9][0-9]*)(?:-|$)", branch)
+    if match is None:
+        return fail("unparseable_branch", failure_class="terminal", retry_safe=False, branch=branch)
+    return ok(status="parsed", branch=branch, issue=int(match.group(1)))
+
+
+def read_branch_ownership(request: Request) -> Result:
+    """Read one branch ownership key and nothing else."""
+    data, cfg = input_of(request), cfg_of(request)
+    upstream = _cleanup_upstream_failure(request, "read_branch_ownership", "resolve_cleanup_branch_source", "parse_cleanup_issue_number")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "read_branch_ownership", "resolve_cleanup_branch_source", "parse_cleanup_issue_number")
+    if idle:
+        return idle
+    branch = str(data.get("branch") or cond_get(request, "branch", "parse_cleanup_issue_number", "resolve_cleanup_branch_source", default=cfg.get("branch", ""))).strip()
+    clone = str(data.get("clone_path") or cfg.get("clone_path") or "").strip()
+    key = str(data.get("key") or data.get("ownership_key") or cfg.get("ownership_key") or "").strip().lower()
+    if key.startswith("lokay-"):
+        key = key.removeprefix("lokay-")
+    if key not in {"task", "issue", "receipt", "repo"}:
+        return fail("invalid_ownership_key", failure_class="terminal", retry_safe=False, key=key)
+    if not clone or not branch:
+        return fail("missing_branch_ownership_context", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch, key=key)
+    try:
+        value = branch_config_get(clone, branch, f"lokay-{key}").strip()
+    except CommandError as exc:
+        return fail("branch_ownership_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, branch=branch, key=key)
+    if not value:
+        return fail("branch_ownership_missing", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch, key=key)
+    return ok(status="read", key=key, value=value, clone_path=clone, branch=branch)
+
+
+def derive_cleanup_paths(request: Request) -> Result:
+    """Purely derive a confined worktree path from a branch and configured root."""
+    data, cfg = input_of(request), cfg_of(request)
+    upstream = _cleanup_upstream_failure(request, "derive_cleanup_paths", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "derive_cleanup_paths", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    parsed = cond_blob(request, "parse_cleanup_issue_number")
+    branch = str(data.get("branch") or parsed.get("branch") or cfg.get("branch") or "").strip()
+    root_value = str(data.get("worktree_root") or cfg.get("worktree_root") or "").strip()
+    if not branch or not root_value:
+        return fail("missing_cleanup_path_context", failure_class="terminal", retry_safe=False, branch=branch, worktree_root=root_value)
+    root = Path(root_value).expanduser().resolve(strict=False)
+    worktree = (root / re.sub(r"[^a-zA-Z0-9._/-]+", "-", branch)).resolve(strict=False)
+    if not worktree.is_relative_to(root):
+        return fail("worktree_path_escape", failure_class="terminal", retry_safe=False, branch=branch, worktree_root=str(root))
+    return ok(status="derived", branch=branch, worktree_root=str(root), worktree_path=str(worktree))
+
+
+def validate_cleanup_identity(request: Request) -> Result:
+    """Purely validate that independently read ownership fields agree."""
+    data, cfg = input_of(request), cfg_of(request)
+    upstream = _cleanup_upstream_failure(request, "validate_cleanup_identity", "read_branch_ownership", "derive_cleanup_paths", "parse_cleanup_issue_number")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "validate_cleanup_identity", "read_branch_ownership", "derive_cleanup_paths", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    conduction = data.get("conduction") if isinstance(data.get("conduction"), dict) else {}
+    values: dict[str, list[str]] = {key: [] for key in ("task", "issue", "receipt", "repo")}
+    for key in values:
+        direct = data.get(key if key != "task" else "task_id") or cfg.get(key if key != "task" else "task_id")
+        if direct not in (None, ""):
+            values[key].append(str(direct).strip())
+        for name, blob in conduction.items():
+            if not isinstance(blob, dict) or not (name.endswith("read_branch_ownership") or name in {"read_branch_ownership", "cleanup_read_branch_ownership"}):
+                continue
+            if str(blob.get("key") or "").removeprefix("lokay-") == key and blob.get("value") not in (None, ""):
+                values[key].append(str(blob["value"]).strip())
+    identity: dict[str, Any] = {}
+    for key, candidates in values.items():
+        unique = list(dict.fromkeys(item for item in candidates if item))
+        if len(unique) != 1:
+            return fail("cleanup_identity_mismatch" if unique else "cleanup_identity_missing", failure_class="terminal", retry_safe=False, field=key, values=unique)
+        identity[key] = int(unique[0]) if key == "issue" and unique[0].isdigit() else unique[0]
+    branch = str(data.get("branch") or cond_get(request, "branch", "parse_cleanup_issue_number", default=cfg.get("branch", ""))).strip()
+    clone = str(data.get("clone_path") or cfg.get("clone_path") or "").strip()
+    worktree = str(data.get("worktree_path") or cond_get(request, "worktree_path", "derive_cleanup_paths", default=cfg.get("worktree_path", ""))).strip()
+    if not branch or not clone or not worktree or not identity.get("issue") or int(identity["issue"]) <= 0:
+        return fail("cleanup_identity_missing", failure_class="terminal", retry_safe=False, identity=identity, branch=branch, clone_path=clone, worktree_path=worktree)
+    identity.update(branch=branch, clone_path=clone, worktree_path=worktree)
+    return ok(status="validated", identity=identity, **identity)
+
+
+def verify_cleanup_guards(request: Request) -> Result:
+    """Pure decision gate proving issue close and no-open-PR guards."""
+    upstream = _cleanup_upstream_failure(request, "verify_cleanup_guards", "check_issue_closed", "check_no_open_pr_for_branch")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "verify_cleanup_guards", "check_issue_closed", "check_no_open_pr_for_branch", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    closed = cond_blob(request, "check_issue_closed")
+    prs = cond_blob(request, "check_no_open_pr_for_branch")
+    if closed.get("ok") is not True or closed.get("closed") is not True:
+        return fail("cleanup_guard_failed", failure_class="terminal", retry_safe=False, guard="check_issue_closed", evidence=closed)
+    if prs.get("ok") is not True or prs.get("safe_to_cleanup") is not True or prs.get("open_count") not in (0, None):
+        return fail("cleanup_guard_failed", failure_class="terminal", retry_safe=False, guard="check_no_open_pr_for_branch", evidence=prs)
+    return ok(status="verified", issue_closed=True, no_open_pr=True, issue=closed.get("issue"))
+
+
+def read_worktree_ownership(request: Request) -> Result:
+    """Read worktree inventory and branch ownership before removal."""
+    data, cfg = input_of(request), cfg_of(request)
+    upstream = _cleanup_upstream_failure(request, "read_worktree_ownership", "verify_cleanup_guards", "validate_cleanup_identity")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "read_worktree_ownership", "verify_cleanup_guards", "validate_cleanup_identity", "read_branch_ownership", "derive_cleanup_paths", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    clone = str(data.get("clone_path") or cfg.get("clone_path") or "").strip()
+    path = str(data.get("worktree_path") or cfg.get("worktree_path") or cond_get(request, "worktree_path", "derive_cleanup_paths", default="")).strip()
+    branch = str(data.get("branch") or cfg.get("branch") or cond_get(request, "branch", "parse_cleanup_issue_number", default="")).strip()
+    if not clone or not path or not branch:
+        return fail("missing_worktree_ownership_context", failure_class="terminal", retry_safe=False, clone_path=clone, worktree_path=path, branch=branch)
+    try:
+        rows = parse_worktree_porcelain(worktree_list(clone))
+        matches = [row for row in rows if str(Path(row.get("path") or "").resolve()) == str(Path(path).resolve())]
+    except CommandError as exc:
+        return fail("worktree_ownership_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, worktree_path=path, branch=branch)
+    if len(matches) != 1:
+        return fail("worktree_ownership_mismatch", failure_class="terminal", retry_safe=False, clone_path=clone, worktree_path=path, branch=branch, matches=matches)
+    row = matches[0]
+    if row.get("locked") or str(row.get("branch") or "") != branch:
+        return fail("foreign_worktree_ownership", failure_class="terminal", retry_safe=False, clone_path=clone, worktree_path=path, branch=branch, actual_branch=row.get("branch"), locked=bool(row.get("locked")))
+    return ok(status="read", clone_path=clone, worktree_path=path, branch=branch, ownership=row)
+
+
+def read_worktree_cleanliness(request: Request) -> Result:
+    """Read one worktree's cleanliness state."""
+    upstream = _cleanup_upstream_failure(request, "read_worktree_cleanliness", "read_worktree_ownership")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "read_worktree_cleanliness", "read_worktree_ownership", "verify_cleanup_guards", "validate_cleanup_identity", "read_branch_ownership", "derive_cleanup_paths", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    data, cfg = input_of(request), cfg_of(request)
+    path = str(data.get("worktree_path") or cfg.get("worktree_path") or cond_get(request, "worktree_path", "read_worktree_ownership", default="")).strip()
+    if not path:
+        return fail("missing_worktree_path", failure_class="terminal", retry_safe=False)
+    try:
+        dirty = is_dirty(path)
+    except CommandError as exc:
+        return fail("worktree_cleanliness_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), worktree_path=path)
+    return ok(status="checked", worktree_path=path, dirty=bool(dirty), clean=not bool(dirty))
+
+
+def verify_worktree_absent(request: Request) -> Result:
+    """Read worktree inventory and verify the target is absent."""
+    upstream = _cleanup_upstream_failure(request, "verify_worktree_absent", "remove_worktree")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "verify_worktree_absent", "remove_worktree", "read_worktree_cleanliness", "read_worktree_ownership", "verify_cleanup_guards", "validate_cleanup_identity", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    data, cfg = input_of(request), cfg_of(request)
+    clone = str(data.get("clone_path") or cfg.get("clone_path") or "").strip()
+    path = str(data.get("worktree_path") or cfg.get("worktree_path") or "").strip()
+    if not clone or not path:
+        return fail("missing_worktree_absence_context", failure_class="terminal", retry_safe=False)
+    try:
+        rows = parse_worktree_porcelain(worktree_list(clone))
+    except CommandError as exc:
+        return fail("worktree_absence_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=bool(cond_blob(request, "remove_worktree").get("mutated")))
+    absent = not any(str(Path(row.get("path") or "").resolve()) == str(Path(path).resolve()) for row in rows) and not Path(path).exists()
+    if not absent:
+        return fail("worktree_not_absent", failure_class="reconcile_then_retry", retry_safe=False, worktree_path=path, mutated=bool(cond_blob(request, "remove_worktree").get("mutated")))
+    return ok(status="verified", worktree_path=path, absent=True)
+
+
+def verify_branch_delete_guards(request: Request) -> Result:
+    """Pure decision gate proving worktree removal before branch deletion."""
+    upstream = _cleanup_upstream_failure(request, "verify_branch_delete_guards", "verify_cleanup_guards", "verify_worktree_absent")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "verify_branch_delete_guards", "verify_cleanup_guards", "verify_worktree_absent", "remove_worktree", "read_worktree_cleanliness", "read_worktree_ownership", "validate_cleanup_identity", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    removed = cond_blob(request, "verify_worktree_absent")
+    if removed.get("ok") is not True or removed.get("status") != "verified" or removed.get("absent") is not True:
+        return fail("branch_delete_guard_failed", failure_class="terminal", retry_safe=False, evidence=removed)
+    return ok(status="verified", worktree_absent=True)
+
+
+def read_local_branch_ownership(request: Request) -> Result:
+    """Read local branch existence and ownership metadata."""
+    data, cfg = input_of(request), cfg_of(request)
+    upstream = _cleanup_upstream_failure(request, "read_local_branch_ownership", "verify_branch_delete_guards")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "read_local_branch_ownership", "verify_branch_delete_guards", "verify_worktree_absent", "remove_worktree", "verify_cleanup_guards", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    clone = str(data.get("clone_path") or cfg.get("clone_path") or "").strip()
+    branch = str(data.get("branch") or cfg.get("branch") or "").strip()
+    if not clone or not branch:
+        return fail("missing_branch_context", failure_class="terminal", retry_safe=False)
+    try:
+        exists = branch_exists(clone, branch)
+        expected = _cleanup_provenance(data, cfg, branch, data.get("conduction") if isinstance(data.get("conduction"), dict) else None)
+        owned = not exists or _cleanup_owner_matches(clone, branch, expected)
+    except CommandError as exc:
+        return fail("branch_ownership_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, branch=branch)
+    if not owned:
+        return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch)
+    return ok(status="read", clone_path=clone, branch=branch, exists=exists, owned=True)
+
+
+def delete_local_branch(request: Request) -> Result:
+    """Delete exactly one owned local branch; never touch a remote ref."""
+    upstream = _cleanup_upstream_failure(request, "delete_local_branch", "verify_branch_delete_guards", "read_local_branch_ownership")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "delete_local_branch", "verify_branch_delete_guards", "read_local_branch_ownership", "verify_worktree_absent", "remove_worktree", "verify_cleanup_guards", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    data, cfg = input_of(request), cfg_of(request)
+    clone, branch = str(data.get("clone_path") or cfg.get("clone_path") or "").strip(), str(data.get("branch") or cfg.get("branch") or "").strip()
+    if not clone or not branch:
+        return fail("missing_clone_or_branch", failure_class="terminal", retry_safe=False)
+    if dry_run_flag(request):
+        return planned(clone_path=clone, branch=branch)
+    try:
+        git_delete_local_branch(clone, branch, force=bool(data.get("force", True)))
+    except CommandError as exc:
+        return fail("branch_delete_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), clone_path=clone, branch=branch, mutated=True)
+    return ok(status="deleted", clone_path=clone, branch=branch, mutated=True)
+
+
+def verify_local_branch_absent(request: Request) -> Result:
+    """Read local branch ref and verify deletion."""
+    upstream = _cleanup_upstream_failure(request, "verify_local_branch_absent", "delete_local_branch")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "verify_local_branch_absent", "delete_local_branch", "read_local_branch_ownership", "verify_branch_delete_guards", "verify_worktree_absent", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    data, cfg = input_of(request), cfg_of(request)
+    clone, branch = str(data.get("clone_path") or cfg.get("clone_path") or "").strip(), str(data.get("branch") or cfg.get("branch") or "").strip()
+    try:
+        exists = branch_exists(clone, branch)
+    except CommandError as exc:
+        return fail("branch_absence_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=bool(cond_blob(request, "delete_local_branch").get("mutated")))
+    if exists:
+        return fail("local_branch_not_absent", failure_class="reconcile_then_retry", retry_safe=False, clone_path=clone, branch=branch, mutated=bool(cond_blob(request, "delete_local_branch").get("mutated")))
+    return ok(status="verified", clone_path=clone, branch=branch, absent=True)
+
+def verify_claim_release_evidence(request: Request) -> Result:
+    """Pure gate for canonical claim-release evidence."""
+    upstream = _cleanup_upstream_failure(request, "verify_claim_release_evidence", "verify_cleanup_guards", "verify_local_branch_absent", "verify_worktree_absent")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "verify_claim_release_evidence", "verify_cleanup_guards", "verify_local_branch_absent", "verify_worktree_absent", "delete_local_branch", "remove_worktree", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    if not isinstance(input_of(request).get("conduction"), dict):
+        return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False)
+    required = ("remove_worktree", "check_issue_closed", "check_no_open_pr_for_branch", "delete_local_branch")
+    evidence = {}
+    for canonical in required:
+        blob = cond_blob(request, canonical)
+        if not blob:
+            return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False, peer=canonical)
+        evidence[canonical] = blob
+    if evidence["check_issue_closed"].get("closed") is not True or evidence["check_no_open_pr_for_branch"].get("safe_to_cleanup") is not True:
+        return fail("claim_release_guard_failed", failure_class="terminal", retry_safe=False, evidence=evidence)
+    for name in ("remove_worktree", "delete_local_branch"):
+        if evidence[name].get("ok") is not True or evidence[name].get("status") not in {"removed", "deleted", "already_absent"}:
+            return fail("claim_release_guard_failed", failure_class="terminal", retry_safe=False, evidence=evidence)
+    return ok(status="verified", evidence=evidence)
+
+
+
+def read_claim_identity(request: Request) -> Result:
+    """Read and parse one claim JSON identity."""
+    data, cfg = input_of(request), cfg_of(request)
+    upstream = _cleanup_upstream_failure(request, "read_claim_identity", "verify_claim_release_evidence")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "read_claim_identity", "verify_claim_release_evidence", "verify_cleanup_guards", "verify_local_branch_absent", "verify_worktree_absent", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    claim = str(data.get("claim_path") or cfg.get("active_issue_path") or "").strip()
+    if not claim:
+        return fail("missing_claim_path", failure_class="terminal", retry_safe=False)
+    configured = Path(claim).expanduser()
+    path = configured / "claim.json" if ((configured.exists() and configured.is_dir()) or configured.suffix.lower() != ".json") else configured
+    if not path.exists():
+        return ok(status="already_absent", claim_path=str(path), absent=True)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            raise ValueError("claim payload is not an object")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return fail("claim_corrupt", failure_class="terminal", retry_safe=False, claim_path=str(path), error=str(exc))
+    return ok(status="read", claim_path=str(path), payload=payload)
+
+
+def release_claim_file(request: Request) -> Result:
+    """Unlink one claim file after evidence and identity reads."""
+    upstream = _cleanup_upstream_failure(request, "release_claim_file", "verify_claim_release_evidence", "read_claim_identity")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "release_claim_file", "verify_claim_release_evidence", "read_claim_identity", "verify_cleanup_guards", "verify_local_branch_absent", "verify_worktree_absent", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    data, cfg = input_of(request), cfg_of(request)
+    identity = cond_blob(request, "read_claim_identity")
+    path = Path(str(data.get("claim_path") or identity.get("claim_path") or cfg.get("active_issue_path") or "")).expanduser()
+    if identity.get("status") == "already_absent" or not path.exists():
+        return ok(status="already_absent", claim_path=str(path), mutated=False)
+    if dry_run_flag(request):
+        return planned(claim_path=str(path))
+    try:
+        path.unlink()
+        parent_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except OSError as exc:
+        return fail("claim_release_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), claim_path=str(path), mutated=True)
+    return ok(status="released", claim_path=str(path), mutated=True)
+
+
+def verify_claim_absent(request: Request) -> Result:
+    """Read the claim path and verify absence."""
+    upstream = _cleanup_upstream_failure(request, "verify_claim_absent", "release_claim_file")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "verify_claim_absent", "release_claim_file", "read_claim_identity", "verify_claim_release_evidence", "verify_local_branch_absent", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    identity = cond_blob(request, "read_claim_identity", "release_claim_file")
+    path = Path(str(input_of(request).get("claim_path") or identity.get("claim_path") or "")).expanduser()
+    if path.exists():
+        return fail("claim_not_absent", failure_class="reconcile_then_retry", retry_safe=False, claim_path=str(path), mutated=bool(cond_blob(request, "release_claim_file").get("mutated")))
+    return ok(status="verified", claim_path=str(path), absent=True)
+
+def collect_cleanup_receipt_evidence(request: Request) -> Result:
+    """Read canonical cleanup peer evidence."""
+    upstream = _cleanup_upstream_failure(request, "collect_cleanup_receipt_evidence", "verify_claim_absent")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "collect_cleanup_receipt_evidence", "verify_claim_absent")
+    if idle:
+        return idle
+    if not isinstance(input_of(request).get("conduction"), dict):
+        return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False)
+    names = ("parse_cleanup_issue_number", "check_issue_closed", "check_no_open_pr_for_branch", "remove_worktree", "delete_local_branch", "release_claim_file")
+    evidence = {}
+    for name in names:
+        blob = cond_blob(request, name)
+        if not blob:
+            return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False, peer=name)
+        evidence[name] = blob
+    return ok(status="collected", evidence=evidence)
+
+
+
+def decide_cleanup_outcome(request: Request) -> Result:
+    """Purely decide cleanup receipt outcome."""
+    upstream = _cleanup_upstream_failure(request, "decide_cleanup_outcome", "collect_cleanup_receipt_evidence")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "decide_cleanup_outcome", "collect_cleanup_receipt_evidence", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    evidence = cond_blob(request, "collect_cleanup_receipt_evidence").get("evidence")
+    if not isinstance(evidence, dict):
+        return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False)
+    parse = evidence.get("parse_cleanup_issue_number") or {}
+    if parse.get("status") == "noop" and parse.get("reason") == "no_branch" and all(not bool(item.get("mutated")) for item in evidence.values() if isinstance(item, dict)):
+        return noop("no_branch")
+    if any(item.get("ok") is False for item in evidence.values() if isinstance(item, dict)):
+        return ok(status="decided", outcome="partial" if any(item.get("mutated") for item in evidence.values() if isinstance(item, dict)) else "failure")
+    return ok(status="decided", outcome="success")
+
+
+def build_cleanup_receipt(request: Request) -> Result:
+    """Purely build canonical cleanup receipt payload."""
+    upstream = _cleanup_upstream_failure(request, "build_cleanup_receipt", "decide_cleanup_outcome", "collect_cleanup_receipt_evidence")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "build_cleanup_receipt", "decide_cleanup_outcome", "collect_cleanup_receipt_evidence", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    data, cfg = input_of(request), cfg_of(request)
+    decision = cond_blob(request, "decide_cleanup_outcome")
+    if decision.get("status") == "noop" and decision.get("reason") == "no_branch":
+        return noop("no_branch")
+    evidence = cond_blob(request, "collect_cleanup_receipt_evidence").get("evidence") or {}
+    payload = dict(data.get("payload") or {})
+    payload.update({"phase": "CLEANUP_TERMINAL", "outcome": decision.get("outcome"), "entity": data.get("entity") or cfg.get("entity") or {}, "steps": {name: {"status": item.get("status"), "mutated": bool(item.get("mutated")), "reason": item.get("reason")} for name, item in evidence.items() if isinstance(item, dict)}})
+    return ok(status="built", payload=payload)
+
+
+def publish_cleanup_receipt(request: Request) -> Result:
+    """Publish only the canonical payload emitted by build_cleanup_receipt."""
+    upstream = _cleanup_upstream_failure(request, "publish_cleanup_receipt", "build_cleanup_receipt")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "publish_cleanup_receipt", "build_cleanup_receipt", "decide_cleanup_outcome", "collect_cleanup_receipt_evidence", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    data, cfg = input_of(request), cfg_of(request)
+    built = cond_blob(request, "build_cleanup_receipt")
+    payload = data.get("payload") or built.get("payload")
     path = str(data.get("receipt_path") or cfg.get("receipt_path") or "").strip()
+    if not isinstance(payload, dict) or payload.get("phase") != "CLEANUP_TERMINAL":
+        return fail("cleanup_receipt_payload_missing", failure_class="terminal", retry_safe=False)
     if not path:
         return fail("missing_receipt_path", failure_class="terminal", retry_safe=False)
-    conduction = data.get("conduction")
-    required = {
-        "parse_issue_from_branch": ("parse_issue_from_branch", "cleanup_parse_issue_from_branch"),
-        "check_issue_closed": ("check_issue_closed", "cleanup_check_issue_closed"),
-        "check_no_open_pr": ("check_no_open_pr", "cleanup_check_no_open_pr"),
-        "remove_worktree": ("remove_worktree", "cleanup_remove_worktree"),
-        "delete_local_fix_branch": ("delete_local_fix_branch", "cleanup_delete_local_fix_branch"),
-        "release_active_issue_claim": ("release_active_issue_claim", "cleanup_release_active_issue_claim"),
-    }
-    if not isinstance(conduction, dict):
-        return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False, receipt_path=path)
-    evidence = {name: next((conduction[key] for key in aliases if isinstance(conduction.get(key), dict)), None) for name, aliases in required.items()}
-    if any(blob is None for blob in evidence.values()):
-        return fail("cleanup_evidence_missing", failure_class="terminal", retry_safe=False, receipt_path=path)
-    steps = {name: {"status": blob.get("status"), "mutated": bool(blob.get("mutated", False)), "reason": blob.get("reason"), "failure": blob.get("failure_class") or blob.get("error")} for name, blob in evidence.items()}
-    cancelled = any(blob.get("status") in {"cancelled", "timed_out"} for blob in evidence.values())
-    failed = any(blob.get("ok") is False for blob in evidence.values())
-    no_target = (
-        evidence["parse_issue_from_branch"].get("ok") is True
-        and evidence["parse_issue_from_branch"].get("status") == "noop"
-        and evidence["parse_issue_from_branch"].get("reason") == "no_branch"
-        and all(blob.get("ok") is True and not blob.get("mutated", False) for blob in evidence.values())
-    )
-    if no_target:
-        return noop("no_branch", receipt_path=path)
-    payload = dict(data.get("payload") or {})
-    identity = _cleanup_identity(data, cfg, payload, evidence, path)
-    if identity is None:
-        return fail("cleanup_identity_missing", failure_class="terminal", retry_safe=False, receipt_path=path, steps=steps)
-    if cancelled:
-        outcome = "cancelled"
-    elif failed:
-        outcome = "partial" if any(item["mutated"] for item in steps.values()) else "failure"
-    else:
-        outcome = _cleanup_evidence_contract(evidence)
-        if outcome is None:
-            return fail("cleanup_evidence_inconclusive", failure_class="terminal", retry_safe=False, receipt_path=path, steps=steps)
-    payload.update({"phase": "CLEANUP_TERMINAL", "outcome": outcome, "run_id": data.get("run_id") or cfg.get("run_id") or request.get("run_id") or "", "path_id": data.get("path_id") or cfg.get("path_id") or request.get("path_id") or "cleanup", "process_id": data.get("process_id") or cfg.get("process_id") or request.get("process_id") or "", "entity": identity, "steps": steps})
     if dry_run_flag(request):
         return planned(receipt_path=path, payload=payload)
-    p = Path(path)
     try:
-        with _receipt_directory_lock(p.parent):
-            return _publish_cleanup_receipt(p, payload, path)
+        with _receipt_directory_lock(Path(path).parent):
+            return _publish_cleanup_receipt(Path(path), payload, path)
     except OSError as exc:
-        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path, mutated=False)
-def create_maintenance_task(request: Request) -> Result:
-    """Create one Kanban maintenance task per deterministic repo/PR marker."""
-    data = input_of(request)
-    cfg = cfg_of(request)
-    dry = dry_run_flag(request)
-    board = str(data.get("board") or cfg.get("board") or "")
-    repo = str(data.get("repo") or cfg.get("repo") or "")
-    pr = str(data.get("pr_number") or data.get("number") or "")
-    path = str(data.get("worktree_path") or "")
-    reason = str(data.get("reason") or "dirty_worktree")
-    assignee = str(cfg.get("kanban_intake_assignee") or "lokay-intake")
+        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
+
+
+def verify_cleanup_receipt(request: Request) -> Result:
+    """Read receipt JSON and verify it matches the canonical payload."""
+    upstream = _cleanup_upstream_failure(request, "verify_cleanup_receipt", "publish_cleanup_receipt")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "verify_cleanup_receipt", "publish_cleanup_receipt", "build_cleanup_receipt", "decide_cleanup_outcome", "collect_cleanup_receipt_evidence", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    if idle:
+        return idle
+    data, cfg = input_of(request), cfg_of(request)
+    path = Path(str(data.get("receipt_path") or cfg.get("receipt_path") or "")).expanduser()
+    expected = data.get("payload") or cond_blob(request, "build_cleanup_receipt").get("payload")
+    try:
+        actual = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return fail("receipt_readback_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), receipt_path=str(path))
+    if not isinstance(expected, dict) or actual != expected:
+        return fail("receipt_readback_mismatch", failure_class="terminal", retry_safe=False, receipt_path=str(path))
+    return ok(status="verified", receipt_path=str(path), payload=actual)
+
+
+def read_maintenance_tasks(request: Request) -> Result:
+    """Read maintenance task list."""
+    upstream = _cleanup_upstream_failure(request, "read_maintenance_tasks", "verify_cleanup_receipt")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "read_maintenance_tasks", "verify_cleanup_receipt")
+    if idle:
+        return idle
+    data, cfg = input_of(request), cfg_of(request)
+    board = str(data.get("board") or cfg.get("board") or "").strip()
     if not board:
-        return fail("missing_board", failure_class="terminal", retry_safe=False, board=board, repo=repo, worktree_path=path, pr_number=pr, idempotency_key=f"maintenance:{repo or path}:pr:{pr or 'none'}")
-    if not repo and not path:
-        return fail("missing_maintenance_provenance", failure_class="terminal", retry_safe=False, board=board, repo=repo, worktree_path=path, pr_number=pr, idempotency_key=f"maintenance:{repo or path}:pr:{pr or 'none'}")
-    marker = f"maintenance:{repo or path}:pr:{pr or 'none'}"
-    title = f"[maintenance] dirty worktree: {path or repo or reason}"
-    body = f"Path: {path}\nRepository: {repo}\nPR: {pr}\nReason: {reason}\nIdempotency-Key: {marker}\n"
-    if dry:
-        return planned(board=board, title=title, assignee=assignee, idempotency_key=marker)
+        return fail("missing_board", failure_class="terminal", retry_safe=False)
     try:
         tasks = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
     except CommandError as exc:
-        return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), idempotency_key=marker)
+        return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), board=board)
     if not isinstance(tasks, list) or any(not isinstance(task, dict) for task in tasks):
-        return fail("invalid_kanban_readback", failure_class="terminal", retry_safe=False, idempotency_key=marker)
+        return fail("invalid_kanban_readback", failure_class="terminal", retry_safe=False, board=board)
+    return ok(status="read", board=board, tasks=tasks)
+
+
+def find_maintenance_marker(request: Request) -> Result:
+    """Purely find one maintenance marker."""
+    upstream = _cleanup_upstream_failure(request, "find_maintenance_marker", "read_maintenance_tasks")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "find_maintenance_marker", "read_maintenance_tasks")
+    if idle:
+        return idle
+    data, cfg = input_of(request), cfg_of(request)
+    tasks = cond_blob(request, "read_maintenance_tasks").get("tasks")
+    repo, path, pr = str(data.get("repo") or cfg.get("repo") or ""), str(data.get("worktree_path") or ""), str(data.get("pr_number") or data.get("number") or "")
+    marker = f"maintenance:{repo or path}:pr:{pr or 'none'}"
+    if not isinstance(tasks, list):
+        return fail("maintenance_tasks_missing", failure_class="terminal", retry_safe=False)
     matches = [task for task in tasks if _task_marker_matches(task, marker)]
     if len(matches) > 1:
-        return fail("ambiguous_kanban_task", failure_class="terminal", retry_safe=False, idempotency_key=marker, task_ids=[_task_id(task) for task in matches])
-    if matches:
-        task = matches[0]
-        status = str(task.get("status") or task.get("state") or "").strip().lower()
-        return ok(status="already_completed" if status in {"done", "completed", "archived"} else "exists", board=board, task_id=_task_id(task), title=task.get("title"), idempotency_key=marker, mutated=False)
+        return fail("ambiguous_kanban_task", failure_class="terminal", retry_safe=False, marker=marker)
+    return ok(status="found", marker=marker, task=matches[0] if matches else None, found=bool(matches))
+
+
+def reconcile_maintenance_task(request: Request) -> Result:
+    """Reconcile maintenance marker after creation."""
+    upstream = _cleanup_upstream_failure(request, "reconcile_maintenance_task", "create_maintenance_task")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "reconcile_maintenance_task", "create_maintenance_task")
+    if idle:
+        return idle
+    found = cond_blob(request, "find_maintenance_marker")
+    if found.get("found") is True:
+        task = found.get("task") or {}
+        return ok(status="reconciled", task_id=_task_id(task), marker=found.get("marker"), mutated=False)
+    return fail("maintenance_task_unresolved", failure_class="reconcile_then_retry", retry_safe=False, marker=found.get("marker"))
+
+def create_maintenance_task(request: Request) -> Result:
+    """Create one maintenance task after canonical read/find evidence."""
+    upstream = _cleanup_upstream_failure(request, "create_maintenance_task", "read_maintenance_tasks", "find_maintenance_marker")
+    if upstream:
+        return upstream
+    idle = _cleanup_upstream_noop(request, "create_maintenance_task", "read_maintenance_tasks", "find_maintenance_marker")
+    if idle:
+        return idle
+    found = cond_blob(request, "find_maintenance_marker")
+    if not found or found.get("ok") is not True:
+        return fail("maintenance_marker_missing", failure_class="terminal", retry_safe=False, evidence=found)
+    if found.get("found") is True:
+        return ok(status="exists", task_id=_task_id(found.get("task") or {}), marker=found.get("marker"), mutated=False)
+    data, cfg = input_of(request), cfg_of(request)
+    board = str(data.get("board") or cfg.get("board") or "").strip()
+    repo = str(data.get("repo") or cfg.get("repo") or "").strip()
+    path = str(data.get("worktree_path") or "").strip()
+    pr = str(data.get("pr_number") or data.get("number") or "").strip()
+    marker = str(found.get("marker") or f"maintenance:{repo or path}:pr:{pr or 'none'}")
+    reason = str(data.get("reason") or "dirty_worktree")
+    title = f"[maintenance] dirty worktree: {path or repo or reason}"
+    body = f"Path: {path}\nRepository: {repo}\nPR: {pr}\nReason: {reason}\nIdempotency-Key: {marker}\n"
+    if not board:
+        return fail("missing_board", failure_class="terminal", retry_safe=False, marker=marker)
+    if dry_run_flag(request):
+        return planned(board=board, title=title, idempotency_key=marker)
+    assignee = str(cfg.get("kanban_intake_assignee") or "lokay-intake")
     try:
-        proc = run_cmd(["hermes", "kanban", "--board", board, "create", "--title", title, "--body", body, "--assignee", assignee, "--idempotency-key", marker], timeout=90)
+        proc = run_cmd(["hermes", "kanban", "--board", board, "create", "--body", body, "--assignee", assignee, "--idempotency-key", marker, title], timeout=90)
     except CommandError as exc:
-        return fail("create_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), board=board, repo=repo, worktree_path=path, pr_number=pr, title=title, idempotency_key=marker, mutated=True)
-    try:
-        after = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
-    except CommandError as exc:
-        return fail("create_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), board=board, repo=repo, worktree_path=path, pr_number=pr, title=title, idempotency_key=marker, mutated=True)
-    if not isinstance(after, list) or any(not isinstance(task, dict) for task in after):
-        return fail("invalid_create_readback", failure_class="terminal", retry_safe=False, board=board, repo=repo, worktree_path=path, pr_number=pr, title=title, idempotency_key=marker, mutated=True)
-    matches = [task for task in after if _task_marker_matches(task, marker)]
-    if len(matches) != 1:
-        return fail("created_but_unresolved_task_id", failure_class="terminal", retry_safe=False, board=board, repo=repo, worktree_path=path, pr_number=pr, title=title, idempotency_key=marker, match_count=len(matches), mutated=True)
-    task = matches[0]
-    return ok(status="created", board=board, task_id=_task_id(task), title=title, idempotency_key=marker, stdout=proc.stdout[-300:], mutated=True)
+        return fail("create_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), board=board, marker=marker, mutated=True)
+    return ok(status="created", board=board, marker=marker, title=title, stdout=proc.stdout[-300:], mutated=True)

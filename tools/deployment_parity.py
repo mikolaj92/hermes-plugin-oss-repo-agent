@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-FALA_PINNED_COMMIT = "69bc2ec9d4cdf61773114847c0c582fb2652296d"
+FALA_PINNED_COMMIT = "b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
 # Every shell entrypoint copied to ~/.hermes/scripts is part of the deployment
 # contract. Keeping this list explicit makes a missing deployment fail closed.
 DEPLOYED_SCRIPTS = (
@@ -446,7 +446,7 @@ def _relative_candidate_path(candidate: Path, value: object, label: str, errors:
     return path
 
 
-FALA_TAG = "0.7.9"
+FALA_TAG = "0.7.15"
 
 
 

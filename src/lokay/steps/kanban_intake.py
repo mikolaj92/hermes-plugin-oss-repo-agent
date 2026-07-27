@@ -38,138 +38,117 @@ def _task_id(task: dict[str, Any]) -> object:
     return task.get("id") or task.get("task_id")
 
 
-def ensure_kanban_intake(request: Request) -> Result:
-    """Atomic: ensure one Kanban [issue] task for claimed issue."""
+def read_intake_tasks(request: Request) -> Result:
+    """Read all Kanban tasks for one intake board."""
+    from lokay.envelope import cond_blob, terminal_upstream
+    terminal = terminal_upstream(request, "read_intake_tasks", "build_issue_claim_result")
+    if terminal:
+        return terminal
     data = input_of(request)
-    cond = conduction_of(request)
-    claim = dict(data.get("claim") or cond.get("claim") or cond.get("claim_github_issue") or cond.get("intake_claim") or {})
-    poll = dict(data.get("poll") or cond.get("poll") or cond.get("intake_poll") or {})
-    decide = dict(data.get("decide_issue_action") or data.get("decide") or cond.get("decide_issue_action") or cond.get("decide") or cond.get("intake_decide_issue_action") or {})
-    decide_action = str(data.get("action") or decide.get("action") or "")
-    selected = data.get("selected") if "selected" in data else (claim.get("selected") or poll.get("selected"))
-    dry_run = dry_run_flag(request, default=bool(claim.get("dry_run", True)))
     cfg = cfg_of(request)
-    assignee = str(cfg.get("kanban_intake_assignee") or "lokay-intake")
-    if decide_action in {"reject_comment", "skip"}:
-        return noop(
-            str(decide.get("reason") or f"issue_{decide_action}"),
-            dry_run=dry_run,
-            decide_action=decide_action,
-        )
-    if not selected or claim.get("status") == "noop":
-        return noop(claim.get("reason") or "no_selected_issue", dry_run=dry_run)
-    if claim.get("status") == "failed":
-        return fail(
-            "claim_failed",
-            failure_class=str(claim.get("failure_class") or "terminal"),
-            retry_safe=bool(claim.get("retry_safe", False)),
-            claim=claim,
-            dry_run=dry_run,
-        )
-    repo = str(selected["repo"])
-    number = int(selected.get("number") or selected.get("issue") or 0)
-    board = str(selected.get("board") or "")
-    title = str(selected.get("title") or "")
-    url = str(selected.get("url") or "")
-    labels = selected.get("labels") or []
-    key = f"github-issue:{repo}:{number}"
-    task_title = f"[issue] {repo}#{number}: {title}"
-    body = (
-        f"GitHub issue: {url}\nRepository: {repo}\nIssue: #{number}\n"
-        f"Labels at intake: {', '.join(labels) if labels else 'none'}\n\n"
-        f"Intake via Fala effector ensure_kanban_intake.\nIdempotency-Key: {key}\n"
-    )
-    planned_spec = {"board": board, "title": task_title, "assignee": assignee, "idempotency_key": key}
-    if dry_run:
-        return planned(selected=selected, planned=planned_spec)
+    claim = cond_blob(request, "build_issue_claim_result")
+    if claim.get("status") == "noop":
+        return noop(str(claim.get("reason") or "no_selected_issue"), dry_run=dry_run_flag(request), selected=claim.get("selected"))
+    selected = data.get("selected") or claim.get("selected") or {}
+    board = str(data.get("board") or (selected.get("board") if isinstance(selected, dict) else ""))
     if not board:
-        return fail("missing_board", failure_class="terminal", retry_safe=False, selected=selected, idempotency_key=key)
+        return fail("missing_board", failure_class="terminal", retry_safe=False, board=board)
     try:
         tasks = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
     except CommandError as exc:
-        return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), selected=selected, idempotency_key=key)
+        return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), board=board)
     if not isinstance(tasks, list) or any(not isinstance(task, dict) for task in tasks):
-        return fail("invalid_kanban_readback", failure_class="terminal", retry_safe=False, selected=selected, idempotency_key=key)
-    matches = [task for task in tasks if _task_matches(task, key)]
+        return fail("invalid_kanban_readback", failure_class="terminal", retry_safe=False, board=board)
+    return ok(status="intake_tasks_read", tasks=tasks, board=board, selected=selected, dry_run=dry_run_flag(request))
+
+
+def find_intake_marker(request: Request) -> Result:
+    """Purely find the exact idempotency marker in task rows."""
+    from lokay.envelope import cond_blob, terminal_upstream
+    terminal = terminal_upstream(request, "find_intake_marker", "read_intake_tasks")
+    if terminal:
+        return terminal
+    data = input_of(request)
+    read = cond_blob(request, "read_intake_tasks")
+    if read.get("status") == "noop":
+        return noop(str(read.get("reason") or "no_selected_issue"), dry_run=dry_run_flag(request), selected=read.get("selected"))
+    tasks = data.get("tasks") if isinstance(data.get("tasks"), list) else read.get("tasks", [])
+    selected = data.get("selected") or read.get("selected") or {}
+    repo = str((selected or {}).get("repo") or "")
+    number = (selected or {}).get("number") or 0
+    marker = str(data.get("idempotency_key") or f"github-issue:{repo}:{number}")
+    if not isinstance(tasks, list) or any(not isinstance(x, dict) for x in tasks):
+        return fail("invalid_kanban_tasks", failure_class="terminal", retry_safe=False, mutated=False)
+    matches = [task for task in tasks if _task_matches(task, marker)]
     if len(matches) > 1:
-        return fail("ambiguous_kanban_task", failure_class="terminal", retry_safe=False, selected=selected, idempotency_key=key, task_ids=[_task_id(task) for task in matches])
+        return fail("ambiguous_kanban_task", failure_class="terminal", retry_safe=False, task_ids=[_task_id(x) for x in matches], mutated=False)
     if matches:
         task = matches[0]
         task_id = _task_id(task)
         if task_id is None or not str(task_id).strip():
-            return fail("invalid_kanban_task_id", failure_class="terminal", retry_safe=False, selected=selected, idempotency_key=key)
-        status = str(task.get("status") or task.get("state") or "").strip().lower()
-        return ok(status="already_completed" if status in _COMPLETED_TASK_STATUSES else "exists", selected=selected, task_id=task_id, task_title=task.get("title"), idempotency_key=key, mutated=False)
+            return fail("invalid_kanban_task_id", failure_class="terminal", retry_safe=False, mutated=False)
+        status = str(task.get("status") or task.get("state") or "").lower()
+        return ok(status="intake_marker_found", found=True, task=task, task_id=task_id, already_completed=status in _COMPLETED_TASK_STATUSES, marker=marker, dry_run=dry_run_flag(request))
+    return ok(status="intake_marker_absent", found=False, marker=marker, selected=selected, board=read.get("board"), dry_run=dry_run_flag(request))
+
+
+def create_intake_task(request: Request) -> Result:
+    """Create one Kanban intake task; reconciliation is separate."""
+    from lokay.envelope import cond_blob, terminal_upstream
+    terminal = terminal_upstream(request, "create_intake_task", "find_intake_marker")
+    if terminal:
+        return terminal
+    data = input_of(request)
+    cfg = cfg_of(request)
+    found = cond_blob(request, "find_intake_marker")
+    selected = data.get("selected") or found.get("selected") or {}
+    board = str(data.get("board") or found.get("board") or (selected.get("board") if isinstance(selected, dict) else ""))
+    marker = str(data.get("idempotency_key") or found.get("marker") or "")
+    if found.get("status") == "noop":
+        return noop(str(found.get("reason") or "no_selected_issue"), dry_run=dry_run_flag(request), selected=found.get("selected"))
+    repo = str((selected or {}).get("repo") or "")
+    number = (selected or {}).get("number") or 0
+    title = str((selected or {}).get("title") or "")
+    assignee = str(cfg.get("kanban_intake_assignee") or "lokay-intake")
+    dry = dry_run_flag(request)
+    if found.get("found"):
+        return noop("already_exists", task_id=found.get("task_id"), marker=marker, dry_run=dry)
+    if dry:
+        return planned(board=board, title=f"[issue] {repo}#{number}: {title}", idempotency_key=marker, assignee=assignee)
+    if not board:
+        return fail("missing_board", failure_class="terminal", retry_safe=False, marker=marker)
+    body = f"GitHub issue: {selected.get('url', '')}\nRepository: {repo}\nIssue: #{number}\n\nIdempotency-Key: {marker}\n"
     try:
-        proc = run_cmd(
-            [
-                "hermes", "kanban", "--board", board, "create",
-                "--title", task_title, "--body", body, "--assignee", assignee,
-                "--idempotency-key", key,
-            ],
-            timeout=90,
-        )
+        proc = run_cmd(["hermes", "kanban", "--board", board, "create", "--body", body, "--assignee", assignee, "--idempotency-key", marker, f"[issue] {repo}#{number}: {title}"], timeout=90)
     except CommandError as exc:
-        # A create timeout may have committed remotely; the next runner must
-        # reconcile by listing the stable idempotency key before retrying.
-        try:
-            recovery = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
-        except CommandError:
-            recovery = None
-        if isinstance(recovery, list) and all(isinstance(task, dict) for task in recovery):
-            recovered = [task for task in recovery if _task_matches(task, key)]
-            if len(recovered) == 1:
-                task = recovered[0]
-                task_id = _task_id(task)
-                if task_id is None or not str(task_id).strip():
-                    return fail("invalid_kanban_task_id", failure_class="terminal", retry_safe=False, selected=selected, idempotency_key=key, mutated=True)
-                return ok(status="reconciled", selected=selected, task_id=task_id, task_title=task.get("title"), idempotency_key=key, mutated=True, reconciled=True)
-        return fail(
-            "kanban_create_failed",
-            failure_class="reconcile_then_retry",
-            retry_safe=False,
-            error=str(exc),
-            stderr=exc.stderr[-500:],
-            planned=planned_spec,
-            idempotency_key=key,
-            mutated=True,
-        )
+        return fail("kanban_create_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, board=board, marker=marker)
+    return ok(status="intake_task_created", mutated=True, stdout=(getattr(proc, "stdout", "") or "")[-500:], board=board, marker=marker)
+
+
+def reconcile_intake_task(request: Request) -> Result:
+    """Re-read Kanban tasks and verify exactly one marker after creation."""
+    from lokay.envelope import cond_blob, terminal_upstream
+    terminal = terminal_upstream(request, "reconcile_intake_task", "create_intake_task")
+    if terminal:
+        return terminal
+    data = input_of(request)
+    created = cond_blob(request, "create_intake_task")
+    board = str(data.get("board") or created.get("board") or "")
+    marker = str(data.get("idempotency_key") or created.get("marker") or "")
+    if created.get("status") == "noop":
+        return noop(str(created.get("reason") or "no_selected_issue"), dry_run=dry_run_flag(request), marker=created.get("marker"))
+    dry = dry_run_flag(request)
+    if dry or created.get("status") == "noop":
+        return ok(status="intake_reconciled", verified=False, mutated=False, dry_run=dry, marker=marker)
     try:
-        after = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
+        tasks = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
     except CommandError as exc:
-        return fail(
-            "kanban_create_readback_failed",
-            failure_class="reconcile_then_retry",
-            retry_safe=False,
-            error=str(exc),
-            planned=planned_spec,
-            idempotency_key=key,
-            mutated=True,
-        )
-    if not isinstance(after, list) or any(not isinstance(task, dict) for task in after):
-        return fail("invalid_kanban_create_readback", failure_class="terminal", retry_safe=False, planned=planned_spec, idempotency_key=key, mutated=True)
-    matches = [task for task in after if _task_matches(task, key)]
+        return fail("kanban_reconcile_read_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, board=board, marker=marker)
+    matches = [x for x in tasks if isinstance(x, dict) and _task_matches(x, marker)] if isinstance(tasks, list) else []
     if len(matches) != 1:
-        return fail(
-            "kanban_create_readback_ambiguous",
-            failure_class="reconcile_then_retry",
-            retry_safe=False,
-            planned=planned_spec,
-            idempotency_key=key,
-            match_count=len(matches),
-            mutated=True,
-        )
+        return fail("kanban_reconcile_mismatch", failure_class="reconcile_then_retry", retry_safe=False, match_count=len(matches), mutated=True, board=board, marker=marker)
     task = matches[0]
     task_id = _task_id(task)
     if task_id is None or not str(task_id).strip():
-        return fail("invalid_kanban_task_id", failure_class="terminal", retry_safe=False, planned=planned_spec, idempotency_key=key, mutated=True)
-    return ok(
-        status="created",
-        selected=selected,
-        planned=planned_spec,
-        idempotency_key=key,
-        task_id=task_id,
-        task_title=task.get("title"),
-        stdout=proc.stdout[-500:],
-        mutated=True,
-    )
+        return fail("invalid_kanban_task_id", failure_class="terminal", retry_safe=False, mutated=True, board=board, marker=marker)
+    return ok(status="intake_reconciled", verified=True, mutated=True, task_id=task_id, task_title=task.get("title"), board=board, marker=marker)

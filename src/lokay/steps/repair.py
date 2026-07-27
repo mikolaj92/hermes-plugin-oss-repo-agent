@@ -14,6 +14,7 @@ from lokay.envelope import (
     noop,
     ok,
     planned,
+    upstream_noop,
 )
 
 
@@ -145,10 +146,10 @@ def build_repair_prompt(request: Request) -> Result:
     if gated is not None:
         return gated
     data = input_of(request)
-    loaded = cond_blob(request, "load_pr_fields", "triage_load_pr_fields")
-    created = cond_blob(request, "create_review_fix_task", "triage_create_review_fix_task")
     decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
     checks = cond_blob(request, "evaluate_checks", "checks", "triage_evaluate_checks")
+    loaded = cond_blob(request, "load_pr_fields", "triage_load_pr_fields")
+    created = cond_blob(request, "create_review_task", "create_fix_task")
     pr = data.get("pr") or loaded.get("pr") or {}
     failures = data.get("failures") or checks.get("failures") or []
     reason = str(data.get("reason") or decide.get("reason") or "repair")
@@ -177,204 +178,105 @@ def build_repair_prompt(request: Request) -> Result:
     )
 
 
-def create_review_fix_task(request: Request) -> Result:
-    """Create Kanban [fix-pr-review] task for a PR."""
+
+
+
+
+# Atomic repair-chain handlers share the Kanban/read primitives with dispatch.
+from lokay.steps.issue_to_pr import (
+    _atomic_terminal,
+    _reconcile_kanban_marker,
+)
+
+def read_review_tasks(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_review_tasks", "decide_triage_action", "verify_merge_receipt")
+    if terminal: return terminal
+    idle = upstream_noop(request, "decide_triage_action", "verify_merge_receipt")
+    if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="read_review_tasks")
+    data, cfg = input_of(request), cfg_of(request); board = str(data.get("board") or cfg.get("board") or "")
+    if not board: return fail("missing_board", failure_class="terminal", retry_safe=False, operation="read_review_tasks")
+    try: tasks = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
+    except CommandError as exc: return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_review_tasks", error=str(exc), board=board)
+    if not isinstance(tasks, list) or any(not isinstance(t, dict) for t in tasks): return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="read_review_tasks")
+    return ok(status="read", operation="read_review_tasks", board=board, tasks=tasks)
+
+def find_review_marker(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "find_review_marker", "read_review_tasks")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_review_tasks")
+    if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="find_review_marker")
+    data = input_of(request); rows = data.get("tasks") or cond_blob(request, "read_review_tasks").get("tasks") or []; repo, number = str(data.get("repo") or ""), str(data.get("pr_number") or data.get("number") or ""); marker = str(data.get("idempotency_key") or f"fix-pr-review:{repo}:{number}")
+    if not isinstance(rows, list): return fail("missing_review_rows", failure_class="terminal", retry_safe=False, operation="find_review_marker")
+    matches = [t for t in rows if marker in str(t.get("body") or t.get("description") or "")]
+    if len(matches) > 1: return fail("ambiguous_review_task", failure_class="terminal", retry_safe=False, operation="find_review_marker", matches=matches)
+    return ok(status="found" if matches else "absent", operation="find_review_marker", marker=marker, task=matches[0] if matches else None)
+
+def create_review_task(request: Request) -> Result:
     gated = _repair_decision_gate(request)
-    if gated is not None:
-        return gated
-    data = input_of(request)
-    cfg = cfg_of(request)
-    dry = dry_run_flag(request)
-    loaded = cond_blob(request, "load_pr_fields", "decide_triage_action", "triage_load_pr_fields", "triage_decide_triage_action")
-    decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
-    pr = data.get("pr") or loaded.get("pr") or {}
-    board = str(data.get("board") or cfg.get("board") or "")
-    repo = str(data.get("repo") or loaded.get("repo") or cfg.get("repo") or "")
-    number = int(
-        data.get("number")
-        or data.get("pr_number")
-        or loaded.get("number")
-        or (pr.get("number") if isinstance(pr, dict) else 0)
-        or 0
-    )
-    reason = str(data.get("reason") or decide.get("reason") or "checks_failed")
-    assignee = str(cfg.get("fixer_assignee") or "lokay-fixer")
-    marker = f"fix-pr-review:{repo}:{number}"
-    if not board or not repo or not number:
-        return fail(
-            "missing_board_repo_or_number",
-            failure_class="terminal",
-            retry_safe=False,
-            board=board,
-            repo=repo,
-            pr_number=number,
-            idempotency_key=marker,
-        )
-    # Title uses owner/repo#PR so shell extract_records parses PR number
-    # the same way as scripts/repo_pr_triage.sh review tasks.
-    title = f"[fix-pr-review] {repo}#{number}: {reason}"
-    body = (
-        f"Repository: {repo}\nPR: #{number}\nReason: {reason}\n"
-        f"Idempotency-Key: {marker}\n"
-    )
-    if dry:
-        return planned(board=board, title=title, assignee=assignee, idempotency_key=marker)
-    state, existing, error = _reconcile_marker_read(board=board, marker=marker, title=title)
-    if state == "found" and existing is not None:
-        return _existing_task_result(board=board, marker=marker, task=existing, title=title)
-    if state == "read_failed":
-        return fail(
-            "kanban_list_failed",
-            failure_class="retryable_read",
-            retry_safe=True,
-            error=error,
-            board=board,
-            repo=repo,
-            pr_number=number,
-            title=title,
-            idempotency_key=marker,
-        )
-    if state == "malformed":
-        return fail(
-            "invalid_kanban_readback",
-            failure_class="terminal",
-            retry_safe=False,
-            error=error,
-            board=board,
-            repo=repo,
-            pr_number=number,
-            title=title,
-            idempotency_key=marker,
-        )
-    if state == "conflict":
-        return fail(
-            "ambiguous_kanban_task",
-            failure_class="terminal",
-            retry_safe=False,
-            error=error,
-            board=board,
-            repo=repo,
-            pr_number=number,
-            title=title,
-            idempotency_key=marker,
-        )
-    try:
-        proc = run_cmd(
-            [
-                "hermes", "kanban", "--board", board, "create",
-                "--title", title, "--body", body, "--assignee", assignee,
-                "--idempotency-key", marker,
-            ],
-            timeout=90,
-        )
-    except CommandError as exc:
-        state, existing, error = _reconcile_marker_read(board=board, marker=marker, title=title)
-        if state == "found" and existing is not None:
-            existing_result = _existing_task_result(board=board, marker=marker, task=existing, title=title)
-            reconciled_output = dict(existing_result)
-            reconciled_output["reconciled"] = True
-            reconciled_output["mutated"] = True
-            if reconciled_output.get("ok") is not False:
-                reconciled_output["status"] = "reconciled"
-            return reconciled_output
-        return fail(
-            "create_reconciliation_failed",
-            failure_class="terminal",
-            retry_safe=False,
-            error=error or str(exc),
-            board=board,
-            repo=repo,
-            pr_number=number,
-            title=title,
-            idempotency_key=marker,
-            mutated=True,
-        )
-    state, existing, error = _reconcile_marker_read(board=board, marker=marker, title=title)
-    if state == "found" and existing is not None:
-        task_id = _task_id(existing)
-        if task_id is None or not str(task_id).strip():
-            return fail(
-                "created_but_unresolved_task_id",
-                failure_class="terminal",
-                retry_safe=False,
-                title=title,
-                board=board,
-                repo=repo,
-                pr_number=number,
-                error="stable marker matched a task with no id",
-                stdout=(proc.stdout or "")[-300:],
-                idempotency_key=marker,
-                mutated=True,
-            )
-        return ok(status="created", title=title, board=board, task_id=task_id, stdout=(proc.stdout or "")[-300:], idempotency_key=marker, mutated=True)
-    return fail(
-        "created_but_unresolved_task_id",
-        failure_class="terminal",
-        retry_safe=False,
-        title=title,
-        board=board,
-        repo=repo,
-        pr_number=number,
-        error=error or "stable marker missing after create",
-        stdout=(proc.stdout or "")[-300:],
-        idempotency_key=marker,
-        mutated=True,
-    )
+    if gated is not None: return gated
+    terminal = _atomic_terminal(request, "create_review_task", "find_review_marker")
+    if terminal: return terminal
+    idle = upstream_noop(request, "find_review_marker")
+    if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="create_review_task")
+    data, cfg = input_of(request), cfg_of(request); board, repo, number = str(data.get("board") or cfg.get("board") or ""), str(data.get("repo") or ""), str(data.get("pr_number") or data.get("number") or ""); reason = str(data.get("reason") or "checks_failed"); marker = str(data.get("idempotency_key") or f"fix-pr-review:{repo}:{number}"); title = str(data.get("title") or f"[fix-pr-review] {repo}#{number}: {reason}")
+    if not board or not repo or not number: return fail("missing_board_repo_or_number", failure_class="terminal", retry_safe=False, operation="create_review_task", idempotency_key=marker)
+    if dry_run_flag(request): return planned(operation="create_review_task", board=board, title=title, idempotency_key=marker)
+    body = str(data.get("body") or f"Repository: {repo}\nPR: #{number}\nReason: {reason}\nIdempotency-Key: {marker}\n")
+    try: proc = run_cmd(["hermes", "kanban", "--board", board, "create", "--body", body, "--assignee", str(cfg.get("fixer_assignee") or "lokay-fixer"), "--idempotency-key", marker, title], timeout=90)
+    except CommandError as exc: return fail("review_task_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_review_task", error=str(exc), mutated=True)
+    return ok(status="created", operation="create_review_task", board=board, title=title, marker=marker, stdout=(proc.stdout or "")[-400:], mutated=True)
 
+def reconcile_review_task(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "reconcile_review_task", "create_review_task")
+    if terminal: return terminal
+    idle = upstream_noop(request, "create_review_task")
+    if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="reconcile_review_task")
+    return _reconcile_kanban_marker(request, "reconcile_review_task", "create_review_task", "fix-pr-review")
 
-def block_kanban_task(request: Request) -> Result:
-    """Mark a task blocked, reconciling authoritative state before and after."""
-    data = input_of(request)
-    dry = dry_run_flag(request)
-    cfg = cfg_of(request)
-    board = str(data.get("board") or cfg.get("board") or "")
-    task_id = str(data.get("task_id") or "")
-    reason = str(data.get("reason") or "blocked")
-    key = f"kanban:{board}:task:{task_id}:block"
-    if not board or not task_id:
-        return fail(
-            "missing_board_or_task_id",
-            failure_class="terminal",
-            retry_safe=False,
-            board=board,
-            task_id=task_id,
-            idempotency_key=key,
-        )
+def read_task_for_block(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_task_for_block", "build_repair_prompt")
+    if terminal: return terminal
+    idle = upstream_noop(request, "build_repair_prompt")
+    if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="read_task_for_block")
+    data, cfg = input_of(request), cfg_of(request); board, task_id = str(data.get("board") or cfg.get("board") or ""), str(data.get("task_id") or "")
+    if not board or not task_id: return fail("missing_board_or_task_id", failure_class="terminal", retry_safe=False, operation="read_task_for_block")
+    try: tasks = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
+    except CommandError as exc: return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_task_for_block", error=str(exc))
+    if not isinstance(tasks, list) or any(not isinstance(t, dict) for t in tasks): return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="read_task_for_block")
+    matches = [t for t in tasks if str(t.get("id") or t.get("task_id") or "") == task_id]
+    if len(matches) != 1: return fail("task_not_found" if not matches else "ambiguous_task", failure_class="terminal", retry_safe=False, operation="read_task_for_block", task_id=task_id)
+    return ok(status="read", operation="read_task_for_block", board=board, task=matches[0], task_id=task_id)
 
-    def read_state() -> tuple[dict[str, object] | None, str | None]:
-        try:
-            tasks = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
-        except CommandError as exc:
-            return None, str(exc)
-        if not isinstance(tasks, list) or any(not isinstance(task, dict) for task in tasks):
-            return None, "kanban list returned malformed JSON"
-        matches = [task for task in tasks if str(_task_id(task) or "") == task_id]
-        if len(matches) != 1:
-            return None, "task missing or ambiguous"
-        status = _task_status(matches[0])
-        if not status:
-            return None, "task state is blank"
-        return matches[0], None
+def decide_task_block(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "decide_task_block", "read_task_for_block")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_task_for_block")
+    if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="decide_task_block")
+    task = input_of(request).get("task") or cond_blob(request, "read_task_for_block").get("task") or {}; state = _task_status(task)
+    if state == "blocked": return ok(status="already_blocked", operation="decide_task_block", should_block=False)
+    if state in _COMPLETED_TASK_STATUSES: return ok(status="already_completed", operation="decide_task_block", should_block=False)
+    return ok(status="should_block", operation="decide_task_block", should_block=True)
 
-    if dry:
-        return planned(board=board, task_id=task_id, reason=reason, idempotency_key=key)
-    before, error = read_state()
-    if error or before is None:
-        return fail("invalid_kanban_task_readback", failure_class="terminal", retry_safe=False, error=error or "missing task", board=board, task_id=task_id, idempotency_key=key)
-    before_status = _task_status(before)
-    if before_status in {"blocked", *_COMPLETED_TASK_STATUSES}:
-        return ok(status="already_blocked" if before_status == "blocked" else "already_completed", board=board, task_id=task_id, mutated=False)
-    try:
-        run_cmd(["hermes", "kanban", "--board", board, "block", task_id, "--reason", reason], timeout=60)
-    except CommandError as exc:
-        after, read_error = read_state()
-        if after is not None and _task_status(after) in {"blocked", *_COMPLETED_TASK_STATUSES}:
-            return ok(status="reconciled", board=board, task_id=task_id, mutated=True, reconciled=True)
-        return fail("block_failed", failure_class="reconcile_then_retry", retry_safe=False, error=read_error or str(exc), board=board, task_id=task_id, idempotency_key=key, mutated=True)
-    after, error = read_state()
-    if error or after is None:
-        return fail("block_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=error or "missing task", board=board, task_id=task_id, idempotency_key=key, mutated=True)
-    after_status = _task_status(after)
-    if after_status not in {"blocked", *_COMPLETED_TASK_STATUSES}:
-        return fail("block_not_confirmed", failure_class="reconcile_then_retry", retry_safe=False, board=board, task_id=task_id, idempotency_key=key, state=after_status, mutated=True)
-    return ok(status="blocked" if after_status == "blocked" else "already_completed", board=board, task_id=task_id, mutated=True)
+def block_task(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "block_task", "decide_task_block")
+    if terminal: return terminal
+    idle = upstream_noop(request, "decide_task_block")
+    if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="block_task")
+    data, cfg = input_of(request), cfg_of(request); board, task_id, reason = str(data.get("board") or cfg.get("board") or ""), str(data.get("task_id") or ""), str(data.get("reason") or "blocked"); decision = cond_blob(request, "decide_task_block")
+    if decision.get("should_block") is False: return ok(status=decision.get("status") or "already_blocked", operation="block_task", mutated=False)
+    if not board or not task_id: return fail("missing_board_or_task_id", failure_class="terminal", retry_safe=False, operation="block_task")
+    if dry_run_flag(request): return planned(operation="block_task", board=board, task_id=task_id, reason=reason)
+    try: run_cmd(["hermes", "kanban", "--board", board, "block", task_id, "--reason", reason], timeout=60)
+    except CommandError as exc: return fail("block_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="block_task", error=str(exc), mutated=True)
+    return ok(status="blocked", operation="block_task", board=board, task_id=task_id, mutated=True)
+
+def verify_task_blocked(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "verify_task_blocked", "block_task")
+    if terminal: return terminal
+    idle = upstream_noop(request, "block_task")
+    if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="verify_task_blocked")
+    read = read_task_for_block(request)
+    if read.get("ok") is False: return read
+    state = _task_status(read["task"])
+    if state not in {"blocked", *_COMPLETED_TASK_STATUSES}: return fail("block_not_confirmed", failure_class="reconcile_then_retry", retry_safe=False, operation="verify_task_blocked", task_id=read["task_id"], state=state, mutated=True)
+    return ok(status="verified", operation="verify_task_blocked", task_id=read["task_id"], blocked=state == "blocked")

@@ -12,11 +12,9 @@ from pathlib import Path
 from unittest import mock
 
 from lokay.adapters_cli import CommandError
-from lokay.catalog import EFFECTORS, domains, list_effectors, load_all
-from lokay.steps import cleanup, issue_to_pr, repair, triage
-from lokay.steps.claim import _reserve_claim, claim_github_issue
-from lokay.steps.kanban_intake import ensure_kanban_intake
-from lokay.steps.poll import poll_eligible_issues
+from lokay.catalog import EFFECTORS, domains, load_all
+from lokay.steps import claim, cleanup, issue_direction, issue_to_pr, kanban_intake, poll, repair, triage
+from lokay.steps.claim import _reserve_claim
 
 
 def req(input_data=None, config=None):
@@ -35,6 +33,88 @@ def triage_req(action, input_data=None, config=None):
     return req(data, config)
 
 
+class EnvelopeContractTests(unittest.TestCase):
+    def test_terminal_upstream_preserves_exact_peer_payload(self) -> None:
+        from lokay.envelope import terminal_upstream
+
+        for status in ("failed", "cancelled", "timed_out"):
+            with self.subTest(status=status):
+                peer = {
+                    "status": status,
+                    "ok": status != "failed",
+                    "mutated": status == "timed_out",
+                    "reason": "peer detail",
+                    "failure_class": "retryable_read",
+                    "retry_safe": True,
+                }
+                out = terminal_upstream(
+                    req({"conduction": {"auto_worker_read_peer": peer}}),
+                    "dependent_operation",
+                    "read_peer",
+                )
+                self.assertIsNotNone(out)
+                assert out is not None
+                self.assertEqual(out["status"], "failed")
+                self.assertEqual(out["operation"], "dependent_operation")
+                self.assertEqual(out["upstream_effector"], "auto_worker_read_peer")
+                self.assertEqual(out["upstream"], peer)
+
+    def test_terminal_upstream_ignores_success_noop_and_missing_peer(self) -> None:
+        from lokay.envelope import terminal_upstream
+
+        for peer in (
+            None,
+            {"status": "ok", "ok": True, "mutated": False},
+            {"status": "noop", "ok": True, "mutated": False, "reason": "none"},
+        ):
+            conduction = {} if peer is None else {"read_peer": peer}
+            with self.subTest(peer=peer):
+                self.assertIsNone(
+                    terminal_upstream(
+                        req({"conduction": conduction}),
+                        "dependent_operation",
+                        "read_peer",
+                    )
+                )
+
+    def test_terminal_upstream_checks_all_declared_peers(self) -> None:
+        from lokay.envelope import terminal_upstream
+
+        failed = {"status": "failed", "ok": False, "mutated": False, "reason": "late"}
+        out = terminal_upstream(
+            req(
+                {
+                    "conduction": {
+                        "poll": {"status": "ok", "ok": True, "mutated": False},
+                        "decide": failed,
+                    }
+                }
+            ),
+            "claim",
+            "poll",
+            "decide",
+        )
+        self.assertIsNotNone(out)
+        assert out is not None
+        self.assertEqual(out["upstream_effector"], "decide")
+        self.assertEqual(out["upstream"], failed)
+
+    def test_reserve_stops_on_prefixed_terminal_peer(self) -> None:
+        peer = {
+            "status": "cancelled",
+            "ok": True,
+            "mutated": False,
+            "reason": "cancelled upstream",
+        }
+        out = claim.reserve_claim_file(
+            req({"conduction": {"auto_worker_intake_select_issue_candidate": peer}, "dry_run": False})
+        )
+        self.assertEqual(out["reason"], "upstream_failed")
+        self.assertEqual(out["operation"], "reserve_claim_file")
+        self.assertEqual(out["upstream_effector"], "auto_worker_intake_select_issue_candidate")
+        self.assertEqual(out["upstream"], peer)
+
+
 class CatalogTests(unittest.TestCase):
     def test_catalog_spans_all_domains(self) -> None:
         d = domains()
@@ -51,88 +131,60 @@ class CatalogTests(unittest.TestCase):
             "check_worktree_dirty",
             "list_controlled_worktrees",
             "push_branch",
-            "apply_issue_labels",
-            "complete_kanban_task",
-            "refresh_clone_base",
-            "prepare_worktree",
-            "apply_pr_labels",
-            "list_ai_fix_prs",
+            "issue_to_pr_add_issue_label",
+            "complete_task",
+            "fetch_clone_origin",
+            "add_worktree",
+            "aggregate_pr_label_results",
+            "select_fix_pr",
             "load_pr_fields",
-            "claim_pr_assignee",
+            "assign_pr",
             "close_linked_issue",
-            "write_merge_receipt",
-            "block_kanban_task",
+            "publish_merge_receipt",
+            "block_task",
             "check_issue_closed",
-            "delete_local_fix_branch",
+            "delete_local_branch",
         ):
             self.assertIn(eid, loaded)
 
 
 class IntakeAlignedTests(unittest.TestCase):
+    def _selected(self, number=3):
+        return {"repo": "o/r", "board": "b", "number": number, "title": "t", "url": "u", "labels": ["ai:ready"], "assignees": []}
+
     def test_poll_success_and_filter(self) -> None:
         issues = [
-            {
-                "number": 1,
-                "title": "a",
-                "url": "u",
-                "labels": [{"name": "ai:ready"}],
-                "assignees": [],
-            },
-            {
-                "number": 2,
-                "title": "b",
-                "url": "u",
-                "labels": [{"name": "ai:ready"}, {"name": "ai:blocked"}],
-                "assignees": [],
-            },
+            {"number": 1, "title": "a", "url": "u", "labels": [{"name": "ai:ready"}], "assignees": []},
+            {"number": 2, "title": "b", "url": "u", "labels": [{"name": "ai:ready"}, {"name": "ai:blocked"}], "assignees": []},
         ]
         with mock.patch("lokay.steps.poll.gh_json", return_value=issues):
-            out = poll_eligible_issues(
-                req(
-                    {"repos": [{"repo": "o/r", "board": "b"}], "dry_run": True},
-                    {"assignee": "mikolaj92", "ready_label": "ai:ready"},
-                )
-            )
+            read = poll.read_open_issues(req({"repo": "o/r", "board": "b", "dry_run": True}, {"assignee": "mikolaj92"}))
+        self.assertEqual(read["status"], "read")
+        normalized = poll.normalize_issue_rows(req({"issues": read["issues"], "repo": "o/r", "board": "b", "conduction": {"read_open_issues": read}, "dry_run": True}))
+        filtered = poll.filter_issue_eligibility(req({"conduction": {"normalize_issue_rows": normalized}, "dry_run": True}, {"assignee": "mikolaj92", "ready_label": "ai:ready"}))
+        out = poll.select_issue_candidate(req({"conduction": {"filter_issue_eligibility": filtered}, "dry_run": True}))
         self.assertTrue(out["ok"])
         self.assertEqual(out["eligible_count"], 1)
         self.assertEqual(out["selected"]["number"], 1)
 
     def test_claim_dry_run_and_noop(self) -> None:
-        noop = claim_github_issue(
-            req({"conduction": {"poll": {"selected": None}}, "dry_run": True})
-        )
+        noop = claim.reserve_claim_file(req({"conduction": {"select_issue_candidate": {"status": "noop", "selected": None}}, "dry_run": True}))
         self.assertEqual(noop["status"], "noop")
-        planned = claim_github_issue(
-            req(
-                {
-                    "dry_run": True,
-                    "conduction": {
-                        "poll": {
-                            "selected": {
-                                "repo": "o/r",
-                                "number": 3,
-                                "labels": [],
-                                "assignees": [],
-                            }
-                        }
-                    },
-                },
-                {"assignee": "mikolaj92"},
-            )
-        )
+        planned = claim.reserve_claim_file(req({"dry_run": True, "conduction": {"select_issue_candidate": {"selected": self._selected()}}}, {"assignee": "mikolaj92"}))
         self.assertEqual(planned["status"], "planned")
         self.assertFalse(planned["mutated"])
+
     def test_claim_rejects_bool_and_string_issue_values(self) -> None:
         for value in (True, "3"):
             with self.subTest(value=value):
-                out = claim_github_issue(req({"dry_run": True, "selected": {"repo": "o/r", "board": "b", "number": value}}))
+                out = claim.reserve_claim_file(req({"dry_run": True, "selected": {"repo": "o/r", "board": "b", "number": value}}))
                 self.assertEqual(out["reason"], "invalid_selected_issue")
 
     def test_claim_rejects_malformed_unrelated_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "other.json"
             path.write_text("not json", encoding="utf-8")
-            out = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 3}}, {"active_issue_path": tmp}))
+            out = claim.reserve_claim_file(req({"dry_run": False, "selected": self._selected()}, {"active_issue_path": tmp}))
             self.assertEqual(out["reason"], "claim_malformed")
 
     def test_claim_rejects_invalid_existing_identity_fields(self) -> None:
@@ -147,1539 +199,302 @@ class IntakeAlignedTests(unittest.TestCase):
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "claim.json"
                 path.write_text(json.dumps(payload), encoding="utf-8")
-                out = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 1}}, {"assignee": "a", "active_issue_path": path}))
+                out = claim.reserve_claim_file(req({"dry_run": False, "selected": self._selected(1)}, {"assignee": "a", "active_issue_path": path}))
                 self.assertEqual(out["reason"], "claim_malformed")
 
     def test_claim_capacity_and_same_identity_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _reserve_claim(Path(tmp) / "first.json", repo="o/r", issue=1, board="b", assignee="a")
-            out = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 2}}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1}))
-            self.assertEqual(out["reason"], "claim_capacity_exhausted")
-            with mock.patch("lokay.steps.claim.run_cmd", return_value=SimpleNamespace(stdout='{"assignees": [{"login": "a"}], "labels": [{"name": "ai:ready"}, {"name": "ai:in-progress"}]}')):
-                reused = claim_github_issue(req({"dry_run": False, "selected": {"repo": "o/r", "board": "b", "number": 1}}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1}))
+            out = claim.reserve_claim_file(req({"dry_run": False, "selected": self._selected(2)}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1}))
+            self.assertEqual(out["reason"], "claim_busy")
+            reused = claim.reserve_claim_file(req({"dry_run": False, "selected": self._selected(1)}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1}))
             self.assertTrue(reused["ok"])
             self.assertTrue(reused["reused"])
 
-    def test_claim_exclusive_conflict_and_fsync_failure_are_fail_closed(self) -> None:
+    def test_claim_reservation_failures_are_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "claim.json"
             _reserve_claim(path, repo="o/r", issue=1, board="b", assignee="a")
-            existing, error, reused = _reserve_claim(path, repo="o/r", issue=2, board="b", assignee="a")
+            _, error, reused = _reserve_claim(path, repo="o/r", issue=2, board="b", assignee="a")
             self.assertEqual(error, "claim_busy")
             self.assertFalse(reused)
             with mock.patch("lokay.steps.claim.os.fsync", side_effect=OSError("disk full")):
-                claim, fsync_error, reused = _reserve_claim(Path(tmp) / "second.json", repo="o/r", issue=2, board="b", assignee="a")
+                reserved, fsync_error, reused = _reserve_claim(Path(tmp) / "second.json", repo="o/r", issue=2, board="b", assignee="a")
             self.assertTrue(fsync_error.startswith("claim_uncertain:"))
             self.assertFalse(reused)
-            self.assertIsNotNone(claim)
+            self.assertIsNotNone(reserved)
 
-    def test_claim_command_timeout_and_readback_mismatch_reconcile(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            selected = {"repo": "o/r", "board": "b", "number": 3}
-            with mock.patch("lokay.steps.claim.run_cmd", side_effect=CommandError(["gh"], 1, "", "denied")):
-                failed = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp}))
-            self.assertEqual(failed["reason"], "claim_uncertain")
-            self.assertTrue(failed["mutated"])
+    def test_claim_state_read_and_mutation_failures_attribute_exact_atom(self) -> None:
+        selected = self._selected(3)
+        reserve = {"status": "claim_reserved", "ok": True, "selected": selected}
+        with mock.patch("lokay.steps.claim.run_cmd", side_effect=CommandError(["gh"], 1, "", "denied")):
+            read = claim.read_issue_claim_state(req({"conduction": {"reserve_claim_file": reserve}, "selected": selected}, {"repo": "o/r"}))
+        self.assertEqual(read["reason"], "claim_read_failed")
+        self.assertEqual(read["failure_class"], "retryable_read")
+        state = {"status": "claim_state_read", "ok": True, "repo": "o/r", "number": 3, "assignees": [], "labels": []}
+        with mock.patch("lokay.steps.claim.run_cmd", side_effect=CommandError(["gh"], 1, "", "denied")):
+            failed = claim.assign_issue(req({"conduction": {"reserve_claim_file": reserve, "read_issue_claim_state": state}, "selected": selected, "dry_run": False}, {"assignee": "a"}))
+        self.assertEqual(failed["reason"], "assign_issue_failed")
+        self.assertEqual(failed["failure_class"], "reconcile_then_retry")
+        self.assertTrue(failed["mutated"])
 
-        with tempfile.TemporaryDirectory() as tmp:
-            selected = {"repo": "o/r", "board": "b", "number": 4}
-            with mock.patch("lokay.steps.claim.run_cmd", side_effect=subprocess.TimeoutExpired(["gh"], 1)):
-                timed = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp}))
-            self.assertEqual(timed["reason"], "claim_uncertain")
-            self.assertEqual(timed["failure_class"], "reconcile_then_retry")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            selected = {"repo": "o/r", "board": "b", "number": 5}
-            with mock.patch("lokay.steps.claim.run_cmd", return_value=SimpleNamespace(stdout='{"assignees": [], "labels": []}')):
-                mismatch = claim_github_issue(req({"dry_run": False, "selected": selected}, {"active_issue_path": tmp}))
-            self.assertEqual(mismatch["reason"], "claim_readback_mismatch")
-            self.assertTrue(mismatch["mutated"])
-
-    def test_kanban_dry_run(self) -> None:
-        out = ensure_kanban_intake(
-            req(
-                {
-                    "dry_run": True,
-                    "conduction": {
-                        "claim": {
-                            "status": "planned",
-                            "selected": {
-                                "repo": "o/r",
-                                "number": 1,
-                                "title": "t",
-                                "url": "u",
-                                "board": "b",
-                                "labels": [],
-                            },
-                        }
-                    },
-                }
-            )
-        )
+    def test_kanban_dry_run_chain(self) -> None:
+        selected = self._selected(1)
+        claim_result = {"status": "claimed", "ok": True, "selected": selected}
+        with mock.patch("lokay.steps.kanban_intake.hermes_kanban_json", return_value=[]):
+            read = kanban_intake.read_intake_tasks(req({"conduction": {"build_issue_claim_result": claim_result}, "selected": selected, "dry_run": True}))
+        found = kanban_intake.find_intake_marker(req({"conduction": {"read_intake_tasks": read}, "dry_run": True}))
+        out = kanban_intake.create_intake_task(req({"conduction": {"find_intake_marker": found}, "selected": selected, "dry_run": True}))
         self.assertEqual(out["status"], "planned")
+        self.assertEqual(out["idempotency_key"], "github-issue:o/r:1")
 
 
 class IssueToPrTests(unittest.TestCase):
-    def test_parse_issue_ref(self) -> None:
+    def test_parse_issue_ref_from_task(self) -> None:
         out = issue_to_pr.parse_issue_ref_from_task(
-            req(
-                {
-                    "task": {
-                        "title": "[issue] acme/app#42: fix crash",
-                        "id": "t1",
-                    }
-                },
-                {"branch_prefix": "ai/fix"},
-            )
+            req({"task": {"title": "[issue] acme/app#42: fix crash", "id": "t1"}}, {"branch_prefix": "ai/fix"})
         )
         self.assertTrue(out["ok"])
         self.assertEqual(out["repo"], "acme/app")
         self.assertEqual(out["issue"], 42)
         self.assertTrue(out["branch"].startswith("ai/fix/42-"))
 
-    def test_parse_issue_ref_failure(self) -> None:
-        out = issue_to_pr.parse_issue_ref_from_task(
-            req({"task": {"title": "no ref here"}})
+    def test_dispatch_read_select_chain(self) -> None:
+        rows = [{"id": "t1", "title": "[fix-pr] o/r#9", "status": "ready", "repo": "o/r"}]
+        with mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json", return_value=rows):
+            read = issue_to_pr.read_dispatch_tasks(req({"board": "b"}, {}))
+        self.assertEqual(read["status"], "read")
+        selected = issue_to_pr.select_dispatch_task(req({"conduction": {"read_dispatch_tasks": read}}))
+        self.assertEqual(selected["status"], "selected")
+        self.assertEqual(selected["task_id"], "t1")
+
+    def test_dispatch_selection_noop_and_failure_gate(self) -> None:
+        noop = issue_to_pr.select_dispatch_task(
+            req({"conduction": {"read_dispatch_tasks": {"status": "ok", "ok": True, "tasks": [{"id": "done", "status": "done"}]}}})
         )
-        self.assertFalse(out["ok"])
-        self.assertEqual(out["reason"], "unparseable_issue_ref")
-
-    def test_create_fix_pr_task_dry_run(self) -> None:
-        out = issue_to_pr.create_fix_pr_task(
-            req(
-                {"board": "b", "repo": "o/r", "issue": 9, "title": "x", "dry_run": True},
-                {"fixer_assignee": "fixer"},
-            )
-        )
-        self.assertEqual(out["status"], "planned")
-        self.assertIn("[fix-pr]", out["title"])
-
-    def test_verify_branch_has_commits(self) -> None:
-        with mock.patch(
-            "lokay.steps.issue_to_pr.rev_parse", side_effect=["aaa", "bbb"]
-        ):
-            out = issue_to_pr.verify_branch_has_commits(
-                req(
-                    {
-                        "worktree_path": "/wt",
-                        "clone_path": "/c",
-                        "base_branch": "main",
-                        "dry_run": False,
-                    }
-                )
-            )
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["status"], "has_commits")
-
-    def test_verify_branch_no_commits(self) -> None:
-        with mock.patch(
-            "lokay.steps.issue_to_pr.rev_parse", side_effect=["same", "same"]
-        ):
-            out = issue_to_pr.verify_branch_has_commits(
-                req({"worktree_path": "/wt", "clone_path": "/c", "dry_run": False})
-            )
-        self.assertFalse(out["ok"])
-        self.assertEqual(out["reason"], "no_new_commits")
-
-    def test_open_pr_dry_run(self) -> None:
-        out = issue_to_pr.open_pull_request(
-            req(
-                {
-                    "repo": "o/r",
-                    "branch": "ai/fix/1-x",
-                    "title": "t",
-                    "dry_run": True,
-                }
-            )
-        )
-        self.assertEqual(out["status"], "planned")
-
-    def test_write_dispatch_receipt(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = str(Path(tmp) / "r.json")
-            out = issue_to_pr.write_dispatch_receipt(
-                req(
-                    {
-                        "receipt_path": path,
-                        "payload": {"phase": "CLAIMED", "issue": 1},
-                        "dry_run": False,
-                    }
-                )
-            )
-            self.assertTrue(out["ok"])
-            self.assertTrue(out["mutated"])
-            self.assertEqual(json.loads(Path(path).read_text())["phase"], "CLAIMED")
-
-    def test_run_omp_dry_run(self) -> None:
-        out = issue_to_pr.run_omp_worker(
-            req(
-                {
-                    "worktree_path": "/wt",
-                    "prompt": "fix it",
-                    "dry_run": True,
-                },
-                {"model": "omniroute/omp/default"},
-            )
-        )
-        self.assertEqual(out["status"], "planned")
-        self.assertFalse(out["mutated"])
-
-    def test_run_omp_uses_executor_command(self) -> None:
-        with mock.patch("lokay.steps.issue_to_pr.run_omp", return_value={"status": "planned", "prompt_len": 6}) as runner:
-            out = issue_to_pr.run_omp_worker(
-                req(
-                    {"worktree_path": "/wt", "prompt": "fix it", "dry_run": True},
-                    {"executor_command": "custom-omp", "model": "model"},
-                )
-            )
-        self.assertEqual(out["status"], "planned")
-        self.assertEqual(runner.call_args.kwargs["command"], "custom-omp")
-
-    def test_run_omp_success_and_failure(self) -> None:
-        def git_side_effect(cmd, cwd=None, **_kwargs):
-            if cmd[:2] == ["rev-parse", "--is-inside-work-tree"]:
-                return "true"
-            if cmd[:2] == ["rev-parse", "--show-toplevel"]:
-                return str(cwd)
-            if cmd[:2] == ["branch", "--show-current"]:
-                return "ai/fix/1"
-            raise AssertionError(cmd)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            wt = Path(tmp)
-            with mock.patch(
-                "lokay.steps.issue_to_pr.git", side_effect=git_side_effect
-            ), mock.patch(
-                "lokay.steps.issue_to_pr.rev_parse",
-                side_effect=["head-before", "base", "head-after"],
-            ), mock.patch(
-                "lokay.steps.issue_to_pr.run_omp",
-                return_value={
-                    "status": "completed",
-                    "returncode": 0,
-                    "stdout_tail": "ok",
-                },
-            ), mock.patch(
-                "lokay.steps.issue_to_pr._omp_diff_paths",
-                return_value=[],
-            ), mock.patch(
-                "lokay.steps.issue_to_pr._escaped_omp_paths",
-                return_value=[],
-            ):
-                ok_out = issue_to_pr.run_omp_worker(
-                    req(
-                        {
-                            "worktree_path": str(wt),
-                            "prompt": "fix",
-                            "branch": "ai/fix/1",
-                            "clone_path": str(wt),
-                            "dry_run": False,
-                        }
-                    )
-                )
-        self.assertTrue(ok_out["ok"])
-        self.assertEqual(ok_out["status"], "omp_finished")
-        self.assertTrue(ok_out["mutated"])
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch(
-                "lokay.steps.issue_to_pr.git", side_effect=git_side_effect
-            ), mock.patch(
-                "lokay.steps.issue_to_pr.rev_parse",
-                side_effect=["head-before", "base"],
-            ), mock.patch(
-                "lokay.steps.issue_to_pr.run_omp",
-                side_effect=CommandError(["omp"], 1, "", "oom"),
-            ):
-                bad = issue_to_pr.run_omp_worker(
-                    req(
-                        {
-                            "worktree_path": tmp,
-                            "prompt": "fix",
-                            "branch": "ai/fix/1",
-                            "dry_run": False,
-                        }
-                    )
-                )
-        self.assertFalse(bad["ok"])
-        self.assertEqual(bad["reason"], "omp_failed")
-
-    def test_create_fix_pr_task_success_and_failure(self) -> None:
-        # create: empty list first (no exists), then re-list with matching title+id
-        list_calls = {"n": 0}
-
-        def list_side_effect(*_a, **_k):
-            list_calls["n"] += 1
-            if list_calls["n"] == 1:
-                return []
-            return [
-                {
-                    "id": "t_fix_9",
-                    "title": "[fix-pr] o/r#9: x",
-                    "status": "ready",
-                }
-            ]
-
-        with mock.patch(
-            "lokay.steps.issue_to_pr.hermes_kanban_json",
-            side_effect=list_side_effect,
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.run_cmd",
-            return_value=SimpleNamespace(
-                stdout="Created task t_fix_9\n", stderr="", returncode=0
-            ),
-        ):
-            out = issue_to_pr.create_fix_pr_task(
-                req(
-                    {
-                        "board": "b",
-                        "repo": "o/r",
-                        "issue": 9,
-                        "title": "x",
-                        "dry_run": False,
-                    }
-                )
-            )
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["status"], "created")
-        self.assertTrue(out["mutated"])
-        self.assertEqual(out["task_id"], "t_fix_9")
-        with mock.patch(
-            "lokay.steps.issue_to_pr.hermes_kanban_json",
-            side_effect=CommandError(["hermes"], 1, "", "no board"),
-        ):
-            bad = issue_to_pr.create_fix_pr_task(
-                req({"board": "b", "repo": "o/r", "issue": 1, "dry_run": False})
-            )
-        self.assertEqual(bad["reason"], "kanban_list_failed")
-
-    def test_complete_kanban_task_paths(self) -> None:
-        dry = issue_to_pr.complete_kanban_task(
-            req({"board": "b", "task_id": "t1", "result": "done", "dry_run": True})
-        )
-        self.assertEqual(dry["status"], "planned")
-        with mock.patch(
-            "lokay.steps.issue_to_pr.hermes_kanban_json",
-            return_value=[{"id": "t1", "status": "ready"}],
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.run_cmd",
-            return_value=SimpleNamespace(stdout="", stderr="", returncode=0),
-        ):
-            ok_out = issue_to_pr.complete_kanban_task(
-                req({"board": "b", "task_id": "t1", "dry_run": False})
-            )
-        self.assertEqual(ok_out["status"], "completed")
-        self.assertTrue(ok_out["mutated"])
-        with mock.patch(
-            "lokay.steps.issue_to_pr.hermes_kanban_json",
-            return_value=[{"id": "t1", "status": "ready"}],
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.run_cmd",
-            side_effect=CommandError(["hermes"], 1, "", "gone"),
-        ):
-            bad = issue_to_pr.complete_kanban_task(
-                req({"board": "b", "task_id": "t1", "dry_run": False})
-            )
-        self.assertEqual(bad["reason"], "complete_failed")
-        miss = issue_to_pr.complete_kanban_task(req({"board": "b"}))
-        self.assertEqual(miss["reason"], "missing_board_or_task_id")
-
-    def test_complete_kanban_task_blocks_failed_dispatch_receipt(self) -> None:
-        out = issue_to_pr.complete_kanban_task(req({
-            "board": "b", "task_id": "t1", "dry_run": False,
-            "conduction": {"write_dispatch_receipt": {"status": "failed", "ok": False, "reason": "receipt_write_failed"}},
-        }))
+        self.assertEqual(noop["status"], "noop")
+        failed = {"status": "failed", "ok": False, "reason": "read_failed", "mutated": False}
+        out = issue_to_pr.select_dispatch_task(req({"conduction": {"read_dispatch_tasks": failed}}))
         self.assertEqual(out["reason"], "upstream_failed")
-        self.assertFalse(out["mutated"])
+        self.assertEqual(out["upstream"], failed)
+        self.assertEqual(out["upstream_effector"], "read_dispatch_tasks")
 
-    def test_refresh_clone_base_paths(self) -> None:
-        dry = issue_to_pr.refresh_clone_base(
-            req({"clone_path": "/c", "base_branch": "main", "dry_run": True})
+    def test_fix_task_creation_dry_chain(self) -> None:
+        found = {"status": "absent", "ok": True, "task": None, "marker": "fix-pr:o/r:9"}
+        out = issue_to_pr.create_fix_task(
+            req({"board": "b", "repo": "o/r", "issue": 9, "dry_run": True, "conduction": {"find_fix_task_marker": found}})
         )
-        self.assertEqual(dry["status"], "planned")
+        self.assertEqual(out["status"], "planned")
+        self.assertEqual(out["idempotency_key"], "fix-pr:o/r:9")
+
+    def test_completion_chain_dry_and_failed_predecessor(self) -> None:
+        read = {"status": "read", "ok": True, "task_id": "t1", "task": {"id": "t1", "status": "ready"}}
+        decision = issue_to_pr.decide_task_completion(req({"conduction": {"read_task_for_completion": read}}))
+        self.assertTrue(decision["should_complete"])
+        out = issue_to_pr.complete_task(req({"task_id": "t1", "board": "b", "dry_run": True, "conduction": {"decide_task_completion": decision}}))
+        self.assertEqual(out["status"], "planned")
+        failed = {"status": "failed", "ok": False, "reason": "decision_failed", "mutated": False}
+        blocked = issue_to_pr.complete_task(req({"board": "b", "task_id": "t1", "conduction": {"decide_task_completion": failed}}))
+        self.assertEqual(blocked["reason"], "upstream_failed")
+        self.assertFalse(blocked["mutated"])
+
+    def test_worktree_and_omp_dry_chain(self) -> None:
+        pre = {"status": "ready", "ok": True, "clone_path": "/clone", "base_branch": "main"}
+        fetched = issue_to_pr.fetch_clone_origin(req({"clone_path": "/clone", "dry_run": True, "conduction": {"read_clone_preconditions": pre}}))
+        self.assertEqual(fetched["status"], "planned")
+        omp_pre = {"status": "ready", "ok": True, "worktree_path": "/wt", "branch": "ai/fix/1", "pre_head": "abc"}
+        omp = issue_to_pr.invoke_omp(req({"worktree_path": "/wt", "prompt": "fix", "dry_run": True, "conduction": {"read_omp_preconditions": omp_pre}}))
+        self.assertEqual(omp["status"], "planned")
+
+    def test_push_pr_and_receipt_dry_chains(self) -> None:
+        push_read = {"status": "read", "ok": True, "worktree_path": "/wt", "branch": "ai/fix/1", "local_oid": "abc"}
+        pushed = issue_to_pr.push_branch(req({"worktree_path": "/wt", "branch": "ai/fix/1", "dry_run": True, "conduction": {"read_push_head": push_read}}))
+        self.assertEqual(pushed["status"], "planned")
+        pr_decision = {"status": "create", "ok": True, "should_create": True}
+        pr = issue_to_pr.create_pull_request(req({"repo": "o/r", "branch": "ai/fix/1", "dry_run": True, "conduction": {"decide_existing_pr": pr_decision}}))
+        self.assertEqual(pr["status"], "planned")
+        built = issue_to_pr.build_dispatch_receipt(req({"payload": {"phase": "CLAIMED"}}))
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, ".git").mkdir()
-            with mock.patch(
-                "lokay.steps.issue_to_pr.status_porcelain", return_value=""
-            ), mock.patch(
-                "lokay.steps.issue_to_pr.remote_url", return_value="origin"
-            ), mock.patch(
-                "lokay.steps.issue_to_pr.remote_ref", return_value="deadbeef"
-            ), mock.patch("lokay.steps.issue_to_pr.git"):
-                ok_out = issue_to_pr.refresh_clone_base(
-                    req({"clone_path": tmp, "base_branch": "main", "dry_run": False})
-                )
-            self.assertEqual(ok_out["status"], "refreshed")
-        with mock.patch(
-            "lokay.steps.issue_to_pr.status_porcelain", return_value=""
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.remote_url", return_value="origin"
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.git",
-            side_effect=CommandError(["git"], 1, "", "fetch fail"),
-        ):
-            with tempfile.TemporaryDirectory() as tmp:
-                Path(tmp, ".git").mkdir()
-                bad = issue_to_pr.refresh_clone_base(
-                    req({"clone_path": tmp, "dry_run": False})
-                )
-        self.assertEqual(bad["reason"], "refresh_clone_check_failed")
-
-    def test_prepare_worktree_paths(self) -> None:
-        dry = issue_to_pr.prepare_worktree(
-            req(
-                {
-                    "clone_path": "/c",
-                    "branch": "ai/fix/1-x",
-                    "worktree_root": "/wt",
-                    "dry_run": True,
-                }
-            )
-        )
-        self.assertEqual(dry["status"], "planned")
-        self.assertIn("worktree_path", dry)
-        with mock.patch(
-            "lokay.steps.issue_to_pr.status_porcelain", return_value=""
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.remote_url", return_value="origin"
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.remote_ref", return_value="deadbeef"
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.worktree_list", return_value=""
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.branch_exists", return_value=False
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.git"
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.worktree_add"
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.branch_config_set"
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.rev_parse", return_value="deadbeef"
-        ):
-            with tempfile.TemporaryDirectory() as tmp:
-                Path(tmp, ".git").mkdir()
-                out = issue_to_pr.prepare_worktree(
-                    req(
-                        {
-                            "clone_path": tmp,
-                            "branch": "ai/fix/1-x",
-                            "receipt_path": "/tmp/dispatch-1.json",
-                            "worktree_root": str(Path(tmp) / "wts"),
-                            "base_branch": "main",
-                            "dry_run": False,
-                            "conduction": {
-                                "dispatch_parse_issue_ref": {"task_id": "task-1", "issue": "1", "repo": "owner/repo", "branch": "ai/fix/1-x"},
-                                "dispatch_write_dispatch_receipt": {"receipt_path": "/tmp/dispatch-1.json"},
-                            },
-                        }
-                    )
-                )
-        self.assertEqual(out["status"], "prepared")
-        self.assertEqual(out["head"], "deadbeef")
-        with mock.patch(
-            "lokay.steps.issue_to_pr.status_porcelain", return_value=""
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.remote_url", return_value="origin"
-        ), mock.patch(
-            "lokay.steps.issue_to_pr.git",
-            side_effect=CommandError(["git"], 1, "", "no base"),
-        ):
-            with tempfile.TemporaryDirectory() as tmp:
-                Path(tmp, ".git").mkdir()
-                bad = issue_to_pr.prepare_worktree(
-                    req(
-                        {
-                            "clone_path": tmp,
-                            "branch": "ai/fix/1-x",
-                            "receipt_path": "/tmp/dispatch-1.json",
-                            "worktree_root": str(Path(tmp) / "wts"),
-                            "base_branch": "main",
-                            "dry_run": False,
-                            "conduction": {
-                                "dispatch_parse_issue_ref": {"task_id": "task-1", "issue": "1", "repo": "owner/repo", "branch": "ai/fix/1-x"},
-                                "dispatch_write_dispatch_receipt": {"receipt_path": "/tmp/dispatch-1.json"},
-                            },
-                        }
-                    )
-                )
-        self.assertEqual(bad["reason"], "clone_ref_check_failed")
-
-    def test_open_pull_request_success_structured_and_failure(self) -> None:
-        def fake_run(cmd, **kwargs):
-            if "create" in cmd:
-                return SimpleNamespace(
-                    stdout="https://github.com/o/r/pull/42\n",
-                    stderr="",
-                    returncode=0,
-                )
-            if "list" in cmd:
-                return SimpleNamespace(
-                    stdout=json.dumps([{"number": 42, "url": "https://github.com/o/r/pull/42"}]),
-                    stderr="",
-                    returncode=0,
-                )
-            return SimpleNamespace(stdout="[]", stderr="", returncode=0)
-
-        with mock.patch("lokay.steps.issue_to_pr.run_cmd", side_effect=fake_run):
-            # first list empty then create then list with number
-            calls = {"n": 0}
-
-            def side_effect(cmd, **kwargs):
-                calls["n"] += 1
-                if cmd[1] == "pr" and cmd[2] == "list" and calls["n"] == 1:
-                    return SimpleNamespace(stdout="[]", stderr="", returncode=0)
-                if cmd[1] == "pr" and cmd[2] == "create":
-                    return SimpleNamespace(
-                        stdout="https://github.com/o/r/pull/42\n",
-                        stderr="",
-                        returncode=0,
-                    )
-                if cmd[1] == "pr" and cmd[2] == "list":
-                    return SimpleNamespace(
-                        stdout=json.dumps(
-                            [{"number": 42, "url": "https://github.com/o/r/pull/42"}]
-                        ),
-                        stderr="",
-                        returncode=0,
-                    )
-                raise AssertionError(cmd)
-
-            with mock.patch(
-                "lokay.steps.issue_to_pr.run_cmd", side_effect=side_effect
-            ):
-                out = issue_to_pr.open_pull_request(
-                    req(
-                        {
-                            "repo": "o/r",
-                            "branch": "ai/fix/1-x",
-                            "title": "t",
-                            "dry_run": False,
-                        }
-                    )
-                )
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["status"], "created")
-        self.assertEqual(out["number"], 42)
-        self.assertIn("pull/42", out["url"])
-        with mock.patch(
-            "lokay.steps.issue_to_pr.run_cmd",
-            side_effect=CommandError(["gh"], 1, "", "denied"),
-        ):
-            bad = issue_to_pr.open_pull_request(
-                req({"repo": "o/r", "branch": "ai/fix/1", "dry_run": False})
-            )
-        self.assertEqual(bad["reason"], "pr_create_failed")
-
-    def test_apply_pr_labels_paths(self) -> None:
-        dry = issue_to_pr.apply_pr_labels(
-            req({"repo": "o/r", "number": 3, "labels": ["ai:generated"], "dry_run": True})
-        )
-        self.assertEqual(dry["status"], "planned")
-        with mock.patch(
-            "lokay.steps.issue_to_pr.run_cmd",
-            return_value=SimpleNamespace(stdout="", stderr="", returncode=0),
-        ):
-            ok_out = issue_to_pr.apply_pr_labels(
-                req(
-                    {
-                        "repo": "o/r",
-                        "number": 3,
-                        "labels": ["ai:generated"],
-                        "dry_run": False,
-                    }
-                )
-            )
-        self.assertEqual(ok_out["status"], "labeled")
-        with mock.patch(
-            "lokay.steps.issue_to_pr.run_cmd",
-            side_effect=CommandError(["gh"], 1, "", "no label"),
-        ):
-            bad = issue_to_pr.apply_pr_labels(
-                req(
-                    {
-                        "repo": "o/r",
-                        "number": 3,
-                        "labels": ["missing"],
-                        "dry_run": False,
-                    }
-                )
-            )
-        self.assertEqual(bad["reason"], "all_labels_failed")
-
-    def test_check_worktree_dirty_and_list_and_push(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            miss = issue_to_pr.check_worktree_dirty(
-                req({"worktree_path": str(Path(tmp) / "nope")})
-            )
-            self.assertEqual(miss["reason"], "worktree_missing")
-            Path(tmp, "f").write_text("x")
-            with mock.patch(
-                "lokay.steps.issue_to_pr.is_dirty", return_value=True
-            ):
-                dirty = issue_to_pr.check_worktree_dirty(
-                    req({"worktree_path": tmp})
-                )
-            self.assertTrue(dirty["dirty"])
-        with mock.patch(
-            "lokay.steps.issue_to_pr.worktree_list",
-            return_value="worktree /c\nHEAD abc\nbranch refs/heads/main\n\n"
-            "worktree /c/wts/ai-fix-1\nHEAD def\nbranch refs/heads/ai/fix/1\n",
-        ):
-            listed = issue_to_pr.list_controlled_worktrees(
-                req({"clone_path": "/c", "worktree_root": "/c/wts"})
-            )
-        self.assertEqual(listed["status"], "listed")
-        self.assertEqual(listed["count"], 1)
-        dry = issue_to_pr.push_branch(
-            req({"worktree_path": "/wt", "branch": "ai/fix/1", "dry_run": True})
-        )
-        self.assertEqual(dry["status"], "planned")
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch(
-                "lokay.steps.issue_to_pr.rev_parse", return_value="abc123"
-            ), mock.patch(
-                "lokay.steps.issue_to_pr.git_push_branch", return_value="pushed"
-            ), mock.patch(
-                "lokay.steps.issue_to_pr.git",
-                return_value="abc123\trefs/heads/ai/fix/1",
-            ):
-                pushed = issue_to_pr.push_branch(
-                    req(
-                        {
-                            "worktree_path": tmp,
-                            "branch": "ai/fix/1",
-                            "dry_run": False,
-                        }
-                    )
-                )
-            self.assertEqual(pushed["status"], "pushed")
-            self.assertTrue(pushed["mutated"])
-            with mock.patch(
-                "lokay.steps.issue_to_pr.rev_parse", return_value="abc123"
-            ), mock.patch(
-                "lokay.steps.issue_to_pr.git_push_branch",
-                side_effect=CommandError(["git"], 1, "", "rejected"),
-            ):
-                bad = issue_to_pr.push_branch(
-                    req({"worktree_path": tmp, "branch": "b", "dry_run": False})
-                )
-            self.assertEqual(bad["reason"], "push_failed")
-
-    def test_apply_issue_labels_paths(self) -> None:
-        dry = issue_to_pr.apply_issue_labels(
-            req(
-                {
-                    "repo": "o/r",
-                    "issue": 1,
-                    "labels": ["ai:blocked"],
-                    "dry_run": True,
-                }
-            )
-        )
-        self.assertEqual(dry["status"], "planned")
-        with mock.patch(
-            "lokay.steps.issue_to_pr.run_cmd",
-            return_value=SimpleNamespace(stdout="", stderr="", returncode=0),
-        ):
-            ok_out = issue_to_pr.apply_issue_labels(
-                req(
-                    {
-                        "repo": "o/r",
-                        "issue": 1,
-                        "labels": ["ai:in-progress"],
-                        "dry_run": False,
-                    }
-                )
-            )
-        self.assertEqual(ok_out["status"], "labeled")
-        miss = issue_to_pr.apply_issue_labels(req({"repo": "o/r", "issue": 1}))
-        self.assertEqual(miss["reason"], "missing_labels")
-
-
-class TriageTests(unittest.TestCase):
-    def test_evaluate_checks_pass_and_fail(self) -> None:
-        good = triage.evaluate_checks(
-            req(
-                {
-                    "pr": {
-                        "statusCheckRollup": [
-                            {"name": "ci", "conclusion": "SUCCESS", "state": "SUCCESS"}
-                        ]
-                    }
-                }
-            )
-        )
-        self.assertTrue(good["pass_"])
-        bad = triage.evaluate_checks(
-            req(
-                {
-                    "pr": {
-                        "statusCheckRollup": [
-                            {"name": "ci", "conclusion": "FAILURE", "state": "FAILURE"}
-                        ]
-                    }
-                }
-            )
-        )
-        self.assertFalse(bad["pass_"])
-        self.assertEqual(bad["status"], "checks_failed")
-
-    def test_evaluate_test_evidence(self) -> None:
-        miss = triage.evaluate_test_evidence(
-            req({"pr": {"body": "no plan"}, "require_test_evidence": True})
-        )
-        self.assertFalse(miss["pass_"])
-        hit = triage.evaluate_test_evidence(
-            req({"pr": {"body": "Test plan: ran pytest"}, "require_test_evidence": True})
-        )
-        self.assertTrue(hit["pass_"])
-
-    def test_decide_triage_action_routes(self) -> None:
-        merge = triage.decide_triage_action(
-            req(
-                {
-                    "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "labels": [], "author": {"login": "o"}},
-                    "checks_pass": True,
-                    "evidence_pass": True,
-                    "automerge": True,
-                }
-            )
-        )
-        self.assertEqual(merge["action"], "merge")
-        repair = triage.decide_triage_action(
-            req(
-                {
-                    "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "labels": [], "author": {"login": "o"}},
-                    "checks_pass": False,
-                    "evidence_pass": True,
-                    "automerge": True,
-                }
-            )
-        )
-        self.assertEqual(repair["action"], "repair")
-        block = triage.decide_triage_action(
-            req(
-                {
-                    "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "labels": [], "author": {"login": "o"}},
-                    "checks_pass": True,
-                    "evidence_pass": False,
-                    "automerge": True,
-                }
-            )
-        )
-        self.assertEqual(block["action"], "comment_block")
-
-    def test_comment_pr_dry_run_success_failure(self) -> None:
-        dry = triage.comment_pr_once(triage_req("comment_block", {
-            "repo": "o/r",
-            "number": 5,
-            "body": "blocked: missing tests",
-            "dry_run": True,
-        }))
-        self.assertEqual(dry["status"], "planned")
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=[
-                SimpleNamespace(stdout=json.dumps({"comments": []}), stderr="", returncode=0),
-                SimpleNamespace(stdout="", stderr="", returncode=0),
-                SimpleNamespace(stdout=json.dumps({"comments": [{"body": "blocked\n\n<!-- lokay:o/r:5:triage -->"}]}), stderr="", returncode=0),
-            ],
-        ):
-            ok_out = triage.comment_pr_once(triage_req("comment_block", {
-                "repo": "o/r",
-                "number": 5,
-                "body": "blocked",
-                "dry_run": False,
-            }))
-        self.assertEqual(ok_out["status"], "commented")
-        self.assertTrue(ok_out["mutated"])
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=CommandError(["gh"], 1, "", "fail"),
-        ):
-            bad = triage.comment_pr_once(triage_req("comment_block", {"repo": "o/r", "number": 5, "body": "x", "dry_run": False}))
-        self.assertEqual(bad["reason"], "comment_read_failed")
-
-    def test_merge_success_and_failure(self) -> None:
-        dry = triage.merge_pull_request(triage_req("merge", {
-            "repo": "o/r",
-            "number": 5,
-            "head_oid": "abc",
-            "dry_run": True,
-        }))
-        self.assertEqual(dry["status"], "planned")
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=[
-                SimpleNamespace(stdout=json.dumps({"state": "OPEN", "headRefOid": "abc"}), stderr="", returncode=0),
-                SimpleNamespace(stdout="", stderr="", returncode=0),
-                SimpleNamespace(stdout=json.dumps({"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z", "headRefOid": "abc", "headRefName": "ai/fix/5-x", "mergeCommit": {"oid": "merge-1"}}), stderr="", returncode=0),
-            ],
-        ):
-            ok_out = triage.merge_pull_request(triage_req("merge", {
-                "repo": "o/r",
-                "number": 5,
-                "head_oid": "abc",
-                "dry_run": False,
-            }))
-        self.assertEqual(ok_out["status"], "merged")
-        self.assertTrue(ok_out["mutated"])
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=[
-                SimpleNamespace(stdout=json.dumps({"state": "OPEN", "headRefOid": "abc"}), stderr="", returncode=0),
-                CommandError(["gh"], 1, "", "not mergeable"),
-                SimpleNamespace(stdout="", stderr="", returncode=0),
-            ],
-        ):
-            bad = triage.merge_pull_request(triage_req("merge", {"repo": "o/r", "number": 5, "head_oid": "abc", "dry_run": False}))
-        self.assertEqual(bad["reason"], "merge_failed")
-
-    def test_list_ai_fix_prs_and_load_pr_fields(self) -> None:
-        prs = [
-            {
-                "number": 1,
-                "headRefName": "ai/fix/1-x",
-                "title": "t",
-                "url": "u",
-                "author": {"login": "m"},
-                "labels": [],
-            },
-            {
-                "number": 2,
-                "headRefName": "feature/other",
-                "title": "t2",
-                "url": "u2",
-                "author": {"login": "m"},
-                "labels": [],
-            },
-        ]
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            return_value=SimpleNamespace(
-                stdout=json.dumps(prs), stderr="", returncode=0
-            ),
-        ):
-            listed = triage.list_ai_fix_prs(req({"repo": "o/r"}))
-        self.assertEqual(listed["count"], 1)
-        self.assertEqual(listed["prs"][0]["number"], 1)
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=[
-                SimpleNamespace(stdout="[]", stderr="", returncode=0),
-                SimpleNamespace(stdout=json.dumps([{"number": 7, "headRefName": "ai/fix/7-x"}]), stderr="", returncode=0),
-            ],
-        ):
-            multi = triage.list_ai_fix_prs(req({"repos": [{"repo": "o/first"}, {"repo": "o/second"}]}))
-        self.assertEqual(multi["repo"], "o/second")
-        self.assertEqual(multi["prs"][0]["repo"], "o/second")
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            return_value=SimpleNamespace(stdout=json.dumps({"number": 7, "title": "t", "state": "OPEN"}), stderr="", returncode=0),
-        ) as view:
-            loaded_multi = triage.load_pr_fields(req({"conduction": {"triage_list_ai_fix_prs": multi}}))
-        self.assertEqual(loaded_multi["repo"], "o/second")
-        self.assertIn("o/second", view.call_args.args[0])
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            return_value=SimpleNamespace(
-                stdout=json.dumps({"number": 9, "title": "t", "state": "OPEN"}),
-                stderr="",
-                returncode=0,
-            ),
-        ):
-            loaded = triage.load_pr_fields(
-                req({"repo": "o/r", "number": 9})
-            )
-        self.assertEqual(loaded["status"], "loaded")
-        self.assertEqual(loaded["pr"]["number"], 9)
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=CommandError(["gh"], 1, "", "404"),
-        ):
-            bad = triage.load_pr_fields(req({"repo": "o/r", "number": 9}))
-        self.assertEqual(bad["reason"], "pr_view_failed")
-
-    def test_claim_pr_close_issue_merge_receipt(self) -> None:
-        dry = triage.claim_pr_assignee(triage_req("merge", {"repo": "o/r", "number": 3, "dry_run": True}, {"assignee": "me"}))
-        self.assertEqual(dry["status"], "planned")
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=[
-                SimpleNamespace(stdout=json.dumps({"assignees": []}), stderr="", returncode=0),
-                SimpleNamespace(stdout="", stderr="", returncode=0),
-                SimpleNamespace(stdout=json.dumps({"assignees": [{"login": "me"}]}), stderr="", returncode=0),
-            ],
-        ):
-            claimed = triage.claim_pr_assignee(triage_req("merge", {"repo": "o/r", "number": 3, "dry_run": False}, {"assignee": "me"}))
-        self.assertEqual(claimed["status"], "claimed")
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=[
-                SimpleNamespace(stdout=json.dumps({"assignees": []}), stderr="", returncode=0),
-                CommandError(["gh"], 1, "", "nope"),
-            ],
-        ):
-            bad_claim = triage.claim_pr_assignee(triage_req("merge", {"repo": "o/r", "number": 3, "dry_run": False}))
-        self.assertEqual(bad_claim["reason"], "claim_failed")
-
-        provenance = {
-            "source": "github_pr_readback", "state": "MERGED", "repo": "o/r", "number": 7,
-            "head_oid": "head-7", "head_ref": "ai/fix/7-x", "merge_oid": "merge-7", "merged_at": "2026-01-01T00:00:00Z",
-        }
-        dry_c = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 7, "dry_run": True}))
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=[
-                SimpleNamespace(stdout=json.dumps({"state": "MERGED", "mergedAt": provenance["merged_at"], "headRefOid": provenance["head_oid"], "headRefName": provenance["head_ref"], "mergeCommit": {"oid": provenance["merge_oid"]}}), stderr="", returncode=0),
-                SimpleNamespace(stdout=json.dumps({"state": "OPEN"}), stderr="", returncode=0),
-                SimpleNamespace(stdout="", stderr="", returncode=0),
-                SimpleNamespace(stdout=json.dumps({"state": "CLOSED"}), stderr="", returncode=0),
-            ],
-        ):
-            closed = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 7, "dry_run": False, "verified_provenance": provenance}))
-        self.assertEqual(closed["status"], "closed")
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=[
-                SimpleNamespace(stdout=json.dumps({"state": "MERGED", "mergedAt": provenance["merged_at"], "headRefOid": provenance["head_oid"], "headRefName": provenance["head_ref"], "mergeCommit": {"oid": provenance["merge_oid"]}}), stderr="", returncode=0),
-                SimpleNamespace(stdout=json.dumps({"state": "OPEN"}), stderr="", returncode=0),
-                CommandError(["gh"], 1, "", "x"),
-                SimpleNamespace(stdout=json.dumps({"state": "OPEN"}), stderr="", returncode=0),
-            ],
-        ):
-            bad_close = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 7, "dry_run": False, "verified_provenance": provenance}))
-        self.assertEqual(bad_close["reason"], "close_failed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            path = str(Path(tmp) / "merge.json")
-            with mock.patch(
-                "lokay.steps.triage.run_cmd",
-                return_value=SimpleNamespace(
-                    stdout=json.dumps({"state": "MERGED", "mergedAt": provenance["merged_at"], "headRefOid": provenance["head_oid"], "headRefName": provenance["head_ref"], "mergeCommit": {"oid": provenance["merge_oid"]}}),
-                    stderr="",
-                    returncode=0,
-                ),
-            ):
-                written = triage.write_merge_receipt(
-                    req(
-                        {
-                            "receipt_path": path,
-                            "payload": {"repo": "o/r", "pr": 7, "phase": "MERGED"},
-                            "verified_provenance": provenance,
-                            "dry_run": False,
-                        }
-                    )
-                )
-            self.assertEqual(written["status"], "written")
-            self.assertEqual(json.loads(Path(path).read_text())["phase"], "MERGED")
-    def test_merge_preconditions_and_provenance_fail_closed(self) -> None:
-        base = {"repo": "o/r", "number": 4, "head_oid": "head-4", "dry_run": False}
-        for view, expected in (
-            ({"state": "OPEN", "headRefOid": "other"}, "merge_head_mismatch"),
-            ({"state": "CLOSED", "headRefOid": "head-4"}, "merge_precondition_failed"),
-            ({"state": "OPEN", "headRefOid": "head-4"}, "merge_precondition_read_failed"),
-        ):
-            with self.subTest(expected=expected):
-                stdout = "" if expected.endswith("read_failed") else json.dumps(view)
-                with mock.patch(
-                    "lokay.steps.triage.run_cmd",
-                    return_value=SimpleNamespace(stdout=stdout, stderr="", returncode=0),
-                ):
-                    out = triage.merge_pull_request(triage_req("merge", base))
-                self.assertEqual(out["reason"], expected)
-        already = {
-            "state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z", "headRefOid": "head-4",
-            "headRefName": "ai/fix/4-x", "mergeCommit": {"oid": "merge-4"},
-        }
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            return_value=SimpleNamespace(stdout=json.dumps(already), stderr="", returncode=0),
-        ):
-            out = triage.merge_pull_request(triage_req("merge", base))
-        self.assertEqual(out["status"], "already_merged")
-        self.assertFalse(out["mutated"])
-        for provenance in ({}, {"source": "forged", "repo": "o/r", "number": 4}):
-            with self.subTest(provenance=provenance):
-                out = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 4, "dry_run": False, "verified_provenance": provenance}))
-                self.assertEqual(out["reason"], "merge_provenance_unverified")
-        valid = {
-            "source": "github_pr_readback", "state": "MERGED", "repo": "o/r", "number": 4,
-            "head_oid": "head-4", "head_ref": "ai/fix/4-x", "merge_oid": "merge-4", "merged_at": "2026-01-01T00:00:00Z",
-        }
-        mismatched = dict(valid, merge_oid="forged-merge")
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            return_value=SimpleNamespace(stdout=json.dumps(already), stderr="", returncode=0),
-        ):
-            out = triage.close_linked_issue(triage_req("merge", {"repo": "o/r", "issue": 4, "dry_run": False, "verified_provenance": mismatched}))
-        self.assertEqual(out["reason"], "merge_provenance_unverified")
-    def test_assignee_post_readback_absent_and_already_claimed(self) -> None:
-        base = {"repo": "o/r", "number": 4, "assignee": "agent", "dry_run": False}
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=[
-                SimpleNamespace(stdout=json.dumps({"assignees": []}), stderr="", returncode=0),
-                SimpleNamespace(stdout="", stderr="", returncode=0),
-                SimpleNamespace(stdout=json.dumps({"assignees": []}), stderr="", returncode=0),
-            ],
-        ):
-            out = triage.claim_pr_assignee(triage_req("merge", base))
-        self.assertEqual(out["reason"], "assignee_readback_mismatch")
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            return_value=SimpleNamespace(stdout=json.dumps({"assignees": [{"login": "agent"}]}), stderr="", returncode=0),
-        ):
-            out = triage.claim_pr_assignee(triage_req("merge", base))
-        self.assertEqual(out["status"], "already_claimed")
-
-    def test_comment_post_readback_absent_and_marker_idempotency(self) -> None:
-        marker = "<!-- lokay:o/r:4:triage -->"
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            side_effect=[
-                SimpleNamespace(stdout=json.dumps({"comments": []}), stderr="", returncode=0),
-                SimpleNamespace(stdout="", stderr="", returncode=0),
-                SimpleNamespace(stdout=json.dumps({"comments": []}), stderr="", returncode=0),
-            ],
-        ):
-            out = triage.comment_pr_once(triage_req("comment_block", {"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False}))
-        self.assertEqual(out["reason"], "comment_readback_mismatch")
-        with mock.patch(
-            "lokay.steps.triage.run_cmd",
-            return_value=SimpleNamespace(stdout=json.dumps({"comments": [{"body": f"blocked\\n\\n{marker}"}]}), stderr="", returncode=0),
-        ):
-            out = triage.comment_pr_once(triage_req("comment_block", {"repo": "o/r", "number": 4, "body": "blocked", "dry_run": False}))
-        self.assertTrue(out["reconciled"])
-
-    def test_assignee_and_comment_blank_or_malformed_readback_fail_closed(self) -> None:
-        for handler, payload, reason in (
-            (triage.claim_pr_assignee, "", "assignee_read_failed"),
-            (triage.claim_pr_assignee, "not-json", "assignee_read_failed"),
-            (triage.comment_pr_once, "", "comment_read_failed"),
-            (triage.comment_pr_once, "not-json", "comment_read_failed"),
-        ):
-            with self.subTest(handler=handler.__name__, payload=payload):
-                with mock.patch(
-                    "lokay.steps.triage.run_cmd",
-                    return_value=SimpleNamespace(stdout=payload, stderr="", returncode=0),
-                ):
-                    data = {"repo": "o/r", "number": 4, "dry_run": False}
-                    if handler is triage.claim_pr_assignee:
-                        data["assignee"] = "agent"
-                    else:
-                        data["body"] = "blocked"
-                    action = "merge" if handler is triage.claim_pr_assignee else "comment_block"
-                    out = handler(triage_req(action, data))
-                self.assertEqual(out["reason"], reason)
-        dry_r = triage.write_merge_receipt(
-            req({"receipt_path": "/tmp/x", "payload": {}, "dry_run": True})
-        )
-        self.assertEqual(dry_r["status"], "planned")
-        miss = triage.write_merge_receipt(req({"payload": {}}))
-        self.assertEqual(miss["reason"], "missing_receipt_path")
+            path = str(Path(tmp) / "receipt.json")
+            published = issue_to_pr.publish_dispatch_receipt(req({"receipt_path": path, "dry_run": False, "conduction": {"build_dispatch_receipt": built}}))
+            verified = issue_to_pr.verify_dispatch_receipt(req({"receipt_path": path, "dry_run": False, "conduction": {"publish_dispatch_receipt": published, "build_dispatch_receipt": built}}))
+            self.assertEqual(published["status"], "published")
+            self.assertEqual(verified["status"], "verified")
 
 
 class RepairTests(unittest.TestCase):
     def test_build_repair_prompt(self) -> None:
-        out = repair.build_repair_prompt(
-            req(
-                {
-                    "pr": {"number": 8, "title": "fix"},
-                    "failures": ["ci"],
-                    "reason": "checks_failed",
-                }
-            )
-        )
+        out = repair.build_repair_prompt(req({"pr": {"number": 8, "title": "fix"}, "failures": ["ci"], "reason": "checks_failed"}))
         self.assertTrue(out["ok"])
         self.assertIn("PR #8", out["prompt"])
         self.assertIn("ci", out["prompt"])
 
-    def test_create_review_fix_task_dry(self) -> None:
-        out = repair.create_review_fix_task(
-            req(
-                {
-                    "board": "b",
-                    "repo": "o/r",
-                    "number": 2,
-                    "reason": "conflict",
-                    "dry_run": True,
-                }
-            )
-        )
+    def test_review_task_dry_chain(self) -> None:
+        found = {"status": "absent", "ok": True, "task": None, "marker": "fix-pr-review:o/r:2"}
+        out = repair.create_review_task(req({"board": "b", "repo": "o/r", "number": 2, "reason": "conflict", "dry_run": True, "conduction": {"find_review_marker": found}}))
         self.assertEqual(out["status"], "planned")
-        self.assertIn("[fix-pr-review]", out["title"])
+        self.assertEqual(out["idempotency_key"], "fix-pr-review:o/r:2")
 
-    def test_create_review_fix_task_success_returns_task_id(self) -> None:
-        title = "[fix-pr-review] o/r#2: conflict"
-        marker = "fix-pr-review:o/r:2"
-        body = (
-            "Repository: o/r\nPR: #2\nReason: conflict\n"
-            f"Idempotency-Key: {marker}\n"
-        )
-        list_calls = {"n": 0}
+    def test_block_task_dry_chain_and_failure_gate(self) -> None:
+        read = {"status": "read", "ok": True, "task_id": "t1", "task": {"id": "t1", "status": "ready"}}
+        decision = repair.decide_task_block(req({"conduction": {"read_task_for_block": read}}))
+        self.assertTrue(decision["should_block"])
+        out = repair.block_task(req({"board": "b", "task_id": "t1", "dry_run": True, "conduction": {"decide_task_block": decision}}))
+        self.assertEqual(out["status"], "planned")
+        failed = {"status": "failed", "ok": False, "reason": "read_failed", "mutated": False}
+        blocked = repair.block_task(req({"board": "b", "task_id": "t1", "conduction": {"decide_task_block": failed}}))
+        self.assertEqual(blocked["reason"], "upstream_failed")
+        self.assertFalse(blocked["mutated"])
 
-        def list_side_effect(*_a, **_k):
-            list_calls["n"] += 1
-            if list_calls["n"] == 1:
-                return []
-            return [
-                {
-                    "id": "t_rev_2",
-                    "title": title,
-                    "status": "ready",
-                    "body": body,
-                }
-            ]
 
-        with mock.patch(
-            "lokay.steps.repair.hermes_kanban_json", side_effect=list_side_effect
-        ), mock.patch(
-            "lokay.steps.repair.run_cmd",
-            return_value=SimpleNamespace(
-                stdout="Created t_rev_2\n", stderr="", returncode=0
-            ),
-        ):
-            out = repair.create_review_fix_task(
-                req(
-                    {
-                        "board": "b",
-                        "repo": "o/r",
-                        "number": 2,
-                        "reason": "conflict",
-                        "dry_run": False,
-                    }
-                )
-            )
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["status"], "created")
-        self.assertEqual(out["task_id"], "t_rev_2")
-        self.assertTrue(out["mutated"])
+class TriageTests(unittest.TestCase):
+    def test_evaluate_checks_pass_and_fail(self) -> None:
+        good = triage.evaluate_checks(req({"pr": {"statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS", "state": "SUCCESS"}]}}))
+        self.assertTrue(good["pass_"])
+        bad = triage.evaluate_checks(req({"pr": {"statusCheckRollup": [{"name": "ci", "conclusion": "FAILURE", "state": "FAILURE"}]}}))
+        self.assertFalse(bad["pass_"])
+        self.assertEqual(bad["status"], "checks_failed")
 
-    def test_block_kanban_task_paths(self) -> None:
-        dry = repair.block_kanban_task(
-            req({"board": "b", "task_id": "t1", "reason": "stuck", "dry_run": True})
-        )
-        self.assertEqual(dry["status"], "planned")
-        with mock.patch(
-            "lokay.steps.repair.hermes_kanban_json",
-            side_effect=[
-                [{"id": "t1", "status": "ready"}],
-                [{"id": "t1", "status": "blocked"}],
-            ],
-        ), mock.patch(
-            "lokay.steps.repair.run_cmd",
-            return_value=SimpleNamespace(stdout="", stderr="", returncode=0),
-        ):
-            ok_out = repair.block_kanban_task(
-                req(
-                    {
-                        "board": "b",
-                        "task_id": "t1",
-                        "reason": "stuck",
-                        "dry_run": False,
-                    }
-                )
-            )
-        self.assertEqual(ok_out["status"], "blocked")
-        self.assertTrue(ok_out["mutated"])
-        with mock.patch(
-            "lokay.steps.repair.hermes_kanban_json",
-            side_effect=[
-                [{"id": "t1", "status": "ready"}],
-                [{"id": "t1", "status": "ready"}],
-            ],
-        ), mock.patch(
-            "lokay.steps.repair.run_cmd",
-            side_effect=CommandError(["hermes"], 1, "", "no"),
-        ):
-            bad = repair.block_kanban_task(
-                req({"board": "b", "task_id": "t1", "dry_run": False})
-            )
-        self.assertEqual(bad["reason"], "block_failed")
-        miss = repair.block_kanban_task(req({"board": "b"}))
-        self.assertEqual(miss["reason"], "missing_board_or_task_id")
+    def test_evaluate_test_evidence(self) -> None:
+        miss = triage.evaluate_test_evidence(req({"pr": {"body": "no plan"}, "require_test_evidence": True}))
+        self.assertFalse(miss["pass_"])
+        hit = triage.evaluate_test_evidence(req({"pr": {"body": "Test plan: ran pytest"}, "require_test_evidence": True}))
+        self.assertTrue(hit["pass_"])
+
+    def test_decide_triage_action_routes(self) -> None:
+        base = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "labels": [], "author": {"login": "o"}}, "checks_pass": True, "evidence_pass": True, "automerge": True}
+        self.assertEqual(triage.decide_triage_action(req(base))["action"], "merge")
+        self.assertEqual(triage.decide_triage_action(req({**base, "checks_pass": False}))["action"], "repair")
+        self.assertEqual(triage.decide_triage_action(req({**base, "evidence_pass": False}))["action"], "comment_block")
+
+    def test_canonical_comment_chain_dry_run(self) -> None:
+        decision = {"status": "decided", "ok": True, "action": "comment_block"}
+        read = {"status": "comments_read", "ok": True, "comments": [], "repo": "o/r", "number": 5}
+        request = req({"repo": "o/r", "number": 5, "body": "blocked", "dry_run": True, "conduction": {"decide_triage_action": decision, "read_pr_comments": read}})
+        selected = triage.decide_pr_comment(request)
+        self.assertEqual(selected["status"], "comment_selected")
+        posted = triage.post_pr_comment(req({**request["input"], "conduction": {"decide_triage_action": decision, "read_pr_comments": read, "decide_pr_comment": selected}}))
+        self.assertEqual(posted["status"], "planned")
+
+    def test_canonical_merge_chain_and_branch_gate(self) -> None:
+        decision = {"status": "decided", "ok": True, "action": "merge"}
+        pre = {"status": "merge_preconditions_read", "ok": True, "repo": "o/r", "number": 5, "head_oid": "abc"}
+        request = req({"repo": "o/r", "number": 5, "head_oid": "abc", "dry_run": True, "conduction": {"decide_triage_action": decision, "read_merge_preconditions": pre}})
+        merged = triage.merge_pr(request)
+        self.assertEqual(merged["status"], "planned")
+        blocked = triage.merge_pr(req({"repo": "o/r", "number": 5, "head_oid": "abc", "conduction": {"decide_triage_action": {"status": "decided", "ok": True, "action": "comment_block"}, "read_merge_preconditions": pre}}))
+        self.assertEqual(blocked["reason"], "not_selected")
+
+    def test_terminal_decision_attribution_is_exact(self) -> None:
+        peer = {"status": "failed", "ok": False, "reason": "invalid_pr", "failure_class": "terminal"}
+        out = triage.merge_pr(req({"repo": "o/r", "number": 3, "head_oid": "abc", "conduction": {"decide_triage_action": peer}}))
+        self.assertEqual(out["reason"], "upstream_failed")
+        self.assertEqual(out["upstream_effector"], "decide_triage_action")
+        self.assertEqual(out["upstream"], peer)
+
+
 
 
 class CleanupTests(unittest.TestCase):
-    def test_parse_issue_from_branch(self) -> None:
-        out = cleanup.parse_issue_from_branch(
-            req({"branch": "ai/fix/17-fix-login"})
-        )
-        self.assertEqual(out["issue"], 17)
-        conducted = cleanup.parse_issue_from_branch(
-            {"input": {"conduction": {"repair_push_branch": {"branch": "ai/fix/18-fix-session"}}}, "config": {}}
-        )
-        self.assertEqual(conducted["issue"], 18)
-        merged = cleanup.parse_issue_from_branch({
-            "input": {"conduction": {
-                "triage_close_linked_issue": {
-                    "repo": "o/r",
-                    "verified_provenance": {"head_ref": "ai/fix/19-fix-cleanup"},
-                },
-                "triage_load_pr_fields": {"pr": {"headRefName": "ai/fix/19-fix-cleanup"}},
-            }},
-            "config": {"repos": [{"repo": "o/r", "clone_path": "/tmp/clone"}], "worktree_root": "/tmp/worktrees"},
-        })
-        self.assertEqual(merged["issue"], 19)
-        self.assertEqual(merged["clone_path"], "/tmp/clone")
-        self.assertEqual(merged["worktree_path"], "/tmp/worktrees/ai/fix/19-fix-cleanup")
+    def test_resolve_and_parse_cleanup_branch(self) -> None:
+        resolved = cleanup.resolve_cleanup_branch_source(req({"branch": "ai/fix/17-fix-login"}))
+        self.assertEqual(resolved["status"], "resolved")
+        parsed = cleanup.parse_cleanup_issue_number(req({"branch": "ai/fix/17-fix-login", "conduction": {"resolve_cleanup_branch_source": resolved}}))
+        self.assertEqual(parsed["issue"], 17)
 
-    def test_parse_issue_fail(self) -> None:
-        out = cleanup.parse_issue_from_branch(req({"branch": "feature/foo"}))
+    def test_parse_cleanup_branch_rejects_unparseable(self) -> None:
+        resolved = cleanup.resolve_cleanup_branch_source(req({"branch": "feature/foo"}))
+        out = cleanup.parse_cleanup_issue_number(req({"conduction": {"resolve_cleanup_branch_source": resolved}}))
         self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "unparseable_branch")
 
-    def test_check_no_open_pr(self) -> None:
-        with mock.patch(
-            "lokay.steps.cleanup.run_cmd",
-            return_value=SimpleNamespace(stdout="[]", stderr="", returncode=0),
-        ):
-            out = cleanup.check_no_open_pr_for_branch(
-                req({"repo": "o/r", "branch": "ai/fix/1-x"})
-            )
-        self.assertTrue(out["safe_to_cleanup"])
+    def test_verify_cleanup_guards_requires_canonical_evidence(self) -> None:
+        missing = cleanup.verify_cleanup_guards(req({"conduction": {}}))
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["reason"], "cleanup_guard_failed")
+        out = cleanup.verify_cleanup_guards(req({"conduction": {
+            "check_issue_closed": {"ok": True, "status": "checked", "closed": True, "issue": 3},
+            "check_no_open_pr_for_branch": {"ok": True, "status": "checked", "safe_to_cleanup": True, "open_count": 0},
+        }}))
+        self.assertEqual(out["status"], "verified")
 
-    def test_remove_worktree_dry_and_absent(self) -> None:
-        dry = cleanup.remove_worktree(
-            req(
-                {
-                    "clone_path": "/c",
-                    "worktree_path": "/nope",
-                    "dry_run": True,
-                    "conduction": {
-                        "check_issue_closed": {"closed": True},
-                        "check_no_open_pr": {"safe_to_cleanup": True},
-                    },
-                }
-            )
-        )
-        self.assertEqual(dry["status"], "planned")
-        with tempfile.TemporaryDirectory() as tmp:
-            # path does not exist
-            out = cleanup.remove_worktree(
-                req(
-                    {
-                        "clone_path": tmp,
-                        "worktree_path": str(Path(tmp) / "missing-wt"),
-                        "dry_run": False,
-                        "conduction": {
-                            "check_issue_closed": {"closed": True},
-                            "check_no_open_pr": {"safe_to_cleanup": True},
-                        },
-                    }
-                )
-            )
-        self.assertEqual(out["reason"], "worktree_missing")
+    def test_remove_worktree_consumes_reads_and_dry_runs(self) -> None:
+        conduction = {
+            "verify_cleanup_guards": {"ok": True, "status": "verified"},
+            "read_worktree_ownership": {"ok": True, "status": "read", "clone_path": "/c", "worktree_path": "/wt", "branch": "ai/fix/3-x"},
+            "read_worktree_cleanliness": {"ok": True, "status": "checked", "clean": True, "dirty": False},
+        }
+        out = cleanup.remove_worktree(req({"clone_path": "/c", "worktree_path": "/wt", "dry_run": True, "conduction": conduction}))
+        self.assertEqual(out["status"], "planned")
 
-    def test_release_active_claim(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "claim.json"
-            path.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
-            out = cleanup.release_active_issue_claim(
-                req(
-                    {
-                        "claim_path": str(path),
-                        "repo": "o/r",
-                        "issue": 3,
-                        "dry_run": False,
-                        "conduction": {
-                            "remove_worktree": {"status": "already_absent", "ok": True},
-                            "check_issue_closed": {"closed": True, "ok": True},
-                            "check_no_open_pr": {"safe_to_cleanup": True, "ok": True},
-                            "delete_local_fix_branch": {"status": "already_absent", "ok": True},
-                        },
-                    }
-                )
-            )
-            self.assertEqual(out["status"], "released")
-            self.assertTrue(out["mutated"])
-            self.assertFalse(path.exists())
+    def test_remove_worktree_fails_closed_on_dirty_read(self) -> None:
+        out = cleanup.remove_worktree(req({"clone_path": "/c", "worktree_path": "/wt", "conduction": {
+            "verify_cleanup_guards": {"ok": True, "status": "verified"},
+            "read_worktree_ownership": {"ok": True, "status": "read", "clone_path": "/c", "worktree_path": "/wt", "branch": "ai/fix/3-x"},
+            "read_worktree_cleanliness": {"ok": True, "status": "checked", "clean": False, "dirty": True},
+        }}))
+        self.assertEqual(out["reason"], "worktree_dirty")
 
-    def test_release_active_claim_rejects_boolean_issue(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "claim.json"
-            path.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": True, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
-            out = cleanup.release_active_issue_claim(
-                req(
-                    {
-                        "claim_path": str(path),
-                        "repo": "o/r",
-                        "issue": 1,
-                        "dry_run": False,
-                        "conduction": {
-                            "remove_worktree": {"status": "already_absent", "ok": True},
-                            "check_issue_closed": {"closed": True, "ok": True},
-                            "check_no_open_pr": {"safe_to_cleanup": True, "ok": True},
-                            "delete_local_fix_branch": {"status": "already_absent", "ok": True},
-                        },
-                    }
-                )
-            )
-            self.assertEqual(out["reason"], "claim_malformed")
-            self.assertTrue(path.exists())
+    def test_verify_branch_delete_guards_requires_absence_read(self) -> None:
+        out = cleanup.verify_branch_delete_guards(req({"conduction": {
+            "verify_cleanup_guards": {"ok": True},
+            "verify_worktree_absent": {"ok": True, "status": "verified", "absent": True},
+        }}))
+        self.assertEqual(out["status"], "verified")
 
-    def test_release_active_claim_noops_without_branch(self) -> None:
-        out = cleanup.release_active_issue_claim(
-            req(
-                {
-                    "dry_run": False,
-                    "conduction": {
-                        "parse_issue_from_branch": {"ok": True, "status": "noop", "reason": "no_branch"},
-                    },
-                }
-            )
-        )
-        self.assertEqual(out["status"], "noop")
-        self.assertEqual(out["reason"], "no_branch")
-    def test_release_active_claim_directory_path_removes_claim_json_and_fsyncs(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            claim = directory / "claim.json"
-            claim.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
-            with mock.patch("lokay.steps.cleanup.os.fsync") as fsync:
-                out = cleanup.release_active_issue_claim(req({"claim_path": str(directory), "repo": "o/r", "issue": 3, "dry_run": False, "conduction": {"remove_worktree": {"ok": True, "status": "removed"}, "check_issue_closed": {"ok": True, "closed": True}, "check_no_open_pr": {"ok": True, "safe_to_cleanup": True}, "delete_local_fix_branch": {"ok": True, "status": "deleted"}}}))
-            self.assertEqual(out["status"], "released")
-            self.assertFalse(claim.exists())
-            fsync.assert_called_once()
+    def test_delete_local_branch_dry_run_requires_canonical_reads(self) -> None:
+        conduction = {
+            "verify_branch_delete_guards": {"ok": True, "status": "verified"},
+            "read_local_branch_ownership": {"ok": True, "status": "read", "owned": True, "exists": True},
+        }
+        out = cleanup.delete_local_branch(req({"clone_path": "/c", "branch": "ai/fix/3-x", "dry_run": True, "conduction": conduction}))
+        self.assertEqual(out["status"], "planned")
 
-    def test_release_active_claim_unlink_fsync_failure_is_explicit(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            claim = directory / "claim.json"
-            claim.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
-            with mock.patch("lokay.steps.cleanup.os.fsync", side_effect=OSError("disk full")):
-                out = cleanup.release_active_issue_claim(req({"claim_path": str(directory), "repo": "o/r", "issue": 3, "dry_run": False, "conduction": {"remove_worktree": {"ok": True, "status": "removed"}, "check_issue_closed": {"ok": True, "closed": True}, "check_no_open_pr": {"ok": True, "safe_to_cleanup": True}, "delete_local_fix_branch": {"ok": True, "status": "deleted"}}}))
-            self.assertFalse(out["ok"])
-            self.assertEqual(out["reason"], "unlink_durability_unconfirmed")
-            self.assertFalse(claim.exists())
+    def test_collect_cleanup_receipt_evidence_uses_canonical_names(self) -> None:
+        names = ("parse_cleanup_issue_number", "check_issue_closed", "check_no_open_pr_for_branch", "remove_worktree", "delete_local_branch", "release_claim_file")
+        out = cleanup.collect_cleanup_receipt_evidence(req({"conduction": {name: {"ok": True, "status": "checked"} for name in names}}))
+        self.assertEqual(out["status"], "collected")
+        self.assertEqual(set(out["evidence"]), set(names))
 
-    def test_release_active_claim_directory_releases_exact_per_issue_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            target = directory / "claim-o_r-3.json"
-            other = directory / "claim-o_r-4.json"
-            target.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
-            other.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 4, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
-            out = cleanup.release_active_issue_claim(
-                req(
-                    {
-                        "claim_path": str(directory),
-                        "repo": "o/r",
-                        "issue": 3,
-                        "dry_run": False,
-                        "conduction": {
-                            "remove_worktree": {"ok": True, "status": "removed"},
-                            "check_issue_closed": {"ok": True, "closed": True},
-                            "check_no_open_pr": {"ok": True, "safe_to_cleanup": True},
-                            "delete_local_fix_branch": {"ok": True, "status": "deleted"},
-                        },
-                    }
-                )
-            )
-            self.assertEqual(out["status"], "released")
-            self.assertEqual(out["claim_path"], str(target))
-            self.assertFalse(target.exists())
-            self.assertTrue(other.exists())
-
-    def test_release_active_claim_directory_does_not_report_absent_for_per_issue_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            claim = directory / "claim-o_r-3.json"
-            claim.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
-            out = cleanup.release_active_issue_claim(
-                req(
-                    {
-                        "claim_path": str(directory),
-                        "repo": "o/r",
-                        "issue": 3,
-                        "dry_run": False,
-                        "conduction": {
-                            "remove_worktree": {"ok": True, "status": "removed"},
-                            "check_issue_closed": {"ok": True, "closed": True},
-                            "check_no_open_pr": {"ok": True, "safe_to_cleanup": True},
-                            "delete_local_fix_branch": {"ok": True, "status": "deleted"},
-                        },
-                    }
-                )
-            )
-            self.assertEqual(out["status"], "released")
-            self.assertFalse(claim.exists())
-
-    def test_release_active_claim_directory_fails_closed_on_ambiguous_match(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            first = directory / "claim-a.json"
-            second = directory / "claim-b.json"
-            payload = {"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}
-            first.write_text(json.dumps(payload), encoding="utf-8")
-            second.write_text(json.dumps(payload), encoding="utf-8")
-            out = cleanup.release_active_issue_claim(
-                req(
-                    {
-                        "claim_path": str(directory),
-                        "repo": "o/r",
-                        "issue": 3,
-                        "dry_run": False,
-                        "conduction": {
-                            "remove_worktree": {"ok": True, "status": "removed"},
-                            "check_issue_closed": {"ok": True, "closed": True},
-                            "check_no_open_pr": {"ok": True, "safe_to_cleanup": True},
-                            "delete_local_fix_branch": {"ok": True, "status": "deleted"},
-                        },
-                    }
-                )
-            )
-            self.assertFalse(out["ok"])
-            self.assertEqual(out["reason"], "claim_ambiguous")
-            self.assertTrue(first.exists())
-            self.assertTrue(second.exists())
-
-    def test_release_active_claim_directory_fails_closed_on_corrupt_sibling(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            good = directory / "claim-o_r-3.json"
-            bad = directory / "claim-broken.json"
-            good.write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 3, "board": "b", "claimedAt": "2024-01-01T00:00:00Z"}), encoding="utf-8")
-            bad.write_text("{not-json", encoding="utf-8")
-            out = cleanup.release_active_issue_claim(
-                req(
-                    {
-                        "claim_path": str(directory),
-                        "repo": "o/r",
-                        "issue": 3,
-                        "dry_run": False,
-                        "conduction": {
-                            "remove_worktree": {"ok": True, "status": "removed"},
-                            "check_issue_closed": {"ok": True, "closed": True},
-                            "check_no_open_pr": {"ok": True, "safe_to_cleanup": True},
-                            "delete_local_fix_branch": {"ok": True, "status": "deleted"},
-                        },
-                    }
-                )
-            )
-            self.assertFalse(out["ok"])
-            self.assertEqual(out["reason"], "claim_corrupt")
-            self.assertTrue(good.exists())
-            self.assertTrue(bad.exists())
-
-
-    def test_create_maintenance_dry(self) -> None:
-        out = cleanup.create_maintenance_task(
-            req(
-                {
-                    "board": "b",
-                    "worktree_path": "/wt/dirty",
-                    "reason": "dirty",
-                    "dry_run": True,
-                }
-            )
-        )
+    def test_create_maintenance_dry_requires_read_and_find(self) -> None:
+        out = cleanup.create_maintenance_task(req({"board": "b", "worktree_path": "/wt", "reason": "dirty", "dry_run": True, "conduction": {
+            "read_maintenance_tasks": {"ok": True, "status": "read", "tasks": []},
+            "find_maintenance_marker": {"ok": True, "status": "found", "found": False, "marker": "maintenance:/wt:pr:none"},
+        }}))
         self.assertEqual(out["status"], "planned")
 
     def test_check_issue_closed_paths(self) -> None:
-        with mock.patch(
-            "lokay.steps.cleanup.run_cmd",
-            return_value=SimpleNamespace(
-                stdout=json.dumps({"state": "CLOSED"}), stderr="", returncode=0
-            ),
-        ):
-            closed = cleanup.check_issue_closed(
-                req({"repo": "o/r", "issue": 3})
-            )
-        self.assertTrue(closed["closed"])
-        self.assertEqual(closed["state"], "CLOSED")
-        with mock.patch(
-            "lokay.steps.cleanup.run_cmd",
-            return_value=SimpleNamespace(
-                stdout=json.dumps({"state": "OPEN"}), stderr="", returncode=0
-            ),
-        ):
-            open_ = cleanup.check_issue_closed(
-                req({"repo": "o/r", "issue": 3})
-            )
-        self.assertFalse(open_["closed"])
-        with mock.patch(
-            "lokay.steps.cleanup.run_cmd",
-            side_effect=CommandError(["gh"], 1, "", "404"),
-        ):
-            bad = cleanup.check_issue_closed(req({"repo": "o/r", "issue": 3}))
-        self.assertEqual(bad["reason"], "issue_view_failed")
+        with mock.patch("lokay.steps.cleanup.run_cmd", return_value=SimpleNamespace(stdout=json.dumps({"state": "CLOSED"}), stderr="", returncode=0)):
+            out = cleanup.check_issue_closed(req({"repo": "o/r", "issue": 3}))
+        self.assertTrue(out["closed"])
 
-    def test_delete_local_fix_branch_paths(self) -> None:
-        dry = cleanup.delete_local_fix_branch(
-            req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": True})
-        )
-        self.assertEqual(dry["status"], "planned")
-        with mock.patch(
-            "lokay.steps.cleanup.branch_exists", side_effect=[True, False]
-        ), mock.patch(
-            "lokay.steps.cleanup._cleanup_owner_matches", return_value=True
-        ), mock.patch("lokay.steps.cleanup.delete_local_branch"):
-            ok_out = cleanup.delete_local_fix_branch(
-                req(
-                    {
-                        "clone_path": "/c",
-                        "branch": "ai/fix/1",
-                        "dry_run": False,
-                        "conduction": {"cleanup_remove_worktree": {"ok": True, "status": "removed"}},
-                    }
-                )
-            )
-        self.assertEqual(ok_out["status"], "deleted")
-        self.assertTrue(ok_out["mutated"])
-        with mock.patch(
-            "lokay.steps.cleanup.branch_exists", return_value=True
-        ), mock.patch(
-            "lokay.steps.cleanup._cleanup_owner_matches", return_value=True
-        ), mock.patch(
-            "lokay.steps.cleanup.delete_local_branch",
-            side_effect=CommandError(["git"], 1, "", "not found"),
-        ):
-            bad = cleanup.delete_local_fix_branch(
-                req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": False, "conduction": {"cleanup_remove_worktree": {"ok": True, "status": "removed"}}})
-            )
-        self.assertEqual(bad["reason"], "delete_failed")
-
-        with mock.patch(
-            "lokay.steps.cleanup.branch_exists", side_effect=[True, False]
-        ), mock.patch(
-            "lokay.steps.cleanup._cleanup_owner_matches", return_value=True
-        ), mock.patch(
-            "lokay.steps.cleanup.delete_local_branch",
-            side_effect=CommandError(["git"], 1, "", "interrupted"),
-        ):
-            reconciled = cleanup.delete_local_fix_branch(
-                req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": False, "conduction": {"cleanup_remove_worktree": {"ok": True, "status": "removed"}}})
-            )
-        self.assertEqual(reconciled["status"], "deleted")
-        self.assertTrue(reconciled["reconciled"])
-        self.assertTrue(reconciled["mutated"])
-
-        with mock.patch(
-            "lokay.steps.cleanup.branch_exists",
-            side_effect=[True, CommandError(["git"], 1, "", "readback failed")],
-        ), mock.patch(
-            "lokay.steps.cleanup._cleanup_owner_matches", return_value=True
-        ), mock.patch(
-            "lokay.steps.cleanup.delete_local_branch",
-            side_effect=CommandError(["git"], 1, "", "interrupted"),
-        ):
-            uncertain = cleanup.delete_local_fix_branch(
-                req({"clone_path": "/c", "branch": "ai/fix/1", "dry_run": False, "conduction": {"cleanup_remove_worktree": {"ok": True, "status": "removed"}}})
-            )
-        self.assertEqual(uncertain["reason"], "delete_readback_failed")
-        self.assertTrue(uncertain["mutated"])
+    def test_check_no_open_pr_paths(self) -> None:
+        with mock.patch("lokay.steps.cleanup.run_cmd", return_value=SimpleNamespace(stdout="[]", stderr="", returncode=0)):
+            out = cleanup.check_no_open_pr_for_branch(req({"repo": "o/r", "branch": "ai/fix/3-x"}))
+        self.assertTrue(out["safe_to_cleanup"])
 
 
 class AdapterFailurePathTests(unittest.TestCase):
-    def test_load_kanban_task_list_failure(self) -> None:
+    def test_dispatch_read_failure_attribution(self) -> None:
         with mock.patch(
             "lokay.steps.issue_to_pr.hermes_kanban_json",
             side_effect=CommandError(["hermes"], 1, "", "boom"),
         ):
-            out = issue_to_pr.load_kanban_task(req({"board": "b"}))
-        self.assertFalse(out["ok"])
-        self.assertEqual(out["reason"], "kanban_list_failed")
+            read = issue_to_pr.read_dispatch_tasks(req({"board": "b"}))
+        self.assertFalse(read["ok"])
+        self.assertEqual(read["reason"], "kanban_list_failed")
+        self.assertEqual(read["operation"], "read_dispatch_tasks")
+        self.assertEqual(read["failure_class"], "retryable_read")
+        self.assertTrue(read["retry_safe"])
+
+        selected = issue_to_pr.select_dispatch_task(
+            req({"conduction": {"read_dispatch_tasks": read}})
+        )
+        self.assertFalse(selected["ok"])
+        self.assertEqual(selected["reason"], "upstream_failed")
+        self.assertEqual(selected["operation"], "select_dispatch_task")
+        self.assertEqual(selected["upstream_effector"], "read_dispatch_tasks")
+        self.assertEqual(selected["upstream"], read)
 
 
 if __name__ == "__main__":

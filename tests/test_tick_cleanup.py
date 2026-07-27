@@ -47,16 +47,26 @@ class TickCleanupTests(unittest.TestCase):
             with mock.patch.object(tick_cleanup, "load_config", return_value=cfg), mock.patch.object(tick_cleanup, "ensure_fala_paths", return_value=(root / "fala.sqlite", None)), mock.patch("lokay.flows.cleanup.run_package_path_async", new=run_path), mock.patch.object(tick_cleanup, "print_path_result", return_value=0):
                 self.assertEqual(tick_cleanup.main(argv), 0)
 
-            inputs = captured["kwargs"]["effector_inputs"]["reconcile_no_target_cleanup"]
-            config = captured["kwargs"]["effector_configs"]["reconcile_no_target_cleanup"]
-            self.assertEqual(inputs["claim_path"], str(root / "active"))
+            inputs = captured["kwargs"]["effector_inputs"]
+            config = captured["kwargs"]["effector_configs"]
+            expected = {
+                "validate_reconcile_identity", "read_local_receipts", "read_claim_process_evidence",
+                "read_github_terminal_state", "read_remote_provenance", "read_reconcile_worktree_state",
+                "decide_no_target_reconciliation", "update_task_receipt", "publish_reconcile_receipt",
+                "verify_no_target_reconciliation",
+            }
+            self.assertEqual(set(inputs), expected)
+            self.assertEqual(set(config), expected)
+            self.assertEqual(inputs["validate_reconcile_identity"]["claim_path"], str(root / "active"))
             paths.active_issue = str(root / "active.json")
             with mock.patch.object(tick_cleanup, "load_config", return_value=cfg), mock.patch.object(tick_cleanup, "ensure_fala_paths", return_value=(root / "fala.sqlite", None)), mock.patch("lokay.flows.cleanup.run_package_path_async", new=run_path), mock.patch.object(tick_cleanup, "print_path_result", return_value=0):
                 self.assertEqual(tick_cleanup.main(argv), 0)
-            inputs = captured["kwargs"]["effector_inputs"]["reconcile_no_target_cleanup"]
-            config = captured["kwargs"]["effector_configs"]["reconcile_no_target_cleanup"]
-            self.assertEqual(inputs["claim_path"], str(root / "active.json"))
-            self.assertEqual(config["task_receipt_root"], str(root / "task-receipts"))
+            inputs = captured["kwargs"]["effector_inputs"]
+            config = captured["kwargs"]["effector_configs"]
+            self.assertEqual(set(inputs), expected)
+            self.assertEqual(set(config), expected)
+            self.assertEqual(inputs["validate_reconcile_identity"]["claim_path"], str(root / "active.json"))
+            self.assertEqual(config["validate_reconcile_identity"]["task_receipt_root"], str(root / "task-receipts"))
 
 
 if __name__ == "__main__":

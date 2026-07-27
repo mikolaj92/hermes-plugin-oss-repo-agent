@@ -30,8 +30,8 @@ from .config import ConfigError, LokayConfig, default_config_path, load_config
 from .executor import CommandSpec, Runner, planned_command
 
 INTAKE_ASSIGNEE = "lokay-intake"
-FALA_PINNED_COMMIT = "69bc2ec9d4cdf61773114847c0c582fb2652296d"
-FALA_PINNED_VERSION = "0.7.9"
+FALA_PINNED_COMMIT = "b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
+FALA_PINNED_VERSION = "0.7.15"
 
 
 def setup_parser(parser: ArgumentParser) -> None:

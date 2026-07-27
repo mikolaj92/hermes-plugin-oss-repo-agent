@@ -126,9 +126,17 @@ Start from [`config.example.yaml`](config.example.yaml), or let `init` create a 
 ## Checks
 
 ```bash
-python3 -m unittest discover -s tests
-python3 tools/hygiene_check.py .
+uv run python -m unittest discover -s tests
+uv run python tools/hygiene_check.py .
 scripts/lokay_smoke.sh
+```
+
+The default suite excludes deployment integration fixtures and should finish
+within two minutes. Run those explicitly when changing deployment or health
+behavior:
+
+```bash
+uv run python -m unittest discover -s tests -p 'integration_*.py'
 ```
 
 <!-- hermes e2e closed-loop test 20260717 -->

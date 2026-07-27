@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+import json
+import os
+from pathlib import Path
 import re
 import sys
+import traceback
 from collections.abc import Mapping
 from typing import Any
 
@@ -40,6 +44,15 @@ def _handlers() -> dict[str, Any]:
     return {entry.ref: resolve(entry.ref) for entry in EFFECTORS}
 
 
+def _write_debug_log(content: str) -> None:
+    try:
+        log_path = Path.home() / ".hermes" / "lokay" / "effector_error.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(content, encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _request(manifest: Mapping[str, Any]) -> dict[str, Any]:
     inputs = sdk.declared_inputs(manifest)
     inputs["conduction"] = sdk.conduction(manifest)
@@ -49,6 +62,7 @@ def _request(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "process_id": manifest.get("process_id", ""),
         "impulse_id": manifest.get("impulse_id", ""),
     }
+
 
 def _expected_dry_run(request: Mapping[str, Any]) -> bool | None:
     inputs = request["input"]
@@ -100,10 +114,21 @@ def main() -> int:
         payload = _safe(_normalize_result(raw, request))
         sdk.write_result(sdk.output(values=payload))
         if payload.get("ok") is False or payload.get("status") == "failed":
+            captured_stdout = captured.getvalue().strip()
+            _write_debug_log(
+                "Status FAILED payload:\n"
+                f"{json.dumps(payload, indent=2)}\n\n"
+                f"Captured output:\n{captured_stdout}"
+            )
             print("lokay effector reported failure", file=sys.stderr)
             return 1
         return 0
     except Exception as exc:
+        captured_stdout = ""
+        try:
+            captured_stdout = captured.getvalue().strip()
+        except Exception:
+            pass
         failure = {
             "status": "failed",
             "ok": False,
@@ -115,6 +140,10 @@ def main() -> int:
             sdk.write_result(sdk.output(values=failure))
         except Exception:
             pass
+        tb = traceback.format_exc()
+        _write_debug_log(
+            f"Exception: {exc}\nTraceback:\n{tb}\n\nCaptured output:\n{captured_stdout}"
+        )
         print(f"lokay effector failed: {failure['error']}", file=sys.stderr)
         return 1
 

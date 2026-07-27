@@ -57,7 +57,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 if checkout == fala_root and command[3:5] == ["cat-file", "-e"]:
                     return subprocess.CompletedProcess(command, 0, "", "")
                 if checkout == fala_root and command[3:5] == ["show", f"{self.commands.FALA_PINNED_COMMIT}:pyproject.toml"]:
-                    return subprocess.CompletedProcess(command, 0, '[project]\nversion = "0.7.9"\n', "")
+                    return subprocess.CompletedProcess(command, 0, '[project]\nversion = "0.7.15"\n', "")
             return real_run(argv, *args, **kwargs)
 
         return patch.object(self.commands.subprocess, "run", side_effect=fake_run)
@@ -94,8 +94,8 @@ class DeploymentCandidateTests(unittest.TestCase):
             "schema": 1,
             "mode": mode,
             "plugin_commit": "plugin-commit",
-            "fala_tag": "0.7.9",
-            "fala_commit": "69bc2ec9d4cdf61773114847c0c582fb2652296d",
+            "fala_tag": "0.7.15",
+            "fala_commit": "b5f9a6d500a442a1c79060a862fe4b9da87bc98f",
             "lock_hash": hashlib.sha256(lock_data).hexdigest(),
             "config_path": str(config.absolute()),
             "config_hash": hashlib.sha256(config.read_bytes()).hexdigest(),
@@ -460,7 +460,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             with self._fala_git_clean(), patch.object(self.commands.subprocess, "run", side_effect=wrong_version), patch.object(
                 self.commands, "_read_git_revision", return_value="plugin-commit"
             ):
-                with self.assertRaisesRegex(self.commands.ConfigError, "version must be 0.7.9"):
+                with self.assertRaisesRegex(self.commands.ConfigError, "version must be 0.7.15"):
                     self.commands.render_launchd(
                         self.cfg, str(root / "candidates" / "candidate"), config_path=str(config), fala_db=str(root / "state.sqlite"), deployment_root=str(root)
                     )
@@ -1372,7 +1372,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             ]
             fala_bootstraps = [
                 i for i, call in enumerate(calls)
-                if call[:2] == ["launchctl", "bootstrap"] and "lokay-fala-tick-all" in " ".join(call)
+                if call[:2] == ["launchctl", "bootstrap"] and "lokay.fala-tick-all" in " ".join(call)
             ]
             self.assertTrue(legacy_bootouts)
             self.assertTrue(fala_bootstraps)
@@ -1455,7 +1455,7 @@ class DeploymentCandidateTests(unittest.TestCase):
 
             self.assertFalse(
                 any(
-                    call[:2] == ["launchctl", "bootstrap"] and "lokay-fala-tick-all" in " ".join(call)
+                    call[:2] == ["launchctl", "bootstrap"] and "lokay.fala-tick-all" in " ".join(call)
                     for call in calls
                 )
             )
@@ -1507,7 +1507,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 1, "", "not loaded")
                 if argv[:2] == ["plutil", "-lint"]:
                     return subprocess.CompletedProcess(argv, 0, "OK\n", "")
-                if argv[:2] == ["launchctl", "bootstrap"] and "lokay-fala-tick-all" in " ".join(argv):
+                if argv[:2] == ["launchctl", "bootstrap"] and "lokay.fala-tick-all" in " ".join(argv):
                     raise subprocess.CalledProcessError(1, argv)
                 if argv[:2] == ["launchctl", "bootstrap"] and argv[-1] == str(legacy_plist):
                     restored = True

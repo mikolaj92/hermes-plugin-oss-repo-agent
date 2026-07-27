@@ -168,10 +168,11 @@ class PrDecideMatrixTests(unittest.TestCase):
         self.assertFalse(out["mutated"])
 
     def test_direct_merge_action_cannot_bypass_decision_gate(self) -> None:
-        out = triage.merge_pull_request(
+        out = triage.merge_pr(
             req({"action": "merge", "repo": "owner/repo", "number": 42, "dry_run": True})
         )
-        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["reason"], "merge_preconditions_required")
         self.assertFalse(out["mutated"])
 
     def test_string_false_evidence_cannot_merge(self) -> None:

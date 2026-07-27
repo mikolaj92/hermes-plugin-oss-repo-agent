@@ -8,6 +8,7 @@ import re
 import sqlite3
 import sys
 import tomllib
+from importlib import metadata
 
 import threading
 from contextlib import closing
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from fala.host import host_run_package
+
+_FALA_VERSION = "0.7.15"
 _HOST_RUN_LOCK = threading.Lock()
 
 _PROCESS_COLUMNS = (
@@ -287,6 +290,21 @@ def _host_python_overrides(package_path: str | Path) -> dict[str, tuple[str, ...
     return overrides
 
 
+def _verify_fala_runtime() -> None:
+    module = sys.modules.get(host_run_package.__module__)
+    loaded_path = Path(getattr(module, "__file__", "") or "").resolve()
+    try:
+        observed = metadata.version("fala")
+    except metadata.PackageNotFoundError as exc:
+        raise RuntimeFacadeError(
+            f"Fala runtime metadata is unavailable; loaded host: {loaded_path}"
+        ) from exc
+    if observed != _FALA_VERSION:
+        raise RuntimeFacadeError(
+            f"Fala runtime version mismatch: expected {_FALA_VERSION}, observed {observed}; loaded host: {loaded_path}"
+        )
+
+
 def run_package_path(
     *,
     db_path: str | Path,
@@ -302,6 +320,7 @@ def run_package_path(
     worker_id: str = "lokay",
 ) -> HostPathRunResult:
     """Run one package path and normalize evidence from its SQLite journal."""
+    _verify_fala_runtime()
     # Fala's in-process Mojo bridge temporarily changes the process-wide cwd.
     # Serialize host calls so concurrent async tick callers cannot race it.
     resolved_overrides = _host_python_overrides(package_path)

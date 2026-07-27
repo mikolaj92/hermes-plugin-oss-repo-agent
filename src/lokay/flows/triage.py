@@ -177,7 +177,7 @@ async def run_pr_triage_decide(
     }
     load_input: dict[str, Any] = dict(dry_input)
     effector_inputs: dict[str, dict[str, Any]] = {
-        "list_ai_fix_prs": list_input,
+        "read_open_prs": list_input,
         "load_pr_fields": load_input,
         "evaluate_checks": {
             "dry_run": is_dry,
@@ -194,29 +194,16 @@ async def run_pr_triage_decide(
             "base_branch": step_config["base_branch"],
             "require_human_approval": step_config["require_human_approval"],
         },
-        "claim_pr": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
-        "merge": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
-        "write_merge_receipt": {**dry_input, "receipt_path": receipt},
+        "assign_pr": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
+        "merge_pr": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
+        "build_merge_receipt": {**dry_input, "receipt_path": receipt},
         "close_linked_issue": {**dry_input, "repo": resolved_repo},
-        "comment_pr": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
-        "create_review_fix_task": {
-            **dry_input,
-            "repo": resolved_repo,
-            "board": board,
-            **({"number": pr_number} if pr_number else {}),
-        },
+        "post_pr_comment": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
+        "create_review_task": {**dry_input, "repo": resolved_repo, "board": board, **({"number": pr_number} if pr_number else {})},
         "build_repair_prompt": dry_input,
-        "repair_prepare_worktree": {
-            **dry_input,
-            "clone_path": clone_path,
-            "repo": resolved_repo,
-            "issue": pr_number,
-            "receipt_path": receipt,
-            "worktree_root": step_config["worktree_root"],
-            "base_branch": step_config["base_branch"],
-        },
-        "repair_run_omp": dry_input,
-        "repair_push_branch": dry_input,
+        "create_local_branch": {**dry_input, "clone_path": clone_path, "repo": resolved_repo, "issue": pr_number, "receipt_path": receipt, "worktree_root": step_config["worktree_root"], "base_branch": step_config["base_branch"]},
+        "invoke_omp": dry_input,
+        "push_branch": dry_input,
     }
 
     host = await run_package_path_async(
@@ -226,26 +213,11 @@ async def run_pr_triage_decide(
         run_id=rid,
         inputs=step_config,
         effector_inputs=effector_inputs,
-        effector_configs={
-            step_id: step_config
-            for step_id in (
-                "list_ai_fix_prs",
-                "load_pr_fields",
-                "evaluate_checks",
-                "evaluate_test_evidence",
-                "decide_triage_action",
-                "claim_pr",
-                "merge",
-                "write_merge_receipt",
-                "close_linked_issue",
-                "comment_pr",
-                "create_review_fix_task",
-                "build_repair_prompt",
-                "repair_prepare_worktree",
-                "repair_run_omp",
-                "repair_push_branch",
-            )
-        },
+        effector_configs={step_id: step_config for step_id in (
+            "read_open_prs", "load_pr_fields", "evaluate_checks", "evaluate_test_evidence", "decide_triage_action",
+            "assign_pr", "merge_pr", "build_merge_receipt", "close_linked_issue", "post_pr_comment", "create_review_task",
+            "build_repair_prompt", "create_local_branch", "invoke_omp", "push_branch",
+        )},
         max_ticks=max_ticks,
         worker_id=worker_id,
     )
@@ -253,41 +225,17 @@ async def run_pr_triage_decide(
     summaries = [process_summary(process) for process in host.processes]
     by_step = _by_step(summaries)
     decide_out = _output_of(by_step, "decide_triage_action")
-    list_out = _output_of(by_step, "list_ai_fix_prs")
+    list_out = _output_of(by_step, "read_open_prs")
     load_out = _output_of(by_step, "load_pr_fields")
     action = decide_out.get("action")
     pr_obj = load_out.get("pr") if isinstance(load_out.get("pr"), dict) else {}
     resolved_number = load_out.get("number") or pr_obj.get("number") or pr_number
-    status, stopped_reason = _normalize_status(
-        run_status=host.run_status,
-        summaries=summaries,
-        decide_out=decide_out,
-        list_out=list_out,
-    )
+    status, stopped_reason = _normalize_status(run_status=host.run_status, summaries=summaries, decide_out=decide_out, list_out=list_out)
     failed_steps = _failed_steps(summaries)
-    worked = bool(
-        action
-        and action != "skip"
-        and status not in {"idle", *_TERMINAL_FAILURES}
-        and any(
-            bool(process_values(item).get("mutated"))
-            or str(item.get("status") or "") == "succeeded"
-            and str(process_values(item).get("status") or "") not in {"noop", "planned", ""}
-            for item in summaries
-            if item.get("step_id")
-            in {
-                "claim_pr",
-                "merge",
-                "write_merge_receipt",
-                "close_linked_issue",
-                "comment_pr",
-                "create_review_fix_task",
-                "repair_prepare_worktree",
-                "repair_run_omp",
-                "repair_push_branch",
-            }
-        )
-    )
+    worked = bool(action and action != "skip" and status not in {"idle", *_TERMINAL_FAILURES} and any(
+        bool(process_values(item).get("mutated")) or (str(item.get("status") or "") == "succeeded" and str(process_values(item).get("status") or "") not in {"noop", "planned", ""})
+        for item in summaries if item.get("step_id") in {"assign_pr", "merge_pr", "build_merge_receipt", "close_linked_issue", "post_pr_comment", "create_review_task", "create_local_branch", "invoke_omp", "push_branch"}
+    ))
     summary = {
         "repo": resolved_repo,
         "action": action,

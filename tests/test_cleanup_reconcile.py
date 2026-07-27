@@ -10,7 +10,31 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from lokay.steps.cleanup_reconcile import reconcile_no_target_cleanup
+from lokay.steps import cleanup_reconcile
+
+
+RECONCILE_ATOMS = (
+    "validate_reconcile_identity",
+    "read_local_receipts",
+    "read_claim_process_evidence",
+    "read_remote_provenance",
+    "read_reconcile_worktree_state",
+    "read_github_terminal_state",
+    "decide_no_target_reconciliation",
+    "update_task_receipt",
+    "publish_reconcile_receipt",
+    "verify_no_target_reconciliation",
+)
+
+
+def reconcile_chain(data: dict, config: dict) -> dict:
+    conduction: dict[str, dict] = {}
+    for atom in RECONCILE_ATOMS:
+        result = getattr(cleanup_reconcile, atom)({"input": {**data, "conduction": conduction}, "config": config})
+        conduction[atom] = result
+        if result.get("ok") is False:
+            return result
+    return conduction[RECONCILE_ATOMS[-1]]
 
 
 SHA_BASE = "1" * 40
@@ -83,7 +107,7 @@ class CleanupReconcileTests(unittest.TestCase):
 
     def test_writes_exact_terminal_receipt_and_closes_task_receipt(self) -> None:
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertEqual(result["status"], "reconciled", result)
         payload = json.loads(self.output.read_text())
         self.assertEqual(payload["phase"], "CLEANUP_TERMINAL")
@@ -103,21 +127,21 @@ class CleanupReconcileTests(unittest.TestCase):
             mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True),
         )
         with patches[0], patches[1], patches[2]:
-            first = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
-            second = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            first = reconcile_chain(self.data, self.config)
+            second = reconcile_chain(self.data, self.config)
         self.assertEqual(first["status"], "reconciled", first)
         self.assertEqual(second["status"], "reconciled", second)
 
     def test_receipt_publication_failure_reports_partial_mutation(self) -> None:
-        with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True), mock.patch("lokay.steps.cleanup_reconcile._atomic_replace_json", side_effect=OSError("disk")):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
-        self.assertEqual(result["failure_class"], "reconcile_then_retry", result)
+        with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True), mock.patch("lokay.steps.cleanup_reconcile._publish_cleanup_receipt", side_effect=OSError("disk")):
+            result = reconcile_chain(self.data, self.config)
+        self.assertEqual(result["reason"], "receipt_write_failed", result)
         self.assertTrue(result["mutated"], result)
-        self.assertTrue(self.output.exists())
+        self.assertFalse(self.output.exists())
 
     def test_rejects_unauthorized_remote_retention_without_writing(self) -> None:
         self.data["remote_retention_authorized"] = False
-        result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+        result = reconcile_chain(self.data, self.config)
         self.assertEqual(result["reason"], "remote_retention_not_authorized")
         self.assertFalse(self.output.exists())
 
@@ -125,7 +149,7 @@ class CleanupReconcileTests(unittest.TestCase):
         with sqlite3.connect(self.db) as connection:
             connection.execute("INSERT INTO processes VALUES (?,?,?,?,?,?,?,?)", ("r", "p", "running", "worker", "2099", json.dumps({"task_id": "task-8"}), "{}", "{}"))
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertEqual(result["reason"], "cleanup_reconciliation_failed")
         self.assertIn("active Fala", result["error"])
         self.assertFalse(self.output.exists())
@@ -134,14 +158,14 @@ class CleanupReconcileTests(unittest.TestCase):
         with sqlite3.connect(self.db) as connection:
             connection.execute("INSERT INTO processes VALUES (?,?,?,?,?,?,?,?)", ("r", "p", "succeeded", "old-worker", "2020-01-01T00:00:00Z", json.dumps({"task_id": "task-8"}), "{}", "{}"))
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertEqual(result["status"], "reconciled", result)
 
     def test_rejects_matching_alternate_claim_without_writing(self) -> None:
         claim = self.active / "claim-owner_repo-8.json"
         claim.write_text(json.dumps({"version": 1, "repo": "owner/repo", "issue": 8, "board": "board", "assignee": "owner", "claimedAt": "2026-01-01T00:00:00Z"}), encoding="utf-8")
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertIn("active claim", result["error"])
         self.assertFalse(self.output.exists())
 
@@ -152,14 +176,14 @@ class CleanupReconcileTests(unittest.TestCase):
         self.config["cleanup_receipt_root"] = str(output.parent)
         lock = self.task_lock
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertIn("not eligible", result["error"])
         self.assertFalse(output.parent.exists())
         self.assertTrue(lock.exists())
 
     def test_missing_task_lock_fails_closed_without_writing(self) -> None:
         self.task_lock.unlink()
-        result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+        result = reconcile_chain(self.data, self.config)
         self.assertIn("No such file", result["error"])
         self.assertFalse(self.output.exists())
 
@@ -167,7 +191,7 @@ class CleanupReconcileTests(unittest.TestCase):
         with sqlite3.connect(self.db) as connection:
             connection.execute("INSERT INTO processes VALUES (?,?,?,?,?,?,?,?)", ("r", "p", "mystery", "", "", json.dumps({"task_id": "task-8"}), "{}", "{}"))
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertIn("unknown Fala", result["error"])
         self.assertFalse(self.output.exists())
 
@@ -175,13 +199,14 @@ class CleanupReconcileTests(unittest.TestCase):
         self.worktree.parent.mkdir(parents=True)
         self.worktree.symlink_to(self.root / "missing")
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
-        self.assertIn("worktree path escapes configured root", result["error"])
+            result = reconcile_chain(self.data, self.config)
+        self.assertEqual(result["reason"], "cleanup_context_mismatch", result)
+        self.assertEqual(result["field"], "worktree_path", result)
         self.assertFalse(self.output.exists())
 
     def test_missing_clone_returns_context_failure(self) -> None:
         self.clone.rmdir()
-        result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+        result = reconcile_chain(self.data, self.config)
         self.assertEqual(result["reason"], "cleanup_context_missing")
         self.assertFalse(self.output.exists())
 
@@ -192,13 +217,13 @@ class CleanupReconcileTests(unittest.TestCase):
         (self.root / "unrelated.json").write_text("{}", encoding="utf-8")
         self.data["dry_run"] = True
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertEqual(result["status"], "planned", result)
         self.assertFalse(self.output.exists())
 
     def test_missing_database_does_not_create_it(self) -> None:
         self.db.unlink()
-        result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+        result = reconcile_chain(self.data, self.config)
         self.assertFalse(result["ok"])
         self.assertFalse(self.db.exists())
 
@@ -208,7 +233,7 @@ class CleanupReconcileTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "git@github.com:other/repo.git\n", "")
             return self._command(argv, **kwargs)
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertIn("origin repository mismatch", result["error"])
         self.assertFalse(self.output.exists())
 
@@ -216,7 +241,7 @@ class CleanupReconcileTests(unittest.TestCase):
         error = sqlite3.OperationalError("locked")
         error.sqlite_errorcode = sqlite3.SQLITE_LOCKED | (1 << 8)
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True), mock.patch("lokay.steps.cleanup_reconcile.sqlite3.connect", side_effect=error):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertEqual(result["reason"], "database_lock_active")
         self.assertTrue(result["retry_safe"])
 
@@ -224,7 +249,7 @@ class CleanupReconcileTests(unittest.TestCase):
         with sqlite3.connect(self.db) as connection:
             connection.execute("INSERT INTO processes VALUES (?,?,?,?,?,?,?,?)", ("r", "p", "running", "worker", "2099", json.dumps({"input": {"task_id": "task-8"}}), "{}", "{}"))
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertIn("active Fala", result["error"])
         self.assertFalse(self.output.exists())
 
@@ -232,7 +257,7 @@ class CleanupReconcileTests(unittest.TestCase):
         with sqlite3.connect(self.db) as connection:
             connection.execute("INSERT INTO processes VALUES (?,?,?,?,?,?,?,?)", ("r", "p", "done", "", "", "{", "{}", "{}"))
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertIn("malformed Fala", result["error"])
         self.assertFalse(self.output.exists())
 
@@ -240,21 +265,21 @@ class CleanupReconcileTests(unittest.TestCase):
         lock = self.task_lock
         with lock.open("a+b") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertEqual(result["reason"], "task_lock_active")
         self.assertFalse(self.output.exists())
 
     def test_dry_run_validates_then_plans_without_writing(self) -> None:
         self.data["dry_run"] = True
         with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch("lokay.steps.cleanup_reconcile.worktree_list", return_value=""), mock.patch("lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True):
-            result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+            result = reconcile_chain(self.data, self.config)
         self.assertEqual(result["status"], "planned", result)
         self.assertIn("postconditions", result)
         self.assertFalse(self.output.exists())
 
     def test_rejects_noncanonical_branch_before_commands(self) -> None:
         self.data["branch"] = "../../outside"
-        result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+        result = reconcile_chain(self.data, self.config)
         self.assertEqual(result["reason"], "cleanup_identity_invalid")
         self.assertFalse(self.output.exists())
 
@@ -264,7 +289,7 @@ class CleanupReconcileTests(unittest.TestCase):
         os.chmod(outside, 0o600)
         Path(str(outside) + ".lock").touch()
         self.data["task_receipt_path"] = str(outside)
-        result = reconcile_no_target_cleanup({"input": self.data, "config": self.config})
+        result = reconcile_chain(self.data, self.config)
         self.assertEqual(result["reason"], "cleanup_context_mismatch")
         self.assertEqual(result["field"], "task_receipt_path")
         self.assertFalse(self.output.exists())

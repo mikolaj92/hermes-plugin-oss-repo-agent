@@ -7,9 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from lokay.steps.claim import claim_github_issue
-from lokay.steps.issue_direction import comment_issue_once, decide_issue_action
-from lokay.steps.kanban_intake import ensure_kanban_intake
+from lokay.steps import claim, issue_direction, kanban_intake
 
 
 def req(input_data=None, config=None):
@@ -45,125 +43,47 @@ class IssueDirectionIntakeTests(unittest.TestCase):
 
     def test_reject_out_of_direction_posts_comment_and_skips_claim(self) -> None:
         poll = self._poll()
-        decide = decide_issue_action(
-            req(
-                {
-                    "conduction": {"poll": poll},
-                    "repo_goal": "automate GitHub issue PR merge lifecycle for hermes lokay",
-                    "dry_run": False,
-                }
-            )
+        decide = issue_direction.decide_issue_action(
+            req({"selected": poll["selected"], "conduction": {"select_issue_candidate": poll}, "repo_goal": "automate GitHub issue PR merge lifecycle for hermes lokay", "dry_run": False})
         )
         self.assertEqual(decide["action"], "reject_comment")
         self.assertEqual(decide["reason"], "out_of_direction_goal")
 
-        with mock.patch(
-            "lokay.steps.issue_direction.run_cmd",
-            side_effect=[
-                SimpleNamespace(stdout=json.dumps({"comments": []}), stderr="", returncode=0),
-                SimpleNamespace(stdout="", stderr="", returncode=0),
-            ],
-        ) as run_cmd:
-            comment = comment_issue_once(
-                req(
-                    {
-                        "dry_run": False,
-                        "conduction": {
-                            "poll": poll,
-                            "decide_issue_action": decide,
-                        },
-                    },
-                    config={"gh_cli": "gh"},
-                )
-            )
-        self.assertEqual(comment["status"], "commented")
-        self.assertTrue(comment["mutated"])
-        cmds = [list(c.args[0]) for c in run_cmd.call_args_list]
-        self.assertTrue(any(c[:2] == ["gh", "issue"] and "comment" in c for c in cmds))
+        read = {"status": "comments_read", "ok": True, "comments": [], "selected": poll["selected"], "repo": "owner/repo", "number": 99, "comment_marker": "lokay:owner/repo:99:issue-direction"}
+        comment_decision = issue_direction.decide_issue_comment(req({"conduction": {"read_issue_comments": read}, "dry_run": False}))
+        with mock.patch("lokay.steps.issue_direction.run_cmd", return_value=SimpleNamespace(stdout="", stderr="", returncode=0)) as run_cmd:
+            posted = issue_direction.post_issue_comment(req({"dry_run": False, "conduction": {"read_issue_comments": read, "decide_issue_comment": comment_decision}, "reason": decide["reason"], "comment_marker": read["comment_marker"]}, {"gh_cli": "gh"}))
+        self.assertEqual(posted["status"], "comment_posted")
+        self.assertTrue(posted["mutated"])
+        self.assertTrue(any("comment" in list(c.args[0]) for c in run_cmd.call_args_list))
+        verified = issue_direction.verify_issue_comment(req({"dry_run": True, "conduction": {"post_issue_comment": posted}}))
+        self.assertEqual(verified["status"], "comment_verified")
 
-        claim = claim_github_issue(
-            req(
-                {
-                    "dry_run": False,
-                    "conduction": {
-                        "poll": poll,
-                        "decide_issue_action": decide,
-                    },
-                },
-                config={"assignee": "owner"},
-            )
-        )
-        self.assertEqual(claim["status"], "noop")
-        self.assertIn("out_of_direction", claim.get("reason", ""))
+        reserve = claim.reserve_claim_file(req({"dry_run": False, "conduction": {"select_issue_candidate": poll, "decide_issue_action": decide}} , {"active_issue_path": "/tmp/no-claim", "assignee": "owner"}))
+        self.assertEqual(reserve["status"], "noop")
+        self.assertIn("no_selected_issue", reserve.get("reason", ""))
 
-        kanban = ensure_kanban_intake(
-            req(
-                {
-                    "dry_run": False,
-                    "conduction": {
-                        "poll": poll,
-                        "decide_issue_action": decide,
-                        "claim": claim,
-                    },
-                },
-                config={"kanban_intake_assignee": "lokay-intake"},
-            )
-        )
-        self.assertEqual(kanban["status"], "noop")
+        intake = kanban_intake.read_intake_tasks(req({"conduction": {"build_issue_claim_result": reserve}, "selected": poll["selected"]}))
+        self.assertEqual(intake["reason"], "no_selected_issue")
 
     def test_accept_aligned_issue_claims(self) -> None:
-        poll = self._poll(
-            title="Harden issue PR merge lifecycle receipts",
-            body="Hermes lokay automation for GitHub issue merge",
-        )
-        decide = decide_issue_action(
-            req(
-                {
-                    "conduction": {"poll": poll},
-                    "repo_goal": "automate GitHub issue PR merge lifecycle for hermes lokay",
-                    "dry_run": False,
-                }
-            )
-        )
+        poll = self._poll(title="Harden issue PR merge lifecycle receipts", body="Hermes lokay automation for GitHub issue merge")
+        decide = issue_direction.decide_issue_action(req({"selected": poll["selected"], "conduction": {"select_issue_candidate": poll}, "repo_goal": "automate GitHub issue PR merge lifecycle for hermes lokay", "dry_run": False}))
         self.assertEqual(decide["action"], "accept")
-        self.assertEqual(decide["reason"], "goal_aligned")
-
-        comment = comment_issue_once(
-            req(
-                {
-                    "dry_run": False,
-                    "conduction": {"poll": poll, "decide_issue_action": decide},
-                }
-            )
-        )
-        self.assertEqual(comment["status"], "noop")
-
-        claim = claim_github_issue(
-            req(
-                {
-                    "dry_run": True,
-                    "conduction": {"poll": poll, "decide_issue_action": decide},
-                },
-                config={"assignee": "owner"},
-            )
-        )
-        self.assertEqual(claim["status"], "planned")
-        self.assertEqual(claim["selected"]["number"], 99)
+        read = {"status": "comments_read", "ok": True, "comments": [], "selected": poll["selected"], "repo": "owner/repo", "number": 99, "comment_marker": "lokay:owner/repo:99:issue-direction"}
+        comment_decision = issue_direction.decide_issue_comment(req({"conduction": {"read_issue_comments": read}, "dry_run": False}))
+        self.assertTrue(comment_decision["should_post"])
+        posted = issue_direction.post_issue_comment(req({"dry_run": False, "conduction": {"read_issue_comments": read, "decide_issue_comment": {**comment_decision, "should_post": False}}}))
+        self.assertEqual(posted["status"], "noop")
+        planned = claim.reserve_claim_file(req({"dry_run": True, "conduction": {"select_issue_candidate": poll, "decide_issue_action": decide}}, {"assignee": "owner"}))
+        self.assertEqual(planned["status"], "planned")
+        self.assertEqual(planned["selected"]["number"], 99)
 
     def test_reject_label_is_durable_not_silent(self) -> None:
         poll = self._poll(labels=["ai:ready", "wontfix"], title="Anything")
-        decide = decide_issue_action(
-            req({"conduction": {"poll": poll}, "dry_run": True})
-        )
+        decide = issue_direction.decide_issue_action(req({"selected": poll["selected"], "conduction": {"select_issue_candidate": poll}, "dry_run": True}))
         self.assertEqual(decide["action"], "reject_comment")
-        planned = comment_issue_once(
-            req(
-                {
-                    "dry_run": True,
-                    "conduction": {"poll": poll, "decide_issue_action": decide},
-                }
-            )
-        )
+        planned = issue_direction.post_issue_comment(req({"dry_run": True, "conduction": {"read_issue_comments": {"status": "comments_read", "comments": [], "selected": poll["selected"], "repo": "owner/repo", "number": 99, "comment_marker": "lokay:owner/repo:99:issue-direction"}, "decide_issue_comment": {"status": "comment_decided", "should_post": True, "comment_marker": "lokay:owner/repo:99:issue-direction"}}}))
         self.assertEqual(planned["status"], "planned")
         self.assertIn("lokay:owner/repo:99:issue-direction", planned["comment_marker"])
 

@@ -15,16 +15,16 @@ from lokay.flows.runtime import run_package_path_async
 
 _PATH_ID = "issue_to_pr"
 _EFFECTOR_IDS = (
-    "load_kanban_task",
-    "parse_issue_ref",
-    "prepare_worktree",
-    "run_omp",
-    "verify_branch",
+    "select_dispatch_task",
+    "parse_issue_ref_from_task",
+    "create_local_branch",
+    "invoke_omp",
+    "verify_omp_postconditions",
     "push_branch",
-    "open_pull_request",
-    "apply_pr_labels",
-    "write_dispatch_receipt",
-    "complete_kanban_task",
+    "create_pull_request",
+    "aggregate_pr_label_results",
+    "build_dispatch_receipt",
+    "complete_task",
 )
 
 
@@ -160,16 +160,16 @@ async def run_issue_to_pr_flow(
     candidate = str(cfg.raw.get("candidate") or "")
     dry_input = {"dry_run": is_dry, "run_id": rid, "path_id": _PATH_ID, **({"candidate": candidate} if candidate else {}), **context}
     effector_inputs: dict[str, dict[str, Any]] = {
-        "load_kanban_task": {**dry_input, **({"task_id": task_id} if task_id else {})},
-        "parse_issue_ref": dry_input,
-        "prepare_worktree": {**dry_input, "receipt_path": receipt, "worktree_root": wt_root, "base_branch": cfg.base_branch},
-        "run_omp": dry_input,
-        "verify_branch": {**dry_input, "base_branch": cfg.base_branch},
+        "select_dispatch_task": {**dry_input, **({"task_id": task_id} if task_id else {})},
+        "parse_issue_ref_from_task": dry_input,
+        "create_local_branch": {**dry_input, "receipt_path": receipt, "worktree_root": wt_root, "base_branch": cfg.base_branch},
+        "invoke_omp": dry_input,
+        "verify_omp_postconditions": {**dry_input, "base_branch": cfg.base_branch},
         "push_branch": dry_input,
-        "open_pull_request": {**dry_input, "base_branch": cfg.base_branch},
-        "apply_pr_labels": dry_input,
-        "write_dispatch_receipt": {**dry_input, "receipt_path": receipt},
-        "complete_kanban_task": {**dry_input, "result": "dispatched via issue_to_pr"},
+        "create_pull_request": {**dry_input, "base_branch": cfg.base_branch},
+        "aggregate_pr_label_results": dry_input,
+        "build_dispatch_receipt": {**dry_input, "receipt_path": receipt},
+        "complete_task": {**dry_input, "result": "dispatched via issue_to_pr"},
     }
     result = await run_package_path_async(
         db_path=db_path,
@@ -185,15 +185,15 @@ async def run_issue_to_pr_flow(
 
     processes = [process_summary(process) for process in result.processes]
     by_step = {item["step_id"]: item for item in processes if item.get("step_id")}
-    load_output = process_values(by_step.get("load_kanban_task") or {})
-    pr_output = process_values(by_step.get("open_pull_request") or {})
+    load_output = process_values(by_step.get("select_dispatch_task") or {})
+    pr_output = process_values(by_step.get("create_pull_request") or {})
     idle = load_output.get("status") == "noop" and load_output.get("reason") == "no_ready_task"
     status = "idle" if idle and result.run_status == "completed" else result.run_status
     summary = {
         "board": resolved_board,
         "task_id": task_id,
         "load_status": load_output.get("status"),
-        "parse_status": (by_step.get("parse_issue_ref") or {}).get("output", {}).get("status"),
+        "parse_status": (by_step.get("parse_issue_ref_from_task") or {}).get("output", {}).get("status"),
         "pr_status": pr_output.get("status"),
         "pr_number": pr_output.get("number"),
         "pr_url": pr_output.get("url"),

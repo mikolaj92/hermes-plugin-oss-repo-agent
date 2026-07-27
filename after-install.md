@@ -23,9 +23,15 @@ ticks (`lokay-tick-intake`, `lokay-tick-dispatch`,
 only, not deployment paths. Legacy shell intake/dispatch/triage/cleanup,
 backfill, webhook, and cron entrypoints are removed.
 
-CI-style checks:
+Fast checks (under two minutes):
 
 ```bash
-python3 -m unittest discover -s tests
-python3 tools/hygiene_check.py .
+uv run python -m unittest discover -s tests
+uv run python tools/hygiene_check.py .
+```
+
+Deployment and health integration checks are intentionally separate:
+
+```bash
+uv run python -m unittest discover -s tests -p 'integration_*.py'
 ```
