@@ -829,27 +829,32 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(out["conflict"], "verified_head_mismatch")
 
     def test_verified_push_restart_resumes_pending_without_second_omp_or_push(self) -> None:
-        """Controlled restart after verified push: one OMP, one push, no duplicates."""
+        """Controlled SQLite restart: one OMP and one push across two runs."""
+        import sqlite3
+
+        from lokay.flows.runtime import read_journal_processes
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             db = root / "state.sqlite"
-            import sqlite3
+            schema = """
+CREATE TABLE processes (
+    run_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    max_attempts INTEGER NOT NULL,
+    output_json TEXT NOT NULL,
+    error_json TEXT NOT NULL
+);
+CREATE TABLE runs (
+    id TEXT PRIMARY KEY,
+    metadata TEXT NOT NULL
+);
+"""
             with sqlite3.connect(db) as connection:
-                connection.execute(
-                    "CREATE TABLE processes (run_id TEXT, id TEXT, status TEXT, input_json TEXT, output_json TEXT, error_json TEXT, metadata TEXT)"
-                )
-                connection.execute(
-                    "INSERT INTO processes VALUES (?,?,?,?,?,?,?)",
-                    (
-                        "run-a",
-                        "run-a:auto_worker:triage_verify_repair_push_oid",
-                        "succeeded",
-                        json.dumps({"candidate_id": "candidate-a"}),
-                        json.dumps({"ok": True, "status": "verified", "remote_oid": "b" * 40}),
-                        "{}",
-                        json.dumps({"__adapter_binding": {"cwd": str(root)}}),
-                    ),
-                )
+                connection.executescript(schema)
+                connection.execute("INSERT INTO runs VALUES (?, ?)", ("run-a", json.dumps({"mode": "live"})))
             context = {
                 "repo": "o/r",
                 "issue": "1",
@@ -865,6 +870,22 @@ class RepairTests(unittest.TestCase):
                 "live": True,
                 "dry_run": False,
             }
+
+            def persist(run_id: str, step: str, output: dict[str, object], *, attempt: int = 1) -> None:
+                with sqlite3.connect(db) as connection:
+                    connection.execute(
+                        "INSERT INTO processes VALUES (?,?,?,?,?,?,?)",
+                        (
+                            run_id,
+                            f"{run_id}:auto_worker:{step}",
+                            "succeeded",
+                            attempt,
+                            1,
+                            json.dumps(output, sort_keys=True),
+                            "{}",
+                        ),
+                    )
+
             first_decision = repair.decide_repair_attempt(req({
                 **context,
                 "number": 1,
@@ -872,6 +893,7 @@ class RepairTests(unittest.TestCase):
                 "checks": [{"name": "ci", "conclusion": "FAILURE"}],
             }))
             self.assertEqual(first_decision["status"], "invoke")
+            persist("run-a", "triage_decide_repair_attempt", first_decision)
             reserved = repair.reserve_repair_attempt(req({
                 **context,
                 "number": 1,
@@ -879,6 +901,7 @@ class RepairTests(unittest.TestCase):
                 "conduction": {"decide_repair_attempt": first_decision},
             }))
             self.assertEqual(reserved["status"], "reserved")
+            persist("run-a", "triage_reserve_repair_attempt", reserved)
             verified_reservation = repair.verify_repair_attempt_reservation(req({
                 **context,
                 "number": 1,
@@ -886,11 +909,13 @@ class RepairTests(unittest.TestCase):
                 "conduction": {"reserve_repair_attempt": reserved},
             }))
             self.assertTrue(verified_reservation["verified"])
+            persist("run-a", "triage_verify_repair_attempt_reservation", verified_reservation)
             with mock.patch("lokay.steps.repair.run_omp", return_value={"status": "completed", "stdout": "ok"}) as run_omp:
                 invoked = repair.invoke_repair_omp(req({
                     **context,
                     "prompt": "fix checks",
                     "worktree_path": str(root / "worktrees" / "wt"),
+                    "process_id": "run-a:auto_worker:triage_invoke_repair_omp",
                     "conduction": {
                         "decide_repair_attempt": first_decision,
                         "verify_repair_attempt_reservation": verified_reservation,
@@ -904,6 +929,7 @@ class RepairTests(unittest.TestCase):
                 }))
             self.assertEqual(invoked["status"], "invoked")
             run_omp.assert_called_once()
+            persist("run-a", "triage_invoke_repair_omp", invoked)
             with mock.patch("lokay.steps.repair.git_push_branch", return_value="pushed") as push:
                 pushed = repair.push_repair_branch(req({
                     **context,
@@ -921,13 +947,24 @@ class RepairTests(unittest.TestCase):
                 }))
             self.assertEqual(pushed["status"], "pushed")
             push.assert_called_once()
+            persist("run-a", "triage_push_repair_branch", pushed)
+            persist(
+                "run-a",
+                "triage_verify_repair_push_oid",
+                {"ok": True, "status": "verified", "local_oid": "b" * 40, "remote_oid": "b" * 40},
+            )
             receipt_payload = {
                 "phase": "REPAIR_COMPLETED",
                 "before_oid": "a" * 40,
                 "after_oid": "b" * 40,
                 "candidate": "candidate-a",
                 "checks": [{"identity": "ci", "conclusion": "FAILURE"}],
-                "run": {"run_id": "run-a", "status": "completed", "omp_process_id": "omp-a", "receipt_process_id": "verify-a"},
+                "run": {
+                    "run_id": "run-a",
+                    "status": "completed",
+                    "omp_process_id": "run-a:auto_worker:triage_invoke_repair_omp",
+                    "receipt_process_id": "run-a:auto_worker:triage_verify_repair_receipt",
+                },
                 "provenance": {
                     "repo": "o/r",
                     "pr_number": 1,
@@ -953,6 +990,16 @@ class RepairTests(unittest.TestCase):
                 },
             }))
             self.assertEqual(published["status"], "written")
+            persist("run-a", "triage_publish_repair_receipt", published)
+
+            first_run = read_journal_processes(db, "run-a")
+            omp_rows = [row for row in first_run if row.step_id == "triage_invoke_repair_omp"]
+            push_rows = [row for row in first_run if row.step_id == "triage_push_repair_branch"]
+            self.assertEqual(len(omp_rows), 1)
+            self.assertEqual(len(push_rows), 1)
+            self.assertEqual(omp_rows[0].status, "succeeded")
+            self.assertEqual(push_rows[0].status, "succeeded")
+
             completed = repair.read_repair_completed_receipt(req({
                 "repo": "o/r",
                 "number": 1,
@@ -984,20 +1031,42 @@ class RepairTests(unittest.TestCase):
                     "conduction": {
                         "decide_repair_attempt": restart,
                         "verify_repair_attempt_reservation": {"ok": True, "verified": True},
-                        "read_repair_omp_preconditions": {"ok": True, "status": "ready", "worktree_path": str(root / "worktrees" / "wt"), "pre_head": "a" * 40},
+                        "read_repair_omp_preconditions": {
+                            "ok": True,
+                            "status": "ready",
+                            "worktree_path": str(root / "worktrees" / "wt"),
+                            "pre_head": "a" * 40,
+                        },
                     },
                 }))
                 blocked_push = repair.push_repair_branch(req({
                     "dry_run": False,
                     "conduction": {
                         "decide_repair_attempt": restart,
-                        "decide_repair_push": {"ok": True, "status": "push", "should_push": True, "before_oid": "a" * 40, "local_oid": "b" * 40},
+                        "decide_repair_push": {
+                            "ok": True,
+                            "status": "push",
+                            "should_push": True,
+                            "before_oid": "a" * 40,
+                            "local_oid": "b" * 40,
+                        },
                     },
                 }))
             self.assertEqual(blocked_omp["status"], "noop")
             self.assertEqual(blocked_push["status"], "noop")
             run_omp_restart.assert_not_called()
             push_restart.assert_not_called()
+            persist("run-b", "triage_decide_repair_attempt", restart)
+            persist("run-b", "triage_invoke_repair_omp", blocked_omp)
+            persist("run-b", "triage_push_repair_branch", blocked_push)
+
+            second_run = read_journal_processes(db, "run-b")
+            self.assertEqual([row.step_id for row in second_run if row.step_id == "triage_invoke_repair_omp" and row.output.get("status") == "invoked"], [])
+            self.assertEqual([row.step_id for row in second_run if row.step_id == "triage_push_repair_branch" and row.output.get("status") == "pushed"], [])
+            all_rows = read_journal_processes(db, "run-a") + second_run
+            self.assertEqual(len([row for row in all_rows if row.step_id == "triage_invoke_repair_omp" and row.output.get("status") == "invoked"]), 1)
+            self.assertEqual(len([row for row in all_rows if row.step_id == "triage_push_repair_branch" and row.output.get("status") == "pushed"]), 1)
+
 
     def test_repair_reservation_restart_blocks_changed_checks_and_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
