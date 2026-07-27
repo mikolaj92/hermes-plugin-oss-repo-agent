@@ -757,10 +757,14 @@ def decide_repair_worktree_ownership(request: Request) -> Result:
      if not remote_oid:
          return fail("missing_repair_remote_oid", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership")
      expected = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": remote_oid}
-     if not all(expected[key] for key in ("task", "issue", "repo", "pr", "remote_oid")):
+     if not all(expected[key] for key in ("issue", "repo", "pr", "remote_oid")):
          return fail("missing_repair_ownership_evidence", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected=expected)
      actual = dict(branch_read.get("provenance") or {})
-     if branch_read.get("exists") and any(actual.get(key) != value for key, value in expected.items() if value):
+     if branch_read.get("exists") and any(
+         actual.get(key) != value
+         for key, value in expected.items()
+         if value or key == "task" and actual.get(key)
+     ):
          return fail("foreign_repair_branch_ownership", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected=expected, actual=actual)
      rows = inventory.get("worktrees") if isinstance(inventory.get("worktrees"), list) else []
      target = Path(context["worktree_path"]).resolve()
@@ -803,7 +807,7 @@ def write_repair_branch_provenance(request: Request) -> Result:
          return ok(status="verified", operation="write_repair_branch_provenance", mutated=False, **context)
      decision = cond_blob(request, "decide_repair_worktree_ownership")
      values = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": str(decision.get("remote_oid") or "")}
-     if not all(values[key] for key in ("task", "issue", "repo", "pr", "remote_oid")):
+     if not all(values[key] for key in ("issue", "repo", "pr", "remote_oid")):
          return fail("missing_repair_provenance", failure_class="terminal", retry_safe=False, operation="write_repair_branch_provenance")
      if dry_run_flag(request):
          return planned(operation="write_repair_branch_provenance", branch=context["branch"], provenance=values)

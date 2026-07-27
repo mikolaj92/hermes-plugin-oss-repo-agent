@@ -394,6 +394,47 @@ class RepairTests(unittest.TestCase):
         self.assertFalse(blocked["mutated"])
 
 
+    def test_repair_ownership_allows_empty_dispatch_task(self) -> None:
+        context = {
+            "repo": "owner/repo", "issue": 10, "pr_number": 11,
+            "branch": "ai/fix/10-test", "clone_path": "/clone",
+            "worktree_root": "/worktrees", "task_id": "", "receipt": "/receipt",
+        }
+        base_conduction = {
+            "read_repair_context": {"ok": True, "status": "read", **context},
+            "read_repair_remote_head": {"ok": True, "status": "read", "remote_oid": "a" * 40},
+            "read_repair_worktree_inventory": {"ok": True, "status": "read", "worktree": None},
+        }
+        fresh = repair.decide_repair_worktree_ownership(req({
+            **context,
+            "conduction": {**base_conduction, "read_repair_branch_provenance": {"ok": True, "status": "read", "exists": False, "provenance": {}}},
+        }))
+        self.assertTrue(fresh["ok"])
+        self.assertEqual(fresh["expected"]["task"], "")
+
+        matching = {"task": "", "issue": "10", "repo": "owner/repo", "pr": "11", "receipt": "/receipt", "remote_oid": "a" * 40}
+        reuse = repair.decide_repair_worktree_ownership(req({
+            **context,
+            "conduction": {**base_conduction, "read_repair_branch_provenance": {"ok": True, "status": "read", "exists": True, "provenance": matching}},
+        }))
+        self.assertTrue(reuse["ok"])
+
+        conflicting = repair.decide_repair_worktree_ownership(req({
+            **context,
+            "conduction": {**base_conduction, "read_repair_branch_provenance": {"ok": True, "status": "read", "exists": True, "provenance": {**matching, "task": "foreign-task"}}},
+        }))
+        self.assertFalse(conflicting["ok"])
+        self.assertEqual(conflicting["reason"], "foreign_repair_branch_ownership")
+
+        for missing in ("repo", "issue", "pr_number"):
+            broken = dict(context)
+            broken[missing] = ""
+            conduction = dict(base_conduction)
+            conduction["read_repair_context"] = {"ok": True, "status": "read", **broken}
+            conduction["read_repair_branch_provenance"] = {"ok": True, "status": "read", "exists": False, "provenance": {}}
+            out = repair.decide_repair_worktree_ownership(req({**broken, "conduction": conduction}))
+            self.assertFalse(out["ok"], missing)
+
     def test_decide_repair_attempt_disabled_or_dry_run(self) -> None:
         from lokay.steps.repair import decide_repair_attempt
         # disabled
