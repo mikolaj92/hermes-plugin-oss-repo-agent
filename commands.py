@@ -32,6 +32,8 @@ from .executor import CommandSpec, Runner, planned_command
 INTAKE_ASSIGNEE = "lokay-intake"
 FALA_PINNED_COMMIT = "b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
 FALA_PINNED_VERSION = "0.7.15"
+FALA_EMBER_JSON_COMMIT = "882acf141301db4ee797228016982ad6acc71a6f"
+FALA_SQLITE_FIRE_COMMIT = "3d482362c863e769d018443045b27ca5db645b3c"
 
 
 def setup_parser(parser: ArgumentParser) -> None:
@@ -813,6 +815,28 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
         raise ConfigError("pinned Fala checkout is dirty")
     fala_target = project / "Fala"
     _copy_git_tree(fala_root, FALA_PINNED_COMMIT, project / "Fala")
+    for relative, commit in (
+        ("vendor/EmberJson", FALA_EMBER_JSON_COMMIT),
+        ("vendor/sqlite.fire", FALA_SQLITE_FIRE_COMMIT),
+    ):
+        dependency = fala_root / relative
+        try:
+            dependency_head = subprocess.run(
+                ["git", "-C", str(dependency), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "-C", str(dependency), "diff", "--quiet", "HEAD"],
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise ConfigError(f"unable to verify pinned Fala dependency {relative}: {exc}") from exc
+        if dependency_head != commit:
+            raise ConfigError(f"Fala dependency {relative} HEAD does not match pinned commit")
+        _copy_git_tree(dependency, commit, fala_target / relative)
     for line in submodules.stdout.splitlines():
         if not line or line[0] != " ":
             raise ConfigError("pinned Fala submodules are not initialized at recorded commits")
