@@ -544,15 +544,16 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return fail("repair_attempt_reservation_readback_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", error=str(exc), reservation_path=path)
-    identity, error = _repair_identity(request)
     stored = _reservation_identity(payload)
-    if identity is None or stored is None:
-        return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict=error)
+    if stored is None:
+        return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="invalid_reservation_identity")
     if payload.get("status") != "reserved" or payload.get("attempted") is not True:
         return fail("repair_attempt_reservation_invalid", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
     if source.get("status") == "recovered":
         recovery = cond_blob(request, "verify_repair_attempt_recovery")
         claim = source.get("recovery_claim")
+        current_run_id = str(input_of(request).get("run_id") or cfg_of(request).get("run_id") or "")
+        current_candidate = str(input_of(request).get("candidate") or input_of(request).get("candidate_id") or cfg_of(request).get("candidate") or "")
         valid = bool(
             recovery.get("ok") is True
             and recovery.get("status") == "verified"
@@ -564,12 +565,15 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
             and str(claim.get("verified_head") or "") == str(stored["verified_head"])
             and str(claim.get("reservation_candidate") or "") == str(stored["candidate"])
             and str(claim.get("reservation_run_id") or "") == str(stored["run_id"])
-            and str(claim.get("recovery_candidate") or "") == str(identity["candidate"])
-            and str(claim.get("recovery_run_id") or "") == str(identity["run_id"])
+            and str(claim.get("recovery_candidate") or "") == current_candidate
+            and str(claim.get("recovery_run_id") or "") == current_run_id
         )
         if not valid:
             return fail("repair_attempt_recovery_claim_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
         return ok(status="verified", operation="verify_repair_attempt_reservation", verified=True, recovered=True, reservation=payload, recovery_claim=claim, reservation_path=path, mutated=False)
+    identity, error = _repair_identity(request)
+    if identity is None:
+        return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict=error)
     if any(str(stored.get(key)) != str(identity.get(key)) for key in ("repo", "pr_number", "verified_head", "candidate", "run_id")):
         return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict=error)
     return ok(status="verified", operation="verify_repair_attempt_reservation", verified=True, reservation=payload, reservation_path=path, mutated=False)
@@ -1238,10 +1242,10 @@ def create_repair_branch(request: Request) -> Result:
          return upstream
      decision = cond_blob(request, "decide_repair_worktree_ownership")
      context = _repair_context(request)
-     if decision.get("reuse") is True:
-         return ok(status="reused", operation="create_repair_branch", mutated=False, **context)
      if decision.get("recover_branch") is True:
          return ok(status="recovered", operation="create_repair_branch", mutated=False, remote_oid=str(decision.get("remote_oid") or ""), **context)
+     if decision.get("reuse") is True:
+         return ok(status="reused", operation="create_repair_branch", mutated=False, remote_oid=str(decision.get("remote_oid") or ""), **context)
      remote_oid = str(decision.get("remote_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
      if not remote_oid:
          return fail("missing_repair_remote_oid", failure_class="terminal", retry_safe=False, operation="create_repair_branch")

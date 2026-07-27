@@ -460,6 +460,37 @@ class RepairTests(unittest.TestCase):
         self.assertFalse(rejected["ok"])
         self.assertEqual(rejected["reason"], "foreign_repair_branch_ownership")
 
+    def test_recovery_precedes_reuse_and_repairs_provenance(self) -> None:
+        context = {
+            "repo": "owner/repo", "issue": "10", "pr_number": "11", "branch": "ai/fix/10",
+            "clone_path": "/clone", "worktree_root": "/worktrees", "repair_state_root": "/state",
+            "dry_run": False,
+        }
+        resolved = repair._repair_context(req(context))
+        remote_oid = "a" * 40
+        decision = {
+            "ok": True, "status": "recover", "recover_branch": True, "reuse": True,
+            "remote_oid": remote_oid, **resolved,
+        }
+        created = repair.create_repair_branch(req({**context, "conduction": {"decide_repair_worktree_ownership": decision}}))
+        self.assertEqual(created["status"], "recovered")
+        with mock.patch("lokay.steps.repair.branch_config_set") as set_config:
+            written = repair.write_repair_branch_provenance(req({**context, "conduction": {
+                "create_repair_branch": created,
+                "decide_repair_worktree_ownership": decision,
+            }}))
+        self.assertEqual(written["status"], "written")
+        self.assertTrue(set_config.called)
+        with mock.patch("lokay.steps.repair.worktree_add") as add_worktree:
+            added = repair.add_repair_worktree(req({**context, "conduction": {
+                "create_repair_branch": created,
+                "write_repair_branch_provenance": written,
+                "decide_repair_worktree_ownership": decision,
+            }}))
+        self.assertEqual(added["status"], "reused")
+        add_worktree.assert_not_called()
+
+
     def test_repair_setup_context_survives_atomic_conduction(self) -> None:
         context = {
             "repo": "owner/repo",
@@ -1052,6 +1083,61 @@ class RepairTests(unittest.TestCase):
             self.assertEqual(verified_reservation["status"], "verified")
             self.assertTrue(verified_reservation["recovered"])
             self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_verify_recovered_reservation_without_top_level_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity = {
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": "head-a",
+                "candidate": "old-candidate",
+                "run_id": "old-run",
+            }
+            reservation = {
+                **identity,
+                "status": "reserved",
+                "attempted": True,
+                "kind": "repair_attempt_reservation",
+                "checks": [{"identity": "ci", "conclusion": "FAILURE"}],
+            }
+            path = root / "reservation.json"
+            path.write_text(json.dumps(reservation, sort_keys=True) + "\n", encoding="utf-8")
+            claim = {
+                "kind": "repair_attempt_recovery_claim",
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": "head-a",
+                "reservation_run_id": "old-run",
+                "reservation_candidate": "old-candidate",
+                "evidence_process_id": "old-run:auto_worker:triage_verify_repair_attempt_reservation",
+                "recovery_run_id": "new-run",
+                "recovery_candidate": "new-candidate",
+            }
+            reserved = {
+                "ok": True,
+                "status": "recovered",
+                "mutated": False,
+                "reservation_path": str(path),
+                "recovery_claim": claim,
+            }
+            verified = {
+                "ok": True,
+                "status": "verified",
+                "recovery_verified": True,
+                "recovery_claim": claim,
+            }
+            out = repair.verify_repair_attempt_reservation(req({
+                "candidate": "new-candidate",
+                "run_id": "new-run",
+                "conduction": {
+                    "reserve_repair_attempt": reserved,
+                    "verify_repair_attempt_recovery": verified,
+                },
+            }))
+            self.assertEqual(out["status"], "verified")
+            self.assertTrue(out["recovered"])
+            self.assertTrue(out["verified"])
 
     def test_repair_attempt_recovery_claim_paths_differ_by_evidence_process(self) -> None:
         path = Path("/tmp/reservation.json")

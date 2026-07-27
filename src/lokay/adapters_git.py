@@ -41,7 +41,8 @@ def _branch_config_section(branch: str) -> str:
 
 
 def _branch_config_key(branch: str, key: str) -> str:
-    return f"branch.{_branch_config_section(branch)}.{key}"
+    # Git variable names reject underscores; provenance field names use them.
+    return f"branch.{_branch_config_section(branch)}.{key.replace('_', '-')}"
 
 
 def branch_config_get(clone_path: str | Path, branch: str, key: str) -> str:

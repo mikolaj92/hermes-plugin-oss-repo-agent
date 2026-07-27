@@ -719,21 +719,21 @@ config = { handler = "lokay.steps.repair.create_repair_branch" }
 [[correlation_paths.effectors]]
 id = "write_repair_branch_provenance"
 capability = "lokay_step"
-conduction = ["create_repair_branch"]
+conduction = ["create_repair_branch", "decide_repair_worktree_ownership"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.write_repair_branch_provenance" }
 
 [[correlation_paths.effectors]]
 id = "add_repair_worktree"
 capability = "lokay_step"
-conduction = ["create_repair_branch", "write_repair_branch_provenance"]
+conduction = ["create_repair_branch", "write_repair_branch_provenance", "decide_repair_worktree_ownership"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.add_repair_worktree" }
 
 [[correlation_paths.effectors]]
 id = "verify_repair_worktree"
 capability = "lokay_step"
-conduction = ["add_repair_worktree"]
+conduction = ["add_repair_worktree", "decide_repair_worktree_ownership"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.verify_repair_worktree" }
 
@@ -1920,21 +1920,21 @@ config = { handler = "lokay.steps.repair.create_repair_branch" }
 [[correlation_paths.effectors]]
 id = "triage_write_repair_branch_provenance"
 capability = "lokay_step"
-conduction = ["triage_create_repair_branch"]
+conduction = ["triage_create_repair_branch", "triage_decide_repair_worktree_ownership"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.write_repair_branch_provenance" }
 
 [[correlation_paths.effectors]]
 id = "triage_add_repair_worktree"
 capability = "lokay_step"
-conduction = ["triage_create_repair_branch", "triage_write_repair_branch_provenance"]
+conduction = ["triage_create_repair_branch", "triage_write_repair_branch_provenance", "triage_decide_repair_worktree_ownership"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.add_repair_worktree" }
 
 [[correlation_paths.effectors]]
 id = "triage_verify_repair_worktree"
 capability = "lokay_step"
-conduction = ["triage_add_repair_worktree"]
+conduction = ["triage_add_repair_worktree", "triage_decide_repair_worktree_ownership"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.verify_repair_worktree" }
 
