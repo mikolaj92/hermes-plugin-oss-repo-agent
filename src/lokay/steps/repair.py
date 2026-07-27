@@ -641,6 +641,11 @@ def _repair_field(request: Request, *keys: str, default: str = "") -> str:
              return values[0]
      return default
 
+def _repair_local_branch(repo: str, pr_number: str, branch: str) -> str:
+     """Return the collision-safe local ref owned by one remote repair target."""
+     digest = hashlib.sha256(f"{repo}\0{pr_number}\0{branch}".encode()).hexdigest()
+     return f"lokay/repair/{digest}"
+
 def _repair_ownership_receipt(request: Request, repo: str, pr_number: str, branch: str) -> str:
      root = _repair_state_root(request)
      if root is None or not repo or not pr_number or not branch:
@@ -654,27 +659,34 @@ def _repair_context(request: Request) -> dict[str, str]:
      cfg = cfg_of(request)
      root = str(data.get("worktree_root") or cfg.get("worktree_root") or "").strip()
      branch = _repair_field(request, "branch", "head_ref_name")
-     path = str(Path(root) / branch) if root and branch else ""
+     repo = _repair_field(request, "repo")
+     pr_number = _repair_field(request, "pr_number", "number")
+     local_branch = _repair_local_branch(repo, pr_number, branch) if repo and pr_number and branch else ""
+     path = str(Path(root) / local_branch) if root and local_branch else ""
      return {
-         "repo": _repair_field(request, "repo"),
+         "repo": repo,
          "issue": _repair_field(request, "issue"),
-         "pr_number": _repair_field(request, "pr_number", "number"),
+         "pr_number": pr_number,
          "branch": branch,
+         "local_branch": local_branch,
          "clone_path": _repair_field(request, "clone_path"),
          "worktree_root": root,
          "worktree_path": path,
          "remote": _repair_field(request, "remote", default="origin") or "origin",
          "task_id": _repair_field(request, "task_id"),
-         "receipt": _repair_ownership_receipt(request, _repair_field(request, "repo"), _repair_field(request, "pr_number", "number"), branch),
+         "receipt": _repair_ownership_receipt(request, repo, pr_number, branch),
      }
 
 def _repair_context_error(context: dict[str, str]) -> str | None:
-     for key in ("repo", "issue", "pr_number", "branch", "clone_path", "worktree_root", "worktree_path"):
+     for key in ("repo", "issue", "pr_number", "branch", "local_branch", "clone_path", "worktree_root", "worktree_path"):
          if not context.get(key):
              return f"missing_repair_{key}"
      branch = Path(context["branch"])
+     local_branch = Path(context["local_branch"])
      if branch.is_absolute() or ".." in branch.parts or not branch.parts:
          return "invalid_repair_branch"
+     if local_branch.is_absolute() or ".." in local_branch.parts or not local_branch.parts:
+         return "invalid_repair_local_branch"
      try:
          Path(context["worktree_path"]).resolve().relative_to(Path(context["worktree_root"]).resolve())
      except ValueError:
@@ -702,7 +714,7 @@ def read_repair_context(request: Request) -> Result:
      if error:
          return fail(error, failure_class="terminal", retry_safe=False, operation="read_repair_context", context=context)
      # Every identity must be singular across request/config/conduction.
-     conflicts = {key: _repair_values(request, key) for key in ("repo", "issue", "pr_number", "branch", "clone_path", "worktree_root", "worktree_path") if len(_repair_values(request, key)) > 1}
+     conflicts = {key: _repair_values(request, key) for key in ("repo", "issue", "pr_number", "branch", "clone_path", "worktree_root") if len(_repair_values(request, key)) > 1}
      if conflicts:
          return fail("conflicting_repair_context", failure_class="terminal", retry_safe=False, operation="read_repair_context", conflicts=conflicts)
      return ok(status="read", operation="read_repair_context", **context)
@@ -742,12 +754,12 @@ def read_repair_branch_provenance(request: Request) -> Result:
          return upstream
      context = _repair_context(request)
      try:
-         exists = branch_exists(context["clone_path"], context["branch"])
+         exists = branch_exists(context["clone_path"], context["local_branch"])
          provenance: dict[str, str] = {}
          if exists:
-             for key in ("task", "issue", "repo", "pr", "receipt", "remote_oid"):
+             for key in ("task", "issue", "repo", "pr", "receipt", "repair_receipt", "remote_oid", "target_branch"):
                  try:
-                     provenance[key] = branch_config_get(context["clone_path"], context["branch"], f"lokay-{key}").strip()
+                     provenance[key] = branch_config_get(context["clone_path"], context["local_branch"], f"lokay-{key}").strip()
                  except CommandError:
                      provenance[key] = ""
      except (CommandError, OSError) as exc:
@@ -765,27 +777,23 @@ def decide_repair_worktree_ownership(request: Request) -> Result:
      remote_oid = str(remote.get("remote_oid") or _repair_field(request, "remote_oid"))
      if not remote_oid:
          return fail("missing_repair_remote_oid", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership")
-     expected = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": remote_oid}
-     if not all(expected[key] for key in ("issue", "repo", "pr", "remote_oid")):
+     expected = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": remote_oid, "target_branch": context["branch"]}
+     if not all(expected[key] for key in ("issue", "repo", "pr", "remote_oid", "target_branch")):
          return fail("missing_repair_ownership_evidence", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected=expected)
      actual = dict(branch_read.get("provenance") or {})
-     if branch_read.get("exists") and any(
-         actual.get(key) != value
-         for key, value in expected.items()
-         if value or key == "task" and actual.get(key)
-     ):
+     if branch_read.get("exists") and any(actual.get(key) != value for key, value in expected.items() if value or key == "task" and actual.get(key)):
          return fail("foreign_repair_branch_ownership", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected=expected, actual=actual)
      rows = inventory.get("worktrees") if isinstance(inventory.get("worktrees"), list) else []
      target = Path(context["worktree_path"]).resolve()
      matching = [row for row in rows if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == target]
-     if matching and any(str(row.get("branch") or "") != context["branch"] for row in matching):
+     if matching and any(str(row.get("branch") or "") != context["local_branch"] for row in matching):
          return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
      if matching and str(matching[0].get("head") or "") != remote_oid:
          return fail("stale_repair_remote_head", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected_head=remote_oid, actual_head=matching[0].get("head"))
      if target.exists() or target.is_symlink():
          if not matching:
              return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
-     reuse = bool(branch_read.get("exists") and matching and str(matching[0].get("branch") or "") == context["branch"])
+     reuse = bool(branch_read.get("exists") and matching and str(matching[0].get("branch") or "") == context["local_branch"])
      return ok(status="reuse" if reuse else "create", operation="decide_repair_worktree_ownership", should_prepare=True, reuse=reuse, remote_oid=remote_oid, expected=expected, **context)
 
 def create_repair_branch(request: Request) -> Result:
@@ -800,9 +808,9 @@ def create_repair_branch(request: Request) -> Result:
      if not remote_oid:
          return fail("missing_repair_remote_oid", failure_class="terminal", retry_safe=False, operation="create_repair_branch")
      if dry_run_flag(request):
-         return planned(operation="create_repair_branch", branch=context["branch"], remote_oid=remote_oid)
+         return planned(operation="create_repair_branch", branch=context["branch"], local_branch=context["local_branch"], remote_oid=remote_oid)
      try:
-         git(["branch", context["branch"], remote_oid], cwd=context["clone_path"])
+         git(["branch", context["local_branch"], remote_oid], cwd=context["clone_path"])
      except CommandError as exc:
          return fail("repair_branch_create_failed", failure_class="terminal", retry_safe=False, operation="create_repair_branch", error=str(exc), mutated=False, **context)
      return ok(status="created", operation="create_repair_branch", mutated=True, remote_oid=remote_oid, **context)
@@ -815,15 +823,15 @@ def write_repair_branch_provenance(request: Request) -> Result:
      if cond_blob(request, "create_repair_branch").get("status") == "reused":
          return ok(status="verified", operation="write_repair_branch_provenance", mutated=False, **context)
      decision = cond_blob(request, "decide_repair_worktree_ownership")
-     values = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": str(decision.get("remote_oid") or "")}
-     if not all(values[key] for key in ("issue", "repo", "pr", "remote_oid")):
+     values = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": str(decision.get("remote_oid") or ""), "target_branch": context["branch"]}
+     if not all(values[key] for key in ("issue", "repo", "pr", "remote_oid", "target_branch")):
          return fail("missing_repair_provenance", failure_class="terminal", retry_safe=False, operation="write_repair_branch_provenance")
      if dry_run_flag(request):
-         return planned(operation="write_repair_branch_provenance", branch=context["branch"], provenance=values)
+         return planned(operation="write_repair_branch_provenance", branch=context["branch"], local_branch=context["local_branch"], provenance=values)
      try:
          for key, value in values.items():
              if value:
-                 branch_config_set(context["clone_path"], context["branch"], f"lokay-{key}", value)
+                 branch_config_set(context["clone_path"], context["local_branch"], f"lokay-{key}", value)
      except CommandError as exc:
          return fail("repair_provenance_write_failed", failure_class="retryable", retry_safe=True, operation="write_repair_branch_provenance", error=str(exc), mutated=True)
      return ok(status="written", operation="write_repair_branch_provenance", provenance=values, mutated=True, **context)
@@ -835,7 +843,7 @@ def add_repair_worktree(request: Request) -> Result:
      context = _repair_context(request)
      decision = cond_blob(request, "decide_repair_worktree_ownership")
      if decision.get("reuse") is True:
-         return ok(status="reused", operation="add_repair_worktree", worktree_path=context["worktree_path"], branch=context["branch"], mutated=False)
+         return ok(status="reused", operation="add_repair_worktree", worktree_path=context["worktree_path"], branch=context["branch"], local_branch=context["local_branch"], mutated=False)
      path, root = Path(context["worktree_path"]).resolve(), Path(context["worktree_root"]).resolve()
      try:
          path.relative_to(root)
@@ -844,12 +852,12 @@ def add_repair_worktree(request: Request) -> Result:
      if path.exists() or path.is_symlink():
          return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="add_repair_worktree", worktree_path=str(path))
      if dry_run_flag(request):
-         return planned(operation="add_repair_worktree", worktree_path=str(path), branch=context["branch"])
+         return planned(operation="add_repair_worktree", worktree_path=str(path), branch=context["branch"], local_branch=context["local_branch"])
      try:
-         worktree_add(context["clone_path"], str(path), context["branch"], create_branch=False)
+         worktree_add(context["clone_path"], str(path), context["local_branch"], create_branch=False)
      except CommandError as exc:
          return fail("repair_worktree_add_failed", failure_class="terminal", retry_safe=False, operation="add_repair_worktree", error=str(exc), mutated=False)
-     return ok(status="added", operation="add_repair_worktree", worktree_path=str(path), branch=context["branch"], mutated=True)
+     return ok(status="added", operation="add_repair_worktree", worktree_path=str(path), branch=context["branch"], local_branch=context["local_branch"], mutated=True)
 
 def prepare_repair_worktree(request: Request) -> Result:
      """Mutation atom for the already-decided exact-head worktree add."""
@@ -868,11 +876,11 @@ def verify_repair_worktree(request: Request) -> Result:
          head = rev_parse(path)
      except (CommandError, OSError) as exc:
          return fail("repair_worktree_readback_failed", failure_class="retryable_read", retry_safe=True, operation="verify_repair_worktree", error=str(exc), **context)
-     if Path(top).resolve() != Path(path).resolve() or branch != context["branch"]:
+     if Path(top).resolve() != Path(path).resolve() or branch != context["local_branch"]:
          return fail("repair_worktree_confinement_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_worktree", top_level=top, actual_branch=branch, **context)
      if not expected or head != expected:
          return fail("repair_worktree_head_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_worktree", expected_head=expected, actual_head=head, **context)
-     return ok(status="verified", operation="verify_repair_worktree", head=head, remote_oid=expected, branch=branch, worktree_path=path, **context)
+     return ok(status="verified", operation="verify_repair_worktree", head=head, remote_oid=expected, actual_local_branch=branch, **context)
 
 def verify_repair_worktree_head(request: Request):
      return verify_repair_worktree(request)
@@ -920,8 +928,8 @@ def read_repair_omp_preconditions(request: Request) -> Result:
         return fail("repair_omp_precondition_failed", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", error=str(exc), **context)
     if Path(top).resolve() != Path(path).resolve():
         return fail("repair_omp_worktree_confinement", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", top_level=top, **context)
-    if branch != context["branch"]:
-        return fail("repair_omp_branch_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", expected_branch=context["branch"], actual_branch=branch, **context)
+    if branch != context["local_branch"]:
+        return fail("repair_omp_branch_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", expected_branch=context["local_branch"], actual_branch=branch, **context)
     expected = str(cond_blob(request, "verify_repair_worktree", "verify_repair_worktree_head").get("head") or cond_blob(request, "decide_repair_worktree_ownership").get("remote_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
     if expected and head != expected:
         return fail("repair_omp_head_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", expected_head=expected, actual_head=head, **context)
@@ -961,7 +969,7 @@ def invoke_repair_omp(request: Request) -> Result:
         "status": "invoked",
         "attempted": True,
     }
-    return ok(status="invoked", operation="invoke_repair_omp", omp=out, worktree_path=path, pre_head=pre_head, attempt_state=attempt_state, mutated=True)
+    return ok(status="invoked", operation="invoke_repair_omp", omp=out, omp_process_id=str(request.get("process_id") or ""), worktree_path=path, pre_head=pre_head, attempt_state=attempt_state, mutated=True)
 
 
 def verify_repair_omp_postconditions(request: Request) -> Result:
@@ -987,7 +995,7 @@ def verify_repair_omp_postconditions(request: Request) -> Result:
         return fail("repair_omp_head_unchanged", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head)
     if before and not changed:
         return fail("repair_omp_no_changes", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head)
-    return ok(status="verified", operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head, changed_paths=changed.splitlines(), omp=cond_blob(request, "invoke_repair_omp").get("omp"), mutated=False)
+    return ok(status="verified", operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head, changed_paths=changed.splitlines(), omp=cond_blob(request, "invoke_repair_omp").get("omp"), omp_process_id=cond_blob(request, "invoke_repair_omp").get("omp_process_id"), mutated=False)
 
 
 def read_repair_worktree_head(request: Request) -> Result:
@@ -1033,10 +1041,10 @@ def push_repair_branch(request: Request) -> Result:
         return noop("repair_push_not_authorized", operation="push_repair_branch")
     context = _repair_context(request)
     try:
-        out = git_push_branch(context["worktree_path"], context["branch"], set_upstream=True)
+        out = git_push_branch(context["worktree_path"], context["branch"], remote=context["remote"], set_upstream=False)
     except CommandError as exc:
         return fail("repair_push_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="push_repair_branch", error=str(exc), mutated=True, **context)
-    return ok(status="pushed", operation="push_repair_branch", branch=context["branch"], remote=context["remote"], stdout_tail=out[-400:], mutated=True, **context)
+    return ok(status="pushed", operation="push_repair_branch", stdout_tail=out[-400:], mutated=True, **context)
 
 
 def read_repair_pushed_ref(request: Request) -> Result:
@@ -1054,7 +1062,7 @@ def read_repair_pushed_ref(request: Request) -> Result:
     rows = [line.split() for line in text.splitlines() if line.split()]
     if len(rows) != 1 or len(rows[0]) < 2 or rows[0][1] != f"refs/heads/{context['branch']}":
         return fail("repair_pushed_ref_missing", failure_class="terminal", retry_safe=False, operation="read_repair_pushed_ref", output=text, **context)
-    return ok(status="read", operation="read_repair_pushed_ref", remote_oid=rows[0][0], branch=context["branch"], **context)
+    return ok(status="read", operation="read_repair_pushed_ref", remote_oid=rows[0][0], **context)
 
 
 def verify_repair_push_oid(request: Request) -> Result:
@@ -1073,25 +1081,25 @@ def verify_repair_push_oid(request: Request) -> Result:
     return ok(status="verified", operation="verify_repair_push_oid", local_oid=local, remote_oid=remote, mutated=False)
 
 def update_repair_branch_provenance(request: Request) -> Result:
-    gated = _repair_execution_gate(request, "update_repair_branch_provenance", "verify_repair_push_oid")
+    gated = _repair_execution_gate(request, "update_repair_branch_provenance", "verify_repair_receipt")
     if gated:
         return gated
-    upstream = _repair_upstream(request, "update_repair_branch_provenance", "verify_repair_push_oid")
+    upstream = _repair_upstream(request, "update_repair_branch_provenance", "verify_repair_receipt")
     if upstream:
         return upstream
     context = _repair_context(request)
     remote_oid = str(cond_blob(request, "verify_repair_push_oid").get("remote_oid") or "")
-    values = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": remote_oid}
-    if not all(values[key] for key in ("issue", "repo", "pr", "receipt", "remote_oid")):
+    values = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "repair_receipt": str(cond_blob(request, "verify_repair_receipt").get("receipt_path") or ""), "remote_oid": remote_oid, "target_branch": context["branch"]}
+    if not all(values[key] for key in ("issue", "repo", "pr", "receipt", "repair_receipt", "remote_oid", "target_branch")):
         return fail("missing_repair_provenance", failure_class="terminal", retry_safe=False, operation="update_repair_branch_provenance")
     if dry_run_flag(request):
-        return planned(operation="update_repair_branch_provenance", branch=context["branch"], provenance=values)
+        return planned(operation="update_repair_branch_provenance", branch=context["branch"], local_branch=context["local_branch"], provenance=values)
     try:
         for key, value in values.items():
             if value:
-                branch_config_set(context["clone_path"], context["branch"], f"lokay-{key}", value)
+                branch_config_set(context["clone_path"], context["local_branch"], f"lokay-{key}", value)
             else:
-                branch_config_unset(context["clone_path"], context["branch"], f"lokay-{key}")
+                branch_config_unset(context["clone_path"], context["local_branch"], f"lokay-{key}")
     except CommandError as exc:
         return fail("repair_provenance_update_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="update_repair_branch_provenance", error=str(exc), mutated=True)
     return ok(status="updated", operation="update_repair_branch_provenance", provenance=values, mutated=True, **context)
@@ -1107,12 +1115,12 @@ def verify_updated_repair_branch_provenance(request: Request) -> Result:
     if not isinstance(expected, dict):
         return fail("missing_repair_provenance", failure_class="terminal", retry_safe=False, operation="verify_updated_repair_branch_provenance")
     if dry_run_flag(request):
-        return planned(operation="verify_updated_repair_branch_provenance", branch=context["branch"])
+        return planned(operation="verify_updated_repair_branch_provenance", branch=context["branch"], local_branch=context["local_branch"])
     try:
         actual = {}
         for key in expected:
             try:
-                actual[key] = branch_config_get(context["clone_path"], context["branch"], f"lokay-{key}").strip()
+                actual[key] = branch_config_get(context["clone_path"], context["local_branch"], f"lokay-{key}").strip()
             except CommandError:
                 if key != "task":
                     raise
@@ -1126,10 +1134,10 @@ def verify_updated_repair_branch_provenance(request: Request) -> Result:
 
 
 def read_existing_repair_pr(request: Request) -> Result:
-    gated = _repair_execution_gate(request, "read_existing_repair_pr", "verify_updated_repair_branch_provenance")
+    gated = _repair_execution_gate(request, "read_existing_repair_pr", "verify_repair_push_oid")
     if gated:
         return gated
-    upstream = _repair_upstream(request, "read_existing_repair_pr", "verify_updated_repair_branch_provenance")
+    upstream = _repair_upstream(request, "read_existing_repair_pr", "verify_repair_push_oid")
     if upstream:
         return upstream
     context = _repair_context(request)
@@ -1170,6 +1178,17 @@ def verify_existing_repair_pr(request: Request) -> Result:
     return ok(status="verified", operation="verify_existing_repair_pr", repo=context["repo"], pr_number=expected_number, branch=context["branch"], head_oid=expected_oid, pr=pr, mutated=False)
 
 
+def _repair_attempt_receipt(request: Request, payload: dict[str, Any]) -> str:
+    root = _repair_state_root(request)
+    provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
+    run = payload.get("run") if isinstance(payload.get("run"), dict) else {}
+    parts = (provenance.get("repo"), provenance.get("pr_number"), payload.get("before_oid"), payload.get("after_oid"), run.get("run_id"), run.get("omp_process_id"), run.get("receipt_process_id"), payload.get("candidate"))
+    if root is None or any(value in (None, "") for value in parts):
+        return ""
+    digest = hashlib.sha256("\0".join(str(value or "") for value in parts).encode()).hexdigest()
+    return str(root / "repair-receipts" / str(provenance["repo"]).replace("/", "__") / str(provenance["pr_number"]) / f"{digest}.json")
+
+
 def build_repair_receipt(request: Request) -> Result:
     gated = _repair_execution_gate(request, "build_repair_receipt", "verify_existing_repair_pr")
     if gated:
@@ -1190,14 +1209,22 @@ def build_repair_receipt(request: Request) -> Result:
         "checks": decision.get("checks") or data.get("checks") or [],
         "omp": omp.get("omp") or cond_blob(request, "invoke_repair_omp").get("omp") or {},
         "run": {"run_id": decision.get("run_id") or data.get("run_id") or "", "status": "completed"},
+        "omp_process_id": str(omp.get("omp_process_id") or cond_blob(request, "invoke_repair_omp").get("omp_process_id") or ""),
+        "receipt_process_id": str(decision.get("process_id") or request.get("process_id") or ""),
         "candidate": decision.get("candidate") or data.get("candidate") or "",
         "config": dict(cfg),
-        "provenance": {"repo": context["repo"], "pr_number": int(context["pr_number"]), "branch": context["branch"], "task_id": context["task_id"], "issue": context["issue"], "receipt": context["receipt"]},
+        "provenance": {"repo": context["repo"], "pr_number": int(context["pr_number"]), "branch": context["branch"], "local_branch": context["local_branch"], "worktree_path": context["worktree_path"], "task_id": context["task_id"], "issue": context["issue"], "receipt": context["receipt"]},
         "pr": pr.get("pr") or {},
     }
+    payload["run"]["receipt_process_id"] = payload.pop("receipt_process_id")
+    payload["run"]["omp_process_id"] = payload.pop("omp_process_id")
+    if not payload["run"]["omp_process_id"]:
+        return fail("missing_repair_omp_provenance", failure_class="terminal", retry_safe=False, operation="build_repair_receipt", payload=payload)
+    if not payload["run"]["run_id"] or not payload["run"]["receipt_process_id"] or not payload["candidate"]:
+        return fail("missing_repair_receipt_provenance", failure_class="terminal", retry_safe=False, operation="build_repair_receipt", payload=payload)
     if not payload["before_oid"] or not payload["after_oid"] or payload["before_oid"] == payload["after_oid"]:
         return fail("invalid_repair_receipt_heads", failure_class="terminal", retry_safe=False, operation="build_repair_receipt", payload=payload)
-    return ok(status="built", operation="build_repair_receipt", payload=payload, receipt_path=context["receipt"], mutated=False)
+    return ok(status="built", operation="build_repair_receipt", payload=payload, receipt_path=_repair_attempt_receipt(request, payload), ownership_receipt=context["receipt"], mutated=False)
 
 
 def publish_repair_receipt(request: Request) -> Result:
@@ -1209,7 +1236,7 @@ def publish_repair_receipt(request: Request) -> Result:
         return upstream
     built = cond_blob(request, "build_repair_receipt")
     payload = built.get("payload")
-    path = str(input_of(request).get("receipt_path") or built.get("receipt_path") or _repair_context(request)["receipt"])
+    path = str(built.get("receipt_path") or "")
     if not isinstance(payload, dict) or not path:
         return fail("missing_repair_receipt_inputs", failure_class="terminal", retry_safe=False, operation="publish_repair_receipt")
     if dry_run_flag(request):
@@ -1229,7 +1256,7 @@ def verify_repair_receipt(request: Request) -> Result:
     if upstream:
         return upstream
     publication = cond_blob(request, "publish_repair_receipt")
-    path = str(input_of(request).get("receipt_path") or publication.get("receipt_path") or _repair_context(request)["receipt"])
+    path = str(publication.get("receipt_path") or cond_blob(request, "build_repair_receipt").get("receipt_path") or "")
     expected = cond_blob(request, "build_repair_receipt").get("payload")
     try:
         actual = json.loads(Path(path).read_text(encoding="utf-8"))

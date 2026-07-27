@@ -412,7 +412,7 @@ class RepairTests(unittest.TestCase):
         self.assertTrue(fresh["ok"])
         self.assertEqual(fresh["expected"]["task"], "")
 
-        matching = {"task": "", "issue": "10", "repo": "owner/repo", "pr": "11", "receipt": "/receipt", "remote_oid": "a" * 40}
+        matching = {"task": "", "issue": "10", "repo": "owner/repo", "pr": "11", "receipt": repair._repair_context(req(context))["receipt"], "remote_oid": "a" * 40, "target_branch": context["branch"]}
         reuse = repair.decide_repair_worktree_ownership(req({
             **context,
             "conduction": {**base_conduction, "read_repair_branch_provenance": {"ok": True, "status": "read", "exists": True, "provenance": matching}},
@@ -450,13 +450,15 @@ class RepairTests(unittest.TestCase):
         data = {"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10", "clone_path": "/clone", "worktree_root": "/worktrees", "repair_state_root": "/state", "task_id": "", "live": True, "enabled": True, "dry_run": False}
         verified = {"ok": True, "status": "verified", "remote_oid": "b" * 40}
         authorized = {"ok": True, "status": "authorized", "authorize": True}
-        updated = repair.update_repair_branch_provenance(req({**data, "conduction": {"decide_repair_attempt": authorized, "verify_repair_push_oid": verified}}))
+        updated = repair.update_repair_branch_provenance(req({**data, "conduction": {"decide_repair_attempt": authorized, "verify_repair_push_oid": verified, "verify_repair_receipt": {"ok": True, "status": "verified", "receipt_path": "/state/attempt-b.json"}}}))
         self.assertTrue(updated["ok"])
         self.assertEqual(updated["provenance"]["remote_oid"], "b" * 40)
-        unset_config.assert_called_once_with("/clone", "ai/fix/10", "lokay-task")
+        unset_config.assert_called_once_with("/clone", repair._repair_context(req(data))["local_branch"], "lokay-task")
         self.assertEqual(updated["provenance"]["receipt"], repair._repair_context(req({**data, "run_id": "next"}))["receipt"])
+        self.assertEqual(updated["provenance"]["repair_receipt"], "/state/attempt-b.json")
 
-        inventory = {"ok": True, "status": "read", "worktrees": [{"path": "/worktrees/ai/fix/10", "branch": "ai/fix/10", "head": "b" * 40}]}
+        repair_context = repair._repair_context(req(data))
+        inventory = {"ok": True, "status": "read", "worktrees": [{"path": repair_context["worktree_path"], "branch": repair_context["local_branch"], "head": "b" * 40}]}
         reuse = repair.decide_repair_worktree_ownership(req({**data, "run_id": "next", "conduction": {
             "read_repair_context": {"ok": True, "status": "read", **data},
             "read_repair_remote_head": {"ok": True, "status": "read", "remote_oid": "b" * 40},
@@ -467,16 +469,16 @@ class RepairTests(unittest.TestCase):
         self.assertTrue(reuse["reuse"])
     @mock.patch("lokay.steps.repair.branch_config_get")
     def test_provenance_readback_normalizes_only_missing_task(self, get_config) -> None:
-        provenance = {"task": "", "issue": "10", "repo": "owner/repo", "pr": "11", "receipt": "/state/ownership.json", "remote_oid": "b" * 40}
+        provenance = {"task": "", "issue": "10", "repo": "owner/repo", "pr": "11", "receipt": "/state/ownership.json", "remote_oid": "b" * 40, "target_branch": "ai/fix/10"}
         missing = CommandError(["git"], 1, "", "missing")
-        get_config.side_effect = [missing, "10", "owner/repo", "11", "/state/ownership.json", "b" * 40]
+        get_config.side_effect = [missing, "10", "owner/repo", "11", "/state/ownership.json", "b" * 40, "ai/fix/10"]
         checked = repair.verify_updated_repair_branch_provenance(req({"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10", "clone_path": "/clone", "worktree_root": "/worktrees", "repair_state_root": "/state", "dry_run": False, "conduction": {"update_repair_branch_provenance": {"ok": True, "status": "updated", "provenance": provenance}}}))
         self.assertTrue(checked["ok"])
         self.assertEqual(checked["provenance"], provenance)
 
     @mock.patch("lokay.steps.repair.branch_config_get")
     def test_provenance_readback_fails_when_required_key_is_missing(self, get_config) -> None:
-        provenance = {"task": "", "issue": "10", "repo": "owner/repo", "pr": "11", "receipt": "/state/ownership.json", "remote_oid": "b" * 40}
+        provenance = {"task": "", "issue": "10", "repo": "owner/repo", "pr": "11", "receipt": "/state/ownership.json", "remote_oid": "b" * 40, "target_branch": "ai/fix/10"}
         get_config.side_effect = [CommandError(["git"], 1, "", "missing"), CommandError(["git"], 1, "", "missing")]
         checked = repair.verify_updated_repair_branch_provenance(req({"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10", "clone_path": "/clone", "worktree_root": "/worktrees", "repair_state_root": "/state", "dry_run": False, "conduction": {"update_repair_branch_provenance": {"ok": True, "status": "updated", "provenance": provenance}}}))
         self.assertFalse(checked["ok"])
@@ -486,11 +488,49 @@ class RepairTests(unittest.TestCase):
         data = {"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10", "clone_path": "/clone", "repair_state_root": "/state", "task_id": "", "dry_run": True}
         authorized = {"ok": True, "status": "authorized", "authorize": True}
         verified = {"ok": True, "status": "verified", "remote_oid": "b" * 40}
-        updated = repair.update_repair_branch_provenance(req({**data, "conduction": {"decide_repair_attempt": authorized, "verify_repair_push_oid": verified}}))
+        updated = repair.update_repair_branch_provenance(req({**data, "conduction": {"decide_repair_attempt": authorized, "verify_repair_push_oid": verified, "verify_repair_receipt": {"ok": True, "status": "verified", "receipt_path": "/state/attempt-b.json"}}}))
         self.assertEqual(updated["status"], "planned")
         self.assertEqual(updated["provenance"]["task"], "")
         checked = repair.verify_updated_repair_branch_provenance(req({**data, "conduction": {"update_repair_branch_provenance": updated}}))
         self.assertEqual(checked["status"], "planned")
+
+    @mock.patch("lokay.steps.repair.git_push_branch")
+    def test_repair_push_targets_selected_remote_branch_without_force(self, push) -> None:
+        push.return_value = "ok"
+        data = {"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10", "clone_path": "/clone", "worktree_root": "/worktrees", "repair_state_root": "/state", "remote": "upstream", "live": True, "enabled": True, "dry_run": False}
+        decision = {"ok": True, "status": "push", "should_push": True, "local_oid": "b" * 40}
+        authorized = {"ok": True, "status": "authorized", "authorize": True}
+        result = repair.push_repair_branch(req({**data, "conduction": {"decide_repair_attempt": authorized, "decide_repair_push": decision}}))
+        self.assertTrue(result["ok"])
+        context = repair._repair_context(req(data))
+        push.assert_called_once_with(context["worktree_path"], "ai/fix/10", remote="upstream", set_upstream=False)
+
+    def test_foreign_selected_branch_does_not_conflict_with_owned_local_ref(self) -> None:
+        data = {"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10", "clone_path": "/clone", "worktree_root": "/worktrees", "repair_state_root": "/state", "task_id": ""}
+        context = repair._repair_context(req(data))
+        inventory = {"ok": True, "status": "read", "worktrees": [{"path": "/legacy/ai/fix/10", "branch": "ai/fix/10", "head": "b" * 40}]}
+        result = repair.decide_repair_worktree_ownership(req({**data, "conduction": {
+            "read_repair_context": {"ok": True, "status": "read", **context},
+            "read_repair_remote_head": {"ok": True, "status": "read", "remote_oid": "b" * 40},
+            "read_repair_worktree_inventory": inventory,
+            "read_repair_branch_provenance": {"ok": True, "status": "read", "exists": False, "provenance": {}},
+        }}))
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["reuse"])
+        self.assertEqual(result["local_branch"], context["local_branch"])
+        self.assertNotEqual(result["local_branch"], result["branch"])
+
+    def test_repair_attempt_receipts_retain_each_head_transition(self) -> None:
+        data = {"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10", "repair_state_root": "/state"}
+        context = repair._repair_context(req(data))
+        def payload(before: str, after: str, run_id: str) -> dict:
+            return {"before_oid": before, "after_oid": after, "candidate": "candidate", "run": {"run_id": run_id, "omp_process_id": f"omp-{run_id}", "receipt_process_id": "verify-repair"}, "provenance": {"repo": context["repo"], "pr_number": 11}}
+        first = repair._repair_attempt_receipt(req(data), payload("a" * 40, "b" * 40, "run-b"))
+        second = repair._repair_attempt_receipt(req(data), payload("b" * 40, "c" * 40, "run-c"))
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith("/state/repair-receipts/owner__repo/11/"))
+        self.assertTrue(second.startswith("/state/repair-receipts/owner__repo/11/"))
+        self.assertNotEqual(first, context["receipt"])
 
 
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
+from pathlib import Path
 from typing import Any
 
 from lokay.envelope import Request, Result, conduction_of, input_of, ok
@@ -74,6 +76,49 @@ def _identity_value(sources: tuple[Mapping[str, Any], ...], *keys: str) -> Any:
                 return value
     return None
 
+def _repair_cleanup_identity(request: Request, sources: tuple[Mapping[str, Any], ...]) -> dict[str, Any] | None:
+    """Extract verified repair receipt remote and deterministic local identities."""
+    data = input_of(request)
+    cfg = dict(request.get("config") or {}) if isinstance(request, Mapping) else {}
+    repair: list[Mapping[str, Any]] = []
+    for candidate in sources:
+        provenance = candidate.get("provenance")
+        if isinstance(provenance, Mapping):
+            repair.append({**candidate, **provenance})
+        payload = candidate.get("payload")
+        if isinstance(payload, Mapping) and isinstance(payload.get("provenance"), Mapping):
+            repair.append({**candidate, **payload, **payload["provenance"]})
+    source = next((item for item in repair if item.get("local_branch") or item.get("worktree_path")), None)
+    if source is None:
+        return None
+    merged = (source, *sources, data, cfg)
+    repo = str(_identity_value(merged, "repo") or "").strip()
+    branch = str(_identity_value(merged, "target_branch", "branch", "head_ref", "headRefName") or "").strip()
+    try:
+        pr = int(_identity_value(merged, "pr_number", "pr", "number") or 0)
+        issue = int(_identity_value(merged, "issue", "issue_number") or 0)
+    except (TypeError, ValueError):
+        return None
+    digest = hashlib.sha256(f"{repo}\0{pr}\0{branch}".encode()).hexdigest() if repo and pr > 0 and branch else ""
+    expected_local = f"lokay/repair/{digest}" if digest else ""
+    local_branch = str(source.get("local_branch") or "").strip() or expected_local
+    if not expected_local or local_branch != expected_local:
+        return None
+    root = str(_identity_value(merged, "worktree_root") or "").strip()
+    expected_path = str(Path(root) / expected_local) if root else ""
+    path = str(source.get("worktree_path") or "").strip() or expected_path
+    if not path or (expected_path and Path(path).resolve() != Path(expected_path).resolve()):
+        return None
+    receipt = str(_identity_value(merged, "receipt", "receipt_path") or "").strip()
+    remote_oid = str(source.get("remote_oid") or source.get("after_oid") or "").strip()
+    target_branch = str(source.get("target_branch") or branch).strip()
+    if not (repo and issue > 0 and pr > 0 and branch and receipt and remote_oid and target_branch == branch):
+        return None
+    return {"repo": repo, "issue": issue, "pr_number": pr, "branch": branch,
+            "local_branch": local_branch, "worktree_path": path, "receipt": receipt,
+            "remote_oid": remote_oid, "target_branch": target_branch,
+            "task": str(source.get("task_id") or source.get("task") or "").strip()}
+
 
 def _verified_cleanup_identity(request: Request, lanes: Mapping[str, dict[str, Any]]) -> dict[str, Any] | None:
     data = input_of(request)
@@ -89,6 +134,11 @@ def _verified_cleanup_identity(request: Request, lanes: Mapping[str, dict[str, A
         if match is not None:
             lifecycle_evidence.append(match[1])
 
+    repair_candidates: list[Mapping[str, Any]] = []
+    for tail in ("verify_repair_receipt", "triage_verify_repair_receipt", "build_repair_receipt", "triage_build_repair_receipt"):
+        match = _conduction_match(conduction, tail)
+        if match is not None:
+            repair_candidates.append(match[1])
     evidence: Mapping[str, Any] | None = None
     provenance: Mapping[str, Any] | None = None
     for candidate in triage_evidence:
@@ -151,6 +201,17 @@ def _verified_cleanup_identity(request: Request, lanes: Mapping[str, dict[str, A
         return None
     if provenance.get("head_ref") not in (None, identity["branch"]):
         return None
+    repair_identity = _repair_cleanup_identity(request, tuple(repair_candidates))
+    if repair_identity is not None:
+        for key in ("board", "clone_path", "priority"):
+            value = _identity_value(tuple(lanes.values()), key)
+            if value not in (None, ""):
+                repair_identity[key] = value
+        # A repair receipt identifies owned local state, but only terminal merge/lifecycle
+        # evidence authorizes deleting it.
+        if identity is not None and all(str(identity.get(key) or "") == str(repair_identity.get(key) or "") for key in ("repo", "issue", "pr_number", "branch")) and str(identity.get("head_oid") or "") == str(repair_identity.get("remote_oid") or ""):
+            repair_identity["head_oid"] = identity["head_oid"]
+            return repair_identity
     return identity
 
 

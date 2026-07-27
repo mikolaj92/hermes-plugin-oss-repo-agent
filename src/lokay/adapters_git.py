@@ -129,13 +129,13 @@ def parse_worktree_porcelain(text: str) -> list[dict[str, str]]:
     return rows
 
 
-def push_branch(worktree_path: str, branch: str, *, set_upstream: bool = True) -> str:
+def push_branch(worktree_path: str, branch: str, *, remote: str = "origin", set_upstream: bool = True) -> str:
+    """Push HEAD to the selected remote branch without force or implicit ref selection."""
     args = ["push"]
     if set_upstream:
-        args += ["-u", "origin", branch]
+        args += ["-u", remote, f"HEAD:refs/heads/{branch}"]
     else:
-        args += ["origin", branch]
-    # longer timeout for network push
+        args += [remote, f"HEAD:refs/heads/{branch}"]
     cmd = ["git", "-C", str(worktree_path), *args]
     proc = run_cmd(cmd, timeout=300.0)
     return (proc.stdout or proc.stderr or "").strip()

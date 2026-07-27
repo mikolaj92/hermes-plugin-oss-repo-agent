@@ -65,18 +65,24 @@ def _cleanup_aggregate_gate(request: Request, operation: str) -> tuple[Result | 
     if aggregate.get("cleanup_authorized") is not True:
         return noop("cleanup_not_authorized", aggregate=name), {}
     identity = aggregate.get("cleanup_identity")
-    required = ("repo", "issue", "pr_number", "branch", "head_oid", "board", "clone_path", "priority")
+    repair_identity = isinstance(identity, dict) and identity.get("local_branch") not in (None, "")
+    required = (("repo", "issue", "pr_number", "branch", "head_oid", "board", "clone_path", "priority")
+                if not repair_identity else ("repo", "issue", "pr_number", "branch", "local_branch", "worktree_path", "receipt", "remote_oid", "target_branch"))
     if not isinstance(identity, dict) or any(identity.get(key) in (None, "") for key in required):
         return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False, operation=operation, upstream_effector=name, aggregate=aggregate), {}
+    if repair_identity and str(identity.get("target_branch")) != str(identity.get("branch")):
+        return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False, operation=operation, field="target_branch", aggregate=aggregate), {}
     try:
         if isinstance(identity["issue"], bool) or int(identity["issue"]) <= 0:
             raise ValueError("issue must be positive")
         if isinstance(identity["pr_number"], bool) or int(identity["pr_number"]) <= 0:
             raise ValueError("pr_number must be positive")
     except (TypeError, ValueError) as exc:
-        return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False, operation=operation, upstream_effector=name, error=str(exc), aggregate=aggregate), {}
+        return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False, operation=operation, error=str(exc), aggregate=aggregate), {}
     data, cfg = input_of(request), cfg_of(request)
     aliases = {"issue": ("issue",), "pr_number": ("pr_number", "number"), "branch": ("branch", "head_ref"), "repo": ("repo",), "clone_path": ("clone_path",), "head_oid": ("head_oid",)}
+    if repair_identity:
+        aliases.update({"local_branch": ("local_branch",), "worktree_path": ("worktree_path",), "target_branch": ("target_branch",)})
     for key, names in aliases.items():
         expected = str(identity[key])
         for source_name, source in (("input", data), ("config", cfg)):
@@ -363,10 +369,13 @@ def _cleanup_identity(data: dict[str, Any], cfg: dict[str, Any], payload: dict[s
         "issue": ("issue",),
         "receipt": ("receipt_id", "receipt"),
         "branch": ("branch",),
-        "clone_path": ("clone_path",),
+        "local_branch": ("local_branch",),
         "worktree_path": ("worktree_path",),
         "pr_number": ("pr_number",),
         "head_oid": ("head_oid",),
+        "remote_oid": ("remote_oid", "after_oid"),
+        "target_branch": ("target_branch", "branch"),
+        "clone_path": ("clone_path",),
         "base_sha": ("base_sha",),
         "merge_oid": ("merge_oid",),
         "origin_main_sha": ("origin_main_sha",),
@@ -424,16 +433,17 @@ def _cleanup_identity(data: dict[str, Any], cfg: dict[str, Any], payload: dict[s
             return None
         identity[key] = normalized[0]
 
-    required = ("task", "repo", "receipt", "branch", "clone_path", "worktree_path")
-    if any(not str(identity.get(key, "")).strip() for key in required) or "issue" not in identity:
+    repair = present(identity.get("local_branch"))
+    required = ("repo", "receipt", "branch", "clone_path", "worktree_path", "remote_oid", "target_branch") if repair else ("repo", "receipt", "branch", "clone_path", "worktree_path")
+    if any(not present(identity.get(key)) for key in required) or "issue" not in identity:
         return None
+    if repair and identity.get("target_branch") != identity.get("branch"):
+        return None
+    if not repair:
+        identity.pop("local_branch", None)
+        identity.pop("remote_oid", None)
+        identity.pop("target_branch", None)
     return identity
-
-
-def _cleanup_evidence_contract(evidence: dict[str, dict[str, Any]]) -> str | None:
-    parse = evidence["parse_cleanup_issue_number"]
-    closed = evidence["check_issue_closed"]
-    no_open_pr = evidence["check_no_open_pr_for_branch"]
     removed = evidence["remove_worktree"]
     deleted = evidence["delete_local_branch"]
     released = evidence["release_claim_file"]
@@ -557,14 +567,15 @@ def derive_cleanup_paths(request: Request) -> Result:
         return idle
     parsed = cond_blob(request, "parse_cleanup_issue_number")
     branch = str(data.get("branch") or parsed.get("branch") or cond_get(request, "branch", "resolve_cleanup_branch_source", default=cfg.get("branch", ""))).strip()
+    local_branch = str(data.get("local_branch") or cond_get(request, "local_branch", "validate_cleanup_identity", default="")).strip() or branch
     root_value = str(data.get("worktree_root") or cfg.get("worktree_root") or "").strip()
-    if not branch or not root_value:
-        return fail("missing_cleanup_path_context", failure_class="terminal", retry_safe=False, branch=branch, worktree_root=root_value)
+    if not local_branch or not root_value:
+        return fail("missing_cleanup_path_context", failure_class="terminal", retry_safe=False, branch=branch, local_branch=local_branch, worktree_root=root_value)
     root = Path(root_value).expanduser().resolve(strict=False)
-    worktree = (root / re.sub(r"[^a-zA-Z0-9._/-]+", "-", branch)).resolve(strict=False)
+    worktree = (root / re.sub(r"[^a-zA-Z0-9._/-]+", "-", local_branch)).resolve(strict=False)
     if not worktree.is_relative_to(root):
-        return fail("worktree_path_escape", failure_class="terminal", retry_safe=False, branch=branch, worktree_root=str(root))
-    return ok(status="derived", branch=branch, worktree_root=str(root), worktree_path=str(worktree))
+        return fail("worktree_path_escape", failure_class="terminal", retry_safe=False, branch=branch, local_branch=local_branch, worktree_root=str(root))
+    return ok(status="derived", branch=branch, local_branch=local_branch, worktree_root=str(root), worktree_path=str(worktree))
 
 
 def validate_cleanup_identity(request: Request) -> Result:
@@ -634,12 +645,10 @@ def read_worktree_ownership(request: Request) -> Result:
         "parse_cleanup_issue_number",
         "resolve_cleanup_branch_source",
     )
-    if idle:
-        return idle
     data, cfg = input_of(request), cfg_of(request)
     clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
     path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "derive_cleanup_paths", default=cfg.get("worktree_path", ""))).strip()
-    branch = str(data.get("branch") or _cleanup_value(request, "branch", default=cfg.get("branch", "")) or "").strip()
+    branch = str(data.get("local_branch") or _cleanup_value(request, "local_branch", default=cfg.get("local_branch", "")) or data.get("branch") or cfg.get("branch", "")).strip()
     if not clone or not path or not branch:
         return fail("missing_worktree_ownership_context", failure_class="terminal", retry_safe=False, clone_path=clone, worktree_path=path, branch=branch)
     try:
@@ -718,10 +727,8 @@ def read_local_branch_ownership(request: Request) -> Result:
     if upstream:
         return upstream
     idle = _cleanup_upstream_noop(request, "read_local_branch_ownership", "verify_branch_delete_guards", "verify_worktree_absent", "remove_worktree", "verify_cleanup_guards", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
-    if idle:
-        return idle
     clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
-    branch = str(data.get("branch") or _cleanup_value(request, "branch", default=cfg.get("branch", "")) or "").strip()
+    branch = str(data.get("local_branch") or _cleanup_value(request, "local_branch", default=cfg.get("local_branch", "")) or data.get("branch") or cfg.get("branch", "")).strip()
     if not clone or not branch:
         return fail("missing_branch_context", failure_class="terminal", retry_safe=False)
     try:
@@ -745,7 +752,7 @@ def delete_local_branch(request: Request) -> Result:
         return idle
     data, cfg = input_of(request), cfg_of(request)
     clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
-    branch = str(data.get("branch") or _cleanup_value(request, "branch", default=cfg.get("branch", "")) or "").strip()
+    branch = str(data.get("local_branch") or _cleanup_value(request, "local_branch", default=cfg.get("local_branch", "")) or data.get("branch") or cfg.get("branch", "")).strip()
     if not clone or not branch:
         return fail("missing_clone_or_branch", failure_class="terminal", retry_safe=False)
     if dry_run_flag(request):
@@ -766,7 +773,7 @@ def verify_local_branch_absent(request: Request) -> Result:
     if idle:
         return idle
     data, cfg = input_of(request), cfg_of(request)
-    clone, branch = str(data.get("clone_path") or cfg.get("clone_path") or "").strip(), str(data.get("branch") or cfg.get("branch") or "").strip()
+    clone, branch = str(data.get("clone_path") or cfg.get("clone_path") or "").strip(), str(data.get("local_branch") or cfg.get("local_branch") or data.get("branch") or cfg.get("branch") or "").strip()
     try:
         exists = branch_exists(clone, branch)
     except CommandError as exc:
