@@ -152,7 +152,7 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
         "triage_build_merge_receipt": {"receipt_path": merge_receipt}, "triage_read_receipt_merge_provenance": {},
         "triage_publish_merge_receipt": {"receipt_path": merge_receipt}, "triage_verify_merge_receipt": {"receipt_path": merge_receipt},
         "triage_read_review_tasks": {}, "triage_find_review_marker": {}, "triage_create_review_task": {}, "triage_reconcile_review_task": {},
-        "triage_build_repair_prompt": {}, "triage_read_task_for_block": {}, "triage_decide_task_block": {}, "triage_block_task": {}, "triage_verify_task_blocked": {},
+        "triage_build_repair_prompt": {},
         # Repair attempt state is immutable and never shares dispatch/merge receipts.
         "triage_read_repair_attempt_state": {}, "triage_decide_repair_attempt": {}, "triage_reserve_repair_attempt": {},
         "triage_verify_repair_attempt_reservation": {}, "triage_read_repair_context": {}, "triage_read_repair_remote_head": {},
