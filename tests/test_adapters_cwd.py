@@ -8,6 +8,8 @@ from unittest import mock
 
 from lokay.adapters_cli import run_cmd
 from lokay.adapters_omp import run_omp
+from lokay.adapters_cli import CommandError
+from lokay.adapters_git import branch_config_unset
 
 
 class AdapterCwdTests(unittest.TestCase):
@@ -71,6 +73,19 @@ class AdapterCwdTests(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(result["status"], "planned")
         self.assertIn(str(Path("relative/worktree").resolve()), result["command"])
+
+    def test_branch_config_unset_ignores_absent_value(self) -> None:
+        absent = CommandError(["git"], 5, "", "")
+        with mock.patch("lokay.adapters_git.git", side_effect=absent) as git:
+            branch_config_unset("/clone", "ai/fix/10", "lokay-task")
+        git.assert_called_once_with(["config", "--local", "--unset-all", "branch.ai/fix/10.lokay-task"], cwd="/clone")
+
+    def test_branch_config_unset_reraises_real_failure(self) -> None:
+        failure = CommandError(["git"], 1, "", "broken")
+        with mock.patch("lokay.adapters_git.git", side_effect=failure):
+            with self.assertRaises(CommandError) as raised:
+                branch_config_unset("/clone", "ai/fix/10", "lokay-task")
+        self.assertIs(raised.exception, failure)
 
 
 

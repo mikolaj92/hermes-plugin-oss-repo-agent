@@ -162,7 +162,8 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
         "triage_read_repair_omp_preconditions": {}, "triage_invoke_repair_omp": {},
         "triage_verify_repair_omp_postconditions": {}, "triage_read_repair_worktree_head": {},
         "triage_decide_repair_push": {}, "triage_push_repair_branch": {}, "triage_read_repair_pushed_ref": {},
-        "triage_verify_repair_push_oid": {}, "triage_read_existing_repair_pr": {}, "triage_verify_existing_repair_pr": {},
+        "triage_verify_repair_push_oid": {}, "triage_update_repair_branch_provenance": {}, "triage_verify_updated_repair_branch_provenance": {},
+        "triage_read_existing_repair_pr": {}, "triage_verify_existing_repair_pr": {},
         "triage_build_repair_receipt": {"receipt_path": repair_receipt},
         "triage_publish_repair_receipt": {"receipt_path": repair_receipt}, "triage_verify_repair_receipt": {"receipt_path": repair_receipt},
         # Lifecycle reconciliation reads join only at the pure decision.

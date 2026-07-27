@@ -591,6 +591,7 @@ from typing import Any
 from lokay.adapters_git import (
     branch_config_get,
     branch_config_set,
+    branch_config_unset,
     branch_exists,
     git,
     parse_worktree_porcelain,
@@ -640,6 +641,14 @@ def _repair_field(request: Request, *keys: str, default: str = "") -> str:
              return values[0]
      return default
 
+def _repair_ownership_receipt(request: Request, repo: str, pr_number: str, branch: str) -> str:
+     root = _repair_state_root(request)
+     if root is None or not repo or not pr_number or not branch:
+         return ""
+     digest = hashlib.sha256(f"{repo}\0{pr_number}\0{branch}".encode()).hexdigest()
+     return str(root / "repair-ownership" / repo.replace("/", "__") / pr_number / f"{digest}.json")
+
+
 def _repair_context(request: Request) -> dict[str, str]:
      data = input_of(request)
      cfg = cfg_of(request)
@@ -656,7 +665,7 @@ def _repair_context(request: Request) -> dict[str, str]:
          "worktree_path": path,
          "remote": _repair_field(request, "remote", default="origin") or "origin",
          "task_id": _repair_field(request, "task_id"),
-         "receipt": _repair_field(request, "receipt", "receipt_id", "receipt_path"),
+         "receipt": _repair_ownership_receipt(request, _repair_field(request, "repo"), _repair_field(request, "pr_number", "number"), branch),
      }
 
 def _repair_context_error(context: dict[str, str]) -> str | None:
@@ -870,7 +879,8 @@ def verify_repair_worktree_head(request: Request):
 _REPAIR_CONTEXT_ALIASES = _REPAIR_CONTEXT_ALIASES + (
     "read_repair_omp_preconditions", "invoke_repair_omp", "verify_repair_omp_postconditions",
     "read_repair_worktree_head", "decide_repair_push", "push_repair_branch",
-    "read_repair_pushed_ref", "verify_repair_push_oid", "read_existing_repair_pr",
+    "read_repair_pushed_ref", "verify_repair_push_oid", "update_repair_branch_provenance",
+    "verify_updated_repair_branch_provenance", "read_existing_repair_pr",
     "verify_existing_repair_pr", "build_repair_receipt", "publish_repair_receipt", "verify_repair_receipt",
 )
 
@@ -1062,12 +1072,64 @@ def verify_repair_push_oid(request: Request) -> Result:
         return fail("repair_push_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_push_oid", local_oid=local, remote_oid=remote, mutated=True)
     return ok(status="verified", operation="verify_repair_push_oid", local_oid=local, remote_oid=remote, mutated=False)
 
-
-def read_existing_repair_pr(request: Request) -> Result:
-    gated = _repair_execution_gate(request, "read_existing_repair_pr", "verify_repair_push_oid")
+def update_repair_branch_provenance(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "update_repair_branch_provenance", "verify_repair_push_oid")
     if gated:
         return gated
-    upstream = _repair_upstream(request, "read_existing_repair_pr", "verify_repair_push_oid")
+    upstream = _repair_upstream(request, "update_repair_branch_provenance", "verify_repair_push_oid")
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    remote_oid = str(cond_blob(request, "verify_repair_push_oid").get("remote_oid") or "")
+    values = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": remote_oid}
+    if not all(values[key] for key in ("issue", "repo", "pr", "receipt", "remote_oid")):
+        return fail("missing_repair_provenance", failure_class="terminal", retry_safe=False, operation="update_repair_branch_provenance")
+    if dry_run_flag(request):
+        return planned(operation="update_repair_branch_provenance", branch=context["branch"], provenance=values)
+    try:
+        for key, value in values.items():
+            if value:
+                branch_config_set(context["clone_path"], context["branch"], f"lokay-{key}", value)
+            else:
+                branch_config_unset(context["clone_path"], context["branch"], f"lokay-{key}")
+    except CommandError as exc:
+        return fail("repair_provenance_update_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="update_repair_branch_provenance", error=str(exc), mutated=True)
+    return ok(status="updated", operation="update_repair_branch_provenance", provenance=values, mutated=True, **context)
+
+
+def verify_updated_repair_branch_provenance(request: Request) -> Result:
+    upstream = _repair_upstream(request, "verify_updated_repair_branch_provenance", "update_repair_branch_provenance")
+    if upstream:
+        return upstream
+    updated = cond_blob(request, "update_repair_branch_provenance")
+    expected = updated.get("provenance")
+    context = _repair_context(request)
+    if not isinstance(expected, dict):
+        return fail("missing_repair_provenance", failure_class="terminal", retry_safe=False, operation="verify_updated_repair_branch_provenance")
+    if dry_run_flag(request):
+        return planned(operation="verify_updated_repair_branch_provenance", branch=context["branch"])
+    try:
+        actual = {}
+        for key in expected:
+            try:
+                actual[key] = branch_config_get(context["clone_path"], context["branch"], f"lokay-{key}").strip()
+            except CommandError:
+                if key != "task":
+                    raise
+                actual[key] = ""
+    except CommandError as exc:
+        return fail("repair_provenance_readback_failed", failure_class="retryable_read", retry_safe=True, operation="verify_updated_repair_branch_provenance", error=str(exc))
+    if actual != expected:
+        return fail("repair_provenance_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_updated_repair_branch_provenance", expected=expected, actual=actual)
+    return ok(status="verified", operation="verify_updated_repair_branch_provenance", provenance=actual, mutated=False, **context)
+
+
+
+def read_existing_repair_pr(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "read_existing_repair_pr", "verify_updated_repair_branch_provenance")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "read_existing_repair_pr", "verify_updated_repair_branch_provenance")
     if upstream:
         return upstream
     context = _repair_context(request)

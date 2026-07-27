@@ -36,6 +36,14 @@ def branch_config_get(clone_path: str | Path, branch: str, key: str) -> str:
 def branch_config_set(clone_path: str | Path, branch: str, key: str, value: str) -> None:
     git(["config", "--local", f"branch.{branch}.{key}", value], cwd=clone_path)
 
+def branch_config_unset(clone_path: str | Path, branch: str, key: str) -> None:
+    """Remove every value for an optional branch key; absence is already success."""
+    try:
+        git(["config", "--local", "--unset-all", f"branch.{branch}.{key}"], cwd=clone_path)
+    except CommandError as exc:
+        if exc.returncode != 5:
+            raise
+
 
 def remote_url(clone_path: str | Path, remote: str = "origin") -> str:
     return git(["remote", "get-url", remote], cwd=clone_path)

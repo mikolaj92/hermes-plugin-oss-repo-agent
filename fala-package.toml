@@ -815,9 +815,23 @@ adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], 
 config = { handler = "lokay.steps.repair.verify_repair_push_oid" }
 
 [[correlation_paths.effectors]]
-id = "read_existing_repair_pr"
+id = "update_repair_branch_provenance"
 capability = "lokay_step"
 conduction = ["decide_repair_attempt", "verify_repair_push_oid"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.update_repair_branch_provenance" }
+
+[[correlation_paths.effectors]]
+id = "verify_updated_repair_branch_provenance"
+capability = "lokay_step"
+conduction = ["update_repair_branch_provenance"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.verify_updated_repair_branch_provenance" }
+
+[[correlation_paths.effectors]]
+id = "read_existing_repair_pr"
+capability = "lokay_step"
+conduction = ["decide_repair_attempt", "verify_updated_repair_branch_provenance"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_existing_repair_pr" }
 
@@ -1966,9 +1980,23 @@ adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], 
 config = { handler = "lokay.steps.repair.verify_repair_push_oid" }
 
 [[correlation_paths.effectors]]
-id = "triage_read_existing_repair_pr"
+id = "triage_update_repair_branch_provenance"
 capability = "lokay_step"
 conduction = ["triage_decide_repair_attempt", "triage_verify_repair_push_oid"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.update_repair_branch_provenance" }
+
+[[correlation_paths.effectors]]
+id = "triage_verify_updated_repair_branch_provenance"
+capability = "lokay_step"
+conduction = ["triage_update_repair_branch_provenance"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.verify_updated_repair_branch_provenance" }
+
+[[correlation_paths.effectors]]
+id = "triage_read_existing_repair_pr"
+capability = "lokay_step"
+conduction = ["triage_decide_repair_attempt", "triage_verify_updated_repair_branch_provenance"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_existing_repair_pr" }
 

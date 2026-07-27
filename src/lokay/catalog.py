@@ -135,6 +135,8 @@ EFFECTORS: tuple[EffectorEntry, ...] = (
     EffectorEntry("push_repair_branch", "repair", "lokay.steps.repair.push_repair_branch", "Push one repair branch.", True),
     EffectorEntry("read_repair_pushed_ref", "repair", "lokay.steps.repair.read_repair_pushed_ref", "Read the pushed repair ref.", False),
     EffectorEntry("verify_repair_push_oid", "repair", "lokay.steps.repair.verify_repair_push_oid", "Verify repair push OIDs.", False),
+    EffectorEntry("update_repair_branch_provenance", "repair", "lokay.steps.repair.update_repair_branch_provenance", "Update repair ownership to the verified pushed head.", True),
+    EffectorEntry("verify_updated_repair_branch_provenance", "repair", "lokay.steps.repair.verify_updated_repair_branch_provenance", "Verify pushed-head ownership provenance read-back.", False),
     EffectorEntry("read_existing_repair_pr", "repair", "lokay.steps.repair.read_existing_repair_pr", "Read an existing repair pull request.", False),
     EffectorEntry("verify_existing_repair_pr", "repair", "lokay.steps.repair.verify_existing_repair_pr", "Verify the existing repair pull request.", False),
     EffectorEntry("build_repair_receipt", "repair", "lokay.steps.repair.build_repair_receipt", "Build the repair receipt payload.", False),

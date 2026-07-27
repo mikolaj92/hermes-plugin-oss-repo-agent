@@ -252,6 +252,7 @@ async def run_pr_triage_decide(
             "read_repair_attempt_state", "reserve_repair_attempt", "verify_repair_attempt_reservation",
             "read_repair_omp_preconditions", "invoke_repair_omp", "verify_repair_omp_postconditions", "read_repair_worktree_head",
             "decide_repair_push", "push_repair_branch", "read_repair_pushed_ref", "verify_repair_push_oid",
+            "update_repair_branch_provenance", "verify_updated_repair_branch_provenance",
             "read_existing_repair_pr", "verify_existing_repair_pr", "build_repair_receipt", "publish_repair_receipt", "verify_repair_receipt",
         )},
         **{f"triage_{step_id}": dict(repair_input) for step_id in (
@@ -261,6 +262,7 @@ async def run_pr_triage_decide(
             "read_repair_attempt_state", "reserve_repair_attempt", "verify_repair_attempt_reservation",
             "read_repair_omp_preconditions", "invoke_repair_omp", "verify_repair_omp_postconditions", "read_repair_worktree_head",
             "decide_repair_push", "push_repair_branch", "read_repair_pushed_ref", "verify_repair_push_oid",
+            "update_repair_branch_provenance", "verify_updated_repair_branch_provenance",
             "read_existing_repair_pr", "verify_existing_repair_pr", "build_repair_receipt", "publish_repair_receipt", "verify_repair_receipt",
         )},
         "create_local_branch": {**dry_input, "clone_path": clone_path, "repo": resolved_repo, "receipt_path": receipt, "worktree_root": step_config["worktree_root"], "base_branch": step_config["base_branch"]},

@@ -71,6 +71,13 @@ class PackageStructureTests(unittest.TestCase):
                 f"{path['id']} has an operation outside its declared selector lanes",
             )
 
+            if path["id"] in {"pr_triage", "auto_worker"}:
+                prefix = "triage_" if path["id"] == "auto_worker" else ""
+                by_id = {effector["id"]: effector for effector in effectors}
+                self.assertEqual(by_id[f"{prefix}update_repair_branch_provenance"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}verify_repair_push_oid"])
+                self.assertEqual(by_id[f"{prefix}verify_updated_repair_branch_provenance"]["conduction"], [f"{prefix}update_repair_branch_provenance"])
+                self.assertEqual(by_id[f"{prefix}read_existing_repair_pr"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}verify_updated_repair_branch_provenance"])
+
             if path["id"] == "auto_worker":
                 self.assertTrue(
                     all(
