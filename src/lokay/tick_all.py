@@ -166,7 +166,7 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
         "triage_build_repair_receipt": {"receipt_path": repair_receipt},
         "triage_publish_repair_receipt": {"receipt_path": repair_receipt}, "triage_verify_repair_receipt": {"receipt_path": repair_receipt},
         # Lifecycle reconciliation reads join only at the pure decision.
-        "lifecycle_validate_reconcile_identity": {}, "lifecycle_read_lifecycle_github_state": {}, "lifecycle_read_lifecycle_local_evidence": {},
+        "lifecycle_read_lifecycle_github_state": {}, "lifecycle_read_lifecycle_local_evidence": {},
         "lifecycle_decide_lifecycle_transition": {}, "lifecycle_release_orphan_claim": {"claim_path": cfg.paths.active_issue},
         "lifecycle_verify_orphan_claim_release": {"claim_path": cfg.paths.active_issue},
         "aggregate_lane_results": {},
