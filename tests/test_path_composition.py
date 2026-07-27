@@ -12,11 +12,16 @@ from pathlib import Path
 
 PACKAGE_PATH = Path(__file__).resolve().parents[1] / "fala-package.toml"
 EXPECTED_PATH_IDS = {"issue_intake", "issue_to_pr", "pr_triage", "cleanup", "cleanup_reconcile", "auto_worker"}
-SELECTOR_GATES = {
-    "issue_intake": "select_issue_candidate",
-    "issue_to_pr": "select_dispatch_task",
-    "pr_triage": "select_fix_pr",
-    "auto_worker": "intake_select_issue_candidate",
+LANE_ROOTS = {
+    "issue_intake": ("select_issue_candidate",),
+    "issue_to_pr": ("select_dispatch_task",),
+    "pr_triage": ("select_fix_pr",),
+    "auto_worker": (
+        "intake_select_issue_candidate",
+        "triage_read_open_prs",
+        "lifecycle_read_lifecycle_github_state",
+        "lifecycle_read_lifecycle_local_evidence",
+    ),
 }
 
 
@@ -46,25 +51,35 @@ class PackageStructureTests(unittest.TestCase):
                     effector["id"],
                 )
 
-            selector = SELECTOR_GATES.get(path["id"])
-            if selector is None:
+            lane_roots = LANE_ROOTS.get(path["id"])
+            if lane_roots is None:
                 continue
-            selector_position = positions[selector]
-            reachable = {selector}
-            changed = True
-            while changed:
-                changed = False
-                for effector in effectors:
-                    if effector["id"] not in reachable and reachable.intersection(effector.get("conduction", [])):
-                        reachable.add(effector["id"])
-                        changed = True
+            reachable: set[str] = set()
+            first_selector_position = min(positions[root] for root in lane_roots)
+            for selector in lane_roots:
+                lane_reachable = {selector}
+                changed = True
+                while changed:
+                    changed = False
+                    for effector in effectors:
+                        if effector["id"] not in lane_reachable and lane_reachable.intersection(effector.get("conduction", [])):
+                            lane_reachable.add(effector["id"])
+                            changed = True
+                reachable.update(lane_reachable)
             self.assertTrue(
-                all(effector["id"] in reachable for effector in effectors[selector_position + 1:]),
-                f"{path['id']} has an ungated operation after {selector}",
+                all(effector["id"] in reachable for effector in effectors[first_selector_position + 1:]),
+                f"{path['id']} has an operation outside its declared selector lanes",
             )
 
             if path["id"] == "auto_worker":
-                self.assertTrue(all(effector["id"].startswith(("intake_", "dispatch_", "triage_", "cleanup_")) for effector in effectors))
+                self.assertTrue(
+                    all(
+                        effector["id"].startswith(
+                            ("intake_", "dispatch_", "triage_", "lifecycle_", "aggregate_", "cleanup_")
+                        )
+                        for effector in effectors
+                    )
+                )
 
 
 if __name__ == "__main__":

@@ -15,6 +15,18 @@ from typing import Iterable
 
 
 FALA_PINNED_COMMIT = "b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
+POLICY_KEYS = frozenset({"automerge", "require_human_approval", "require_checks", "require_test_evidence", "executor_enabled"})
+PROMOTION_POLICY = {
+    "automerge": True,
+    "require_human_approval": False,
+    "require_checks": True,
+    "require_test_evidence": True,
+    "executor_enabled": True,
+}
+
+
+def is_promotion_policy(policy: object) -> bool:
+    return isinstance(policy, dict) and set(policy) == POLICY_KEYS and policy == PROMOTION_POLICY
 # Every shell entrypoint copied to ~/.hermes/scripts is part of the deployment
 # contract. Keeping this list explicit makes a missing deployment fail closed.
 DEPLOYED_SCRIPTS = (
@@ -678,30 +690,16 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
     if config_artifact_path and _regular_file(config_artifact_path) and identity.get("config_hash") != sha256(config_artifact_path):
         errors.append("Fala config hash does not match candidate config bytes")
     policy = identity.get("policy")
-    policy_keys = {
-        "automerge",
-        "require_human_approval",
-        "require_checks",
-        "require_test_evidence",
-        "executor_enabled",
-    }
-    if not isinstance(policy, dict) or set(policy) != policy_keys:
+    if not isinstance(policy, dict) or set(policy) != POLICY_KEYS:
         errors.append("Fala identity policy key set is invalid")
         policy = policy if isinstance(policy, dict) else {}
     else:
-        for key in policy_keys:
+        for key in POLICY_KEYS:
             if not isinstance(policy.get(key), bool):
                 errors.append(f"Fala identity policy {key} must be a bool")
-        manual = (
-            policy.get("automerge") is False
-            and policy.get("require_human_approval") is True
-            and policy.get("require_checks") is True
-            and policy.get("require_test_evidence") is True
-            and policy.get("executor_enabled") is False
-        )
-        if not manual:
+        if not is_promotion_policy(policy):
             errors.append("Fala identity policy is unsafe for promotion")
-    if config_artifact_path and _regular_file(config_artifact_path) and isinstance(policy, dict) and set(policy) == policy_keys:
+    if config_artifact_path and _regular_file(config_artifact_path) and isinstance(policy, dict) and set(policy) == POLICY_KEYS:
         try:
             try:
                 import tomllib

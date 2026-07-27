@@ -155,9 +155,9 @@ try:
     if set(identity)!=stable_keys: errors.append("manifest-identity-key-set-mismatch")
     for key,expected in identity.items():
         if key in stable_keys and manifest.get(key)!=expected: errors.append(f"identity-mismatch:{key}")
-    policy=manifest.get("policy"); policy_keys={"automerge","require_human_approval","require_checks","require_test_evidence","executor_enabled"}
+    policy=manifest.get("policy"); policy_keys={"automerge","require_human_approval","require_checks","require_test_evidence","executor_enabled"}; promotion_policy={"automerge":True,"require_human_approval":False,"require_checks":True,"require_test_evidence":True,"executor_enabled":True}
     if not isinstance(policy,dict) or set(policy)!=policy_keys or any(not isinstance(policy.get(key),bool) for key in policy_keys): errors.append("identity-policy-invalid")
-    elif policy!={"automerge":False,"require_human_approval":True,"require_checks":True,"require_test_evidence":True,"executor_enabled":False}: errors.append("identity-policy-unsafe")
+    elif policy!=promotion_policy: errors.append("identity-policy-unsafe")
     try: expected_policy=policy_from_toml_text((cand/"source"/"config.toml").read_text(encoding="utf-8"))
     except (OSError,UnicodeError,ValueError,tomllib.TOMLDecodeError): errors.append("identity-policy-config-unreadable"); expected_policy=None
     if expected_policy is not None and isinstance(policy,dict) and set(policy)==policy_keys and all(isinstance(policy.get(key),bool) for key in policy_keys) and policy!=expected_policy: errors.append("identity-policy-config-mismatch")

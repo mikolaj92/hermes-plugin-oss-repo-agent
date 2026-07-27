@@ -43,11 +43,23 @@ class HealthStatusScriptTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_plugin()
         cls.commands = cls.module.commands
-        cls.cfg = cls.commands.LokayConfig.from_mapping({"mode": "dry-run", "repos": []})
+        cls.cfg = cls.commands.LokayConfig.from_mapping(
+            {
+                "mode": "dry-run",
+                "automation": {
+                    "automerge": True,
+                    "require_human_approval": False,
+                    "require_checks": True,
+                    "require_test_evidence": True,
+                },
+                "executor": {"enabled": True},
+                "repos": [],
+            }
+        )
         cls.holder = tempfile.TemporaryDirectory()
         cls.root = Path(cls.holder.name)
         cls.config = cls.root / "config.toml"
-        cls.config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['health', 'valid']\n", encoding="utf-8")
+        cls.config.write_text("mode = 'dry-run'\n[automation]\nautomerge = true\nrequire_human_approval = false\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
         cls.base_db = cls.root / "base.sqlite"
         cls._write_db(cls.base_db, mode="dry-run")
         lock_data = (ROOT / "uv.lock").read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
@@ -66,11 +78,11 @@ class HealthStatusScriptTests(unittest.TestCase):
             "config_artifact_path": "source/config.toml",
             "revision_path": "source/revision.txt",
             "policy": {
-                "automerge": False,
-                "require_human_approval": True,
+                "automerge": True,
+                "require_human_approval": False,
                 "require_checks": True,
                 "require_test_evidence": True,
-                "executor_enabled": False,
+                "executor_enabled": True,
             },
             "repos": sorted(
                 [
@@ -307,8 +319,8 @@ exit 0
         layout = self._layout(db=db)
         manifest_path = layout / "deployment" / "versions" / self.candidate.name / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["policy"]["automerge"] = True
-        manifest["identity"]["policy"]["automerge"] = True
+        manifest["policy"]["require_human_approval"] = True
+        manifest["identity"]["policy"]["require_human_approval"] = True
         manifest_path.chmod(0o644)
         manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
         manifest_path.chmod(0o444)
@@ -322,7 +334,7 @@ exit 0
         layout = self._layout(db=db)
         config = layout / "deployment" / "versions" / self.candidate.name / "source" / "config.toml"
         config.chmod(0o644)
-        config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['status', 'valid']\n\n[automation]\nautomerge = true\n", encoding="utf-8")
+        config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['status', 'valid']\n\n[automation]\nautomerge = true\nrequire_human_approval = false\nrequire_checks = false\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
         config.chmod(0o444)
         completed = self._run("lokay_status.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
@@ -334,7 +346,7 @@ exit 0
         layout = self._layout(db=db)
         config = layout / "deployment" / "versions" / self.candidate.name / "source" / "config.toml"
         config.chmod(0o644)
-        config.write_text("automerge = false\n\n[automation]\nautomerge = true\n", encoding="utf-8")
+        config.write_text("automerge = true\n\n[automation]\nautomerge = false\nrequire_human_approval = false\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
         config.chmod(0o444)
         completed = self._run("lokay_status.sh", db=db, deployment=layout / "deployment")
         self.assertNotIn("identity-policy-config-mismatch", completed.stdout)
@@ -346,7 +358,7 @@ exit 0
         version = layout / "deployment" / "versions" / self.candidate.name
         config = version / "source" / "config.toml"
         config.chmod(0o644)
-        config.write_text("automerge = false\n\n[automation]\nautomerge = true\n", encoding="utf-8")
+        config.write_text("automerge = true\nrequire_human_approval = false\nrequire_checks = true\nrequire_test_evidence = true\n\n[automation]\nautomerge = false\n[executor]\nenabled = true\n", encoding="utf-8")
         config.chmod(0o444)
         manifest_path = version / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -513,8 +525,8 @@ exit 0
         layout = self._layout(db=db)
         manifest_path = layout / "deployment" / "versions" / self.candidate.name / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["policy"]["automerge"] = True
-        manifest["identity"]["policy"]["automerge"] = True
+        manifest["policy"]["require_human_approval"] = True
+        manifest["identity"]["policy"]["require_human_approval"] = True
         manifest_path.chmod(0o644)
         manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
         manifest_path.chmod(0o444)
@@ -531,7 +543,7 @@ exit 0
         version = layout / "deployment" / "versions" / self.candidate.name
         config = version / "source" / "config.toml"
         config.chmod(0o644)
-        config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['health', 'valid']\n\n[automation]\nautomerge = true\n", encoding="utf-8")
+        config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['health', 'valid']\n\n[automation]\nautomerge = true\nrequire_human_approval = false\nrequire_checks = false\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
         config.chmod(0o444)
         manifest_path = version / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

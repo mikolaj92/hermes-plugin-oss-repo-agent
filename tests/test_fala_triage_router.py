@@ -72,19 +72,20 @@ class TriagePackageFlowTests(unittest.TestCase):
         self.assertEqual(inputs["board"], "temida-board")
         self.assertEqual(inputs["clone_path"], "/tmp/temida")
 
-    def test_ambiguous_repo_context_fails_before_host(self) -> None:
+    def test_omitted_repo_scans_all_configured_repositories(self) -> None:
         cfg = AgentConfig(mode="dry-run", repos=(RepoEntry(repo="o/first", board="same", clone_path="/tmp/first"), RepoEntry(repo="o/second", board="same", clone_path="/tmp/second")))
+        host = _host(processes=[_process("read_open_prs", output={"status": "noop", "reason": "no_open_prs"})])
 
         async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
-            runner = mock.AsyncMock()
+            runner = mock.AsyncMock(return_value=host)
             with mock.patch("lokay.flows.triage.run_package_path_async", new=runner):
                 result = await run_pr_triage_decide(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True)
             return result, runner
 
         result, runner = asyncio.run(scenario())
-        runner.assert_not_awaited()
-        self.assertEqual(result.summary["reason"], "ambiguous_repository_context")
-        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.status, "idle")
+        repos = runner.await_args.kwargs["effector_inputs"]["read_open_prs"]["repos"]
+        self.assertEqual([entry["repo"] for entry in repos], ["o/first", "o/second"])
 
     def test_single_package_path_invocation(self) -> None:
         host = _host(

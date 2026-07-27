@@ -99,7 +99,7 @@ class TickAllHostPathTests(unittest.TestCase):
 
         runner.assert_awaited_once()
         self.assertEqual(runner.await_args.kwargs["path_id"], "auto_worker")
-        self.assertEqual(runner.await_args.kwargs["max_ticks"], 160)
+        self.assertEqual(runner.await_args.kwargs["max_ticks"], 180)
         effector_inputs = runner.await_args.kwargs["effector_inputs"]
         self.assertEqual(effector_inputs["triage_read_open_prs"]["limit"], 7)
         self.assertTrue(effector_inputs["triage_decide_triage_action"]["require_human_approval"])

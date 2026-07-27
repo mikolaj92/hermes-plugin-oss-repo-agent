@@ -63,7 +63,7 @@ async def run_intake_flow(
         }
         for entry in cfg.repos
     ]
-    dry_input = {"dry_run": is_dry}
+    dry_input = {"dry_run": is_dry, "repos": repos}
     intake_steps = (
         "read_open_issues", "normalize_issue_rows", "filter_issue_eligibility", "select_issue_candidate",
         "decide_issue_action", "read_issue_comments", "decide_issue_comment", "post_issue_comment",

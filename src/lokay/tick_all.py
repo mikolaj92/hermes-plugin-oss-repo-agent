@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -21,9 +23,37 @@ from lokay.tick_common import add_common_flags, resolve_dry_run
 _PACKAGE_PATH = Path(__file__).resolve().parents[2] / "fala-package.toml"
 _TERMINAL_FAILURES = {"failed", "cancelled", "timed_out"}
 _WAITING = {"waiting", "retry_wait", "running", "pending"}
+_CANDIDATE_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _candidate_identity(cfg: Any) -> str:
+    """Return only an explicitly identified immutable deployment candidate."""
+    raw = getattr(cfg, "raw", {})
+    if isinstance(raw, dict):
+        for key in ("candidate", "candidate_id"):
+            value = str(raw.get(key) or "").strip()
+            if _CANDIDATE_RE.fullmatch(value):
+                return value
+    value = os.environ.get("FALA_CANDIDATE_ID", "").strip()
+    if _CANDIDATE_RE.fullmatch(value):
+        return value
+    parts = Path(__file__).resolve().parts
+    for index, part in enumerate(parts[:-1]):
+        if part == "versions" and index + 1 < len(parts):
+            value = parts[index + 1]
+            if _CANDIDATE_RE.fullmatch(value) and parts[index + 2 : index + 5] == ("source", "project", "src"):
+                return value
+    return ""
 
 
 def _step_config(cfg: Any, *, dry_run: bool, **extra: Any) -> dict[str, Any]:
+    raw = getattr(cfg, "raw", {}) if isinstance(getattr(cfg, "raw", {}), dict) else {}
+    paths = getattr(cfg, "paths", None)
+    task_receipts = str(getattr(paths, "task_receipts", "") or "")
+    active_issue = str(getattr(paths, "active_issue", "") or "")
+    worktree_root = str(getattr(paths, "worktree_root", "") or "")
+    dispatch_receipts = str(getattr(paths, "dispatch_receipts", "") or "")
+    merge_receipts = str(getattr(paths, "merge_receipts", "") or "")
     return {
         "assignee": cfg.assignee,
         "kanban_intake_assignee": cfg.kanban_intake_assignee,
@@ -41,23 +71,30 @@ def _step_config(cfg: Any, *, dry_run: bool, **extra: Any) -> dict[str, Any]:
         "require_test_evidence": cfg.automation.require_test_evidence,
         "fixer_assignee": cfg.automation.fixer_assignee,
         "merge_method": cfg.automation.merge_method,
-        "executor_enabled": cfg.executor.enabled,
+        "executor_enabled": bool(cfg.executor.enabled),
         "executor_command": cfg.executor.command,
         "executor_model": cfg.executor.model,
         "model": cfg.executor.model,
         "thinking": cfg.executor.thinking,
         "timeout_seconds": cfg.executor.timeout_seconds,
-        "worktree_root": cfg.paths.worktree_root,
-        "dispatch_receipts": cfg.paths.dispatch_receipts,
-        "merge_receipts": cfg.paths.merge_receipts,
-        "active_issue": cfg.paths.active_issue,
-        "active_issue_path": cfg.paths.active_issue,
+        "live": not dry_run,
+        "worktree_root": worktree_root,
+        "dispatch_receipts": dispatch_receipts,
+        "merge_receipts": merge_receipts,
+        "task_receipts": task_receipts,
+        "active_issue": active_issue,
+        "active_issue_path": active_issue,
+        "claim_root": active_issue,
+        "repair_receipt_root": str(raw.get("repair_receipt_root") or task_receipts),
+        "repair_state_root": str(raw.get("repair_state_root") or raw.get("repair_receipt_root") or task_receipts),
+        "lifecycle_receipt_root": str(raw.get("lifecycle_receipt_root") or task_receipts),
+        "db_path": str(extra.get("db_path") or ""),
         "paths": {
-            "active_issue": cfg.paths.active_issue,
-            "worktree_root": cfg.paths.worktree_root,
-            "dispatch_receipts": cfg.paths.dispatch_receipts,
-            "merge_receipts": cfg.paths.merge_receipts,
-            "task_receipts": getattr(cfg.paths, "task_receipts", None),
+            "active_issue": active_issue,
+            "worktree_root": worktree_root,
+            "dispatch_receipts": dispatch_receipts,
+            "merge_receipts": merge_receipts,
+            "task_receipts": task_receipts,
         },
         "max_active_issues": getattr(cfg.automation, "max_active_issues", 1),
         "repos": [
@@ -69,166 +106,93 @@ def _step_config(cfg: Any, *, dry_run: bool, **extra: Any) -> dict[str, Any]:
     }
 
 
-def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "") -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", db_path: str = "") -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     repos = [
         {"repo": r.repo, "board": r.board, "clone_path": r.clone_path, "priority": r.priority}
         for r in cfg.repos
     ]
-    suffix = run_id or "unidentified"
+    suffix = run_id or ""
     receipt = str(Path(cfg.paths.dispatch_receipts) / f"auto-worker-dispatch-{suffix}.json")
     merge_receipt = str(Path(cfg.paths.merge_receipts) / f"auto-worker-merge-{suffix}.json")
-    cleanup_receipt = str(Path(cfg.paths.dispatch_receipts) / f"auto-worker-cleanup-{suffix}.json")
-    common = {"dry_run": dry_run, "run_id": run_id, "path_id": "auto_worker"}
+    task_root = str(getattr(cfg.paths, "task_receipts", "") or "")
+    repair_receipt = str(Path(task_root) / f"auto-worker-repair-{suffix}.json")
+    lifecycle_receipt = str(Path(task_root) / f"auto-worker-lifecycle-{suffix}.json")
+    cleanup_receipt = str(Path(task_root) / f"auto-worker-cleanup-{suffix}.json")
+    candidate = _candidate_identity(cfg)
+    raw = getattr(cfg, "raw", {}) if isinstance(getattr(cfg, "raw", {}), dict) else {}
+    executor_policy = raw.get("executor_policy") if isinstance(raw.get("executor_policy"), dict) else {}
     inputs: dict[str, dict[str, Any]] = {
-        # Intake starts with the configured repository set; all later atoms
-        # consume the selected repository through Fala conduction.
         "intake_read_open_issues": {"repos": repos, "limit": limit},
-        "intake_normalize_issue_rows": {},
-        "intake_filter_issue_eligibility": {},
-        "intake_select_issue_candidate": {},
-        "intake_decide_issue_action": {},
-        "intake_read_issue_comments": {},
-        "intake_decide_issue_comment": {},
-        "intake_post_issue_comment": {},
-        "intake_verify_issue_comment": {},
-        "intake_reserve_claim_file": {"active_issue_path": cfg.paths.active_issue},
-        "intake_read_issue_claim_state": {},
-        "intake_assign_issue": {},
-        "intake_add_issue_label": {},
-        "intake_verify_issue_claim": {},
-        "intake_build_issue_claim_result": {},
-        "intake_read_intake_tasks": {},
-        "intake_find_intake_marker": {},
-        "intake_create_intake_task": {},
-        "intake_reconcile_intake_task": {},
-        # Dispatch reads the configured repository set, then routes the
-        # selected board/clone/task through conduction into its atoms.
-        "dispatch_read_dispatch_tasks": {"repos": repos, "limit": limit},
-        "dispatch_select_dispatch_task": {},
-        "dispatch_parse_issue_ref_from_task": {},
-        "dispatch_read_fix_tasks": {},
-        "dispatch_find_fix_task_marker": {},
-        "dispatch_create_fix_task": {},
-        "dispatch_reconcile_fix_task": {},
-        "dispatch_read_clone_preconditions": {"worktree_root": cfg.paths.worktree_root, "base_branch": cfg.base_branch},
-        "dispatch_fetch_clone_origin": {},
-        "dispatch_read_base_ref": {"base_branch": cfg.base_branch},
-        "dispatch_read_worktree_inventory": {"worktree_root": cfg.paths.worktree_root},
-        "dispatch_read_branch_provenance": {},
-        "dispatch_create_local_branch": {"worktree_root": cfg.paths.worktree_root, "base_branch": cfg.base_branch, "receipt_path": receipt},
-        "dispatch_write_branch_provenance": {"receipt_path": receipt},
-        "dispatch_add_worktree": {"worktree_root": cfg.paths.worktree_root},
-        "dispatch_verify_worktree_head": {},
-        "dispatch_read_omp_preconditions": {},
-        "dispatch_invoke_omp": {},
-        "dispatch_verify_omp_postconditions": {},
-        "dispatch_read_worktree_head": {},
-        "dispatch_read_base_head": {},
-        "dispatch_decide_branch_has_commits": {},
-        "dispatch_read_push_head": {},
-        "dispatch_push_branch": {},
-        "dispatch_read_pushed_ref": {},
-        "dispatch_verify_push_oid": {},
-        "dispatch_read_open_pr_for_branch": {},
-        "dispatch_decide_existing_pr": {},
-        "dispatch_create_pull_request": {"base_branch": cfg.base_branch},
-        "dispatch_reconcile_pull_request": {},
-        "dispatch_normalize_pr_labels": {},
-        "dispatch_add_pr_label": {},
-        "dispatch_aggregate_pr_label_results": {},
-        "dispatch_add_issue_label": {},
-        "dispatch_aggregate_issue_label_results": {},
-        "dispatch_build_dispatch_receipt": {"receipt_path": receipt},
-        "dispatch_publish_dispatch_receipt": {"receipt_path": receipt},
-        "dispatch_verify_dispatch_receipt": {"receipt_path": receipt},
-        "dispatch_read_task_for_completion": {},
-        "dispatch_decide_task_completion": {},
-        "dispatch_complete_task": {"result": "dispatched via auto_worker"},
-        "dispatch_verify_task_completed": {},
-        # Triage also starts from all configured repositories.  Its selected
-        # PR context is then carried by conduction into merge/repair atoms.
-        "triage_read_open_prs": {"repos": repos, "limit": limit},
-        "triage_filter_fix_prs": {},
-        "triage_select_fix_pr": {},
-        "triage_load_pr_fields": {},
-        "triage_evaluate_checks": {},
-        "triage_evaluate_test_evidence": {},
-        "triage_decide_triage_action": {},
-        "triage_read_pr_assignees": {},
-        "triage_decide_pr_assignee": {},
-        "triage_assign_pr": {},
-        "triage_verify_pr_assignee": {},
-        "triage_read_pr_comments": {},
-        "triage_decide_pr_comment": {},
-        "triage_post_pr_comment": {},
-        "triage_verify_pr_comment": {},
-        "triage_read_merge_preconditions": {},
-        "triage_merge_pr": {},
-        "triage_read_merge_postcondition": {},
-        "triage_verify_merge_provenance": {},
-        "triage_verify_linked_merge_provenance": {},
-        "triage_read_linked_issue_state": {},
-        "triage_close_linked_issue": {},
-        "triage_verify_linked_issue_closed": {},
-        "triage_build_merge_receipt": {"receipt_path": merge_receipt},
-        "triage_read_receipt_merge_provenance": {},
-        "triage_publish_merge_receipt": {"receipt_path": merge_receipt},
-        "triage_verify_merge_receipt": {"receipt_path": merge_receipt},
-        "triage_read_review_tasks": {},
-        "triage_find_review_marker": {},
-        "triage_create_review_task": {},
-        "triage_reconcile_review_task": {},
-        "triage_build_repair_prompt": {},
-        "triage_read_task_for_block": {},
-        "triage_decide_task_block": {},
-        "triage_block_task": {},
-        "triage_verify_task_blocked": {},
-        # Cleanup consumes branch/clone/worktree/receipt identity from
-        # upstream conduction; explicit empty values avoid selecting a repo.
-        "cleanup_resolve_cleanup_branch_source": {},
-        "cleanup_parse_cleanup_issue_number": {},
-        "cleanup_read_branch_ownership": {},
-        "cleanup_derive_cleanup_paths": {"worktree_root": cfg.paths.worktree_root},
-        "cleanup_validate_cleanup_identity": {},
-        "cleanup_check_issue_closed": {},
-        "cleanup_check_no_open_pr_for_branch": {},
-        "cleanup_verify_cleanup_guards": {"require_safe": True},
-        "cleanup_read_worktree_ownership": {},
-        "cleanup_read_worktree_cleanliness": {},
-        "cleanup_remove_worktree": {"require_safe": True},
-        "cleanup_verify_worktree_absent": {},
-        "cleanup_verify_branch_delete_guards": {},
-        "cleanup_read_local_branch_ownership": {},
-        "cleanup_delete_local_branch": {},
-        "cleanup_verify_local_branch_absent": {},
-        "cleanup_verify_claim_release_evidence": {},
-        "cleanup_read_claim_identity": {"claim_path": cfg.paths.active_issue},
-        "cleanup_release_claim_file": {"claim_path": cfg.paths.active_issue},
-        "cleanup_verify_claim_absent": {"claim_path": cfg.paths.active_issue},
-        "cleanup_collect_cleanup_receipt_evidence": {"receipt_path": cleanup_receipt},
-        "cleanup_decide_cleanup_outcome": {},
-        "cleanup_build_cleanup_receipt": {"receipt_path": cleanup_receipt},
-        "cleanup_publish_cleanup_receipt": {"receipt_path": cleanup_receipt},
-        "cleanup_verify_cleanup_receipt": {"receipt_path": cleanup_receipt},
-        "cleanup_read_maintenance_tasks": {},
-        "cleanup_find_maintenance_marker": {},
-        "cleanup_create_maintenance_task": {},
-        "cleanup_reconcile_maintenance_task": {},
+        "intake_normalize_issue_rows": {}, "intake_filter_issue_eligibility": {}, "intake_select_issue_candidate": {},
+        "intake_decide_issue_action": {}, "intake_read_issue_comments": {}, "intake_decide_issue_comment": {},
+        "intake_post_issue_comment": {}, "intake_verify_issue_comment": {},
+        "intake_reserve_claim_file": {"active_issue_path": cfg.paths.active_issue}, "intake_read_issue_claim_state": {},
+        "intake_assign_issue": {}, "intake_add_issue_label": {}, "intake_verify_issue_claim": {}, "intake_build_issue_claim_result": {},
+        "intake_read_intake_tasks": {}, "intake_find_intake_marker": {}, "intake_create_intake_task": {}, "intake_reconcile_intake_task": {},
+        "dispatch_read_dispatch_tasks": {"repos": repos, "limit": limit}, "dispatch_select_dispatch_task": {}, "dispatch_parse_issue_ref_from_task": {},
+        "dispatch_read_fix_tasks": {}, "dispatch_find_fix_task_marker": {}, "dispatch_create_fix_task": {}, "dispatch_reconcile_fix_task": {},
+        "dispatch_read_clone_preconditions": {"worktree_root": cfg.paths.worktree_root, "base_branch": cfg.base_branch}, "dispatch_fetch_clone_origin": {},
+        "dispatch_read_base_ref": {"base_branch": cfg.base_branch}, "dispatch_read_worktree_inventory": {"worktree_root": cfg.paths.worktree_root},
+        "dispatch_read_branch_provenance": {}, "dispatch_create_local_branch": {"worktree_root": cfg.paths.worktree_root, "base_branch": cfg.base_branch, "receipt_path": receipt},
+        "dispatch_write_branch_provenance": {"receipt_path": receipt}, "dispatch_add_worktree": {"worktree_root": cfg.paths.worktree_root},
+        "dispatch_verify_worktree_head": {}, "dispatch_read_omp_preconditions": {}, "dispatch_invoke_omp": {}, "dispatch_verify_omp_postconditions": {},
+        "dispatch_read_worktree_head": {}, "dispatch_read_base_head": {}, "dispatch_decide_branch_has_commits": {}, "dispatch_read_push_head": {},
+        "dispatch_push_branch": {}, "dispatch_read_pushed_ref": {}, "dispatch_verify_push_oid": {}, "dispatch_read_open_pr_for_branch": {},
+        "dispatch_decide_existing_pr": {}, "dispatch_create_pull_request": {"base_branch": cfg.base_branch}, "dispatch_reconcile_pull_request": {},
+        "dispatch_normalize_pr_labels": {}, "dispatch_add_pr_label": {}, "dispatch_aggregate_pr_label_results": {}, "dispatch_add_issue_label": {},
+        "dispatch_aggregate_issue_label_results": {}, "dispatch_build_dispatch_receipt": {"receipt_path": receipt},
+        "dispatch_publish_dispatch_receipt": {"receipt_path": receipt}, "dispatch_verify_dispatch_receipt": {"receipt_path": receipt},
+        "dispatch_read_task_for_completion": {}, "dispatch_decide_task_completion": {}, "dispatch_complete_task": {"result": "dispatched via auto_worker"}, "dispatch_verify_task_completed": {},
+        "triage_read_open_prs": {"repos": repos, "limit": limit}, "triage_filter_fix_prs": {}, "triage_select_fix_pr": {}, "triage_load_pr_fields": {},
+        "triage_evaluate_checks": {}, "triage_evaluate_test_evidence": {}, "triage_decide_triage_action": {}, "triage_read_pr_assignees": {},
+        "triage_decide_pr_assignee": {}, "triage_assign_pr": {}, "triage_verify_pr_assignee": {}, "triage_read_pr_comments": {},
+        "triage_decide_pr_comment": {}, "triage_post_pr_comment": {}, "triage_verify_pr_comment": {}, "triage_read_merge_preconditions": {},
+        "triage_merge_pr": {}, "triage_read_merge_postcondition": {}, "triage_verify_merge_provenance": {}, "triage_verify_linked_merge_provenance": {},
+        "triage_read_linked_issue_state": {}, "triage_close_linked_issue": {}, "triage_verify_linked_issue_closed": {},
+        "triage_build_merge_receipt": {"receipt_path": merge_receipt}, "triage_read_receipt_merge_provenance": {},
+        "triage_publish_merge_receipt": {"receipt_path": merge_receipt}, "triage_verify_merge_receipt": {"receipt_path": merge_receipt},
+        "triage_read_review_tasks": {}, "triage_find_review_marker": {}, "triage_create_review_task": {}, "triage_reconcile_review_task": {},
+        "triage_build_repair_prompt": {}, "triage_read_task_for_block": {}, "triage_decide_task_block": {}, "triage_block_task": {}, "triage_verify_task_blocked": {},
+        # Repair attempt state is immutable and never shares dispatch/merge receipts.
+        "triage_read_repair_attempt_state": {}, "triage_decide_repair_attempt": {}, "triage_reserve_repair_attempt": {},
+        "triage_verify_repair_attempt_reservation": {}, "triage_read_repair_context": {}, "triage_read_repair_remote_head": {},
+        "triage_read_repair_worktree_inventory": {}, "triage_read_repair_branch_provenance": {},
+        "triage_decide_repair_worktree_ownership": {}, "triage_create_repair_branch": {},
+        "triage_write_repair_branch_provenance": {}, "triage_add_repair_worktree": {}, "triage_verify_repair_worktree": {},
+        "triage_read_repair_omp_preconditions": {}, "triage_invoke_repair_omp": {},
+        "triage_verify_repair_omp_postconditions": {}, "triage_read_repair_worktree_head": {},
+        "triage_decide_repair_push": {}, "triage_push_repair_branch": {}, "triage_read_repair_pushed_ref": {},
+        "triage_verify_repair_push_oid": {}, "triage_read_existing_repair_pr": {}, "triage_verify_existing_repair_pr": {},
+        "triage_build_repair_receipt": {"receipt_path": repair_receipt},
+        "triage_publish_repair_receipt": {"receipt_path": repair_receipt}, "triage_verify_repair_receipt": {"receipt_path": repair_receipt},
+        # Lifecycle reconciliation reads join only at the pure decision.
+        "lifecycle_validate_reconcile_identity": {}, "lifecycle_read_lifecycle_github_state": {}, "lifecycle_read_lifecycle_local_evidence": {},
+        "lifecycle_decide_lifecycle_transition": {}, "lifecycle_release_orphan_claim": {"claim_path": cfg.paths.active_issue},
+        "lifecycle_verify_orphan_claim_release": {"claim_path": cfg.paths.active_issue},
+        "aggregate_lane_results": {},
+        "cleanup_resolve_cleanup_branch_source": {}, "cleanup_parse_cleanup_issue_number": {}, "cleanup_read_branch_ownership": {},
+        "cleanup_derive_cleanup_paths": {"worktree_root": cfg.paths.worktree_root}, "cleanup_validate_cleanup_identity": {}, "cleanup_check_issue_closed": {},
+        "cleanup_check_no_open_pr_for_branch": {}, "cleanup_verify_cleanup_guards": {"require_safe": True}, "cleanup_read_worktree_ownership": {},
+        "cleanup_read_worktree_cleanliness": {}, "cleanup_remove_worktree": {"require_safe": True}, "cleanup_verify_worktree_absent": {},
+        "cleanup_verify_branch_delete_guards": {}, "cleanup_read_local_branch_ownership": {}, "cleanup_delete_local_branch": {},
+        "cleanup_verify_local_branch_absent": {}, "cleanup_verify_claim_release_evidence": {}, "cleanup_read_claim_identity": {"claim_path": cfg.paths.active_issue},
+        "cleanup_release_claim_file": {"claim_path": cfg.paths.active_issue}, "cleanup_verify_claim_absent": {"claim_path": cfg.paths.active_issue},
+        "cleanup_collect_cleanup_receipt_evidence": {"receipt_path": cleanup_receipt}, "cleanup_decide_cleanup_outcome": {},
+        "cleanup_build_cleanup_receipt": {"receipt_path": cleanup_receipt}, "cleanup_publish_cleanup_receipt": {"receipt_path": cleanup_receipt},
+        "cleanup_verify_cleanup_receipt": {"receipt_path": cleanup_receipt}, "cleanup_read_maintenance_tasks": {}, "cleanup_find_maintenance_marker": {},
+        "cleanup_create_maintenance_task": {}, "cleanup_reconcile_maintenance_task": {},
     }
-    config = _step_config(
-        cfg,
-        dry_run=dry_run,
-        receipt_path=receipt,
-        cleanup_receipt_path=cleanup_receipt,
-        merge_receipt_path=merge_receipt,
-        run_id=run_id,
-        path_id="auto_worker",
-    )
-    return {"dry_run": dry_run, "repos": repos, "limit": limit, "run_id": run_id, "path_id": "auto_worker"}, {key: {**config, **value} for key, value in inputs.items()}
+    config = _step_config(cfg, dry_run=dry_run, receipt_path=receipt, cleanup_receipt_path=cleanup_receipt,
+        merge_receipt_path=merge_receipt, repair_receipt_path=repair_receipt, lifecycle_receipt_path=lifecycle_receipt,
+        run_id=run_id, path_id="auto_worker", candidate=candidate, candidate_id=candidate, candidate_sha=candidate,
+        executor_policy=executor_policy, db_path=db_path)
+    base = {"dry_run": dry_run, "live": not dry_run, "repos": repos, "limit": limit, "run_id": run_id, "path_id": "auto_worker",
+        "candidate": candidate, "candidate_id": candidate, "candidate_sha": candidate, "db_path": db_path}
+    return base, {key: {**config, **value} for key, value in inputs.items()}
 
 async def run_all(*, db_path: Path, config: Any, dry_run: bool, limit: int = 10) -> dict[str, Any]:
     run_id = f"auto-worker-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
-    inputs, effector_inputs = _prefixed_inputs(config, dry_run=dry_run, limit=limit, run_id=run_id)
+    inputs, effector_inputs = _prefixed_inputs(config, dry_run=dry_run, limit=limit, run_id=run_id, db_path=str(db_path))
     host = await run_package_path_async(
         db_path=db_path,
         package_path=_PACKAGE_PATH,
@@ -237,7 +201,7 @@ async def run_all(*, db_path: Path, config: Any, dry_run: bool, limit: int = 10)
         inputs=inputs,
         effector_inputs=effector_inputs,
         run_metadata={"mode": "dry-run" if dry_run else "live"},
-        max_ticks=160,
+        max_ticks=180,
         worker_id="lokay:tick-all",
     )
     processes = [process_summary(process) for process in host.processes]

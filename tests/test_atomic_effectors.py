@@ -336,11 +336,45 @@ class IssueToPrTests(unittest.TestCase):
 
 
 class RepairTests(unittest.TestCase):
-    def test_build_repair_prompt(self) -> None:
-        out = repair.build_repair_prompt(req({"pr": {"number": 8, "title": "fix"}, "failures": ["ci"], "reason": "checks_failed"}))
+    def test_build_repair_prompt_uses_exact_linked_issue_and_lane_context(self) -> None:
+        out = repair.build_repair_prompt(req({
+            "issue": 10, "failures": ["ci"], "reason": "checks_failed",
+            "conduction": {"load_pr_fields": {
+                "status": "loaded", "repo": "owner/repo", "number": 11,
+                "board": "board", "clone_path": "/clone", "priority": 2,
+                "pr": {"number": 11, "title": "fix", "headRefName": "ai/fix/11", "closingIssuesReferences": [{"number": 10}]},
+            }},
+        }))
         self.assertTrue(out["ok"])
-        self.assertIn("PR #8", out["prompt"])
-        self.assertIn("ci", out["prompt"])
+        self.assertEqual(out["issue"], 10)
+        self.assertEqual(out["pr_number"], 11)
+        for value in ("owner/repo", "#10", "ai/fix/11", "/clone", "board", "priority 2"):
+            self.assertIn(value, out["prompt"])
+
+    def test_build_repair_prompt_rejects_invalid_linked_issue_identity(self) -> None:
+        base = {"number": 11, "title": "fix", "headRefName": "ai/fix/11"}
+        for refs, explicit, reason in (([], None, "expected_exactly_one_closing_issue"), ([{"number": 10}, {"number": 12}], None, "expected_exactly_one_closing_issue"), ([{"number": 10}], 12, "explicit_issue_mismatch")):
+            with self.subTest(reason=reason):
+                pr = {**base, "closingIssuesReferences": refs}
+                data = {"pr": pr, "conduction": {"load_pr_fields": {"status": "loaded", "pr": pr}}}
+                if explicit is not None:
+                    data["issue"] = explicit
+                out = repair.build_repair_prompt(req(data))
+                self.assertFalse(out["ok"])
+                self.assertEqual(out["reason"], reason)
+                self.assertFalse(out.get("mutated"))
+
+    def test_invalid_repair_identity_blocks_worktree_mutation(self) -> None:
+        failed = {"status": "failed", "ok": False, "reason": "expected_exactly_one_closing_issue", "mutated": False}
+        out = repair.read_repair_context(req({"conduction": {"build_repair_prompt": failed}}))
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["reason"], "upstream_failed")
+        self.assertFalse(out.get("mutated"))
+
+    def test_build_repair_prompt_requires_linked_issue_in_standalone_input(self) -> None:
+        out = repair.build_repair_prompt(req({"pr": {"number": 11, "title": "fix"}, "failures": ["ci"]}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "missing_closing_issue_references")
 
     def test_review_task_dry_chain(self) -> None:
         found = {"status": "absent", "ok": True, "task": None, "marker": "fix-pr-review:o/r:2"}
@@ -358,6 +392,152 @@ class RepairTests(unittest.TestCase):
         blocked = repair.block_task(req({"board": "b", "task_id": "t1", "conduction": {"decide_task_block": failed}}))
         self.assertEqual(blocked["reason"], "upstream_failed")
         self.assertFalse(blocked["mutated"])
+
+
+    def test_decide_repair_attempt_disabled_or_dry_run(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+        # disabled
+        r_dis = req({"enabled": False, "live": True, "dry_run": False})
+        out = decide_repair_attempt(r_dis)
+        self.assertEqual(out["decision"], "wait")
+        self.assertFalse(out["authorize"])
+        # not live
+        r_nl = req({"enabled": True, "live": False, "dry_run": False})
+        out = decide_repair_attempt(r_nl)
+        self.assertEqual(out["decision"], "wait")
+        self.assertFalse(out["authorize"])
+        # dry run
+        r_dry = req({"enabled": True, "live": True, "dry_run": True})
+        out = decide_repair_attempt(r_dry)
+        self.assertEqual(out["decision"], "wait")
+        self.assertFalse(out["authorize"])
+
+    def test_decide_repair_attempt_missing_provenance_conflict(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+        # missing repo
+        r = req({"enabled": True, "live": True, "dry_run": False, "number": 1, "verified_head": "abc", "candidate": "c1", "run_id": "r1"})
+        out = decide_repair_attempt(r)
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["decision"], "terminal_conflict")
+        self.assertEqual(out["conflict"], "missing_repair_provenance")
+
+    def test_decide_repair_attempt_valid_invoke(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+        r = req({
+            "enabled": True, "live": True, "dry_run": False,
+            "repo": "o/r", "number": 1, "verified_head": "abc", "candidate": "c1", "run_id": "r1",
+            "checks": [{"name": "ci", "conclusion": "FAILURE"}]
+        })
+        out = decide_repair_attempt(r)
+        self.assertEqual(out["status"], "invoke")
+        self.assertEqual(out["decision"], "invoke")
+        self.assertTrue(out["authorize"])
+        self.assertEqual(out["failures"], [{"identity": "ci", "conclusion": "FAILURE"}])
+
+
+    def test_decide_repair_attempt_repeated_head_blocks_changed_checks(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+
+        state = {
+            "repo": "o/r", "pr_number": 1, "verified_head": "abc",
+            "candidate": "c1", "run_id": "r1", "status": "invoked",
+            "attempted": True, "checks": [{"identity": "ci", "conclusion": "FAILURE"}],
+        }
+        out = decide_repair_attempt(req({
+            "enabled": True, "live": True, "dry_run": False,
+            "repo": "o/r", "number": 1, "verified_head": "abc", "candidate": "c1", "run_id": "r1",
+            "checks": [{"name": "ci", "conclusion": "ERROR"}], "attempt_state": state,
+        }))
+        self.assertEqual(out["status"], "already_repaired")
+        self.assertFalse(out["authorize"])
+
+    def test_decide_repair_attempt_malformed_executor_flags_are_terminal(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+
+        out = decide_repair_attempt(req({"enabled": "yes", "live": True, "dry_run": False}))
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["decision"], "terminal_conflict")
+        self.assertEqual(out["conflict"], "executor_enabled_must_be_boolean")
+    def test_decide_repair_attempt_pending_checks(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+        r = req({
+            "enabled": True, "live": True, "dry_run": False,
+            "repo": "o/r", "number": 1, "verified_head": "abc", "candidate": "c1", "run_id": "r1",
+            "checks": [{"name": "ci", "conclusion": "PENDING"}]
+        })
+        out = decide_repair_attempt(r)
+        self.assertEqual(out["status"], "pending")
+        self.assertEqual(out["decision"], "wait")
+        self.assertFalse(out["authorize"])
+        self.assertEqual(out["reason"], "checks_pending")
+
+    def test_decide_repair_attempt_already_repaired(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+        r = req({
+            "enabled": True, "live": True, "dry_run": False,
+            "repo": "o/r", "number": 1, "verified_head": "abc", "candidate": "c1", "run_id": "r1",
+            "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+            "attempt_state": {
+                "repo": "o/r", "pr_number": 1, "verified_head": "abc", "candidate": "c1", "run_id": "r1",
+                "status": "repaired", "checks": [{"identity": "ci", "conclusion": "FAILURE"}]
+            }
+        })
+        out = decide_repair_attempt(r)
+        self.assertEqual(out["status"], "already_repaired")
+        self.assertEqual(out["decision"], "already_repaired")
+        self.assertFalse(out["authorize"])
+
+    def test_decide_repair_attempt_identity_mismatch(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+        r = req({
+            "enabled": True, "live": True, "dry_run": False,
+            "repo": "o/r", "number": 1, "verified_head": "abc", "candidate": "c1", "run_id": "r1",
+            "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+            "attempt_state": {
+                "repo": "o/r", "pr_number": 1, "verified_head": "different_head", "candidate": "c1", "run_id": "r1",
+                "status": "repaired", "checks": [{"identity": "ci", "conclusion": "FAILURE"}]
+            }
+        })
+        out = decide_repair_attempt(r)
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["decision"], "terminal_conflict")
+        self.assertEqual(out["conflict"], "verified_head_mismatch")
+
+    def test_repair_reservation_restart_blocks_changed_checks_and_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"enabled": True, "live": True, "dry_run": False, "repo": "o/r", "number": 1, "verified_head": "head-a", "candidate": "candidate-a", "run_id": "run-a", "repair_state_root": tmp, "checks": [{"name": "ci", "conclusion": "FAILURE"}]}
+            first = repair.decide_repair_attempt(req(base))
+            self.assertTrue(first["authorize"])
+            reserved = repair.reserve_repair_attempt(req(dict(base, conduction={"decide_repair_attempt": first})))
+            self.assertEqual(reserved["status"], "reserved")
+            restart = dict(base, candidate="candidate-b", run_id="run-b", checks=[{"name": "ci", "conclusion": "ERROR"}])
+            read = repair.read_repair_attempt_state(req(restart))
+            self.assertEqual(read["status"], "found")
+            second = repair.decide_repair_attempt(req(dict(restart, conduction={"read_repair_attempt_state": read})))
+            self.assertEqual(second["status"], "already_repaired")
+            self.assertFalse(second["authorize"])
+
+    def test_repair_reservation_new_head_authorizes_and_malformed_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"enabled": True, "live": True, "dry_run": False, "repo": "o/r", "number": 1, "verified_head": "head-a", "candidate": "candidate-a", "run_id": "run-a", "repair_state_root": tmp, "checks": [{"name": "ci", "conclusion": "FAILURE"}]}
+            first = repair.decide_repair_attempt(req(base))
+            self.assertTrue(first["authorize"])
+            new_head = dict(base, verified_head="head-b", candidate="candidate-b", run_id="run-b")
+            read = repair.read_repair_attempt_state(req(new_head))
+            second = repair.decide_repair_attempt(req(dict(new_head, conduction={"read_repair_attempt_state": read})))
+            self.assertTrue(second["authorize"])
+            path = repair._repair_reservation_path(req(base), {"repo": "o/r", "pr_number": 1, "verified_head": "head-a"})
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("not-json", encoding="utf-8")
+            malformed = repair.read_repair_attempt_state(req(base))
+            self.assertEqual((malformed["reason"], malformed["failure_class"]), ("repair_attempt_state_malformed", "terminal"))
+
+    def test_repair_invoke_requires_verified_reservation_after_crash_boundary(self) -> None:
+        with mock.patch("lokay.steps.repair.run_omp") as run:
+            out = repair.invoke_repair_omp(req({"dry_run": False, "conduction": {"decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True}, "read_repair_omp_preconditions": {"status": "ready", "ok": True, "worktree_path": "/tmp", "pre_head": "head"}}}))
+            self.assertEqual(out["reason"], "repair_attempt_reservation_required")
+            run.assert_not_called()
+
 
 
 class TriageTests(unittest.TestCase):

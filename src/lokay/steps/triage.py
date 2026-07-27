@@ -198,31 +198,74 @@ def _upstream_noop(request: Request, operation: str, *peers: str) -> Result | No
     return None
 
 
+def _repo_entries(data: dict[str, Any], cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    values = data.get("repos")
+    if not isinstance(values, list):
+        values = cfg.get("repos")
+    entries = [dict(value) for value in values if isinstance(value, dict)] if isinstance(values, list) else []
+    if entries:
+        requested = str(data.get("repo") or "").strip()
+        if requested:
+            entries = [entry for entry in entries if str(entry.get("repo") or "").strip() == requested]
+        return entries
+    return [dict(data)] if isinstance(data, dict) else []
+
+
+def _repo_context(entry: dict[str, Any], data: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "repo": str(entry.get("repo") or data.get("repo") or cfg.get("repo") or "").strip(),
+        "board": str(entry.get("board") or data.get("board") or cfg.get("board") or ""),
+        "clone_path": str(entry.get("clone_path") or data.get("clone_path") or ""),
+        "priority": entry.get("priority", data.get("priority", 0)),
+    }
+
+
 def read_open_prs(request: Request) -> Result:
-    idle = _upstream_noop(request, "read_open_prs", "verify_task_completed")
-    if idle is not None:
-        return idle
-    """Read open PR rows for exactly one configured repository."""
+    """Read and aggregate open PR rows for every configured repository."""
     data, cfg = input_of(request), cfg_of(request)
-    repo = str(data.get("repo") or cfg.get("repo") or "")
-    if not repo:
-        return fail("missing_repo", failure_class="terminal", retry_safe=False)
-    gh = str(cfg.get("gh_cli") or "gh")
-    limit = int(data.get("limit") or cfg.get("limit") or 50)
+    entries = _repo_entries(data, cfg)
+    if not entries:
+        return fail("missing_repo", failure_class="terminal", retry_safe=False, repository_results=[])
     try:
-        proc = run_cmd([gh, "pr", "list", "--repo", repo, "--state", "open", "--limit", str(limit), "--json", "number,title,url,headRefName,author,labels,mergeable,statusCheckRollup"], timeout=90)
-        rows = json.loads(getattr(proc, "stdout", "") or "")
-        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-            raise ValueError("invalid PR list read-back shape")
-    except CommandError as exc:
-        return fail("pr_list_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), repo=repo)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        return fail("pr_list_read_failed", failure_class="terminal", retry_safe=False, error=str(exc), repo=repo)
-    return ok(status="read", repo=repo, prs=[{**row, "repo": repo} for row in rows], count=len(rows))
+        limit = int(data.get("limit") or cfg.get("limit") or 50)
+    except (TypeError, ValueError):
+        return fail("invalid_limit", failure_class="terminal", retry_safe=False, repository_results=[])
+    results: list[dict[str, Any]] = []
+    aggregate: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    gh = str(data.get("gh_cli") or cfg.get("gh_cli") or "gh")
+    for entry in entries:
+        context = _repo_context(entry, data, cfg)
+        repo = context["repo"]
+        try:
+            context["limit"] = int(entry.get("limit") or limit)
+        except (TypeError, ValueError) as exc:
+            failure = {**context, "reason": "invalid_limit", "failure_class": "terminal", "retry_safe": False, "detail": str(exc)}
+            failures.append(failure); results.append(failure); continue
+        if not repo:
+            failure = {**context, "reason": "missing_repo", "failure_class": "terminal", "retry_safe": False}
+            failures.append(failure); results.append(failure); continue
+        try:
+            proc = run_cmd([str(entry.get("gh_cli") or gh), "pr", "list", "--repo", repo, "--state", "open", "--limit", str(context["limit"]), "--json", "number,title,url,headRefName,author,labels,mergeable,statusCheckRollup"], timeout=90)
+            rows = json.loads(getattr(proc, "stdout", "") or "")
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise ValueError("invalid PR list read-back shape")
+        except CommandError as exc:
+            failure = {**context, "reason": "pr_list_read_failed", "failure_class": "retryable_read", "retry_safe": True, "error": str(exc), "stderr": exc.stderr[-500:]}
+            failures.append(failure); results.append(failure); continue
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            failure = {**context, "reason": "pr_list_read_failed", "failure_class": "terminal", "retry_safe": False, "error": str(exc)}
+            failures.append(failure); results.append(failure); continue
+        scoped = [{**row, **context} for row in rows]
+        aggregate.extend(scoped)
+        results.append({**context, "status": "read", "prs": scoped, "count": len(scoped)})
+    if failures:
+        return fail("pr_list_read_failed", failure_class="terminal", retry_safe=False, failures=failures, repository_results=results, prs=[])
+    return ok(status="read", prs=aggregate, count=len(aggregate), repositories=[_repo_context(entry, data, cfg) for entry in entries], repository_results=results, dry_run=dry_run_flag(request))
 
 
 def filter_fix_prs(request: Request) -> Result:
-    """Purely filter an open-PR read by the configured AI branch prefix."""
+    """Purely filter aggregated open-PR rows by branch prefix."""
     terminal = _atomic_terminal(request, "filter_fix_prs", "read_open_prs")
     if terminal is not None:
         return terminal
@@ -236,11 +279,11 @@ def filter_fix_prs(request: Request) -> Result:
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         return fail("invalid_pr_list", failure_class="terminal", retry_safe=False)
     filtered = [row for row in rows if str(row.get("headRefName") or "").startswith(prefix)]
-    return ok(status="filtered", repo=str(data.get("repo") or source.get("repo") or cfg.get("repo") or ""), prs=filtered, count=len(filtered), branch_prefix=prefix)
+    return ok(status="filtered", prs=filtered, count=len(filtered), repositories=source.get("repositories") or [], branch_prefix=prefix)
 
 
 def select_fix_pr(request: Request) -> Result:
-    """Pure deterministic selection of the first fix PR."""
+    """Pure deterministic selection across fix PRs and repositories."""
     terminal = _atomic_terminal(request, "select_fix_pr", "filter_fix_prs")
     if terminal is not None:
         return terminal
@@ -250,12 +293,18 @@ def select_fix_pr(request: Request) -> Result:
     data = input_of(request)
     source = cond_blob(request, "filter_fix_prs")
     rows = data.get("prs") if isinstance(data.get("prs"), list) else source.get("prs", [])
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return fail("invalid_pr_list", failure_class="terminal", retry_safe=False)
     if not rows:
-        return noop("no_open_prs", prs=[])
-    row = rows[0]
-    if not isinstance(row, dict) or not row.get("number"):
+        return noop("no_open_prs", prs=[], repositories=source.get("repositories") or [])
+    try:
+        ordered = sorted(rows, key=lambda row: (int(row.get("priority", 0)), str(row.get("repo") or ""), int(row.get("number") or 0)))
+    except (TypeError, ValueError, AttributeError) as exc:
+        return fail("invalid_selected_pr", failure_class="terminal", retry_safe=False, detail=str(exc))
+    row = ordered[0]
+    if not row.get("number") or not row.get("repo"):
         return fail("invalid_selected_pr", failure_class="terminal", retry_safe=False)
-    return ok(status="selected", repo=row.get("repo") or source.get("repo"), number=int(row["number"]), pr=dict(row), prs=rows)
+    return ok(status="selected", repo=row["repo"], board=row.get("board", ""), clone_path=row.get("clone_path", ""), priority=row.get("priority", 0), number=int(row["number"]), pr=dict(row), prs=ordered, repositories=source.get("repositories") or [])
 
 
 def read_pr_assignees(request: Request) -> Result:
@@ -565,7 +614,7 @@ def load_pr_fields(request: Request) -> Result:
                 repo,
                 "--json",
                 "number,title,url,body,state,isDraft,headRefName,headRefOid,baseRefName,"
-                "author,labels,mergeable,reviewDecision,statusCheckRollup,commits",
+                "author,labels,mergeable,reviewDecision,statusCheckRollup,commits,closingIssuesReferences",
             ],
             timeout=60,
         )
@@ -578,12 +627,15 @@ def load_pr_fields(request: Request) -> Result:
         return fail("invalid_pr_readback", failure_class="terminal", retry_safe=False, error=str(exc))
     board = ""
     clone_path = ""
+    priority: Any = 0
+    lane = selected_pr if isinstance(selected_pr, dict) else {}
     for r in (data.get("repos") or cfg.get("repos") or []):
         if isinstance(r, dict) and r.get("repo") == repo:
             board = r.get("board") or ""
             clone_path = r.get("clone_path") or ""
+            priority = r.get("priority", 0)
             break
-    return ok(status="loaded", repo=repo, number=number, board=board, clone_path=clone_path, pr=pr)
+    return ok(status="loaded", repo=repo, number=number, board=board, clone_path=clone_path, priority=priority, pr=pr)
 
 
 def evaluate_checks(request: Request) -> Result:

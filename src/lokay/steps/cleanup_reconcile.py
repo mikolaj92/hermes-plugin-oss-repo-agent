@@ -460,3 +460,564 @@ def verify_no_target_reconciliation(request: Request) -> Result:
     if payload.get("phase") != "CLEANUP_TERMINAL" or payload.get("outcome") != "NO_TARGET_RECONCILED" or not isinstance(post, dict) or post.get("remote_branch_deleted") is not False or any(post.get(key) is not True for key in required):
         return fail("reconcile_receipt_mismatch", failure_class="terminal", retry_safe=False)
     return ok(status="reconciled", receipt_path=str(path), postconditions=post)
+_LIFECYCLE_ACTIVE_STATUSES = {"pending", "ready", "running", "waiting", "retry_wait", "cancel_requested"}
+_LIFECYCLE_FAILURE_CONCLUSIONS = {"FAILURE", "FAIL", "FAILED", "CANCELLED", "CANCELED", "TIMED_OUT", "ERROR", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+_LIFECYCLE_SUCCESS_CONCLUSIONS = {"SUCCESS", "PASSED", "PASS", "NEUTRAL", "SKIPPED"}
+_LIFECYCLE_PENDING_STATES = {"PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "REQUESTED", "WAITING"}
+_LIFECYCLE_SUCCESS_STATES = {"SUCCESS", "PASSED", "PASS", "COMPLETED"}
+_LIFECYCLE_FAILURE_STATES = {"FAILURE", "FAIL", "FAILED", "CANCELLED", "CANCELED", "TIMED_OUT", "ERROR", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+
+
+def _lifecycle_identity(data: dict[str, Any]) -> dict[str, Any]:
+    """Return only the externally bound identity supplied by the caller."""
+    identity = {key: data.get(key) for key in ("repo", "issue", "pr_number", "branch", "head_oid", "expected_head_oid")}
+    if identity.get("issue") not in (None, ""):
+        try:
+            identity["issue"] = _positive_int(identity["issue"], "issue")
+        except (TypeError, ValueError):
+            pass
+    if identity.get("pr_number") not in (None, ""):
+        try:
+            identity["pr_number"] = _positive_int(identity["pr_number"], "pr_number")
+        except (TypeError, ValueError):
+            pass
+    for key in ("repo", "branch", "head_oid", "expected_head_oid"):
+        if identity.get(key) is not None:
+            identity[key] = str(identity[key]).strip()
+    return identity
+def _lifecycle_context_conflict(error: str, **extra: Any) -> Result:
+    return fail("lifecycle_context_conflict", failure_class="terminal", retry_safe=False, mutated=False, error=error, **extra)
+
+
+def _lifecycle_pr_repo(pr: dict[str, Any]) -> str:
+    value = pr.get("repo") or pr.get("repo_full_name") or pr.get("repository")
+    if isinstance(value, dict):
+        name_with_owner = value.get("nameWithOwner") or value.get("name_with_owner") or value.get("fullName")
+        if name_with_owner:
+            return str(name_with_owner).strip()
+        owner = value.get("owner")
+        owner = owner.get("login") if isinstance(owner, dict) else owner
+        name = value.get("name")
+        value = f"{owner}/{name}" if owner and name else ""
+    return str(value or "").strip()
+
+
+def _lifecycle_pr_number(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = _positive_int(value, "pr_number")
+    except (TypeError, ValueError):
+        return None
+    return number
+
+
+def _lifecycle_linked_numbers(pr: dict[str, Any]) -> list[int] | None:
+    refs = pr.get("closingIssuesReferences")
+    if refs is None:
+        return []
+    if not isinstance(refs, list):
+        return None
+    numbers: list[int] = []
+    for ref in refs:
+        value = ref.get("number") if isinstance(ref, dict) else None
+        try:
+            numbers.append(_positive_int(value, "issue"))
+        except (TypeError, ValueError):
+            return None
+    return sorted(set(numbers))
+
+
+def _resolve_lifecycle_context(request: Request) -> Result:
+    """Resolve one lifecycle identity without choosing a configured repository."""
+    data, cfg = input_of(request), cfg_of(request)
+    upstream = _reconcile_upstream_failure(
+        request,
+        "resolve_lifecycle_context",
+        "triage_load_pr_fields",
+        "load_pr_fields",
+        "triage_decide_triage_action",
+        "decide_triage_action",
+    )
+    if upstream:
+        return upstream
+    load = cond_blob(request, "triage_load_pr_fields", "load_pr_fields")
+    decide = cond_blob(request, "triage_decide_triage_action", "decide_triage_action", "decide")
+    conduction = [blob for blob in (load, decide) if blob]
+    explicit_prs = [data.get("pr")] if isinstance(data.get("pr"), dict) else []
+    triage_prs: list[dict[str, Any]] = []
+    for blob in conduction:
+        for key in ("pr", "selected_pr"):
+            value = blob.get(key)
+            if isinstance(value, dict):
+                triage_prs.append(value)
+    prs = [*explicit_prs, *triage_prs]
+    sources = [data, *conduction]
+
+    def first_value(*keys: str) -> Any:
+        for source in sources:
+            for key in keys:
+                value = source.get(key)
+                if value not in (None, "", []):
+                    return value
+        for pr in prs:
+            for key in keys:
+                value = pr.get(key)
+                if value not in (None, "", []):
+                    return value
+        return None
+
+    repo = str(first_value("repo", "repository", "nameWithOwner") or "").strip()
+    explicit_sources = [data, cfg]
+    explicit_issue_raw = next((source.get(key) for source in explicit_sources for key in ("issue", "issue_number") if source.get(key) not in (None, "", [])), None)
+    issue_raw = explicit_issue_raw
+    pr_raw = first_value("pr_number", "number")
+    branch = str(first_value("branch", "head_ref", "headRefName") or "").strip()
+    head = str(first_value("head_oid", "headRefOid", "expected_head_oid") or "").strip()
+    try:
+        issue = _positive_int(issue_raw, "issue") if issue_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        return _lifecycle_context_conflict("invalid issue")
+    pr_number = _lifecycle_pr_number(pr_raw)
+    if pr_raw not in (None, "") and pr_number is None:
+        return _lifecycle_context_conflict("invalid PR number")
+
+    for pr in prs:
+        candidate_repo = _lifecycle_pr_repo(pr)
+        candidate_number = _lifecycle_pr_number(pr.get("number") or pr.get("pr_number"))
+        candidate_branch = str(pr.get("headRefName") or pr.get("head_ref") or "").strip()
+        candidate_head = str(pr.get("headRefOid") or pr.get("head_oid") or "").strip()
+        if candidate_repo and repo and candidate_repo != repo:
+            return _lifecycle_context_conflict("PR repository disagrees with lifecycle repository", field="repo")
+        if candidate_repo and not repo:
+            repo = candidate_repo
+        if candidate_number is None:
+            return _lifecycle_context_conflict("selected PR has no exact number")
+        if pr_number is not None and candidate_number != pr_number:
+            return _lifecycle_context_conflict("selected PR number disagrees with lifecycle PR", field="pr_number")
+        if pr_number is None:
+            pr_number = candidate_number
+        if candidate_branch and branch and candidate_branch != branch:
+            return _lifecycle_context_conflict("PR branch disagrees with lifecycle branch", field="branch")
+        if candidate_branch and not branch:
+            branch = candidate_branch
+        if candidate_head and head and candidate_head != head:
+            return _lifecycle_context_conflict("PR head disagrees with lifecycle head", field="head_oid")
+        if candidate_head and not head:
+            head = candidate_head
+
+    for source in conduction:
+        source_repo = str(source.get("repo") or "").strip()
+        if source_repo and repo and source_repo != repo:
+            return _lifecycle_context_conflict("triage repository disagrees with lifecycle repository", field="repo")
+        source_branch = str(source.get("branch") or source.get("head_ref") or source.get("headRefName") or "").strip()
+        if source_branch and branch and source_branch != branch:
+            return _lifecycle_context_conflict("triage branch disagrees with lifecycle branch", field="branch")
+        source_head = str(source.get("head_oid") or source.get("headRefOid") or "").strip()
+        if source_head and head and source_head != head:
+            return _lifecycle_context_conflict("triage head disagrees with lifecycle head", field="head_oid")
+
+    linked: list[int] | None = None
+    for pr in prs:
+        values = _lifecycle_linked_numbers(pr)
+        if values is None:
+            return _lifecycle_context_conflict("selected PR has invalid closing issue references", field="issue")
+        if linked is not None and values != linked:
+            return _lifecycle_context_conflict("selected PR linked issues disagree", field="issue")
+        linked = values
+    if issue is None:
+        if linked is None or len(linked) != 1:
+            return _lifecycle_context_conflict("issue requires exactly one closing issue reference", field="issue")
+        issue = linked[0]
+    elif linked and issue not in linked:
+        return _lifecycle_context_conflict("explicit issue is not linked by selected PR", field="issue")
+    if not repo or issue is None or pr_number is None or not branch:
+        return fail("lifecycle_github_context_missing", failure_class="terminal", retry_safe=False, mutated=False)
+    return ok(
+        status="resolved",
+        repo=repo,
+        issue=issue,
+        pr_number=pr_number,
+        branch=branch,
+        head_oid=head,
+        board=str(first_value("board") or ""),
+        clone_path=str(first_value("clone_path") or ""),
+        priority=first_value("priority") if first_value("priority") is not None else 0,
+        selected_pr=triage_prs[-1] if triage_prs else (explicit_prs[0] if explicit_prs else None),
+        linked_issue_numbers=linked or [],
+    )
+
+
+def _lifecycle_check_state(pr: dict[str, Any]) -> str:
+    """Classify check rollup without treating absent evidence as green."""
+    checks = pr.get("statusCheckRollup")
+    if checks is None:
+        checks = pr.get("checks")
+    if not isinstance(checks, list):
+        return "pending"
+    if not checks:
+        return "pending"
+    pending = False
+    for check in checks:
+        if not isinstance(check, dict):
+            return "pending"
+        state = str(check.get("state") or check.get("status") or "").upper()
+        conclusion = str(check.get("conclusion") or "").upper()
+        if conclusion in _LIFECYCLE_FAILURE_CONCLUSIONS or state in _LIFECYCLE_FAILURE_STATES:
+            return "failed"
+        if state in _LIFECYCLE_PENDING_STATES or (conclusion and conclusion not in _LIFECYCLE_SUCCESS_CONCLUSIONS) or (not conclusion and state not in _LIFECYCLE_SUCCESS_STATES):
+            pending = True
+    return "pending" if pending else "passed"
+
+
+def _lifecycle_pr_matches(pr: dict[str, Any], identity: dict[str, Any]) -> bool:
+    expected_branch = str(identity.get("branch") or "")
+    expected_head = str(identity.get("head_oid") or identity.get("expected_head_oid") or "")
+    return (
+        str(pr.get("headRefName") or pr.get("head_ref") or "") == expected_branch
+        and str(pr.get("headRefOid") or pr.get("head_oid") or "") == expected_head
+        and str(pr.get("baseRefName") or pr.get("base_ref") or "main") == "main"
+    )
+
+
+def _lifecycle_labels(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {str(item.get("name") or "").strip() if isinstance(item, dict) else str(item).strip() for item in value} - {""}
+def _lifecycle_missing_marker(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().upper() in {"NOT_FOUND", "MISSING"}
+    if isinstance(value, dict):
+        return any(_lifecycle_missing_marker(value.get(key)) for key in ("status", "state", "reason", "error"))
+    return False
+
+
+def _lifecycle_remote_absent(github: dict[str, Any]) -> bool:
+    """Accept absence only when GitHub explicitly reports both lifecycle objects missing."""
+    explicit = github.get("missing_lifecycle") is True or github.get("remote_lifecycle_missing") is True
+    issue = github.get("issue")
+    pr = github.get("pr")
+    issue_missing = github.get("issue_missing") is True or _lifecycle_missing_marker(issue)
+    pr_missing = github.get("pr_missing") is True or _lifecycle_missing_marker(pr)
+    return explicit or (issue_missing and pr_missing)
+
+
+def _lifecycle_orphan_local(local: dict[str, Any]) -> bool:
+    """Require one claim and no local ownership or receipt evidence."""
+    paths = local.get("claim_paths") or []
+    return (
+        len(paths) == 1
+        and local.get("claim_present") is True
+        and local.get("task_receipt") is None
+        and local.get("receipt") is None
+        and local.get("receipt_conflict") is not True
+        and local.get("worktree_present") is False
+        and not local.get("active_leases")
+    )
+
+
+def _github_lifecycle_not_found(exc: CommandError, object_type: str) -> bool:
+    """Recognize only GitHub's explicit object-not-found diagnostics."""
+    text = " ".join(f"{exc.stderr}\n{exc.stdout}".upper().split())
+    common = "COULD NOT RESOLVE TO AN ISSUE OR PULL REQUEST WITH THE NUMBER OF"
+    specific = {
+        "issue": ("COULD NOT RESOLVE TO AN ISSUE WITH THE NUMBER OF",),
+        "pr": (
+            "COULD NOT RESOLVE TO A PULL REQUEST WITH THE NUMBER OF",
+            "COULD NOT RESOLVE TO A PULLREQUEST WITH THE NUMBER OF",
+        ),
+    }
+    expected = specific[object_type]
+    return common in text or any(marker in text for marker in expected)
+
+
+def read_lifecycle_github_state(request: Request) -> Result:
+    """Read one authoritative GitHub issue/PR/link/head/check snapshot."""
+    upstream = _reconcile_upstream_failure(request, "read_lifecycle_github_state", "validate_reconcile_identity")
+    if upstream:
+        return upstream
+    context = _resolve_lifecycle_context(request)
+    if context.get("ok") is not True:
+        return context
+    repo = str(context["repo"])
+    issue_number = context["issue"]
+    pr_number = context["pr_number"]
+    branch = str(context["branch"])
+    expected_head = str(context.get("head_oid") or "")
+    cfg = cfg_of(request)
+    gh = str(cfg.get("gh_cli") or "gh")
+    missing_issue = False
+    missing_pr = False
+    try:
+        issue = json.loads(run_cmd([gh, "issue", "view", str(issue_number), "--repo", repo, "--json", "number,state,labels,assignees"], timeout=60).stdout)
+    except CommandError as exc:
+        if not _github_lifecycle_not_found(exc, "issue"):
+            return fail("lifecycle_github_state_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=False, repo=repo, issue=issue_number, pr_number=pr_number, branch=branch)
+        issue, missing_issue = "NOT_FOUND", True
+    try:
+        pr = json.loads(run_cmd([gh, "pr", "view", str(pr_number), "--repo", repo, "--json", "number,state,mergedAt,mergeCommit,headRefName,headRefOid,baseRefName,statusCheckRollup,closingIssuesReferences,labels"], timeout=60).stdout)
+    except CommandError as exc:
+        if not _github_lifecycle_not_found(exc, "pr"):
+            return fail("lifecycle_github_state_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=False, repo=repo, issue=issue_number, pr_number=pr_number, branch=branch)
+        pr, missing_pr = "NOT_FOUND", True
+    if missing_issue or missing_pr:
+        if not (missing_issue and missing_pr):
+            return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="issue_or_pr")
+        return ok(
+            status="read",
+            repo=repo,
+            issue=issue,
+            pr=pr,
+            issue_missing=True,
+            pr_missing=True,
+            missing_lifecycle=True,
+            open_prs=[],
+            linked_issue_numbers=[],
+            checks_state="pending",
+            requested_issue=issue_number,
+            requested_pr=pr_number,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            mutated=False,
+        )
+    try:
+        opens = json.loads(run_cmd([gh, "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "number,state,headRefName,headRefOid,baseRefName,closingIssuesReferences,labels,statusCheckRollup"], timeout=60).stdout or "[]")
+    except (CommandError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("lifecycle_github_state_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=False, repo=repo, issue=issue_number, pr_number=pr_number, branch=branch)
+    if not isinstance(issue, dict) or not isinstance(pr, dict) or not isinstance(opens, list) or any(not isinstance(row, dict) for row in opens):
+        return fail("lifecycle_github_state_invalid", failure_class="terminal", retry_safe=False, mutated=False)
+    linked = pr.get("closingIssuesReferences") or pr.get("linkedIssues") or []
+    linked_numbers = []
+    if str(pr.get("headRefName") or "") != branch or (expected_head and str(pr.get("headRefOid") or "") != expected_head) or _lifecycle_pr_repo(pr) not in ("", repo):
+        return _lifecycle_context_conflict("GitHub PR identity disagrees with selected lifecycle context", field="repo_branch_head")
+    if isinstance(linked, list):
+        for item in linked:
+            value = item.get("number") if isinstance(item, dict) else item
+            try:
+                linked_numbers.append(int(value))
+            except (TypeError, ValueError):
+                continue
+    return ok(
+        status="read",
+        repo=repo,
+        issue=issue,
+        pr=pr,
+        open_prs=opens,
+        linked_issue_numbers=sorted(set(linked_numbers)),
+        checks_state=_lifecycle_check_state(pr),
+        board=context.get("board", ""),
+        clone_path=context.get("clone_path", ""),
+        priority=context.get("priority", 0),
+        requested_issue=issue_number,
+        requested_pr=pr_number,
+        issue_number=issue_number,
+        pr_number=pr_number,
+        mutated=False,
+    )
+
+
+def read_lifecycle_local_evidence(request: Request) -> Result:
+    """Read local claim/task/process/worktree/receipt ledgers without mutation."""
+    upstream = _reconcile_upstream_failure(request, "read_lifecycle_local_evidence", "validate_reconcile_identity")
+    if upstream:
+        return upstream
+    context = _resolve_lifecycle_context(request)
+    if context.get("ok") is not True:
+        return context
+    data, cfg = input_of(request), cfg_of(request)
+    repo = str(context["repo"])
+    issue_number = context["issue"]
+    try:
+        issue = _positive_int(issue_number, "issue")
+        claim_root_value = cfg.get("claim_root") or data.get("claim_path")
+        claim_root = Path(str(claim_root_value)).expanduser().resolve(strict=False) if claim_root_value else None
+        claims = _matching_claims(claim_root, repo, issue) if claim_root is not None else []
+        task_path_value = data.get("task_receipt_path")
+        task_path = Path(str(task_path_value)).expanduser() if task_path_value else None
+        task = _read_regular_json(task_path, private=True) if task_path is not None and task_path.exists() else None
+        receipt_path_value = data.get("receipt_path")
+        receipt_path = Path(str(receipt_path_value)).expanduser() if receipt_path_value else None
+        receipt = _read_regular_json(receipt_path, private=True) if receipt_path is not None and receipt_path.exists() else None
+        worktree_path_value = data.get("worktree_path")
+        worktree_path = Path(str(worktree_path_value)).expanduser() if worktree_path_value else None
+        worktree_present = os.path.lexists(str(worktree_path)) if worktree_path is not None else False
+        leases: list[dict[str, Any]] = []
+        db_value = data.get("db_path") or cfg.get("db_path")
+        if db_value and Path(str(db_value)).exists():
+            connection = sqlite3.connect(f"file:{Path(str(db_value)).resolve()}?mode=ro", uri=True, timeout=0)
+            try:
+                leases = _matching_active_leases(connection, str(data.get("task_id") or ""))
+            finally:
+                connection.close()
+    except sqlite3.OperationalError as exc:
+        if getattr(exc, "sqlite_errorcode", 0) & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            return fail("lifecycle_local_evidence_locked", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=False)
+        return fail("lifecycle_local_evidence_read_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False)
+    except (OSError, ValueError, sqlite3.Error, json.JSONDecodeError) as exc:
+        return fail("lifecycle_local_evidence_read_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False)
+    claim_paths = [str(x) for x in claims]
+    return ok(status="read", repo=repo, issue=issue, pr_number=context.get("pr_number"), branch=context.get("branch", ""), head_oid=context.get("head_oid", ""), board=context.get("board", ""), clone_path=context.get("clone_path", ""), priority=context.get("priority", 0), claim_paths=claim_paths, claim_present=bool(claim_paths), task_receipt=task, receipt=receipt, worktree_present=worktree_present, active_leases=leases, requested_issue=issue, requested_pr=context.get("pr_number"), mutated=False)
+
+
+def decide_lifecycle_transition(request: Request) -> Result:
+    """Purely choose the only safe recovery transition from authoritative evidence."""
+    upstream = _reconcile_upstream_failure(request, "decide_lifecycle_transition", "read_lifecycle_github_state", "read_lifecycle_local_evidence")
+    if upstream:
+        return upstream
+    data = input_of(request)
+    github = cond_blob(request, "read_lifecycle_github_state")
+    local = cond_blob(request, "read_lifecycle_local_evidence")
+    identity = _lifecycle_identity(data)
+    if not identity.get("repo") or identity.get("issue") in (None, ""):
+        dec_repo = github.get("repo") or local.get("repo")
+        dec_issue = github.get("requested_issue") or github.get("issue_number") or local.get("issue")
+        dec_pr = github.get("requested_pr") or github.get("pr_number") or local.get("pr_number")
+        dec_branch = github.get("branch") or local.get("branch")
+        dec_head = github.get("head_oid") or local.get("head_oid")
+        if not identity.get("repo") and dec_repo:
+            identity["repo"] = dec_repo
+        if identity.get("issue") in (None, "") and dec_issue is not None:
+            identity["issue"] = dec_issue
+        if identity.get("pr_number") in (None, "") and dec_pr is not None:
+            identity["pr_number"] = dec_pr
+        if not identity.get("branch") and dec_branch:
+            identity["branch"] = dec_branch
+        if not identity.get("head_oid") and dec_head:
+            identity["head_oid"] = dec_head
+    if _lifecycle_remote_absent(github):
+        if _lifecycle_orphan_local(local):
+            return ok(status="decided", outcome="release_orphan", action="release_orphan", mutated=False, identity=identity, remote_lifecycle="absent", repo=identity.get("repo"), issue=identity.get("issue"))
+        if not (local.get("claim_paths") or []) and local.get("claim_present") is False and local.get("task_receipt") is None and local.get("receipt") is None and local.get("worktree_present") is False and not local.get("active_leases"):
+            return ok(status="decided", outcome="already_absent", action="already_absent", mutated=False, identity=identity, remote_lifecycle="absent", repo=identity.get("repo"), issue=identity.get("issue"))
+        return fail("lifecycle_state_conflict", failure_class="terminal", retry_safe=False, mutated=False, error="remote lifecycle absent but local ownership is not an unambiguous orphan")
+    issue = github.get("issue") or {}
+    pr = github.get("pr") or {}
+    if str(github.get("repo") or data.get("repo")) != str(identity.get("repo") or ""):
+        return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="repo")
+    try:
+        if int(issue.get("number") or 0) != int(identity.get("issue") or 0) or int(pr.get("number") or 0) != int(identity.get("pr_number") or 0):
+            raise ValueError("issue_or_pr")
+    except (TypeError, ValueError):
+        return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="issue_or_pr")
+    if not _lifecycle_pr_matches(pr, identity):
+        return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="repo_issue_pr_branch_head")
+    linked = set(github.get("linked_issue_numbers") or [])
+    if not linked or int(identity["issue"]) not in linked:
+        return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="linked_issue")
+    opens = github.get("open_prs") or []
+    matching = [row for row in opens if isinstance(row, dict) and int(row.get("number") or 0) == int(identity["pr_number"])]
+    if len(opens) > 1 or len(matching) != (1 if str(pr.get("state") or "").upper() == "OPEN" else 0):
+        return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="open_prs")
+    state = str(pr.get("state") or "").upper()
+    if state == "MERGED":
+        return ok(status="decided", outcome="finalize_merged", action="finalize_merged", mutated=False, identity=identity)
+    if state == "CLOSED":
+        return ok(status="decided", outcome="finalize_closed", action="finalize_closed", mutated=False, identity=identity)
+    if state != "OPEN":
+        return fail("lifecycle_state_conflict", failure_class="terminal", retry_safe=False, mutated=False, state=state)
+    labels = _lifecycle_labels(issue.get("labels"))
+    check_state = str(github.get("checks_state") or _lifecycle_check_state(pr))
+    if check_state == "pending":
+        return ok(status="decided", outcome="wait_pending_checks", action="wait_pending_checks", mutated=False, identity=identity, checks_state=check_state)
+    if check_state == "failed":
+        return ok(status="decided", outcome="resume_repair", action="resume_repair", mutated=False, identity=identity, checks_state=check_state, labels=sorted(labels))
+    return fail("lifecycle_state_conflict", failure_class="terminal", retry_safe=False, mutated=False, error="open PR has no actionable failed or pending check state")
+
+
+def release_orphan_claim(request: Request) -> Result:
+    """Release only a claim selected as a proven orphan, never a GitHub label."""
+    data = input_of(request)
+    upstream = _reconcile_upstream_failure(request, "release_orphan_claim", "decide_lifecycle_transition", "read_lifecycle_local_evidence")
+    if upstream:
+        return upstream
+    decision = cond_blob(request, "decide_lifecycle_transition")
+    local = cond_blob(request, "read_lifecycle_local_evidence")
+    if decision.get("outcome") == "already_absent":
+        return ok(status="skipped", outcome="already_absent", claim_path=str(data.get("claim_path") or ""), mutated=False)
+    if decision.get("outcome") != "release_orphan":
+        return ok(status="skipped", outcome="not_orphan", mutated=False)
+    paths = local.get("claim_paths") or []
+    if local.get("claim_present") is False and not paths:
+        return ok(
+            status="skipped",
+            outcome="already_absent",
+            claim_path=str(data.get("claim_path") or ""),
+            mutated=False,
+        )
+    if len(paths) != 1 or not local.get("claim_present") or local.get("task_receipt") is not None or local.get("receipt") is not None or local.get("receipt_conflict") is True or local.get("worktree_present") or local.get("active_leases"):
+        return fail("orphan_ownership_unproven", failure_class="terminal", retry_safe=False, mutated=False)
+    path = Path(str(paths[0]))
+    if not path.exists():
+        return ok(status="skipped", outcome="already_absent", claim_path=str(path), mutated=False)
+    try:
+        claim = _read_regular_json(path, private=True)
+        claim_repo = claim.get("repo")
+        claim_issue = claim.get("issue")
+
+        repo_ref = data.get("repo")
+        issue_ref = data.get("issue")
+
+        dec_repo = decision.get("repo") or decision.get("identity", {}).get("repo")
+        dec_issue = decision.get("issue") or decision.get("identity", {}).get("issue")
+
+        local_repo = local.get("repo")
+        local_issue = local.get("issue")
+
+        if dec_repo and local_repo and dec_repo != local_repo:
+            return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="repo")
+        if dec_issue not in (None, "") and local_issue not in (None, "") and int(dec_issue) != int(local_issue):
+            return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="issue")
+
+        resolved_repo = repo_ref or dec_repo or local_repo
+        resolved_issue = issue_ref if issue_ref not in (None, "") else (dec_issue if dec_issue not in (None, "") else local_issue)
+
+        if not resolved_repo or resolved_issue in (None, ""):
+            return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="repo_issue")
+
+        if str(claim_repo) != str(resolved_repo) or int(claim_issue) != int(resolved_issue):
+            return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="claim")
+
+        if repo_ref and dec_repo and repo_ref != dec_repo:
+            return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="repo")
+        if repo_ref and local_repo and repo_ref != local_repo:
+            return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="repo")
+        if issue_ref not in (None, "") and dec_issue not in (None, "") and int(issue_ref) != int(dec_issue):
+            return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="issue")
+        if issue_ref not in (None, "") and local_issue not in (None, "") and int(issue_ref) != int(local_issue):
+            return fail("lifecycle_identity_conflict", failure_class="terminal", retry_safe=False, mutated=False, field="issue")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return fail("orphan_claim_read_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False)
+    if dry_run_flag(request):
+        return planned(claim_path=str(path), outcome="release_orphan")
+    try:
+        path.unlink()
+        parent_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except OSError as exc:
+        return fail("orphan_claim_release_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), claim_path=str(path), mutated=True)
+    return ok(status="released", outcome="release_orphan", claim_path=str(path), mutated=True)
+
+
+def verify_orphan_claim_release(request: Request) -> Result:
+    """Read back the local claim ledger after a proven orphan release."""
+    upstream = _reconcile_upstream_failure(request, "verify_orphan_claim_release", "release_orphan_claim")
+    if upstream:
+        return upstream
+    released = cond_blob(request, "release_orphan_claim")
+    if released.get("status") == "skipped" and released.get("outcome") in {"not_orphan", "already_absent"}:
+        return ok(
+            status="skipped",
+            outcome=str(released.get("outcome")),
+            claim_path=str(released.get("claim_path") or ""),
+            absent=released.get("outcome") == "already_absent",
+            mutated=False,
+        )
+    if dry_run_flag(request):
+        return planned(claim_path=released.get("claim_path"))
+    path = Path(str(released.get("claim_path") or input_of(request).get("claim_path") or ""))
+    if path.exists():
+        return fail("orphan_claim_not_absent", failure_class="reconcile_then_retry", retry_safe=False, claim_path=str(path), mutated=bool(released.get("mutated")))
+    return ok(status="verified", outcome="release_orphan", claim_path=str(path), absent=True, mutated=False)

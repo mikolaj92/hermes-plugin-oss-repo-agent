@@ -19,6 +19,7 @@ from lokay.adapters_git import (
     branch_config_get,
     branch_exists,
     delete_local_branch as git_delete_local_branch,
+    git,
     is_dirty,
     local_branch_head,
     parse_worktree_porcelain,
@@ -30,6 +31,7 @@ from lokay.steps.claim import claim_directory_lock
 
 from lokay.envelope import (
     cfg_of,
+    conduction_of,
     cond_blob,
     cond_get,
     dry_run_flag,
@@ -41,6 +43,65 @@ from lokay.envelope import (
     upstream_noop,
 )
 _TERMINAL_PROCESS_STATUSES = {"failed", "cancelled", "timed_out"}
+
+
+def _cleanup_aggregate(request: Request) -> tuple[str, dict[str, Any]] | None:
+    """Return the composed aggregate predecessor, including malformed blobs."""
+    conduction = conduction_of(request)
+    for name, value in conduction.items():
+        if name == "aggregate_lane_results" or str(name).endswith("_aggregate_lane_results"):
+            return str(name), dict(value) if isinstance(value, dict) else {}
+    return None
+
+
+def _cleanup_aggregate_gate(request: Request, operation: str) -> tuple[Result | None, dict[str, Any]]:
+    """Require the verified aggregate identity before any cleanup work."""
+    aggregate_entry = _cleanup_aggregate(request)
+    if aggregate_entry is None:
+        return None, {}
+    name, aggregate = aggregate_entry
+    if not aggregate or aggregate.get("ok") is False or str(aggregate.get("status") or "") in _TERMINAL_PROCESS_STATUSES:
+        return fail("upstream_failed", failure_class="terminal", retry_safe=False, operation=operation, upstream_effector=name, upstream=aggregate), {}
+    if aggregate.get("cleanup_authorized") is not True:
+        return noop("cleanup_not_authorized", aggregate=name), {}
+    identity = aggregate.get("cleanup_identity")
+    required = ("repo", "issue", "pr_number", "branch", "head_oid", "board", "clone_path", "priority")
+    if not isinstance(identity, dict) or any(identity.get(key) in (None, "") for key in required):
+        return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False, operation=operation, upstream_effector=name, aggregate=aggregate), {}
+    try:
+        if isinstance(identity["issue"], bool) or int(identity["issue"]) <= 0:
+            raise ValueError("issue must be positive")
+        if isinstance(identity["pr_number"], bool) or int(identity["pr_number"]) <= 0:
+            raise ValueError("pr_number must be positive")
+    except (TypeError, ValueError) as exc:
+        return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False, operation=operation, upstream_effector=name, error=str(exc), aggregate=aggregate), {}
+    data, cfg = input_of(request), cfg_of(request)
+    aliases = {"issue": ("issue",), "pr_number": ("pr_number", "number"), "branch": ("branch", "head_ref"), "repo": ("repo",), "clone_path": ("clone_path",), "head_oid": ("head_oid",)}
+    for key, names in aliases.items():
+        expected = str(identity[key])
+        for source_name, source in (("input", data), ("config", cfg)):
+            for candidate in names:
+                value = source.get(candidate)
+                if value not in (None, "") and str(value) != expected:
+                    return fail("cleanup_identity_conflict", failure_class="terminal", retry_safe=False, operation=operation, field=key, source=source_name, expected=identity[key], actual=value), {}
+    return None, dict(identity)
+
+def _cleanup_value(request: Request, key: str, *aliases: str, default: Any = "") -> Any:
+    """Resolve aggregate identity before static cleanup configuration."""
+    data, cfg = input_of(request), cfg_of(request)
+    if _cleanup_aggregate(request) is not None:
+        _, identity = _cleanup_aggregate_gate(request, "resolve_cleanup_context")
+        for candidate in (key, *aliases):
+            if identity.get(candidate) not in (None, ""):
+                return identity[candidate]
+        return default
+    for candidate in (key, *aliases):
+        if data.get(candidate) not in (None, ""):
+            return data[candidate]
+    for candidate in (key, *aliases):
+        if cfg.get(candidate) not in (None, ""):
+            return cfg[candidate]
+    return default
 
 
 
@@ -93,8 +154,11 @@ def check_issue_closed(request: Request) -> Result:
     upstream = upstream_noop(request, "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
     if upstream:
         return noop(str(upstream.get("reason") or "no_branch"), **{k: v for k, v in upstream.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}})
-    repo = str(data.get("repo") or parsed.get("repo") or cfg.get("repo") or "")
-    issue = int(data.get("issue") or parsed.get("issue") or 0)
+    aggregate, identity = _cleanup_aggregate_gate(request, "check_issue_closed")
+    if aggregate is not None:
+        return aggregate
+    repo = str(data.get("repo") or identity.get("repo") or parsed.get("repo") or cfg.get("repo") or "")
+    issue = int(data.get("issue") or identity.get("issue") or parsed.get("issue") or 0)
     gh = str(cfg.get("gh_cli") or "gh")
     if not repo or not issue:
         return fail("missing_repo_or_issue", failure_class="terminal", retry_safe=False, repo=repo, issue=issue, idempotency_key=f"cleanup:issue:{repo}:{issue}:check-closed")
@@ -123,12 +187,12 @@ def check_no_open_pr_for_branch(request: Request) -> Result:
 
     data = input_of(request)
     cfg = cfg_of(request)
-    upstream = upstream_noop(request, "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
-    if upstream:
-        return noop(str(upstream.get("reason") or "no_branch"), **{k: v for k, v in upstream.items() if k not in {"status", "ok", "mutated", "reason", "dry_run"}})
+    aggregate, identity = _cleanup_aggregate_gate(request, "check_no_open_pr_for_branch")
+    if aggregate is not None:
+        return aggregate
     parsed = cond_blob(request, "parse_cleanup_issue_number")
-    repo = str(data.get("repo") or parsed.get("repo") or cfg.get("repo") or "")
-    branch = str(data.get("branch") or parsed.get("branch") or cfg.get("branch") or "")
+    repo = str(data.get("repo") or identity.get("repo") or parsed.get("repo") or cfg.get("repo") or "")
+    branch = str(data.get("branch") or identity.get("branch") or parsed.get("branch") or cfg.get("branch") or "")
     gh = str(cfg.get("gh_cli") or "gh")
     if not repo or not branch:
         return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False, repo=repo, branch=branch, idempotency_key=f"cleanup:pr:{repo}:{branch}:check-open")
@@ -387,11 +451,18 @@ def _cleanup_evidence_contract(evidence: dict[str, dict[str, Any]]) -> str | Non
 
 def _cleanup_upstream_failure(request: Request, operation: str, *ids: str) -> Result | None:
     """Return a fail-closed terminal peer result for a cleanup operation."""
+    aggregate, _ = _cleanup_aggregate_gate(request, operation)
+    if aggregate is not None and aggregate.get("status") == "failed":
+        return aggregate
     from lokay.envelope import terminal_upstream
-
     return terminal_upstream(request, operation, *ids)
+
+
 def _cleanup_upstream_noop(request: Request, operation: str, *ids: str) -> Result | None:
     """Return a canonical upstream no-target noop for a cleanup operation."""
+    aggregate, _ = _cleanup_aggregate_gate(request, operation)
+    if aggregate is not None:
+        return aggregate
     upstream = upstream_noop(request, *ids)
     if upstream:
         return noop(str(upstream.get("reason") or "no_branch"), operation=operation)
@@ -399,11 +470,16 @@ def _cleanup_upstream_noop(request: Request, operation: str, *ids: str) -> Resul
 
 
 def resolve_cleanup_branch_source(request: Request) -> Result:
-    """Purely resolve the authoritative branch source from input or peers."""
+    """Resolve the branch from the verified aggregate identity when composed."""
     data, cfg = input_of(request), cfg_of(request)
     upstream = _cleanup_upstream_failure(request, "resolve_cleanup_branch_source", "triage_close_linked_issue")
     if upstream:
         return upstream
+    if _cleanup_aggregate(request) is not None:
+        gate, identity = _cleanup_aggregate_gate(request, "resolve_cleanup_branch_source")
+        if gate is not None:
+            return gate
+        return ok(status="resolved", branch=str(identity["branch"]).strip(), source="aggregate_cleanup_identity", cleanup_identity=identity, **{key: value for key, value in identity.items() if key != "branch"})
     conduction = data.get("conduction") if isinstance(data.get("conduction"), dict) else {}
     sources = [data, cfg]
     for name in ("triage_close_linked_issue", "triage_load_pr_fields", "dispatch_prepare_worktree", "dispatch_parse_issue_ref"):
@@ -437,7 +513,7 @@ def parse_cleanup_issue_number(request: Request) -> Result:
 
 
 def read_branch_ownership(request: Request) -> Result:
-    """Read one branch ownership key and nothing else."""
+    """Read all branch ownership keys with one git-config read."""
     data, cfg = input_of(request), cfg_of(request)
     upstream = _cleanup_upstream_failure(request, "read_branch_ownership", "resolve_cleanup_branch_source", "parse_cleanup_issue_number")
     if upstream:
@@ -446,21 +522,28 @@ def read_branch_ownership(request: Request) -> Result:
     if idle:
         return idle
     branch = str(data.get("branch") or cond_get(request, "branch", "parse_cleanup_issue_number", "resolve_cleanup_branch_source", default=cfg.get("branch", ""))).strip()
-    clone = str(data.get("clone_path") or cfg.get("clone_path") or "").strip()
-    key = str(data.get("key") or data.get("ownership_key") or cfg.get("ownership_key") or "").strip().lower()
-    if key.startswith("lokay-"):
-        key = key.removeprefix("lokay-")
-    if key not in {"task", "issue", "receipt", "repo"}:
-        return fail("invalid_ownership_key", failure_class="terminal", retry_safe=False, key=key)
+    clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
     if not clone or not branch:
-        return fail("missing_branch_ownership_context", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch, key=key)
+        return fail("missing_branch_ownership_context", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch)
+    pattern = rf"^branch\.{re.escape(branch)}\.lokay-(task|issue|receipt|repo)$"
     try:
-        value = branch_config_get(clone, branch, f"lokay-{key}").strip()
+        raw = git(["config", "--local", "--get-regexp", pattern], cwd=clone)
     except CommandError as exc:
-        return fail("branch_ownership_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, branch=branch, key=key)
-    if not value:
-        return fail("branch_ownership_missing", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch, key=key)
-    return ok(status="read", key=key, value=value, clone_path=clone, branch=branch)
+        if exc.returncode != 1:
+            return fail("branch_ownership_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, branch=branch)
+        raw = ""
+    ownership: dict[str, str] = {}
+    prefix = f"branch.{branch}.lokay-"
+    for line in raw.splitlines():
+        key, separator, value = line.partition(" ")
+        if not separator or not key.startswith(prefix):
+            continue
+        name = key.removeprefix(prefix)
+        if name in {"task", "issue", "receipt", "repo"} and value.strip():
+            ownership[name] = value.strip()
+    if set(ownership) != {"task", "issue", "receipt", "repo"}:
+        return fail("branch_ownership_missing", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch, ownership=ownership)
+    return ok(status="read", clone_path=clone, branch=branch, ownership=ownership, **ownership)
 
 
 def derive_cleanup_paths(request: Request) -> Result:
@@ -473,7 +556,7 @@ def derive_cleanup_paths(request: Request) -> Result:
     if idle:
         return idle
     parsed = cond_blob(request, "parse_cleanup_issue_number")
-    branch = str(data.get("branch") or parsed.get("branch") or cfg.get("branch") or "").strip()
+    branch = str(data.get("branch") or parsed.get("branch") or cond_get(request, "branch", "resolve_cleanup_branch_source", default=cfg.get("branch", ""))).strip()
     root_value = str(data.get("worktree_root") or cfg.get("worktree_root") or "").strip()
     if not branch or not root_value:
         return fail("missing_cleanup_path_context", failure_class="terminal", retry_safe=False, branch=branch, worktree_root=root_value)
@@ -511,7 +594,7 @@ def validate_cleanup_identity(request: Request) -> Result:
             return fail("cleanup_identity_mismatch" if unique else "cleanup_identity_missing", failure_class="terminal", retry_safe=False, field=key, values=unique)
         identity[key] = int(unique[0]) if key == "issue" and unique[0].isdigit() else unique[0]
     branch = str(data.get("branch") or cond_get(request, "branch", "parse_cleanup_issue_number", default=cfg.get("branch", ""))).strip()
-    clone = str(data.get("clone_path") or cfg.get("clone_path") or "").strip()
+    clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
     worktree = str(data.get("worktree_path") or cond_get(request, "worktree_path", "derive_cleanup_paths", default=cfg.get("worktree_path", ""))).strip()
     if not branch or not clone or not worktree or not identity.get("issue") or int(identity["issue"]) <= 0:
         return fail("cleanup_identity_missing", failure_class="terminal", retry_safe=False, identity=identity, branch=branch, clone_path=clone, worktree_path=worktree)
@@ -538,16 +621,25 @@ def verify_cleanup_guards(request: Request) -> Result:
 
 def read_worktree_ownership(request: Request) -> Result:
     """Read worktree inventory and branch ownership before removal."""
-    data, cfg = input_of(request), cfg_of(request)
     upstream = _cleanup_upstream_failure(request, "read_worktree_ownership", "verify_cleanup_guards", "validate_cleanup_identity")
     if upstream:
         return upstream
-    idle = _cleanup_upstream_noop(request, "read_worktree_ownership", "verify_cleanup_guards", "validate_cleanup_identity", "read_branch_ownership", "derive_cleanup_paths", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
+    idle = _cleanup_upstream_noop(
+        request,
+        "read_worktree_ownership",
+        "verify_cleanup_guards",
+        "validate_cleanup_identity",
+        "read_branch_ownership",
+        "derive_cleanup_paths",
+        "parse_cleanup_issue_number",
+        "resolve_cleanup_branch_source",
+    )
     if idle:
         return idle
-    clone = str(data.get("clone_path") or cfg.get("clone_path") or "").strip()
-    path = str(data.get("worktree_path") or cfg.get("worktree_path") or cond_get(request, "worktree_path", "derive_cleanup_paths", default="")).strip()
-    branch = str(data.get("branch") or cfg.get("branch") or cond_get(request, "branch", "parse_cleanup_issue_number", default="")).strip()
+    data, cfg = input_of(request), cfg_of(request)
+    clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
+    path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "derive_cleanup_paths", default=cfg.get("worktree_path", ""))).strip()
+    branch = str(data.get("branch") or _cleanup_value(request, "branch", default=cfg.get("branch", "")) or "").strip()
     if not clone or not path or not branch:
         return fail("missing_worktree_ownership_context", failure_class="terminal", retry_safe=False, clone_path=clone, worktree_path=path, branch=branch)
     try:
@@ -591,8 +683,8 @@ def verify_worktree_absent(request: Request) -> Result:
     if idle:
         return idle
     data, cfg = input_of(request), cfg_of(request)
-    clone = str(data.get("clone_path") or cfg.get("clone_path") or "").strip()
-    path = str(data.get("worktree_path") or cfg.get("worktree_path") or "").strip()
+    clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
+    path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "derive_cleanup_paths", default=cfg.get("worktree_path", ""))).strip()
     if not clone or not path:
         return fail("missing_worktree_absence_context", failure_class="terminal", retry_safe=False)
     try:
@@ -628,8 +720,8 @@ def read_local_branch_ownership(request: Request) -> Result:
     idle = _cleanup_upstream_noop(request, "read_local_branch_ownership", "verify_branch_delete_guards", "verify_worktree_absent", "remove_worktree", "verify_cleanup_guards", "parse_cleanup_issue_number", "resolve_cleanup_branch_source")
     if idle:
         return idle
-    clone = str(data.get("clone_path") or cfg.get("clone_path") or "").strip()
-    branch = str(data.get("branch") or cfg.get("branch") or "").strip()
+    clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
+    branch = str(data.get("branch") or _cleanup_value(request, "branch", default=cfg.get("branch", "")) or "").strip()
     if not clone or not branch:
         return fail("missing_branch_context", failure_class="terminal", retry_safe=False)
     try:
@@ -652,7 +744,8 @@ def delete_local_branch(request: Request) -> Result:
     if idle:
         return idle
     data, cfg = input_of(request), cfg_of(request)
-    clone, branch = str(data.get("clone_path") or cfg.get("clone_path") or "").strip(), str(data.get("branch") or cfg.get("branch") or "").strip()
+    clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
+    branch = str(data.get("branch") or _cleanup_value(request, "branch", default=cfg.get("branch", "")) or "").strip()
     if not clone or not branch:
         return fail("missing_clone_or_branch", failure_class="terminal", retry_safe=False)
     if dry_run_flag(request):

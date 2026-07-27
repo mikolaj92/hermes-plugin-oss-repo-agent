@@ -81,9 +81,9 @@ class DeploymentCandidateTests(unittest.TestCase):
             candidates = root / "candidates"
             self.assertEqual(list(candidates.iterdir()) if candidates.exists() else [], [])
 
-    def _render(self, root: Path, *, mode: str = "dry-run", config_path: Path | None = None, db_path: Path | None = None, autonomous: bool = False, top_level_precedence: bool = False) -> Path:
+    def _render(self, root: Path, *, mode: str = "dry-run", config_path: Path | None = None, db_path: Path | None = None, autonomous: bool = True, top_level_precedence: bool = False) -> Path:
         config = config_path or root / "config.toml"
-        top_level = "automerge = false\n" if top_level_precedence else ""
+        top_level = "automerge = true\n" if top_level_precedence else ""
         config.write_text(
             f"mode = '{mode}'\n{top_level}[automation]\nautomerge = {str(autonomous or top_level_precedence).lower()}\nrequire_human_approval = {str(not autonomous).lower()}\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = {str(autonomous).lower()}\n",
             encoding="utf-8",
@@ -1133,11 +1133,17 @@ class DeploymentCandidateTests(unittest.TestCase):
             import tools.deployment_parity as parity
             self.assertTrue(parity.validate_fala_candidate(candidate)["ok"])
 
-    def test_autonomous_policy_is_rejected_even_in_live_mode(self):
+    def test_autonomous_policy_is_accepted_in_live_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            candidate = self._render(root, mode="live", autonomous=True)
+            import tools.deployment_parity as parity
+            self.assertTrue(parity.validate_fala_candidate(candidate, deployment_root=root)["ok"])
+
+    def test_manual_policy_is_rejected_for_promotion(self):
+        with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(Exception) as raised:
-                self._render(root, mode="live", autonomous=True)
+                self._render(Path(directory), mode="live", autonomous=False)
             self.assertIn("Fala identity policy is unsafe for promotion", raised.exception.result["errors"])
 
     def test_live_only_render_has_correct_argv(self):
@@ -1153,7 +1159,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(manifest["runtime_identity"]["start_interval"], 600)
             self.assertFalse(manifest["runtime_identity"]["run_at_load"])
 
-    def test_candidate_policy_is_required_and_safe(self):
+    def test_candidate_policy_is_required_and_autonomous(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             candidate = self._render(root)
@@ -1165,11 +1171,11 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(
                 manifest["policy"],
                 {
-                    "automerge": False,
-                    "require_human_approval": True,
+                    "automerge": True,
+                    "require_human_approval": False,
                     "require_checks": True,
                     "require_test_evidence": True,
-                    "executor_enabled": False,
+                    "executor_enabled": True,
                 },
             )
 
@@ -1179,8 +1185,8 @@ class DeploymentCandidateTests(unittest.TestCase):
                     path.chmod(0o755)
                 elif path.is_file():
                     path.chmod(0o644)
-            manifest["policy"]["automerge"] = True
-            manifest["identity"]["policy"]["automerge"] = True
+            manifest["policy"]["require_human_approval"] = True
+            manifest["identity"]["policy"]["require_human_approval"] = True
             (candidate / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
             with self.assertRaises(parity.DeploymentParityError) as raised:
                 parity.validate_fala_candidate(candidate, deployment_root=root)

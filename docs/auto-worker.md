@@ -1,8 +1,9 @@
 # Auto-worker (Fala 0.7.15 package host)
 
-Mega-atomic effectors are composed into correlation paths. `auto_worker`,
-invoked by `lokay-tick-all`, is the sole scheduled mutator. Individual
-ticks are CLI entrypoints for manual diagnostics only.
+Atomic effectors are composed into correlation paths. `auto_worker`, invoked by
+`lokay-tick-all`, is the sole scheduled mutator. Intake, dispatch, existing-PR
+triage/repair, lifecycle reconciliation, and cleanup remain independent lanes
+inside that one tick. Individual ticks are CLI entrypoints for manual diagnostics only.
 
 ## Paths
 
@@ -12,7 +13,7 @@ ticks are CLI entrypoints for manual diagnostics only.
 | `issue_to_pr` | `lokay-tick-dispatch` | load → parse → worktree → omp → push → pr → labels → receipt → complete |
 | `pr_triage` | `lokay-tick-triage` | load PR → checks → evidence → decide → apply (merge/comment/repair) |
 | `cleanup` | `lokay-tick-cleanup` | parse branch → verify closed/no PR → remove worktree → delete branch → release claim |
-| `auto_worker` | `lokay-tick-all` | one package-host run containing the prefixed intake, dispatch, triage, and cleanup graph |
+| `auto_worker` | `lokay-tick-all` | one package-host run with independent intake/dispatch, existing-PR triage/repair, lifecycle reconciliation, aggregate authorization, and cleanup lanes |
 
 Fala 0.7.15 package-host conduction passes each upstream effector result directly
 to the next prefixed handler; effectors remain single-purpose subprocess adapters.
@@ -31,6 +32,8 @@ Default is **dry-run** unless `--live` is passed. Schedule only
 one path. Legacy shell intake/dispatch/triage/cleanup, backfill, webhook, cron,
 and separate launchd jobs are removed and must not be restored as operational
 paths.
+
+Safe starter/library defaults are dry-run, executor-disabled, and human-approved. An autonomous production candidate is explicit: `mode=live`, `executor.enabled=true`, `automerge=true`, `require_human_approval=false`, with both checks and test evidence required. Failed checks for the exact current PR head may authorize one durable repair attempt; pending checks wait and never invoke OMP twice for that head.
 
 ## Launchd
 

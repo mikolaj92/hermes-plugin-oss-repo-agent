@@ -1,6 +1,8 @@
 """Mega-atomic effectors: PR repair domain."""
 
 from __future__ import annotations
+import hashlib
+import os
 
 from lokay.adapters_cli import CommandError, hermes_kanban_json, run_cmd
 from lokay.envelope import (
@@ -58,6 +60,268 @@ def _repair_decision_gate(request: Request) -> Result | None:
         worked=False,
     )
 
+
+def _repair_value(request: Request, key: str, *aliases: str) -> object:
+    """Resolve explicit request input, then effector config, then conduction."""
+    data = input_of(request)
+    cfg = cfg_of(request)
+    for source in (data, cfg):
+        for name in (key, *aliases):
+            if name in source:
+                return source[name]
+    for blob in (cond_blob(request, "decide_repair_attempt", "repair_attempt", "verify_repair_head", "evaluate_checks", "checks"),):
+        for name in (key, *aliases):
+            if name in blob:
+                return blob[name]
+    return None
+
+
+def _repair_identity(request: Request) -> tuple[dict[str, object] | None, str | None]:
+    data = input_of(request)
+    loaded = cond_blob(request, "load_pr_fields", "triage_load_pr_fields")
+    pr = data.get("pr") or loaded.get("pr") or {}
+    if not isinstance(pr, dict):
+        return None, "invalid_pr"
+    repo = str(_repair_value(request, "repo") or pr.get("repo") or loaded.get("repo") or "").strip()
+    number_value = _repair_value(request, "pr_number", "number")
+    number_value = number_value or pr.get("number") or loaded.get("number")
+    head = str(_repair_value(request, "verified_head", "head_sha", "head_oid", "headRefOid") or pr.get("verified_head") or pr.get("headSha") or pr.get("headRefOid") or "").strip()
+    candidate = str(_repair_value(request, "candidate", "candidate_id", "candidate_sha") or "").strip()
+    run_id = str(_repair_value(request, "run_id") or "").strip()
+    try:
+        number = int(number_value)
+    except (TypeError, ValueError):
+        number = 0
+    if not repo or number <= 0 or not head or not candidate or not run_id:
+        return None, "missing_repair_provenance"
+    return {"repo": repo, "pr_number": number, "verified_head": head, "candidate": candidate, "run_id": run_id}, None
+
+
+def _repair_checks(request: Request) -> tuple[list[dict[str, str]] | None, str | None, bool]:
+    data = input_of(request)
+    checks = data.get("checks")
+    if checks is None:
+        checks = cond_blob(request, "evaluate_checks", "triage_evaluate_checks", "checks").get("checks")
+    if checks is None:
+        pr = data.get("pr") or cond_blob(request, "load_pr_fields", "triage_load_pr_fields").get("pr") or {}
+        checks = pr.get("statusCheckRollup") if isinstance(pr, dict) else None
+    if not isinstance(checks, list) or not checks:
+        return None, "missing_check_evidence", False
+    normalized: list[dict[str, str]] = []
+    pending = False
+    for item in checks:
+        if not isinstance(item, dict):
+            return None, "malformed_check_evidence", False
+        identity = str(item.get("id") or item.get("name") or item.get("context") or "").strip()
+        conclusion = str(item.get("conclusion") or item.get("state") or "").strip().upper()
+        if not identity or not conclusion:
+            return None, "malformed_check_evidence", False
+        if conclusion in {"PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED", "WAITING"}:
+            pending = True
+        elif conclusion not in {"SUCCESS", "NEUTRAL", "SKIPPED", "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"}:
+            return None, "malformed_check_evidence", False
+        normalized.append({"identity": identity, "conclusion": conclusion})
+    return normalized, None, pending
+def _repair_state(request: Request) -> dict[str, object] | None:
+    data = input_of(request)
+    sources: list[object] = [data.get("attempt_state"), data.get("repair_attempt")]
+    for blob in (
+        cond_blob(request, "read_repair_attempt_state", "triage_read_repair_attempt_state", "read_repair_attempt", "repair_attempt_state"),
+        cond_blob(request, "decide_repair_attempt"),
+    ):
+        sources.extend((blob.get("attempt_state"), blob.get("repair_attempt")))
+    for source in sources:
+        if isinstance(source, dict):
+            return source
+    return None
+
+def _repair_state_root(request: Request) -> Path | None:
+    data, cfg = input_of(request), cfg_of(request)
+    root = data.get("repair_state_root") or cfg.get("repair_state_root") or data.get("repair_receipt_root") or cfg.get("repair_receipt_root")
+    return Path(str(root)).expanduser() if root else None
+
+
+
+def _repair_reservation_path(request: Request, identity: dict[str, object]) -> Path:
+    root = _repair_state_root(request)
+    key = f"{identity['repo']}:{identity['pr_number']}:{identity['verified_head']}".encode()
+    digest = hashlib.sha256(key).hexdigest()[:32]
+    return root / "repair-attempts" / str(identity["repo"]).replace("/", "__") / str(identity["pr_number"]) / f"{digest}.json"
+
+
+def _reservation_identity(payload: object) -> dict[str, object] | None:
+    if not isinstance(payload, dict):
+        return None
+    required = ("repo", "pr_number", "verified_head", "candidate", "run_id")
+    if any(not payload.get(key) for key in required):
+        return None
+    try:
+        number = int(payload["pr_number"])
+    except (TypeError, ValueError):
+        return None
+    identity = {key: payload[key] for key in required}
+    identity["pr_number"] = number
+    if "check_run_id" in payload:
+        identity["check_run_id"] = payload["check_run_id"]
+    return identity
+
+
+def read_repair_attempt_state(request: Request) -> Result:
+    """Read one stable head-bound reservation; absence is safe and malformed is terminal."""
+    identity, error = _repair_identity(request)
+    if identity is None:
+        return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_state", conflict=error)
+    root = _repair_state_root(request)
+    if root is None:
+        return fail("missing_repair_state_root", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_state", **identity)
+    path = _repair_reservation_path(request, identity)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ok(status="absent", operation="read_repair_attempt_state", attempt_state=None, reservation_path=str(path), **identity)
+    except OSError as exc:
+        return fail("repair_attempt_state_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_attempt_state", error=str(exc), reservation_path=str(path), **identity)
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("repair_attempt_state_malformed", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_state", error=str(exc), reservation_path=str(path), **identity)
+    stored = _reservation_identity(payload)
+    if stored is None or any(str(stored.get(key)) != str(identity.get(key)) for key in ("repo", "pr_number", "verified_head")):
+        return fail("repair_attempt_state_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_state", reservation_path=str(path), **identity)
+    if str(payload.get("status") or "") not in {"reserved", "invoked", "completed", "failed"} or payload.get("attempted") is not True:
+        return fail("repair_attempt_state_malformed", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_state", reservation_path=str(path), **identity)
+    return ok(status="found", operation="read_repair_attempt_state", attempt_state=payload, reservation_path=str(path), **identity)
+
+
+def reserve_repair_attempt(request: Request) -> Result:
+    """Atomically reserve the immutable head before invoking OMP."""
+    gated = _repair_execution_gate(request, "reserve_repair_attempt")
+    if gated:
+        return gated
+    decision = cond_blob(request, "decide_repair_attempt")
+    if decision.get("authorize") is not True:
+        return noop(str(decision.get("reason") or "repair_attempt_not_authorized"), operation="reserve_repair_attempt")
+    identity, error = _repair_identity(request)
+    if identity is None:
+        return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", conflict=error)
+    if not str(_repair_state_root(request)):
+        return fail("missing_repair_state_root", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", **identity)
+    path = _repair_reservation_path(request, identity)
+    payload = {**identity, "checks": decision.get("checks") or [], "status": "reserved", "attempted": True, "kind": "repair_attempt_reservation"}
+    data = input_of(request)
+    if data.get("check_run_id") or decision.get("check_run_id"):
+        payload["check_run_id"] = data.get("check_run_id") or decision.get("check_run_id")
+    if dry_run_flag(request):
+        return planned(operation="reserve_repair_attempt", reservation_path=str(path), reservation=payload)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        parent_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+        actual = json.loads(path.read_text(encoding="utf-8"))
+        if actual != payload:
+            raise ValueError("repair attempt reservation read-back mismatch")
+    except FileExistsError:
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return fail("repair_attempt_reservation_conflict", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", error=str(exc), reservation_path=str(path))
+        if existing == payload:
+            return ok(status="exists", operation="reserve_repair_attempt", reservation=existing, reservation_path=str(path), mutated=False)
+        return fail("repair_attempt_reservation_conflict", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", reservation_path=str(path))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("repair_attempt_reservation_write_failed", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", error=str(exc), reservation_path=str(path), mutated=True)
+    return ok(status="reserved", operation="reserve_repair_attempt", reservation=payload, reservation_path=str(path), mutated=True)
+
+
+def verify_repair_attempt_reservation(request: Request) -> Result:
+    """Read back the immutable reservation immediately before OMP."""
+    source = cond_blob(request, "reserve_repair_attempt")
+    path = str(input_of(request).get("reservation_path") or source.get("reservation_path") or "")
+    if not path:
+        return fail("missing_repair_attempt_reservation", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation")
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("repair_attempt_reservation_readback_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", error=str(exc), reservation_path=path)
+    identity, error = _repair_identity(request)
+    stored = _reservation_identity(payload)
+    if identity is None or stored is None or any(str(stored.get(key)) != str(identity.get(key)) for key in ("repo", "pr_number", "verified_head", "candidate", "run_id")):
+        return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict=error)
+    if payload.get("status") != "reserved" or payload.get("attempted") is not True:
+        return fail("repair_attempt_reservation_invalid", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
+    return ok(status="verified", operation="verify_repair_attempt_reservation", verified=True, reservation=payload, reservation_path=path, mutated=False)
+
+
+def _repair_attempt_state(
+    identity: dict[str, object], checks: list[dict[str, str]], *, status: str = "pending"
+) -> dict[str, object]:
+    """Build the immutable identity/check snapshot carried across retries."""
+    return {**identity, "checks": [dict(item) for item in checks], "status": status, "attempted": True}
+
+
+def decide_repair_attempt(request: Request) -> Result:
+    """Pure authorization gate for exactly one OMP repair attempt."""
+    data = input_of(request)
+    cfg = cfg_of(request)
+    enabled = data.get("executor_enabled", data.get("enabled", cfg.get("executor_enabled", cfg.get("enabled", False))))
+    live = data.get("live", cfg.get("live", False))
+    dry = data.get("dry_run", cfg.get("dry_run", True))
+    for key, value in (("executor_enabled", enabled), ("live", live), ("dry_run", dry)):
+        if type(value) is not bool:
+            return fail(
+                "terminal_conflict",
+                failure_class="terminal",
+                retry_safe=False,
+                decision="terminal_conflict",
+                authorize=False,
+                conflict=f"{key}_must_be_boolean",
+            )
+    if not enabled:
+        return noop("executor_disabled", decision="wait", authorize=False)
+    if not live:
+        return noop("not_live", decision="wait", authorize=False)
+    if dry:
+        return noop("dry_run", decision="wait", authorize=False)
+    identity, identity_error = _repair_identity(request)
+    if identity is None:
+        return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict=identity_error)
+    checks, check_error, pending = _repair_checks(request)
+    if checks is None:
+        return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict=check_error, **identity)
+    state = _repair_state(request)
+    if state:
+        for key in ("repo", "pr_number", "verified_head"):
+            if key in state and str(state.get(key)) != str(identity[key]):
+                return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict=f"{key}_mismatch", **identity)
+        prior_status = str(state.get("status") or state.get("decision") or "").lower()
+        # Check conclusions and run/candidate IDs can evolve; head reservation cannot.
+        if prior_status in {"pending", "waiting", "awaiting_checks", "running", "authorized"}:
+            return ok(status="pending", decision="wait", authorize=False, reason="awaiting_checks", **identity)
+        if prior_status in {"reserved", "repaired", "succeeded", "completed", "invoked", "failed", "already_repaired"} or state.get("attempted") is True:
+            return ok(status="already_repaired", decision="already_repaired", authorize=False, reason="attempt_already_recorded", **identity)
+    if pending:
+        return ok(status="pending", decision="wait", authorize=False, reason="checks_pending", checks=checks, **identity)
+    failures = [item for item in checks if item["conclusion"] in {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"}]
+    if not failures:
+        return ok(status="already_repaired", decision="already_repaired", authorize=False, reason="checks_passed", checks=checks, **identity)
+    return ok(
+        status="invoke",
+        decision="invoke",
+        authorize=True,
+        checks=checks,
+        failures=failures,
+        attempt_state=_repair_attempt_state(identity, checks),
+        **identity,
+    )
 
 _COMPLETED_TASK_STATUSES = {"done", "completed", "archived"}
 
@@ -140,6 +404,37 @@ def _existing_task_result(
         mutated=False,
     )
 
+def _linked_repair_issue(data: dict[str, object], loaded: dict[str, object], pr: dict[str, object]) -> tuple[int | None, str | None]:
+    """Resolve the repair issue from GitHub's exact closing issue references."""
+    refs = pr.get("closingIssuesReferences")
+    if not isinstance(refs, list):
+        return None, "missing_closing_issue_references"
+    linked: list[int] = []
+    for ref in refs:
+        if not isinstance(ref, dict) or isinstance(ref.get("number"), bool):
+            return None, "malformed_closing_issue_references"
+        try:
+            issue_number = int(ref.get("number"))
+        except (TypeError, ValueError):
+            return None, "malformed_closing_issue_references"
+        if issue_number <= 0:
+            return None, "malformed_closing_issue_references"
+        linked.append(issue_number)
+    if len(linked) != 1:
+        return None, "expected_exactly_one_closing_issue"
+    explicit = data.get("issue")
+    if explicit is None:
+        explicit = data.get("issue_number")
+    if explicit is not None:
+        try:
+            explicit_number = int(explicit)
+        except (TypeError, ValueError):
+            return None, "explicit_issue_mismatch"
+        if explicit_number != linked[0]:
+            return None, "explicit_issue_mismatch"
+    return linked[0], None
+
+
 def build_repair_prompt(request: Request) -> Result:
     """Pure: build OMP prompt from PR checks/review context."""
     gated = _repair_decision_gate(request)
@@ -150,31 +445,41 @@ def build_repair_prompt(request: Request) -> Result:
     checks = cond_blob(request, "evaluate_checks", "checks", "triage_evaluate_checks")
     loaded = cond_blob(request, "load_pr_fields", "triage_load_pr_fields")
     created = cond_blob(request, "create_review_task", "create_fix_task")
-    pr = data.get("pr") or loaded.get("pr") or {}
+    pr = loaded.get("pr") if isinstance(loaded.get("pr"), dict) else data.get("pr") or {}
+    if not isinstance(pr, dict):
+        return fail("invalid_pr", failure_class="terminal", retry_safe=False)
+    issue, issue_error = _linked_repair_issue(data, loaded, pr)
+    if issue_error:
+        return fail(issue_error, failure_class="terminal", retry_safe=False, pr_number=pr.get("number"))
     failures = data.get("failures") or checks.get("failures") or []
     reason = str(data.get("reason") or decide.get("reason") or "repair")
-    number = pr.get("number") or data.get("number") or loaded.get("number")
+    number = pr.get("number") or loaded.get("number") or data.get("pr_number") or data.get("number")
     title = pr.get("title") or ""
+    repo = loaded.get("repo") or data.get("repo")
+    board = loaded.get("board") or data.get("board")
+    clone_path = loaded.get("clone_path") or data.get("clone_path")
+    priority = loaded.get("priority", data.get("priority"))
+    branch = pr.get("headRefName") or loaded.get("branch") or data.get("branch")
     body = (
         f"Repair PR #{number}: {title}\n"
+        f"Repository: {repo or 'n/a'}\n"
+        f"Issue: #{issue}\n"
+        f"Branch: {branch or 'n/a'}\n"
+        f"Clone: {clone_path or 'n/a'}\n"
+        f"Board: {board or 'n/a'} (priority {priority if priority is not None else 'n/a'})\n"
         f"Reason: {reason}\n"
-        f"Failing checks: {', '.join(failures) if failures else 'n/a'}\n"
+        f"Failing checks: {', '.join(str(item) for item in failures) if failures else 'n/a'}\n"
         "Update the branch to fix CI/merge issues. Keep scope minimal.\n"
         "Do not force-push. Do not merge.\n"
     )
     task_id = created.get("task_id") or data.get("task_id")
-    repo = data.get("repo") or loaded.get("repo")
-    linked = pr.get("linkedIssue") if isinstance(pr, dict) else None
-    issue = data.get("issue") or loaded.get("issue") or (linked.get("number") if isinstance(linked, dict) else linked) or number
     return ok(
-        status="built",
-        prompt=body,
-        reason=reason,
-        pr_number=number,
-        branch=pr.get("headRefName") if isinstance(pr, dict) else None,
+        status="built", prompt=body, reason=reason, pr_number=number, branch=branch,
         **({"task_id": task_id} if task_id else {}),
-        **({"repo": repo} if repo else {}),
-        **({"issue": issue} if issue else {}),
+        **({"repo": repo} if repo else {}), issue=issue,
+        **({"board": board} if board else {}),
+        **({"clone_path": clone_path} if clone_path else {}),
+        **({"priority": priority} if priority is not None else {}),
     )
 
 
@@ -239,7 +544,6 @@ def read_task_for_block(request: Request) -> Result:
     idle = upstream_noop(request, "build_repair_prompt")
     if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="read_task_for_block")
     data, cfg = input_of(request), cfg_of(request); board, task_id = str(data.get("board") or cfg.get("board") or ""), str(data.get("task_id") or "")
-    if not board or not task_id: return fail("missing_board_or_task_id", failure_class="terminal", retry_safe=False, operation="read_task_for_block")
     try: tasks = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
     except CommandError as exc: return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_task_for_block", error=str(exc))
     if not isinstance(tasks, list) or any(not isinstance(t, dict) for t in tasks): return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="read_task_for_block")
@@ -279,4 +583,592 @@ def verify_task_blocked(request: Request) -> Result:
     if read.get("ok") is False: return read
     state = _task_status(read["task"])
     if state not in {"blocked", *_COMPLETED_TASK_STATUSES}: return fail("block_not_confirmed", failure_class="reconcile_then_retry", retry_safe=False, operation="verify_task_blocked", task_id=read["task_id"], state=state, mutated=True)
-    return ok(status="verified", operation="verify_task_blocked", task_id=read["task_id"], blocked=state == "blocked")
+
+ # Repair worktree atoms intentionally do not reuse the new-issue branch creator.
+ # A repair branch is anchored to the authoritative PR head and may never be reset.
+from pathlib import Path
+from typing import Any
+from lokay.adapters_git import (
+    branch_config_get,
+    branch_config_set,
+    branch_exists,
+    git,
+    parse_worktree_porcelain,
+    remote_ref,
+    rev_parse,
+    worktree_add,
+    worktree_list,
+)
+
+_REPAIR_CONTEXT_ALIASES = (
+     "build_repair_prompt", "triage_build_repair_prompt", "read_repair_context",
+     "read_repair_remote_head", "read_repair_worktree_inventory",
+     "read_repair_branch_provenance", "decide_repair_worktree_ownership",
+)
+
+def _repair_blobs(request: Request) -> list[dict[str, Any]]:
+     conduction = input_of(request).get("conduction")
+     if not isinstance(conduction, dict):
+         return []
+     found: list[dict[str, Any]] = []
+     for name, value in conduction.items():
+         if not isinstance(value, dict):
+             continue
+         if name in _REPAIR_CONTEXT_ALIASES or any(name.endswith(f"_{alias}") for alias in _REPAIR_CONTEXT_ALIASES):
+             if value not in found:
+                 found.append(dict(value))
+     return found
+
+def _repair_values(request: Request, key: str) -> list[str]:
+     values: list[str] = []
+     sources = [input_of(request), cfg_of(request), *_repair_blobs(request)]
+     for source in sources:
+         value = source.get(key)
+         if key == "task_id" and isinstance(value, dict):
+             value = value.get("id") or value.get("task_id")
+         if value is None or not str(value).strip():
+             continue
+         text = str(value).strip()
+         if text not in values:
+             values.append(text)
+     return values
+
+def _repair_field(request: Request, *keys: str, default: str = "") -> str:
+     for key in keys:
+         values = _repair_values(request, key)
+         if values:
+             return values[0]
+     return default
+
+def _repair_context(request: Request) -> dict[str, str]:
+     data = input_of(request)
+     cfg = cfg_of(request)
+     root = str(data.get("worktree_root") or cfg.get("worktree_root") or "").strip()
+     branch = _repair_field(request, "branch", "head_ref_name")
+     path = str(Path(root) / branch) if root and branch else ""
+     return {
+         "repo": _repair_field(request, "repo"),
+         "issue": _repair_field(request, "issue"),
+         "pr_number": _repair_field(request, "pr_number", "number"),
+         "branch": branch,
+         "clone_path": _repair_field(request, "clone_path"),
+         "worktree_root": root,
+         "worktree_path": path,
+         "remote": _repair_field(request, "remote", default="origin") or "origin",
+         "task_id": _repair_field(request, "task_id"),
+         "receipt": _repair_field(request, "receipt", "receipt_id", "receipt_path"),
+     }
+
+def _repair_context_error(context: dict[str, str]) -> str | None:
+     for key in ("repo", "issue", "pr_number", "branch", "clone_path", "worktree_root", "worktree_path"):
+         if not context.get(key):
+             return f"missing_repair_{key}"
+     branch = Path(context["branch"])
+     if branch.is_absolute() or ".." in branch.parts or not branch.parts:
+         return "invalid_repair_branch"
+     try:
+         Path(context["worktree_path"]).resolve().relative_to(Path(context["worktree_root"]).resolve())
+     except ValueError:
+         return "repair_worktree_path_escape"
+     return None
+
+def _repair_upstream(request: Request, operation: str, *peers: str) -> Result | None:
+     terminal = _atomic_terminal(request, operation, *peers)
+     if terminal:
+         return terminal
+     idle = upstream_noop(request, *peers)
+     if idle:
+         return noop(str(idle.get("reason") or "no_selected_pr"), operation=operation)
+     return None
+
+def read_repair_context(request: Request) -> Result:
+     terminal = _atomic_terminal(request, "read_repair_context", "build_repair_prompt")
+     if terminal is not None:
+         return terminal
+     gated = _repair_decision_gate(request)
+     if gated is not None:
+         return gated
+     context = _repair_context(request)
+     error = _repair_context_error(context)
+     if error:
+         return fail(error, failure_class="terminal", retry_safe=False, operation="read_repair_context", context=context)
+     # Every identity must be singular across request/config/conduction.
+     conflicts = {key: _repair_values(request, key) for key in ("repo", "issue", "pr_number", "branch", "clone_path", "worktree_root", "worktree_path") if len(_repair_values(request, key)) > 1}
+     if conflicts:
+         return fail("conflicting_repair_context", failure_class="terminal", retry_safe=False, operation="read_repair_context", conflicts=conflicts)
+     return ok(status="read", operation="read_repair_context", **context)
+
+def read_repair_remote_head(request: Request) -> Result:
+     upstream = _repair_upstream(request, "read_repair_remote_head", "read_repair_context")
+     if upstream:
+         return upstream
+     context = _repair_context(request)
+     error = _repair_context_error(context)
+     if error:
+         return fail(error, failure_class="terminal", retry_safe=False, operation="read_repair_remote_head")
+     try:
+         # ls-remote is authoritative; a fetched origin/* ref can be stale.
+         text = git(["ls-remote", context["remote"], f"refs/heads/{context['branch']}"], cwd=context["clone_path"])
+     except CommandError as exc:
+         return fail("repair_remote_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_remote_head", error=str(exc), **context)
+     rows = [line.split() for line in text.splitlines() if line.split()]
+     if len(rows) != 1 or len(rows[0]) < 2 or rows[0][1] != f"refs/heads/{context['branch']}":
+         return fail("repair_remote_head_missing", failure_class="terminal", retry_safe=False, operation="read_repair_remote_head", output=text, **context)
+     return ok(status="read", operation="read_repair_remote_head", remote_oid=rows[0][0], **context)
+
+def read_repair_worktree_inventory(request: Request) -> Result:
+     upstream = _repair_upstream(request, "read_repair_worktree_inventory", "read_repair_context", "read_repair_remote_head")
+     if upstream:
+         return upstream
+     context = _repair_context(request)
+     try:
+         rows = parse_worktree_porcelain(worktree_list(context["clone_path"]))
+     except (CommandError, OSError, ValueError) as exc:
+         return fail("repair_worktree_inventory_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_worktree_inventory", error=str(exc), **context)
+     return ok(status="read", operation="read_repair_worktree_inventory", worktrees=rows, **context)
+
+def read_repair_branch_provenance(request: Request) -> Result:
+     upstream = _repair_upstream(request, "read_repair_branch_provenance", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory")
+     if upstream:
+         return upstream
+     context = _repair_context(request)
+     try:
+         exists = branch_exists(context["clone_path"], context["branch"])
+         provenance: dict[str, str] = {}
+         if exists:
+             for key in ("task", "issue", "repo", "pr", "receipt", "remote_oid"):
+                 try:
+                     provenance[key] = branch_config_get(context["clone_path"], context["branch"], f"lokay-{key}").strip()
+                 except CommandError:
+                     provenance[key] = ""
+     except (CommandError, OSError) as exc:
+         return fail("repair_branch_provenance_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_branch_provenance", error=str(exc), **context)
+     return ok(status="read", operation="read_repair_branch_provenance", exists=exists, provenance=provenance, **context)
+
+def decide_repair_worktree_ownership(request: Request) -> Result:
+     upstream = _repair_upstream(request, "decide_repair_worktree_ownership", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance")
+     if upstream:
+         return upstream
+     context = _repair_context(request)
+     remote = cond_blob(request, "read_repair_remote_head")
+     inventory = cond_blob(request, "read_repair_worktree_inventory")
+     branch_read = cond_blob(request, "read_repair_branch_provenance")
+     remote_oid = str(remote.get("remote_oid") or _repair_field(request, "remote_oid"))
+     if not remote_oid:
+         return fail("missing_repair_remote_oid", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership")
+     expected = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": remote_oid}
+     if not all(expected[key] for key in ("task", "issue", "repo", "pr", "remote_oid")):
+         return fail("missing_repair_ownership_evidence", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected=expected)
+     actual = dict(branch_read.get("provenance") or {})
+     if branch_read.get("exists") and any(actual.get(key) != value for key, value in expected.items() if value):
+         return fail("foreign_repair_branch_ownership", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected=expected, actual=actual)
+     rows = inventory.get("worktrees") if isinstance(inventory.get("worktrees"), list) else []
+     target = Path(context["worktree_path"]).resolve()
+     matching = [row for row in rows if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == target]
+     if matching and any(str(row.get("branch") or "") != context["branch"] for row in matching):
+         return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
+     if matching and str(matching[0].get("head") or "") != remote_oid:
+         return fail("stale_repair_remote_head", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected_head=remote_oid, actual_head=matching[0].get("head"))
+     if target.exists() or target.is_symlink():
+         if not matching:
+             return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
+     reuse = bool(branch_read.get("exists") and matching and str(matching[0].get("branch") or "") == context["branch"])
+     return ok(status="reuse" if reuse else "create", operation="decide_repair_worktree_ownership", should_prepare=True, reuse=reuse, remote_oid=remote_oid, expected=expected, **context)
+
+def create_repair_branch(request: Request) -> Result:
+     upstream = _repair_upstream(request, "create_repair_branch", "decide_repair_worktree_ownership")
+     if upstream:
+         return upstream
+     decision = cond_blob(request, "decide_repair_worktree_ownership")
+     context = _repair_context(request)
+     if decision.get("reuse") is True:
+         return ok(status="reused", operation="create_repair_branch", mutated=False, **context)
+     remote_oid = str(decision.get("remote_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
+     if not remote_oid:
+         return fail("missing_repair_remote_oid", failure_class="terminal", retry_safe=False, operation="create_repair_branch")
+     if dry_run_flag(request):
+         return planned(operation="create_repair_branch", branch=context["branch"], remote_oid=remote_oid)
+     try:
+         git(["branch", context["branch"], remote_oid], cwd=context["clone_path"])
+     except CommandError as exc:
+         return fail("repair_branch_create_failed", failure_class="terminal", retry_safe=False, operation="create_repair_branch", error=str(exc), mutated=False, **context)
+     return ok(status="created", operation="create_repair_branch", mutated=True, remote_oid=remote_oid, **context)
+
+def write_repair_branch_provenance(request: Request) -> Result:
+     upstream = _repair_upstream(request, "write_repair_branch_provenance", "create_repair_branch")
+     if upstream:
+         return upstream
+     context = _repair_context(request)
+     if cond_blob(request, "create_repair_branch").get("status") == "reused":
+         return ok(status="verified", operation="write_repair_branch_provenance", mutated=False, **context)
+     decision = cond_blob(request, "decide_repair_worktree_ownership")
+     values = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": str(decision.get("remote_oid") or "")}
+     if not all(values[key] for key in ("task", "issue", "repo", "pr", "remote_oid")):
+         return fail("missing_repair_provenance", failure_class="terminal", retry_safe=False, operation="write_repair_branch_provenance")
+     if dry_run_flag(request):
+         return planned(operation="write_repair_branch_provenance", branch=context["branch"], provenance=values)
+     try:
+         for key, value in values.items():
+             if value:
+                 branch_config_set(context["clone_path"], context["branch"], f"lokay-{key}", value)
+     except CommandError as exc:
+         return fail("repair_provenance_write_failed", failure_class="retryable", retry_safe=True, operation="write_repair_branch_provenance", error=str(exc), mutated=True)
+     return ok(status="written", operation="write_repair_branch_provenance", provenance=values, mutated=True, **context)
+
+def add_repair_worktree(request: Request) -> Result:
+     upstream = _repair_upstream(request, "add_repair_worktree", "create_repair_branch", "write_repair_branch_provenance")
+     if upstream:
+         return upstream
+     context = _repair_context(request)
+     decision = cond_blob(request, "decide_repair_worktree_ownership")
+     if decision.get("reuse") is True:
+         return ok(status="reused", operation="add_repair_worktree", worktree_path=context["worktree_path"], branch=context["branch"], mutated=False)
+     path, root = Path(context["worktree_path"]).resolve(), Path(context["worktree_root"]).resolve()
+     try:
+         path.relative_to(root)
+     except ValueError:
+         return fail("repair_worktree_path_escape", failure_class="terminal", retry_safe=False, operation="add_repair_worktree", worktree_path=str(path))
+     if path.exists() or path.is_symlink():
+         return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="add_repair_worktree", worktree_path=str(path))
+     if dry_run_flag(request):
+         return planned(operation="add_repair_worktree", worktree_path=str(path), branch=context["branch"])
+     try:
+         worktree_add(context["clone_path"], str(path), context["branch"], create_branch=False)
+     except CommandError as exc:
+         return fail("repair_worktree_add_failed", failure_class="terminal", retry_safe=False, operation="add_repair_worktree", error=str(exc), mutated=False)
+     return ok(status="added", operation="add_repair_worktree", worktree_path=str(path), branch=context["branch"], mutated=True)
+
+def prepare_repair_worktree(request: Request) -> Result:
+     """Mutation atom for the already-decided exact-head worktree add."""
+     return add_repair_worktree(request)
+
+def verify_repair_worktree(request: Request) -> Result:
+     upstream = _repair_upstream(request, "verify_repair_worktree", "add_repair_worktree", "prepare_repair_worktree")
+     if upstream:
+         return upstream
+     context = _repair_context(request)
+     expected = str(cond_blob(request, "decide_repair_worktree_ownership").get("remote_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or _repair_field(request, "remote_oid"))
+     path = context["worktree_path"]
+     try:
+         top = git(["rev-parse", "--show-toplevel"], cwd=path)
+         branch = git(["branch", "--show-current"], cwd=path)
+         head = rev_parse(path)
+     except (CommandError, OSError) as exc:
+         return fail("repair_worktree_readback_failed", failure_class="retryable_read", retry_safe=True, operation="verify_repair_worktree", error=str(exc), **context)
+     if Path(top).resolve() != Path(path).resolve() or branch != context["branch"]:
+         return fail("repair_worktree_confinement_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_worktree", top_level=top, actual_branch=branch, **context)
+     if not expected or head != expected:
+         return fail("repair_worktree_head_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_worktree", expected_head=expected, actual_head=head, **context)
+     return ok(status="verified", operation="verify_repair_worktree", head=head, remote_oid=expected, branch=branch, worktree_path=path, **context)
+
+def verify_repair_worktree_head(request: Request):
+     return verify_repair_worktree(request)
+_REPAIR_CONTEXT_ALIASES = _REPAIR_CONTEXT_ALIASES + (
+    "read_repair_omp_preconditions", "invoke_repair_omp", "verify_repair_omp_postconditions",
+    "read_repair_worktree_head", "decide_repair_push", "push_repair_branch",
+    "read_repair_pushed_ref", "verify_repair_push_oid", "read_existing_repair_pr",
+    "verify_existing_repair_pr", "build_repair_receipt", "publish_repair_receipt", "verify_repair_receipt",
+)
+
+import json
+from lokay.adapters_omp import run_omp
+from lokay.adapters_git import push_branch as git_push_branch
+from lokay.steps.cleanup import _publish_cleanup_receipt, _receipt_directory_lock
+
+
+def _repair_execution_gate(request: Request, operation: str, *peers: str) -> Result | None:
+    """Require the explicit live authorization atom before any execution."""
+    terminal = _atomic_terminal(request, operation, "decide_repair_attempt", *peers)
+    if terminal:
+        return terminal
+    decision = cond_blob(request, "decide_repair_attempt")
+    if not decision:
+        return noop("repair_attempt_not_authorized", operation=operation)
+    if decision.get("authorize") is not True:
+        return noop(str(decision.get("reason") or decision.get("decision") or "repair_attempt_not_authorized"), operation=operation)
+    return None
+
+
+def read_repair_omp_preconditions(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "read_repair_omp_preconditions", "verify_repair_worktree", "verify_repair_worktree_head")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "read_repair_omp_preconditions", "verify_repair_worktree", "verify_repair_worktree_head")
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    path = context["worktree_path"]
+    try:
+        top = git(["rev-parse", "--show-toplevel"], cwd=path)
+        branch = git(["branch", "--show-current"], cwd=path)
+        head = rev_parse(path)
+    except (CommandError, OSError) as exc:
+        return fail("repair_omp_precondition_failed", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", error=str(exc), **context)
+    if Path(top).resolve() != Path(path).resolve():
+        return fail("repair_omp_worktree_confinement", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", top_level=top, **context)
+    if branch != context["branch"]:
+        return fail("repair_omp_branch_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", expected_branch=context["branch"], actual_branch=branch, **context)
+    expected = str(cond_blob(request, "verify_repair_worktree", "verify_repair_worktree_head").get("head") or cond_blob(request, "decide_repair_worktree_ownership").get("remote_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
+    if expected and head != expected:
+        return fail("repair_omp_head_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", expected_head=expected, actual_head=head, **context)
+    return ok(status="ready", operation="read_repair_omp_preconditions", pre_head=head, branch=branch, worktree_path=path, remote_oid=expected, **context)
+
+
+def invoke_repair_omp(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "invoke_repair_omp", "read_repair_omp_preconditions", "verify_repair_attempt_reservation")
+    if gated:
+        return gated
+    reservation = cond_blob(request, "verify_repair_attempt_reservation")
+    if reservation.get("verified") is not True:
+        return fail("repair_attempt_reservation_required", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp")
+    upstream = _repair_upstream(request, "invoke_repair_omp", "read_repair_omp_preconditions", "verify_repair_attempt_reservation")
+    if upstream:
+        return upstream
+    data, cfg = input_of(request), cfg_of(request)
+    pre = cond_blob(request, "read_repair_omp_preconditions")
+    path = str(data.get("worktree_path") or pre.get("worktree_path") or _repair_context(request)["worktree_path"])
+    prompt = str(data.get("prompt") or cond_blob(request, "build_repair_prompt").get("prompt") or "")
+    if not path or not prompt:
+        return fail("missing_repair_worktree_or_prompt", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp")
+    try:
+        out = run_omp(prompt=prompt, cwd=path, command=str(data.get("command") or cfg.get("executor_command") or "omp"), model=str(data.get("model") or cfg.get("model") or "omniroute/omp/default"), thinking=str(data.get("thinking") or cfg.get("thinking") or "medium"), timeout=float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800), dry_run=False)
+    except CommandError as exc:
+        return fail("repair_omp_failed", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", error=str(exc), mutated=True)
+    decision = cond_blob(request, "decide_repair_attempt")
+    pre_head = str(pre.get("pre_head") or decision.get("verified_head") or "")
+    attempt_state = {
+        "repo": decision.get("repo") or _repair_context(request)["repo"],
+        "pr_number": decision.get("pr_number") or _repair_context(request)["pr_number"],
+        "verified_head": decision.get("verified_head") or pre_head,
+        "pre_head": pre_head,
+        "candidate": decision.get("candidate") or data.get("candidate") or "",
+        "run_id": decision.get("run_id") or data.get("run_id") or "",
+        "checks": decision.get("checks") or data.get("checks") or [],
+        "status": "invoked",
+        "attempted": True,
+    }
+    return ok(status="invoked", operation="invoke_repair_omp", omp=out, worktree_path=path, pre_head=pre_head, attempt_state=attempt_state, mutated=True)
+
+
+def verify_repair_omp_postconditions(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "verify_repair_omp_postconditions", "invoke_repair_omp")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "verify_repair_omp_postconditions", "invoke_repair_omp", "read_repair_omp_preconditions")
+    if upstream:
+        return upstream
+    data = input_of(request)
+    source = cond_blob(request, "read_repair_omp_preconditions")
+    path = str(data.get("worktree_path") or source.get("worktree_path") or _repair_context(request)["worktree_path"])
+    before = str(data.get("before_oid") or source.get("pre_head") or "")
+    try:
+        top = git(["rev-parse", "--show-toplevel"], cwd=path)
+        head = rev_parse(path)
+        changed = git(["diff", "--name-only", before, "HEAD"], cwd=path) if before else ""
+    except (CommandError, OSError) as exc:
+        return fail("repair_omp_postcondition_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", error=str(exc))
+    if Path(top).resolve() != Path(path).resolve():
+        return fail("repair_omp_worktree_confinement", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", top_level=top)
+    if before and head == before:
+        return fail("repair_omp_head_unchanged", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head)
+    if before and not changed:
+        return fail("repair_omp_no_changes", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head)
+    return ok(status="verified", operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head, changed_paths=changed.splitlines(), omp=cond_blob(request, "invoke_repair_omp").get("omp"), mutated=False)
+
+
+def read_repair_worktree_head(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "read_repair_worktree_head", "verify_repair_omp_postconditions")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "read_repair_worktree_head", "verify_repair_omp_postconditions")
+    if upstream:
+        return upstream
+    path = str(input_of(request).get("worktree_path") or cond_blob(request, "verify_repair_omp_postconditions").get("worktree_path") or _repair_context(request)["worktree_path"])
+    try:
+        head = rev_parse(path)
+    except CommandError as exc:
+        return fail("repair_worktree_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_worktree_head", error=str(exc))
+    return ok(status="read", operation="read_repair_worktree_head", local_oid=head, after_oid=head, worktree_path=path)
+
+
+def decide_repair_push(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "decide_repair_push", "read_repair_worktree_head")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "decide_repair_push", "read_repair_worktree_head", "verify_repair_omp_postconditions")
+    if upstream:
+        return upstream
+    local = str(cond_blob(request, "read_repair_worktree_head").get("local_oid") or input_of(request).get("local_oid") or "")
+    before = str(input_of(request).get("before_oid") or cond_blob(request, "read_repair_omp_postconditions").get("before_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
+    if not local or not before:
+        return fail("missing_repair_push_oids", failure_class="terminal", retry_safe=False, operation="decide_repair_push")
+    if local == before:
+        return fail("repair_head_unchanged", failure_class="terminal", retry_safe=False, operation="decide_repair_push", before_oid=before, local_oid=local)
+    return ok(status="push", operation="decide_repair_push", should_push=True, before_oid=before, local_oid=local, branch=_repair_context(request)["branch"])
+
+
+def push_repair_branch(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "push_repair_branch", "decide_repair_push")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "push_repair_branch", "decide_repair_push")
+    if upstream:
+        return upstream
+    decision = cond_blob(request, "decide_repair_push")
+    if decision.get("should_push") is not True:
+        return noop("repair_push_not_authorized", operation="push_repair_branch")
+    context = _repair_context(request)
+    try:
+        out = git_push_branch(context["worktree_path"], context["branch"], set_upstream=True)
+    except CommandError as exc:
+        return fail("repair_push_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="push_repair_branch", error=str(exc), mutated=True, **context)
+    return ok(status="pushed", operation="push_repair_branch", branch=context["branch"], remote=context["remote"], stdout_tail=out[-400:], mutated=True, **context)
+
+
+def read_repair_pushed_ref(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "read_repair_pushed_ref", "push_repair_branch")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "read_repair_pushed_ref", "push_repair_branch")
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    try:
+        text = git(["ls-remote", context["remote"], f"refs/heads/{context['branch']}"], cwd=context["worktree_path"])
+    except CommandError as exc:
+        return fail("repair_push_readback_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_pushed_ref", error=str(exc), **context)
+    rows = [line.split() for line in text.splitlines() if line.split()]
+    if len(rows) != 1 or len(rows[0]) < 2 or rows[0][1] != f"refs/heads/{context['branch']}":
+        return fail("repair_pushed_ref_missing", failure_class="terminal", retry_safe=False, operation="read_repair_pushed_ref", output=text, **context)
+    return ok(status="read", operation="read_repair_pushed_ref", remote_oid=rows[0][0], branch=context["branch"], **context)
+
+
+def verify_repair_push_oid(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "verify_repair_push_oid", "read_repair_pushed_ref")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "verify_repair_push_oid", "read_repair_pushed_ref", "decide_repair_push")
+    if upstream:
+        return upstream
+    local = str(cond_blob(request, "decide_repair_push").get("local_oid") or cond_blob(request, "read_repair_worktree_head").get("local_oid") or "")
+    remote = str(cond_blob(request, "read_repair_pushed_ref").get("remote_oid") or "")
+    if not local or not remote:
+        return fail("missing_repair_push_oids", failure_class="terminal", retry_safe=False, operation="verify_repair_push_oid")
+    if local != remote:
+        return fail("repair_push_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_push_oid", local_oid=local, remote_oid=remote, mutated=True)
+    return ok(status="verified", operation="verify_repair_push_oid", local_oid=local, remote_oid=remote, mutated=False)
+
+
+def read_existing_repair_pr(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "read_existing_repair_pr", "verify_repair_push_oid")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "read_existing_repair_pr", "verify_repair_push_oid")
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    cfg = cfg_of(request)
+    gh = str(cfg.get("gh_cli") or "gh")
+    try:
+        proc = run_cmd([gh, "pr", "list", "--repo", context["repo"], "--head", context["branch"], "--state", "open", "--json", "number,headRefName,headRefOid,baseRefName,repository,url"], timeout=120)
+        rows = json.loads(proc.stdout or "[]")
+    except (CommandError, json.JSONDecodeError, ValueError) as exc:
+        return fail("repair_pr_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_existing_repair_pr", error=str(exc), **context)
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return fail("invalid_repair_pr_readback", failure_class="terminal", retry_safe=False, operation="read_existing_repair_pr", **context)
+    if len(rows) != 1:
+        return fail("existing_repair_pr_missing" if not rows else "ambiguous_existing_repair_pr", failure_class="terminal", retry_safe=False, operation="read_existing_repair_pr", prs=rows, **context)
+    return ok(status="read", operation="read_existing_repair_pr", pr=rows[0], **context)
+
+
+def verify_existing_repair_pr(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "verify_existing_repair_pr", "read_existing_repair_pr")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "verify_existing_repair_pr", "read_existing_repair_pr", "verify_repair_push_oid")
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    pr = cond_blob(request, "read_existing_repair_pr").get("pr") or {}
+    expected_number = int(context["pr_number"] or 0)
+    expected_oid = str(cond_blob(request, "verify_repair_push_oid").get("remote_oid") or "")
+    repo_value = pr.get("repository") if isinstance(pr, dict) else None
+    actual_repo = repo_value.get("nameWithOwner") if isinstance(repo_value, dict) else repo_value
+    actual_number = pr.get("number") if isinstance(pr, dict) else None
+    try:
+        actual_number_int = int(actual_number or 0)
+    except (TypeError, ValueError):
+        return fail("repair_pr_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_existing_repair_pr", expected={"repo": context["repo"], "number": expected_number, "branch": context["branch"], "head": expected_oid}, actual=pr)
+    if str(actual_repo or "") != context["repo"] or actual_number_int != expected_number or str(pr.get("headRefName") or "") != context["branch"] or (expected_oid and str(pr.get("headRefOid") or "") != expected_oid):
+        return fail("repair_pr_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_existing_repair_pr", expected={"repo": context["repo"], "number": expected_number, "branch": context["branch"], "head": expected_oid}, actual=pr)
+    return ok(status="verified", operation="verify_existing_repair_pr", repo=context["repo"], pr_number=expected_number, branch=context["branch"], head_oid=expected_oid, pr=pr, mutated=False)
+
+
+def build_repair_receipt(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "build_repair_receipt", "verify_existing_repair_pr")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "build_repair_receipt", "verify_existing_repair_pr")
+    if upstream:
+        return upstream
+    data, cfg = input_of(request), cfg_of(request)
+    context = _repair_context(request)
+    pr = cond_blob(request, "verify_existing_repair_pr")
+    pushed = cond_blob(request, "verify_repair_push_oid")
+    omp = cond_blob(request, "verify_repair_omp_postconditions")
+    decision = cond_blob(request, "decide_repair_attempt")
+    payload = {
+        "phase": "REPAIR_COMPLETED",
+        "before_oid": str(decision.get("verified_head") or omp.get("before_oid") or context.get("remote_oid") or ""),
+        "after_oid": str(pushed.get("remote_oid") or pr.get("head_oid") or ""),
+        "checks": decision.get("checks") or data.get("checks") or [],
+        "omp": omp.get("omp") or cond_blob(request, "invoke_repair_omp").get("omp") or {},
+        "run": {"run_id": decision.get("run_id") or data.get("run_id") or "", "status": "completed"},
+        "candidate": decision.get("candidate") or data.get("candidate") or "",
+        "config": dict(cfg),
+        "provenance": {"repo": context["repo"], "pr_number": int(context["pr_number"]), "branch": context["branch"], "task_id": context["task_id"], "issue": context["issue"], "receipt": context["receipt"]},
+        "pr": pr.get("pr") or {},
+    }
+    if not payload["before_oid"] or not payload["after_oid"] or payload["before_oid"] == payload["after_oid"]:
+        return fail("invalid_repair_receipt_heads", failure_class="terminal", retry_safe=False, operation="build_repair_receipt", payload=payload)
+    return ok(status="built", operation="build_repair_receipt", payload=payload, receipt_path=context["receipt"], mutated=False)
+
+
+def publish_repair_receipt(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "publish_repair_receipt", "build_repair_receipt")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "publish_repair_receipt", "build_repair_receipt")
+    if upstream:
+        return upstream
+    built = cond_blob(request, "build_repair_receipt")
+    payload = built.get("payload")
+    path = str(input_of(request).get("receipt_path") or built.get("receipt_path") or _repair_context(request)["receipt"])
+    if not isinstance(payload, dict) or not path:
+        return fail("missing_repair_receipt_inputs", failure_class="terminal", retry_safe=False, operation="publish_repair_receipt")
+    if dry_run_flag(request):
+        return planned(operation="publish_repair_receipt", receipt_path=path, payload=payload)
+    try:
+        with _receipt_directory_lock(Path(path).parent):
+            return _publish_cleanup_receipt(Path(path), payload, path)
+    except (OSError, ValueError) as exc:
+        return fail("repair_receipt_write_failed", failure_class="terminal", retry_safe=False, operation="publish_repair_receipt", error=str(exc), receipt_path=path)
+
+
+def verify_repair_receipt(request: Request) -> Result:
+    gated = _repair_execution_gate(request, "verify_repair_receipt", "publish_repair_receipt")
+    if gated:
+        return gated
+    upstream = _repair_upstream(request, "verify_repair_receipt", "publish_repair_receipt")
+    if upstream:
+        return upstream
+    publication = cond_blob(request, "publish_repair_receipt")
+    path = str(input_of(request).get("receipt_path") or publication.get("receipt_path") or _repair_context(request)["receipt"])
+    expected = cond_blob(request, "build_repair_receipt").get("payload")
+    try:
+        actual = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return fail("repair_receipt_readback_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_receipt", error=str(exc), receipt_path=path)
+    if not isinstance(expected, dict) or actual != expected:
+        return fail("repair_receipt_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_receipt", receipt_path=path)
+    return ok(status="verified", operation="verify_repair_receipt", receipt_path=path, payload=actual, mutated=False)
