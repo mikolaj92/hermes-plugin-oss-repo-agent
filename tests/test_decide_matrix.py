@@ -248,7 +248,7 @@ class PrDecideMatrixTests(unittest.TestCase):
         self.assertEqual(out["action"], "repair")
         self.assertEqual(out["reason"], "checks_not_green")
 
-    def test_comment_block_missing_evidence(self) -> None:
+    def test_repair_when_test_evidence_is_missing(self) -> None:
         out = triage.decide_triage_action(
             req(
                 {
@@ -260,7 +260,7 @@ class PrDecideMatrixTests(unittest.TestCase):
                 }
             )
         )
-        self.assertEqual(out["action"], "comment_block")
+        self.assertEqual(out["action"], "repair")
         self.assertEqual(out["reason"], "missing_test_evidence")
 
     def test_repair_on_conflict(self) -> None:

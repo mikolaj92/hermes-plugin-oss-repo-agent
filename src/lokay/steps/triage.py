@@ -872,7 +872,7 @@ def decide_triage_action(request: Request) -> Result:
     if not checks_pass:
         return ok(status="decided", action="repair", reason="checks_not_green")
     if not evidence_pass:
-        return ok(status="decided", action="comment_block", reason="missing_test_evidence")
+        return ok(status="decided", action="repair", reason="missing_test_evidence")
     if mergeable in {"CONFLICTING", "DIRTY"}:
         return ok(status="decided", action="repair", reason="merge_conflict")
     if mergeable != "MERGEABLE":

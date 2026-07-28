@@ -2442,7 +2442,10 @@ class TriageTests(unittest.TestCase):
         base = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "labels": [], "author": {"login": "o"}}, "checks_pass": True, "evidence_pass": True, "automerge": True}
         self.assertEqual(triage.decide_triage_action(req(base))["action"], "merge")
         self.assertEqual(triage.decide_triage_action(req({**base, "checks_pass": False}))["action"], "repair")
-        self.assertEqual(triage.decide_triage_action(req({**base, "evidence_pass": False}))["action"], "comment_block")
+        self.assertEqual(triage.decide_triage_action(req({**base, "evidence_pass": False}))["action"], "repair")
+        approval_required = {**base, "require_human_approval": True}
+        approval_required["pr"] = {**base["pr"], "reviewDecision": ""}
+        self.assertEqual(triage.decide_triage_action(req(approval_required))["action"], "comment_block")
 
     def test_canonical_comment_chain_dry_run(self) -> None:
         decision = {"status": "decided", "ok": True, "action": "comment_block"}
