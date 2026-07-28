@@ -993,7 +993,6 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
         and str(provenance_read.get("branch_head") or "") == expected["verified_head"]
         and str(provenance.get("repo") or "") == str(state.get("repo") or "")
         and str(provenance.get("pr") or "") == str(state.get("pr_number") or "")
-        and str(provenance.get("remote_oid") or "") == expected["verified_head"]
         and str(provenance.get("target_branch") or "") == expected["repo_branch"]
         and len(matching) == 1
         and str(matching[0].get("branch") or "") == expected["local_branch"]

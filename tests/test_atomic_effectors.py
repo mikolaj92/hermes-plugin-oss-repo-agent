@@ -2284,7 +2284,7 @@ CREATE TABLE runs (
         self.assertEqual(out["reason"], "not_selected")
         self.assertTrue(out["ok"])
 
-    def test_read_repair_attempt_reconciliation_unchanged(self) -> None:
+    def test_read_repair_attempt_reconciliation_accepts_stale_provenance_oid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_req = req({
@@ -2312,7 +2312,7 @@ CREATE TABLE runs (
                     "read_repair_worktree_inventory": {"ok": True, "worktrees": [{"path": wt_path, "branch": local_branch}]},
                     "read_repair_branch_provenance": {
                         "ok": True, "exists": True, "branch_head": "head-a",
-                        "provenance": {"repo": "o/r", "pr": "1", "remote_oid": "head-a", "target_branch": "ai/fix/1"}
+                        "provenance": {"repo": "o/r", "pr": "1", "remote_oid": "stale-head", "target_branch": "ai/fix/1"}
                     }
                 }
             })
