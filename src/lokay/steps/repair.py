@@ -445,35 +445,41 @@ def _repair_completed_receipt(
         )
     return str(path), payload
 
-def _repair_restart_recovery(request: Request, state: dict[str, object], reservation_path: Path, current: dict[str, object] | None = None, reconciliation: dict[str, object] | None = None) -> Result:
-    """Read and validate one exact failed read-only pre-OMP process row."""
+def _repair_recovery_identity(request: Request, state: dict[str, object], recovery: dict[str, object]) -> tuple[str, str, str, str] | None:
+    """Derive the verifier identity from current path and immutable state."""
     data, cfg = input_of(request), cfg_of(request)
-    recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
-    if not recovery:
-        return ok(status="inactive", operation="read_repair_attempt_recovery_evidence", recovery_active=False, mutated=False)
-    if not isinstance(recovery, dict):
-        return fail("invalid_repair_attempt_recovery", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
-    run_id = str(recovery.get("run_id") or "").strip()
-    process_id = str(recovery.get("process_id") or "").strip()
-    candidate = str(recovery.get("candidate") or "").strip()
-    path_id = str(recovery.get("path_id") or "").strip()
-    effector_id = str(recovery.get("effector_id") or "").strip()
-    expected_process_id = f"{run_id}:{path_id}:{effector_id}"
-    allowed = {
-        ("auto_worker", "triage_verify_repair_attempt_reservation"),
-        ("pr_triage", "verify_repair_attempt_reservation"),
-    }
-    if (
-        (path_id, effector_id) not in allowed
-        or not run_id
-        or process_id != expected_process_id
-        or run_id != str(state.get("run_id") or "")
-        or candidate != str(state.get("candidate") or "")
-        or str(recovery.get("repo") or "") != str(state.get("repo") or "")
-        or str(recovery.get("pr_number") or "") != str(state.get("pr_number") or "")
-        or str(recovery.get("verified_head") or "") != str(state.get("verified_head") or "")
-    ):
-        return fail("repair_attempt_recovery_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
+    configured_path = data.get("path_id") if "path_id" in data else cfg.get("path_id")
+    if configured_path is None:
+        configured_path = recovery.get("path_id")
+    if not isinstance(configured_path, str) or configured_path not in {"auto_worker", "pr_triage"}:
+        return None
+    run_id = state.get("run_id")
+    candidate = state.get("candidate")
+    if not isinstance(run_id, str) or not run_id or not isinstance(candidate, str) or not candidate:
+        return None
+    effector_id = "triage_verify_repair_attempt_reservation" if configured_path == "auto_worker" else "verify_repair_attempt_reservation"
+    process_id = f"{run_id}:{configured_path}:{effector_id}"
+    return run_id, configured_path, effector_id, process_id
+
+
+def _repair_recovery_fields_well_formed(recovery: dict[str, object]) -> bool:
+    """Reject malformed hints without allowing stale hints to select evidence."""
+    string_fields = ("run_id", "process_id", "candidate", "path_id", "effector_id", "repo", "verified_head")
+    if any(key in recovery and recovery[key] is not None and not isinstance(recovery[key], str) for key in string_fields):
+        return False
+    number = recovery.get("pr_number")
+    return number is None or (type(number) is int and number > 0)
+
+
+def _read_repair_journal_pre_omp_evidence(
+    request: Request,
+    state: dict[str, object],
+    reservation_path: Path,
+    identity: tuple[str, str, str, str],
+) -> bool | Result:
+    """Prove the exact failed verifier ran before OMP and did not mutate."""
+    run_id, path_id, effector_id, process_id = identity
+    data, cfg = input_of(request), cfg_of(request)
     db_path = str(data.get("db_path") or cfg.get("db_path") or "").strip()
     if not db_path:
         return fail("invalid_repair_attempt_recovery", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
@@ -483,52 +489,76 @@ def _repair_restart_recovery(request: Request, state: dict[str, object], reserva
                 "SELECT run_id,id,status,input_json,output_json,error_json,metadata FROM processes WHERE run_id=? AND id=?",
                 (run_id, process_id),
             ).fetchall()
-        if len(rows) != 1:
-            return fail("repair_attempt_recovery_not_unique", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence", count=len(rows))
-        row_run, row_id, status, raw_input, raw_output, raw_error, raw_metadata = rows[0]
-        process_input = json.loads(raw_input)
-        process_output = json.loads(raw_output)
-        process_error = json.loads(raw_error)
-        metadata = json.loads(raw_metadata)
-    except (OSError, sqlite3.Error, TypeError, json.JSONDecodeError) as exc:
+    except (OSError, sqlite3.Error) as exc:
+        return fail("repair_attempt_recovery_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_attempt_recovery_evidence", error=str(exc))
+    if len(rows) != 1:
+        return fail("repair_attempt_recovery_not_unique", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence", count=len(rows))
+    row_run, row_id, status, raw_input, raw_output, raw_error, raw_metadata = rows[0]
+    try:
+        process_input, process_output, process_error, metadata = (json.loads(raw) for raw in (raw_input, raw_output, raw_error, raw_metadata))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
         return fail("repair_attempt_recovery_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_attempt_recovery_evidence", error=str(exc))
     conduction = process_input.get("conduction") if isinstance(process_input, dict) else None
     reserve_key = "triage_reserve_repair_attempt" if path_id == "auto_worker" else "reserve_repair_attempt"
     reservation = conduction.get(reserve_key) if isinstance(conduction, dict) else None
     reservation_values = reservation.get("reservation") if isinstance(reservation, dict) else None
+    binding = metadata.get("__adapter_binding") if isinstance(metadata, dict) else None
+    expected_cwd = (Path(db_path).resolve().parent.parent / "deployment" / "versions" / str(state.get("candidate")) / "source" / "project").resolve()
+    expected_conduction = [
+        reserve_key,
+        "triage_verify_repair_attempt_recovery" if path_id == "auto_worker" else "verify_repair_attempt_recovery",
+        "triage_verify_repair_recovery_continuation" if path_id == "auto_worker" else "verify_repair_recovery_continuation",
+    ]
+    valid = bool(
+        row_run == run_id
+        and row_id == process_id
+        and status == "failed"
+        and isinstance(process_input, dict)
+        and isinstance(process_output, dict) and not process_output
+        and isinstance(process_error, dict) and process_error.get("code") == "adapter_failed"
+        and process_input.get("candidate") == state.get("candidate")
+        and process_input.get("candidate_id") == state.get("candidate")
+        and isinstance(reservation, dict) and reservation.get("ok") is True and reservation.get("mutated") is True
+        and str(reservation.get("reservation_path") or "") == str(reservation_path)
+        and isinstance(reservation_values, dict) and _reservation_identity(reservation_values) == _reservation_identity(state)
+        and isinstance(metadata, dict) and metadata.get("effector_id") == effector_id
+        and metadata.get("__correlation_conduction") == expected_conduction
+        and isinstance(binding, dict) and Path(str(binding.get("cwd") or "")).resolve() == expected_cwd
+    )
+    return valid
+
+
+def _repair_restart_recovery(request: Request, state: dict[str, object], reservation_path: Path, current: dict[str, object] | None = None, reconciliation: dict[str, object] | None = None) -> Result:
+    """Read and validate one exact failed read-only pre-OMP process row."""
+    data, cfg = input_of(request), cfg_of(request)
+    recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
+    if not recovery:
+        return ok(status="inactive", operation="read_repair_attempt_recovery_evidence", recovery_active=False, mutated=False)
+    if not isinstance(recovery, dict) or not _repair_recovery_fields_well_formed(recovery):
+        return fail("invalid_repair_attempt_recovery", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
+    if recovery.get("effector_id") in {"invoke_repair_omp", "triage_invoke_repair_omp"}:
+        return fail("repair_attempt_recovery_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
+    identity = _repair_recovery_identity(request, state, recovery)
+    if identity is None:
+        return fail("repair_attempt_recovery_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
+    run_id, path_id, effector_id, process_id = identity
     invoke_process_id = f"{run_id}:{path_id}:{'triage_invoke_repair_omp' if path_id == 'auto_worker' else 'invoke_repair_omp'}"
     invoke_evidence = _read_repair_invoke_evidence(reservation_path, invoke_process_id)
+    if isinstance(invoke_evidence, dict) and not invoke_evidence.get("ok", True):
+        return invoke_evidence
     invoke_no_mutation = bool(
         isinstance(invoke_evidence, dict)
-        and invoke_evidence.get("ok", True)
         and invoke_evidence.get("status") == "failed"
         and invoke_evidence.get("mutated") is False
         and invoke_evidence.get("pre_head") == state.get("pre_head")
         and invoke_evidence.get("pre_status") == state.get("pre_status")
     )
-    binding = metadata.get("__adapter_binding") if isinstance(metadata, dict) else None
-    expected_cwd = (Path(db_path).resolve().parent.parent / "deployment" / "versions" / candidate / "source" / "project").resolve()
-    valid = bool(
-        row_run == run_id
-        and row_id == process_id
-        and status == "failed"
-        and isinstance(process_output, dict)
-        and not process_output
-        and isinstance(process_error, dict)
-        and process_error.get("code") == "adapter_failed"
-        and invoke_no_mutation
-        and isinstance(reservation, dict)
-        and reservation.get("ok") is True
-        and reservation.get("mutated") is True
-        and str(reservation.get("reservation_path") or "") == str(reservation_path)
-        and isinstance(reservation_values, dict)
-        and _reservation_identity(reservation_values) == _reservation_identity(state)
-        and str(process_input.get("candidate") or "") == candidate
-        and str(process_input.get("candidate_id") or "") == candidate
-        and isinstance(binding, dict)
-        and Path(str(binding.get("cwd") or "")).resolve() == expected_cwd
-    )
-    if not valid:
+    if invoke_evidence is None:
+        journal = _read_repair_journal_pre_omp_evidence(request, state, reservation_path, identity)
+        if isinstance(journal, dict):
+            return journal
+        invoke_no_mutation = journal is True
+    if not invoke_no_mutation:
         return fail("repair_attempt_recovery_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
     current = current or {}
     recovery_run_id = str(current.get("run_id") or input_of(request).get("run_id") or cfg_of(request).get("run_id") or "").strip()
@@ -922,22 +952,25 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
     recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
     if isinstance(recovery, dict):
         reservation_path = str(state_read.get("reservation_path") or "").strip()
-        run_id = str(recovery.get("run_id") or "").strip()
-        path_id = str(recovery.get("path_id") or "").strip()
         if not reservation_path:
             return fail("repair_attempt_reconciliation_state_required", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation")
-        if path_id not in {"auto_worker", "pr_triage"} or not run_id:
+        identity = _repair_recovery_identity(request, state, recovery)
+        if identity is None:
             return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke identity unknown")
-        invoke_effector = "triage_invoke_repair_omp" if path_id == "auto_worker" else "invoke_repair_omp"
-        invoke_process_id = f"{run_id}:{path_id}:{invoke_effector}"
+        path_id = identity[1]
+        invoke_process_id = f"{identity[0]}:{path_id}:{'triage_invoke_repair_omp' if path_id == 'auto_worker' else 'invoke_repair_omp'}"
         invoke_evidence = _read_repair_invoke_evidence(Path(reservation_path), invoke_process_id)
         if isinstance(invoke_evidence, dict) and not invoke_evidence.get("ok", True):
             return invoke_evidence
         if invoke_evidence is None:
-            return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke evidence absent")
-        if invoke_evidence.get("mutated") is True:
+            journal = _read_repair_journal_pre_omp_evidence(request, state, Path(reservation_path), identity)
+            if isinstance(journal, dict):
+                return journal
+            if journal is not True:
+                return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke mutation unknown")
+        elif invoke_evidence.get("mutated") is True:
             return fail("repair_attempt_reconciliation_mutated_blocked", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="explicit invoke mutated blocks recovery")
-        if invoke_evidence.get("status") != "failed" or invoke_evidence.get("mutated") is not False:
+        elif invoke_evidence.get("status") != "failed" or invoke_evidence.get("mutated") is not False:
             return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke mutation unknown")
     remote = cond_blob(request, "read_repair_remote_head")
     inventory = cond_blob(request, "read_repair_worktree_inventory")

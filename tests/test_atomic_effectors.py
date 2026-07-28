@@ -1802,6 +1802,31 @@ CREATE TABLE runs (
             self.assertFalse(out["mutated"])
             self.assertEqual(out["recovery_claim"]["evidence_process_id"], process_id)
 
+    def test_repair_attempt_recovery_accepts_failed_verifier_without_invoke_sidecar(self) -> None:
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "state" / "state.sqlite"
+            db.parent.mkdir(parents=True)
+            candidate = "old-candidate"
+            expected_cwd = db.resolve().parent.parent / "deployment" / "versions" / candidate / "source" / "project"
+            expected_cwd.mkdir(parents=True)
+            reservation = root / "reservation.json"
+            reservation.write_text("{}\n")
+            state = {"repo": "o/r", "pr_number": 1, "verified_head": "head-a", "candidate": candidate, "run_id": "old-run", "pre_head": "head-a", "pre_status": ""}
+            process_id = "old-run:auto_worker:triage_verify_repair_attempt_reservation"
+            process_input = {"candidate": candidate, "candidate_id": candidate, "conduction": {"triage_reserve_repair_attempt": {"ok": True, "mutated": True, "reservation_path": str(reservation), "reservation": state}}}
+            metadata = {"effector_id": "triage_verify_repair_attempt_reservation", "__correlation_conduction": ["triage_reserve_repair_attempt", "triage_verify_repair_attempt_recovery", "triage_verify_repair_recovery_continuation"], "__adapter_binding": {"cwd": str(expected_cwd)}}
+            with sqlite3.connect(db) as connection:
+                connection.execute("CREATE TABLE processes (run_id TEXT, id TEXT, status TEXT, input_json TEXT, output_json TEXT, error_json TEXT, metadata TEXT)")
+                connection.execute("INSERT INTO processes VALUES (?,?,?,?,?,?,?)", ("old-run", process_id, "failed", json.dumps(process_input), "{}", json.dumps({"code": "adapter_failed"}), json.dumps(metadata)))
+            out = repair.read_repair_attempt_recovery_evidence(req({
+                "path_id": "auto_worker", "run_id": "new-run", "candidate": "new-candidate", "repo": "o/r", "number": 1, "verified_head": "head-a", "db_path": str(db),
+                "attempt_recovery": {"run_id": "stale-run", "process_id": "stale", "candidate": "stale-candidate", "path_id": "auto_worker", "effector_id": "triage_verify_repair_attempt_reservation", "repo": "o/r", "pr_number": 1, "verified_head": "head-a"},
+                "conduction": {"read_repair_attempt_state": {"ok": True, "status": "found", "attempt_state": state, "reservation_path": str(reservation)}, "read_repair_attempt_reconciliation": {"ok": True, "status": "unchanged", "authorize_reinvoke": True, "snapshot": {"pre_head": "head-a", "pre_status": ""}}}
+            }))
+            self.assertEqual(out["status"], "validated", out)
+            self.assertEqual(out["recovery_claim"]["evidence_process_id"], process_id)
     def test_repair_attempt_recovery_authorizes_composite_reservation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
