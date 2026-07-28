@@ -2817,6 +2817,37 @@ class TriageTests(unittest.TestCase):
         }))
         self.assertEqual((result["status"], result["reason"]), ("noop", "not_selected"))
 
+    def test_linked_issue_is_derived_and_already_closed_reconciles(self) -> None:
+        provenance = {
+            "status": "merge_provenance_verified",
+            "ok": True,
+            "repo": "o/r",
+            "verified_provenance": {"head_ref": "ai/fix/10-repair", "merge_oid": "abc"},
+        }
+        linked = triage.verify_linked_merge_provenance(req({
+            "conduction": {"triage_verify_merge_provenance": provenance},
+        }))
+        self.assertEqual((linked["status"], linked["issue"]), ("linked_merge_provenance_verified", 10))
+        closed_view = mock.Mock(stdout='{"state": "CLOSED"}')
+        with mock.patch("lokay.steps.triage.run_cmd", return_value=closed_view) as run:
+            state = triage.read_linked_issue_state(req({
+                "dry_run": False,
+                "conduction": {"triage_verify_linked_merge_provenance": linked},
+            }))
+        run.assert_called_once_with(["gh", "issue", "view", "10", "--repo", "o/r", "--json", "state"], timeout=60)
+        decision = {"status": "decided", "ok": True, "action": "merge"}
+        closed = triage.close_linked_issue(req({
+            "dry_run": False,
+            "conduction": {
+                "triage_read_linked_issue_state": state,
+                "triage_decide_triage_action": decision,
+            },
+        }))
+        self.assertEqual(
+            (state["status"], state["issue"], closed["status"], closed["mutated"]),
+            ("issue_state_read", 10, "already_closed", False),
+        )
+
     def test_merge_preconditions_reject_failed_comment_verification(self) -> None:
         result = triage.read_merge_preconditions(req({
             "repo": "o/r",

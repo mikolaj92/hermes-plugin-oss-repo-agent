@@ -185,15 +185,20 @@ def _atomic_context(request: Request, *, kind: str = "pr") -> dict[str, Any]:
         (
             row
             for row in upstream_rows
-            if isinstance(row, dict) and (row.get("repo") or row.get("number"))
+            if isinstance(row, dict) and (row.get("repo") or row.get("number") or (kind == "issue" and row.get("issue")))
         ),
         {},
     )
+    if kind == "issue":
+        upstream = next(
+            (row for row in upstream_rows if isinstance(row, dict) and row.get("issue")),
+            upstream,
+        )
     pr = data.get("pr") if isinstance(data.get("pr"), dict) else upstream.get("pr", {})
     repo = str(data.get("repo") or upstream.get("repo") or cfg.get("repo") or "")
     number = int(data.get("number") or data.get("pr_number") or upstream.get("number") or (pr.get("number") if isinstance(pr, dict) else 0) or 0)
     if kind == "issue":
-        number = int(data.get("issue") or data.get("issue_number") or number or 0)
+        number = int(data.get("issue") or data.get("issue_number") or upstream.get("issue") or number or 0)
     context: dict[str, Any] = {"repo": repo, "number": number}
     head_oid = str(
         data.get("head_oid")
@@ -1149,8 +1154,12 @@ def verify_linked_merge_provenance(request: Request) -> Result:
         return idle
     source = cond_blob(request, "verify_merge_provenance", "read_merge_postcondition")
     prov = source.get("verified_provenance")
-    issue = int(input_of(request).get("issue") or input_of(request).get("issue_number") or 0)
     match = re.search(r"(?:^|/)ai/fix/(\d+)", str((prov or {}).get("head_ref") or "")) if isinstance(prov, dict) else None
-    if not isinstance(prov, dict) or not match or int(match.group(1)) != issue:
+    if not isinstance(prov, dict) or not match:
         return fail("merge_provenance_unverified", failure_class="terminal", retry_safe=False)
-    return ok(status="linked_merge_provenance_verified", verified_provenance=dict(prov), issue=issue)
+    issue = int(match.group(1))
+    requested_issue = int(input_of(request).get("issue") or input_of(request).get("issue_number") or 0)
+    if requested_issue and requested_issue != issue:
+        return fail("merge_provenance_unverified", failure_class="terminal", retry_safe=False)
+    repo = str(source.get("repo") or (prov or {}).get("repo") or "")
+    return ok(status="linked_merge_provenance_verified", verified_provenance=dict(prov), repo=repo, issue=issue)
