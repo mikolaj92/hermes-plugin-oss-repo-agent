@@ -619,7 +619,7 @@ def load_pr_fields(request: Request) -> Result:
                 "--repo",
                 repo,
                 "--json",
-                "number,title,url,body,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid,"
+                "number,title,url,body,comments,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid,"
                 "author,labels,mergeable,reviewDecision,statusCheckRollup,commits,closingIssuesReferences",
             ],
             timeout=60,
@@ -737,6 +737,10 @@ def evaluate_test_evidence(request: Request) -> Result:
         data.get("require_test_evidence", cfg_of(request).get("require_test_evidence", True))
     )
     body = str(pr.get("body") or "")
+    comments = pr.get("comments") or []
+    if not isinstance(comments, list) or any(not isinstance(item, dict) for item in comments):
+        return fail("invalid_test_evidence", failure_class="terminal", retry_safe=False)
+    evidence = "\n".join([body, *(str(item.get("body") or "") for item in comments)])
     markers = data.get("markers") or [
         "Test plan",
         "test evidence",
@@ -745,7 +749,7 @@ def evaluate_test_evidence(request: Request) -> Result:
         "unittest",
         "Verified",
     ]
-    hits = [m for m in markers if m.lower() in body.lower()]
+    hits = [m for m in markers if m.lower() in evidence.lower()]
     present = bool(hits)
     if not require:
         return ok(status="evidence_optional", pass_=True, present=present, hits=hits)

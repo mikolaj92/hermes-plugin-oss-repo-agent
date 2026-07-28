@@ -2715,6 +2715,11 @@ class TriageTests(unittest.TestCase):
         self.assertFalse(miss["pass_"])
         hit = triage.evaluate_test_evidence(req({"pr": {"body": "Test plan: ran pytest"}, "require_test_evidence": True}))
         self.assertTrue(hit["pass_"])
+        comment_hit = triage.evaluate_test_evidence(req({
+            "pr": {"body": "", "comments": [{"body": "Test evidence: python -m unittest"}]},
+            "require_test_evidence": True,
+        }))
+        self.assertTrue(comment_hit["pass_"])
 
     def test_decide_triage_action_routes(self) -> None:
         base = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "labels": [], "author": {"login": "o"}}, "checks_pass": True, "evidence_pass": True, "automerge": True}
