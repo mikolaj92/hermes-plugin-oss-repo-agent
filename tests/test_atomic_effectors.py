@@ -526,6 +526,99 @@ class RepairTests(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertTrue(out["verified"])
         self.assertEqual(out["acquired_oid"], oid)
+    def test_dry_run_remote_head_chain_stays_planned(self) -> None:
+        context = {
+            "repo": "owner/repo",
+            "issue": "10",
+            "pr_number": "11",
+            "branch": "feature/x",
+            "clone_path": "/clone",
+            "worktree_root": "/worktrees",
+            "dry_run": True,
+        }
+        fetched = repair.fetch_repair_remote_head(req({
+            **context,
+            "conduction": {
+                "read_repair_remote_head": {
+                    "ok": True,
+                    "status": "read",
+                    "remote_oid": "a" * 40,
+                }
+            },
+        }))
+        verified = repair.verify_fetched_repair_remote_head(req({
+            **context,
+            "conduction": {"fetch_repair_remote_head": fetched},
+        }))
+        ancestry = repair.read_repair_remote_ancestry(req({
+            **context,
+            "conduction": {"verify_fetched_repair_remote_head": verified},
+        }))
+        self.assertEqual(fetched["status"], "planned")
+        self.assertEqual(verified["status"], "planned")
+        self.assertEqual(ancestry["status"], "planned")
+        self.assertEqual(ancestry["remote_oid"], "a" * 40)
+        self.assertNotIn("acquired_oid", ancestry)
+
+    def test_repair_lifecycle_gate_routes_authoritative_outcomes(self) -> None:
+        operation = "read_repair_attempt_state"
+        for outcome, expected in (
+            ("resume_repair", None),
+            ("ready_for_merge", "noop"),
+            ("wait_pending_checks", "noop"),
+            ("finalize_merged", "noop"),
+            ("finalize_closed", "noop"),
+        ):
+            with self.subTest(outcome=outcome):
+                result = repair._repair_lifecycle_gate(req({
+                    "conduction": {
+                        "lifecycle_decide_lifecycle_transition": {
+                            "ok": True,
+                            "status": "decided",
+                            "action": outcome,
+                        }
+                    }
+                }), operation, "lifecycle_decide_lifecycle_transition")
+                if expected is None:
+                    self.assertIsNone(result)
+                else:
+                    self.assertEqual(result["status"], expected)
+                    self.assertEqual(result["reason"], outcome)
+
+        malformed = repair._repair_lifecycle_gate(req({
+            "conduction": {
+                "lifecycle_decide_lifecycle_transition": {
+                    "ok": True,
+                    "status": "decided",
+                    "action": "unknown",
+                }
+            }
+        }), operation, "lifecycle_decide_lifecycle_transition")
+        self.assertFalse(malformed["ok"])
+        self.assertEqual(malformed["reason"], "invalid_repair_lifecycle")
+
+    def test_review_task_dry_run_reconciliation_stays_planned(self) -> None:
+        created = {
+            "ok": True,
+            "status": "planned",
+            "board": "board-r",
+            "idempotency_key": "fix-pr-review:o/r:9",
+        }
+        out = repair.reconcile_review_task(req({
+            "dry_run": True,
+            "conduction": {
+                "decide_triage_action": {
+                    "ok": True,
+                    "status": "decided",
+                    "action": "repair",
+                },
+                "create_review_task": created,
+            },
+        }))
+        self.assertEqual(out["status"], "planned")
+        self.assertEqual(out["board"], "board-r")
+        self.assertEqual(out["idempotency_key"], "fix-pr-review:o/r:9")
+
     def test_repair_ownership_allows_empty_dispatch_task(self) -> None:
         context = {
             "repo": "owner/repo", "issue": 10, "pr_number": 11,
@@ -1963,6 +2056,26 @@ CREATE TABLE runs (
             self.assertEqual(out["pre_status"], "")
             self.assertTrue(out["baseline_verified"])
 
+    def test_dry_run_worktree_verification_stays_planned(self) -> None:
+        request = req({
+            "dry_run": True,
+            "repo": "o/r",
+            "pr_number": 1,
+            "branch": "ai/fix/1",
+            "conduction": {
+                "add_repair_worktree": {"ok": True, "status": "planned"},
+            },
+        })
+        out = repair.verify_repair_worktree(request)
+        self.assertEqual(out["status"], "planned")
+        self.assertEqual(out["operation"], "verify_repair_worktree")
+
+        baseline = repair.read_repair_attempt_baseline(req({
+            "dry_run": True,
+            "conduction": {"verify_repair_worktree": out},
+        }))
+        self.assertEqual(baseline["status"], "noop")
+        self.assertEqual(baseline["reason"], "dry_run")
     def test_read_repair_attempt_baseline_dirty_or_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -90,7 +90,8 @@ def _repair_identity(request: Request) -> tuple[dict[str, object] | None, str | 
     repo = str(_repair_value(request, "repo") or pr.get("repo") or loaded.get("repo") or "").strip()
     number_value = _repair_value(request, "pr_number", "number")
     number_value = number_value or pr.get("number") or loaded.get("number")
-    head = str(_repair_value(request, "verified_head", "head_sha", "head_oid", "headRefOid") or pr.get("verified_head") or pr.get("headSha") or pr.get("headRefOid") or "").strip()
+    remote = cond_blob(request, "read_repair_remote_head", "triage_read_repair_remote_head")
+    head = str(_repair_value(request, "verified_head", "head_sha", "head_oid", "headRefOid") or remote.get("remote_oid") or pr.get("verified_head") or pr.get("headSha") or pr.get("headRefOid") or "").strip()
     candidate = str(_repair_value(request, "candidate", "candidate_id", "candidate_sha") or "").strip()
     run_id = str(_repair_value(request, "run_id") or "").strip()
     try:
@@ -876,6 +877,8 @@ def read_repair_attempt_baseline(request: Request) -> Result:
     if upstream:
         return upstream
     verified = cond_blob(request, "verify_repair_worktree")
+    if dry_run_flag(request) and verified.get("status") == "planned":
+        return noop("dry_run", operation="read_repair_attempt_baseline")
     context = _repair_context(request)
     expected = str(verified.get("head") or "")
     if verified.get("ok") is not True or verified.get("status") != "verified" or not expected:
@@ -1113,10 +1116,14 @@ def decide_repair_attempt(request: Request) -> Result:
     if gated is not None:
         return gated
     predecessors = ("read_repair_attempt_state", "read_repair_completed_receipt", "verify_repair_attempt_recovery", "verify_repair_recovery_continuation", "evaluate_checks", "load_pr_fields", "read_repair_remote_head", "lifecycle_decide_lifecycle_transition")
-    terminal = _atomic_terminal(request, "decide_repair_attempt", *predecessors)
+    lifecycle = _repair_lifecycle_gate(request, "decide_repair_attempt", *predecessors)
+    if lifecycle is not None:
+        return lifecycle
+    checked_predecessors = tuple(peer for peer in predecessors if peer != "lifecycle_decide_lifecycle_transition")
+    terminal = _atomic_terminal(request, "decide_repair_attempt", *checked_predecessors)
     if terminal is not None:
         return terminal
-    idle = upstream_noop(request, *predecessors)
+    idle = upstream_noop(request, *checked_predecessors)
     if idle:
         return noop(str(idle.get("reason") or "repair_attempt_prerequisite_inactive"), decision="wait", authorize=False)
     data = input_of(request)
@@ -1402,11 +1409,11 @@ from lokay.steps.issue_to_pr import (
 def read_review_tasks(request: Request) -> Result:
     gated = _repair_decision_gate(request)
     if gated is not None: return gated
-    terminal = _atomic_terminal(request, "read_review_tasks", "decide_triage_action", "verify_merge_receipt")
+    terminal = _atomic_terminal(request, "read_review_tasks", "decide_triage_action")
     if terminal: return terminal
-    idle = upstream_noop(request, "decide_triage_action", "verify_merge_receipt")
+    idle = upstream_noop(request, "decide_triage_action")
     if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="read_review_tasks")
-    data, cfg = input_of(request), cfg_of(request); board = str(data.get("board") or cfg.get("board") or "")
+    data, cfg = input_of(request), cfg_of(request); selected = cond_blob(request, "select_fix_pr", "triage_select_fix_pr"); board = str(data.get("board") or cfg.get("board") or selected.get("board") or "")
     if not board: return fail("missing_board", failure_class="terminal", retry_safe=False, operation="read_review_tasks")
     try: tasks = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
     except CommandError as exc: return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_review_tasks", error=str(exc), board=board)
@@ -1420,7 +1427,7 @@ def find_review_marker(request: Request) -> Result:
     if terminal: return terminal
     idle = upstream_noop(request, "read_review_tasks")
     if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="find_review_marker")
-    data = input_of(request); rows = data.get("tasks") or cond_blob(request, "read_review_tasks").get("tasks") or []; repo, number = str(data.get("repo") or ""), str(data.get("pr_number") or data.get("number") or ""); marker = str(data.get("idempotency_key") or f"fix-pr-review:{repo}:{number}")
+    data = input_of(request); loaded = cond_blob(request, "load_pr_fields"); pr = loaded.get("pr") if isinstance(loaded.get("pr"), dict) else {}; rows = data.get("tasks") or cond_blob(request, "read_review_tasks").get("tasks") or []; repo, number = str(data.get("repo") or loaded.get("repo") or ""), str(data.get("pr_number") or data.get("number") or loaded.get("number") or pr.get("number") or ""); marker = str(data.get("idempotency_key") or f"fix-pr-review:{repo}:{number}")
     if not isinstance(rows, list): return fail("missing_review_rows", failure_class="terminal", retry_safe=False, operation="find_review_marker")
     matches = [t for t in rows if marker in str(t.get("body") or t.get("description") or "")]
     if len(matches) > 1: return fail("ambiguous_review_task", failure_class="terminal", retry_safe=False, operation="find_review_marker", matches=matches)
@@ -1433,7 +1440,7 @@ def create_review_task(request: Request) -> Result:
     if terminal: return terminal
     idle = upstream_noop(request, "find_review_marker")
     if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="create_review_task")
-    data, cfg = input_of(request), cfg_of(request); board, repo, number = str(data.get("board") or cfg.get("board") or ""), str(data.get("repo") or ""), str(data.get("pr_number") or data.get("number") or ""); reason = str(data.get("reason") or "checks_failed"); marker = str(data.get("idempotency_key") or f"fix-pr-review:{repo}:{number}"); title = str(data.get("title") or f"[fix-pr-review] {repo}#{number}: {reason}")
+    data, cfg = input_of(request), cfg_of(request); loaded = cond_blob(request, "load_pr_fields"); pr = loaded.get("pr") if isinstance(loaded.get("pr"), dict) else {}; board, repo, number = str(data.get("board") or loaded.get("board") or cfg.get("board") or ""), str(data.get("repo") or loaded.get("repo") or ""), str(data.get("pr_number") or data.get("number") or loaded.get("number") or pr.get("number") or ""); reason = str(data.get("reason") or "checks_failed"); marker = str(data.get("idempotency_key") or cond_blob(request, "find_review_marker").get("marker") or f"fix-pr-review:{repo}:{number}"); title = str(data.get("title") or f"[fix-pr-review] {repo}#{number}: {reason}")
     if not board or not repo or not number: return fail("missing_board_repo_or_number", failure_class="terminal", retry_safe=False, operation="create_review_task", idempotency_key=marker)
     if dry_run_flag(request): return planned(operation="create_review_task", board=board, title=title, idempotency_key=marker)
     body = str(data.get("body") or f"Repository: {repo}\nPR: #{number}\nReason: {reason}\nIdempotency-Key: {marker}\n")
@@ -1448,6 +1455,13 @@ def reconcile_review_task(request: Request) -> Result:
     if terminal: return terminal
     idle = upstream_noop(request, "create_review_task")
     if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="reconcile_review_task")
+    created = cond_blob(request, "create_review_task")
+    if dry_run_flag(request) and created.get("status") == "planned":
+        return planned(
+            operation="reconcile_review_task",
+            board=created.get("board"),
+            idempotency_key=created.get("idempotency_key"),
+        )
     return _reconcile_kanban_marker(request, "reconcile_review_task", "create_review_task", "fix-pr-review")
 
 def read_task_for_block(request: Request) -> Result:
@@ -1627,18 +1641,40 @@ def _repair_context_error(context: dict[str, str]) -> str | None:
          return "repair_worktree_path_escape"
      return None
 
+
+def _repair_lifecycle_gate(request: Request, operation: str, *peers: str) -> Result | None:
+     if "lifecycle_decide_lifecycle_transition" not in peers:
+         return None
+     lifecycle = cond_blob(request, "lifecycle_decide_lifecycle_transition")
+     if not lifecycle:
+         return None
+     if lifecycle.get("ok") is not True or lifecycle.get("status") in {"failed", "cancelled", "timed_out"}:
+         return fail("upstream_failed", failure_class="terminal", retry_safe=False, operation=operation, upstream=lifecycle)
+     outcome = str(lifecycle.get("outcome") or lifecycle.get("action") or "")
+     if outcome == "resume_repair":
+         return None
+     if outcome in {"wait_pending_checks", "finalize_merged", "finalize_closed", "ready_for_merge"}:
+         return noop(outcome, operation=operation)
+     return fail("invalid_repair_lifecycle", failure_class="terminal", retry_safe=False, operation=operation, upstream=lifecycle)
+
+
+
 def _repair_upstream(request: Request, operation: str, *peers: str) -> Result | None:
      gated = _repair_decision_gate(request)
      if gated is not None:
          return gated
-     terminal = _atomic_terminal(request, operation, *peers)
+     lifecycle = _repair_lifecycle_gate(request, operation, *peers)
+     if lifecycle is not None:
+         return lifecycle
+     checked_peers = tuple(peer for peer in peers if peer != "lifecycle_decide_lifecycle_transition")
+     terminal = _atomic_terminal(request, operation, *checked_peers)
      if terminal:
          return terminal
-     for peer in peers:
+     for peer in checked_peers:
          refreshed = cond_blob(request, peer)
          if refreshed.get("status") == "refreshed" and refreshed.get("refresh_kind") == "legacy_base_synchronization":
              return noop("legacy_base_refreshed", operation=operation, refresh_kind="legacy_base_synchronization", worked=False)
-     idle = upstream_noop(request, *peers)
+     idle = upstream_noop(request, *checked_peers)
      if idle:
          return noop(str(idle.get("reason") or "no_selected_pr"), operation=operation)
      return None
@@ -1743,10 +1779,14 @@ def verify_fetched_repair_remote_head(request: Request) -> Result:
     fetched = cond_blob(request, "fetch_repair_remote_head")
     remote_oid = str(fetched.get("remote_oid") or "").strip()
     acquired_ref = str(fetched.get("acquired_ref") or "").strip()
+    if dry_run_flag(request) and fetched.get("status") == "planned" and remote_oid and acquired_ref:
+        return planned(
+            operation="verify_fetched_repair_remote_head",
+            remote_oid=remote_oid,
+            acquired_ref=acquired_ref,
+        )
     if fetched.get("ok") is not True or fetched.get("status") != "fetched" or not remote_oid or not acquired_ref:
         return fail("repair_remote_head_not_fetched", failure_class="terminal", retry_safe=False, operation="verify_fetched_repair_remote_head", remote_oid=remote_oid, acquired_ref=acquired_ref, **context)
-    if dry_run_flag(request):
-        return planned(operation="verify_fetched_repair_remote_head", remote_oid=remote_oid, acquired_ref=acquired_ref)
     try:
         acquired_oid = rev_parse(context["clone_path"], acquired_ref)
     except (CommandError, OSError) as exc:
@@ -1803,6 +1843,13 @@ def read_repair_remote_ancestry(request: Request) -> Result:
     remote_oid = str(verified.get("remote_oid") or "")
     acquired_oid = str(verified.get("acquired_oid") or "")
     acquired_ref = str(verified.get("acquired_ref") or "")
+    if dry_run_flag(request) and verified.get("status") == "planned" and remote_oid and acquired_ref:
+        return planned(
+            operation="read_repair_remote_ancestry",
+            remote_oid=remote_oid,
+            acquired_ref=acquired_ref,
+            **context,
+        )
     if verified.get("ok") is not True or verified.get("status") != "verified" or verified.get("verified") is not True or not acquired_ref or not acquired_oid or acquired_oid != remote_oid:
         return fail("repair_remote_head_not_verified", failure_class="terminal", retry_safe=False, operation="read_repair_remote_ancestry", remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
     row = _repair_inventory_row(request)
@@ -2155,6 +2202,9 @@ def verify_repair_worktree(request: Request) -> Result:
      upstream = _repair_upstream(request, "verify_repair_worktree", "add_repair_worktree", "prepare_repair_worktree")
      if upstream:
          return upstream
+     added = cond_blob(request, "add_repair_worktree", "prepare_repair_worktree")
+     if dry_run_flag(request) and added.get("status") == "planned":
+         return planned(operation="verify_repair_worktree", worktree_path=_repair_context(request)["worktree_path"])
      context = _repair_context(request)
      expected = str(cond_blob(request, "decide_repair_worktree_ownership").get("remote_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or _repair_field(request, "remote_oid"))
      path = context["worktree_path"]

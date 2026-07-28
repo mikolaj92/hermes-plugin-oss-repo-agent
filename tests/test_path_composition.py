@@ -90,6 +90,22 @@ class PackageStructureTests(unittest.TestCase):
                     by_id[f"{prefix}verify_pr_comment"]["conduction"],
                     [f"{prefix}post_pr_comment", f"{prefix}decide_pr_comment", f"{prefix}load_pr_fields"],
                 )
+                self.assertEqual(
+                    by_id[f"{prefix}find_review_marker"]["conduction"],
+                    [f"{prefix}read_review_tasks", f"{prefix}load_pr_fields"],
+                )
+                self.assertEqual(
+                    by_id[f"{prefix}create_review_task"]["conduction"],
+                    [f"{prefix}find_review_marker", f"{prefix}load_pr_fields"],
+                )
+                self.assertEqual(
+                    by_id[f"{prefix}read_review_tasks"]["conduction"],
+                    [f"{prefix}decide_triage_action", f"{prefix}select_fix_pr"],
+                )
+                self.assertEqual(
+                    by_id[f"{prefix}read_repair_context"]["conduction"],
+                    [f"{prefix}build_repair_prompt", f"{prefix}decide_triage_action"],
+                )
                 self.assertEqual(by_id[f"{prefix}read_existing_repair_pr"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}verify_repair_push_oid"])
                 self.assertEqual(
                     by_id[f"{prefix}build_repair_receipt"]["conduction"],
@@ -107,9 +123,11 @@ class PackageStructureTests(unittest.TestCase):
                 )
                 self.assertEqual(by_id[f"{prefix}update_repair_branch_provenance"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}verify_repair_receipt", f"{prefix}verify_repair_push_oid"])
                 self.assertEqual(by_id[f"{prefix}verify_updated_repair_branch_provenance"]["conduction"], [f"{prefix}update_repair_branch_provenance"])
-                expected_completed = [f"{prefix}load_pr_fields", f"{prefix}read_repair_remote_head"]
+                expected_completed = [f"{prefix}load_pr_fields"]
                 if path["id"] == "auto_worker":
-                    expected_completed.append("lifecycle_decide_lifecycle_transition")
+                    expected_completed.extend([f"{prefix}read_repair_context", f"{prefix}read_repair_remote_head", "lifecycle_decide_lifecycle_transition"])
+                else:
+                    expected_completed.append(f"{prefix}read_repair_remote_head")
                 self.assertEqual(by_id[f"{prefix}read_repair_completed_receipt"]["conduction"], expected_completed)
                 self.assertIn(f"{prefix}read_repair_completed_receipt", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
                 self.assertEqual(by_id[f"{prefix}read_repair_attempt_reconciliation"]["conduction"], [f"{prefix}read_repair_attempt_state", f"{prefix}read_repair_completed_receipt", f"{prefix}read_repair_remote_head", f"{prefix}read_repair_worktree_inventory", f"{prefix}read_repair_branch_provenance"])

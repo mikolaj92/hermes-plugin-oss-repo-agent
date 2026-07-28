@@ -867,6 +867,7 @@ def decide_lifecycle_transition(request: Request) -> Result:
     data = input_of(request)
     github = cond_blob(request, "read_lifecycle_github_state")
     local = cond_blob(request, "read_lifecycle_local_evidence")
+    triage = cond_blob(request, "decide_triage_action", "triage_decide_triage_action")
     identity = _lifecycle_identity(data)
     if not identity.get("repo") or identity.get("issue") in (None, ""):
         dec_repo = github.get("repo") or local.get("repo")
@@ -919,6 +920,23 @@ def decide_lifecycle_transition(request: Request) -> Result:
     check_state = str(github.get("checks_state") or _lifecycle_check_state(pr))
     if check_state == "pending":
         return ok(status="decided", outcome="wait_pending_checks", action="wait_pending_checks", mutated=False, identity=identity, checks_state=check_state)
+    if (
+        triage.get("ok") is True
+        and triage.get("status") == "decided"
+        and triage.get("action") == "repair"
+        and triage.get("reason") == "missing_test_evidence"
+        and check_state == "passed"
+    ):
+        return ok(
+            status="decided",
+            outcome="resume_repair",
+            action="resume_repair",
+            mutated=False,
+            identity=identity,
+            checks_state=check_state,
+            labels=sorted(labels),
+            repair_reason="missing_test_evidence",
+        )
     if check_state == "failed":
         return ok(status="decided", outcome="resume_repair", action="resume_repair", mutated=False, identity=identity, checks_state=check_state, labels=sorted(labels))
     if check_state == "passed":

@@ -68,6 +68,27 @@ class LifecycleReconcileTests(unittest.TestCase):
         result = self._decide(self._conduction(checks=[{"state": "COMPLETED", "conclusion": "SUCCESS"}]))
         self.assertEqual(result["outcome"], "ready_for_merge")
         self.assertFalse(result["mutated"])
+    def test_missing_evidence_resumes_repair_only_after_checks_pass(self):
+        decision = {
+            "ok": True,
+            "status": "decided",
+            "action": "repair",
+            "reason": "missing_test_evidence",
+        }
+        passed = self._conduction(
+            checks=[{"state": "COMPLETED", "conclusion": "SUCCESS"}]
+        )
+        passed["triage_decide_triage_action"] = decision
+        result = self._decide(passed)
+        self.assertEqual(result["outcome"], "resume_repair")
+        self.assertEqual(result["repair_reason"], "missing_test_evidence")
+
+        pending = self._conduction(
+            checks=[{"state": "IN_PROGRESS", "conclusion": ""}]
+        )
+        pending["triage_decide_triage_action"] = decision
+        self.assertEqual(self._decide(pending)["outcome"], "wait_pending_checks")
+
 
 
     def test_merged_and_closed_are_finalized(self):

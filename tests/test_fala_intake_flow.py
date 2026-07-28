@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ from unittest import mock
 
 import fala
 
-from lokay.config import AgentConfig, RepoEntry
+from lokay.config import AgentConfig, PathConfig, RepoEntry
 from lokay.flows.intake import run_intake_flow
 from lokay.steps import claim, kanban_intake, poll
 
@@ -245,7 +246,7 @@ class IntakeFlowE2ETests(unittest.TestCase):
 
         self.assertEqual(result.fala_version, "0.7.15")
 
-    def test_auto_worker_runs_pr_lane_when_issue_intake_is_idle(self) -> None:
+    def _assert_auto_worker_repair_lane(self, conclusion: str) -> None:
         from lokay.flows.common import process_values
         from lokay.flows.runtime import read_journal_processes
         from lokay.tick_all import run_all
@@ -253,17 +254,36 @@ class IntakeFlowE2ETests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             calls = root / "gh-calls"
+            remote = root / "remote.git"
+            seed = root / "seed"
+            clone = root / "clone"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main", str(seed)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(seed), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(seed), "config", "user.name", "Test"], check=True)
+            (seed / "README").write_text("fixture\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(seed), "add", "README"], check=True)
+            subprocess.run(["git", "-C", str(seed), "commit", "-m", "fixture"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(seed), "branch", "ai/fix/9"], check=True)
+            subprocess.run(["git", "-C", str(seed), "remote", "add", "origin", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(seed), "push", "origin", "main", "ai/fix/9"], check=True, capture_output=True)
+            subprocess.run(["git", "--git-dir", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"], check=True)
+            subprocess.run(["git", "clone", str(remote), str(clone)], check=True, capture_output=True)
+            head_oid = subprocess.run(["git", "-C", str(seed), "rev-parse", "ai/fix/9"], check=True, capture_output=True, text=True).stdout.strip()
+            hermes = root / "hermes"
+            hermes.write_text("#!/bin/sh\nprintf '%s\\n' '[]'\n", encoding="utf-8")
+            hermes.chmod(0o755)
             gh = root / "gh"
             gh.write_text(
                 "#!/bin/sh\n"
                 f"printf '%s\\n' \"$*\" >> {calls}\n"
                 "case \"$1 $2\" in\n"
                 "  \"issue list\") printf '%s\\n' '[]' ;;\n"
-                "  \"pr list\") printf '%s\\n' '[{\"number\":9,\"title\":\"review me\",\"url\":\"https://example/9\",\"body\":\"Test plan: unit tests\",\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"ai/fix/9\",\"headRefOid\":\"abc123\",\"baseRefName\":\"main\",\"baseRefOid\":\"base123\",\"author\":{\"login\":\"o\"},\"labels\":[],\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"SUCCESS\"}],\"commits\":[],\"closingIssuesReferences\":[{\"number\":10}]}]' ;;\n"
+                f"  \"pr list\") printf '%s\\n' '[{{\"number\":9,\"title\":\"review me\",\"url\":\"https://example/9\",\"body\":\"Needs automated repair\",\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"ai/fix/9\",\"headRefOid\":\"{head_oid}\",\"baseRefName\":\"main\",\"baseRefOid\":\"{head_oid}\",\"author\":{{\"login\":\"o\"}},\"labels\":[],\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"conclusion\":\"{conclusion}\"}}],\"commits\":[],\"closingIssuesReferences\":[{{\"number\":10}}]}}]' ;;\n"
                 "  \"issue view\") printf '%s\\n' '{\"number\":10,\"state\":\"OPEN\",\"labels\":[],\"assignees\":[]}' ;;\n"
                 "  \"pr view\") case \"$*\" in\n"
                 "    *\"--json comments\"*) printf '%s\\n' '{\"comments\":[]}' ;;\n"
-                "    *) printf '%s\\n' '{\"number\":9,\"title\":\"review me\",\"url\":\"https://example/9\",\"body\":\"Test plan: unit tests\",\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"ai/fix/9\",\"headRefOid\":\"abc123\",\"baseRefName\":\"main\",\"baseRefOid\":\"base123\",\"author\":{\"login\":\"o\"},\"labels\":[],\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"SUCCESS\"}],\"commits\":[],\"closingIssuesReferences\":[{\"number\":10}]}' ;;\n"
+                f"    *) printf '%s\\n' '{{\"number\":9,\"title\":\"review me\",\"url\":\"https://example/9\",\"body\":\"Needs automated repair\",\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"ai/fix/9\",\"headRefOid\":\"{head_oid}\",\"baseRefName\":\"main\",\"baseRefOid\":\"{head_oid}\",\"author\":{{\"login\":\"o\"}},\"labels\":[],\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"conclusion\":\"{conclusion}\"}}],\"commits\":[],\"closingIssuesReferences\":[{{\"number\":10}}]}}' ;;\n"
                 "  esac ;;\n"
                 "  *) printf '%s\\n' 'unexpected gh mutation' >&2; exit 97 ;;\n"
                 "esac\n",
@@ -273,17 +293,24 @@ class IntakeFlowE2ETests(unittest.TestCase):
             cfg = AgentConfig(
                 mode="dry-run",
                 gh_cli=str(gh),
-                repos=(RepoEntry(repo="o/r", board="board-r", clone_path=str(root / "clone"), priority=1),),
+                raw={"candidate": "a" * 64},
+                paths=PathConfig(
+                    worktree_root=str(root / "worktrees"),
+                    dispatch_receipts=str(root / "dispatch"),
+                    task_receipts=str(root / "receipts"),
+                    merge_receipts=str(root / "merge"),
+                    active_issue=str(root / "active"),
+                ),
+                repos=(RepoEntry(repo="o/r", board="board-r", clone_path=str(clone), priority=1),),
             )
             db = root / "state.sqlite"
             fala_home = Path(fala.__file__).resolve().parents[2]
             if not (fala_home / "mojo" / "fala").is_dir():
                 self.skipTest("installed Fala package does not include its Mojo source checkout")
-            with mock.patch.dict(os.environ, {"FALA_HOME": str(fala_home)}, clear=False):
+            with mock.patch.dict(os.environ, {"FALA_HOME": str(fala_home), "PATH": f"{root}:{os.environ.get('PATH', '')}"}, clear=False):
                 result = asyncio.run(run_all(db_path=db, config=cfg, dry_run=True, limit=1))
             processes = read_journal_processes(db, result["run_id"])
             call_log = calls.read_text(encoding="utf-8")
-            self.assertFalse(result["any_failed"], msg=str([(process.step_id, process.status, process.output, process.error) for process in processes if process.status != "succeeded"]))
         by_step = {process.step_id: process for process in processes}
         self.assertEqual(result["path_id"], "auto_worker")
         self.assertEqual(by_step["intake_read_open_issues"].status, "succeeded")
@@ -291,15 +318,36 @@ class IntakeFlowE2ETests(unittest.TestCase):
         self.assertEqual(by_step["triage_read_open_prs"].status, "succeeded")
         selected = process_values({"output": by_step["triage_select_fix_pr"].output})
         self.assertEqual((selected["repo"], selected["number"]), ("o/r", 9))
+        checks = process_values({"output": by_step["triage_evaluate_checks"].output})
+        evidence = process_values({"output": by_step["triage_evaluate_test_evidence"].output})
+        self.assertEqual(checks["status"], "checks_passed" if conclusion == "SUCCESS" else "checks_failed")
+        self.assertEqual(evidence["status"], "evidence_missing")
         decision = process_values({"output": by_step["triage_decide_triage_action"].output})
-        self.assertEqual(decision["action"], "comment_block")
-        self.assertEqual(by_step["triage_post_pr_comment"].status, "succeeded")
-        self.assertEqual(process_values({"output": by_step["triage_post_pr_comment"].output})["status"], "planned")
-        verified_comment = process_values({"output": by_step["triage_verify_pr_comment"].output})
-        self.assertEqual(verified_comment["status"], "planned")
-        self.assertEqual((verified_comment["repo"], verified_comment["number"]), ("o/r", 9))
-        self.assertTrue(all(process.status == "succeeded" for process in processes), msg=str(processes))
+        self.assertEqual(decision["action"], "repair")
+        lifecycle = process_values({"output": by_step["lifecycle_decide_lifecycle_transition"].output})
+        self.assertEqual(lifecycle["action"], "resume_repair")
+        repair_context = process_values({"output": by_step["triage_read_repair_context"].output})
+        remote_head = process_values({"output": by_step["triage_read_repair_remote_head"].output})
+        self.assertEqual(repair_context["status"], "read")
+        self.assertEqual(remote_head["status"], "read")
+        self.assertEqual(remote_head["remote_oid"], head_oid)
+        preparation = process_values({"output": by_step["triage_add_repair_worktree"].output})
+        self.assertEqual(preparation["status"], "planned")
+        self.assertEqual(process_values({"output": by_step["triage_post_pr_comment"].output})["status"], "noop")
+        failed = [
+            (process.step_id, process.status, process.error, process_values({"output": process.output}))
+            for process in processes
+            if process.status != "succeeded"
+        ]
+        self.assertFalse(failed, msg=str(failed))
+        self.assertFalse(result["any_failed"])
         self.assertNotIn("pr comment", call_log)
+
+    def test_auto_worker_runs_pr_lane_when_issue_intake_is_idle(self) -> None:
+        self._assert_auto_worker_repair_lane("FAILURE")
+
+    def test_auto_worker_repairs_green_pr_with_missing_test_evidence(self) -> None:
+        self._assert_auto_worker_repair_lane("SUCCESS")
 
 
 if __name__ == "__main__":

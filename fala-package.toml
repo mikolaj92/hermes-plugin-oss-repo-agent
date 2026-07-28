@@ -635,21 +635,21 @@ config = { handler = "lokay.steps.triage.verify_merge_receipt" }
 [[correlation_paths.effectors]]
 id = "read_review_tasks"
 capability = "lokay_step"
-conduction = ["decide_triage_action", "verify_merge_receipt"]
+conduction = ["decide_triage_action", "select_fix_pr"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_review_tasks" }
 
 [[correlation_paths.effectors]]
 id = "find_review_marker"
 capability = "lokay_step"
-conduction = ["read_review_tasks"]
+conduction = ["read_review_tasks", "load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.find_review_marker" }
 
 [[correlation_paths.effectors]]
 id = "create_review_task"
 capability = "lokay_step"
-conduction = ["find_review_marker"]
+conduction = ["find_review_marker", "load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.create_review_task" }
 
@@ -670,7 +670,7 @@ config = { handler = "lokay.steps.repair.build_repair_prompt" }
 [[correlation_paths.effectors]]
 id = "read_repair_context"
 capability = "lokay_step"
-conduction = ["build_repair_prompt"]
+conduction = ["build_repair_prompt", "decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_context" }
 
@@ -1929,21 +1929,21 @@ config = { handler = "lokay.steps.triage.verify_merge_receipt" }
 [[correlation_paths.effectors]]
 id = "triage_read_review_tasks"
 capability = "lokay_step"
-conduction = ["triage_decide_triage_action", "triage_verify_merge_receipt"]
+conduction = ["triage_decide_triage_action", "triage_select_fix_pr"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_review_tasks" }
 
 [[correlation_paths.effectors]]
 id = "triage_find_review_marker"
 capability = "lokay_step"
-conduction = ["triage_read_review_tasks"]
+conduction = ["triage_read_review_tasks", "triage_load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.find_review_marker" }
 
 [[correlation_paths.effectors]]
 id = "triage_create_review_task"
 capability = "lokay_step"
-conduction = ["triage_find_review_marker"]
+conduction = ["triage_find_review_marker", "triage_load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.create_review_task" }
 
@@ -1980,7 +1980,7 @@ config = { handler = "lokay.steps.cleanup_reconcile.read_lifecycle_local_evidenc
 [[correlation_paths.effectors]]
 id = "lifecycle_decide_lifecycle_transition"
 capability = "lokay_step"
-conduction = ["lifecycle_read_lifecycle_github_state", "lifecycle_read_lifecycle_local_evidence"]
+conduction = ["triage_decide_triage_action", "lifecycle_read_lifecycle_github_state", "lifecycle_read_lifecycle_local_evidence"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.cleanup_reconcile.decide_lifecycle_transition" }
 
@@ -2001,7 +2001,7 @@ config = { handler = "lokay.steps.cleanup_reconcile.verify_orphan_claim_release"
 [[correlation_paths.effectors]]
 id = "triage_read_repair_context"
 capability = "lokay_step"
-conduction = ["triage_build_repair_prompt"]
+conduction = ["triage_build_repair_prompt", "triage_decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_context" }
 
@@ -2093,7 +2093,7 @@ config = { handler = "lokay.steps.repair.read_repair_creation_evidence" }
 [[correlation_paths.effectors]]
 id = "triage_read_repair_attempt_state"
 capability = "lokay_step"
-conduction = ["triage_decide_triage_action", "triage_evaluate_checks", "triage_load_pr_fields", "triage_read_repair_remote_head", "lifecycle_decide_lifecycle_transition"]
+conduction = ["triage_decide_triage_action", "triage_evaluate_checks", "triage_load_pr_fields", "triage_read_repair_context", "triage_read_repair_remote_head", "lifecycle_decide_lifecycle_transition"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_attempt_state" }
 
@@ -2178,7 +2178,7 @@ config = { handler = "lokay.steps.repair.read_repair_attempt_baseline" }
 [[correlation_paths.effectors]]
 id = "triage_read_repair_completed_receipt"
 capability = "lokay_step"
-conduction = ["triage_load_pr_fields", "triage_read_repair_remote_head", "lifecycle_decide_lifecycle_transition"]
+conduction = ["triage_load_pr_fields", "triage_read_repair_context", "triage_read_repair_remote_head", "lifecycle_decide_lifecycle_transition"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_completed_receipt" }
 
