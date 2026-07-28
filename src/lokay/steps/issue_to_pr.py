@@ -518,7 +518,7 @@ def _reconcile_kanban_marker(request: Request, operation: str, peer: str, prefix
     idle = upstream_noop(request, "create_fix_task", "find_fix_task_marker", "select_dispatch_task")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation=operation)
-    data = input_of(request); board = str(data.get("board") or _atomic_board(request)); marker = str(data.get("idempotency_key") or "")
+    data = input_of(request); created = cond_blob(request, peer); board = str(data.get("board") or created.get("board") or _atomic_board(request)); marker = str(data.get("idempotency_key") or created.get("idempotency_key") or created.get("marker") or "")
     if not board or not marker:
         return fail("missing_board_or_marker", failure_class="terminal", retry_safe=False, operation=operation)
     try: rows = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])

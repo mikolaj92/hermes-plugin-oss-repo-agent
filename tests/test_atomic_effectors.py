@@ -618,6 +618,29 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(out["status"], "planned")
         self.assertEqual(out["board"], "board-r")
         self.assertEqual(out["idempotency_key"], "fix-pr-review:o/r:9")
+    @mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json")
+    def test_review_task_reconciliation_uses_created_identity(self, kanban: mock.Mock) -> None:
+        marker = "fix-pr-review:o/r:9"
+        kanban.return_value = [{"id": "task-1", "body": f"Idempotency-Key: {marker}"}]
+        out = repair.reconcile_review_task(req({
+            "conduction": {
+                "decide_triage_action": {
+                    "ok": True,
+                    "status": "decided",
+                    "action": "repair",
+                },
+                "create_review_task": {
+                    "ok": True,
+                    "status": "created",
+                    "board": "board-r",
+                    "marker": marker,
+                },
+            },
+        }))
+        self.assertEqual(out["status"], "reconciled")
+        self.assertEqual(out["board"], "board-r")
+        self.assertEqual(out["marker"], marker)
+
 
     def test_repair_ownership_allows_empty_dispatch_task(self) -> None:
         context = {
