@@ -438,6 +438,17 @@ class RepairTests(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertEqual(out["reason"], "repair_fast_forward_readback_mismatch")
         self.assertTrue(out["mutated"])
+    def test_fast_forward_stops_after_legacy_refresh(self) -> None:
+        refreshed = {"status": "refreshed", "ok": True, "refresh_kind": "legacy_base_synchronization"}
+        authorized = {"ok": True, "status": "authorized", "should_fast_forward": True, "authorized_branch": "lokay/repair/x", "authorized_local_oid": "a" * 40, "remote_oid": "b" * 40}
+        request = req({"conduction": {"verify_legacy_repair_pr_head": refreshed, "decide_repair_worktree_fast_forward_execution": authorized}})
+        with mock.patch("lokay.steps.repair.git") as git_call:
+            out = repair.fast_forward_repair_worktree(request)
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "legacy_base_refreshed")
+        self.assertFalse(out["mutated"])
+        git_call.assert_not_called()
+
 
     def test_ownership_propagates_legacy_refresh_failure(self) -> None:
         failed = {"ok": False, "status": "failed", "reason": "legacy_refresh_failed", "mutated": False}
