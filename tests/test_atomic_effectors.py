@@ -967,6 +967,30 @@ class RepairTests(unittest.TestCase):
 
 
 
+    def test_read_repair_omp_preconditions_success_preserves_identity(self) -> None:
+        from lokay.steps import repair
+
+        request = req({
+            "repo": "mikolaj92/lokay",
+            "issue": 10,
+            "number": 11,
+            "branch": "ai/fix/10-issue",
+            "clone_path": "/tmp/clone",
+            "worktree_root": "/tmp/worktrees",
+            "conduction": {
+                "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True},
+                "verify_repair_worktree": {"ok": True, "status": "verified", "head": "head-a"},
+                "verify_repair_worktree_head": {"ok": True, "status": "verified"},
+            },
+        })
+        context = repair._repair_context(request)
+        with mock.patch("lokay.steps.repair.git", side_effect=[context["worktree_path"], context["local_branch"]]), mock.patch("lokay.steps.repair.rev_parse", return_value="head-a"):
+            out = repair.read_repair_omp_preconditions(request)
+        self.assertEqual(out["status"], "ready")
+        self.assertEqual(out["branch"], "ai/fix/10-issue")
+        self.assertEqual(out["worktree_path"], context["worktree_path"])
+        self.assertEqual(out["remote_oid"], "head-a")
+
     def test_decide_repair_attempt_disabled_or_dry_run(self) -> None:
         from lokay.steps.repair import decide_repair_attempt
         # disabled

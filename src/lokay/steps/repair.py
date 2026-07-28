@@ -2282,7 +2282,7 @@ def read_repair_omp_preconditions(request: Request) -> Result:
     expected = str(cond_blob(request, "verify_repair_worktree", "verify_repair_worktree_head").get("head") or cond_blob(request, "decide_repair_worktree_ownership").get("remote_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
     if expected and head != expected:
         return fail("repair_omp_head_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", expected_head=expected, actual_head=head, **context)
-    return ok(status="ready", operation="read_repair_omp_preconditions", pre_head=head, worktree_path=path, remote_oid=expected, **context)
+    return ok(**{**context, "status": "ready", "operation": "read_repair_omp_preconditions", "pre_head": head, "worktree_path": path, "remote_oid": expected})
 
 
 def invoke_repair_omp(request: Request) -> Result:
