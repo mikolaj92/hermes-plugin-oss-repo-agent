@@ -509,7 +509,7 @@ config = { handler = "lokay.steps.triage.decide_pr_assignee" }
 [[correlation_paths.effectors]]
 id = "assign_pr"
 capability = "lokay_step"
-conduction = ["decide_pr_assignee"]
+conduction = ["decide_pr_assignee", "decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.assign_pr" }
 
@@ -558,7 +558,7 @@ config = { handler = "lokay.steps.triage.read_merge_preconditions" }
 [[correlation_paths.effectors]]
 id = "merge_pr"
 capability = "lokay_step"
-conduction = ["read_merge_preconditions"]
+conduction = ["read_merge_preconditions", "decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.merge_pr" }
 
@@ -593,7 +593,7 @@ config = { handler = "lokay.steps.triage.read_linked_issue_state" }
 [[correlation_paths.effectors]]
 id = "close_linked_issue"
 capability = "lokay_step"
-conduction = ["read_linked_issue_state"]
+conduction = ["read_linked_issue_state", "decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.close_linked_issue" }
 
@@ -607,7 +607,7 @@ config = { handler = "lokay.steps.triage.verify_linked_issue_closed" }
 [[correlation_paths.effectors]]
 id = "build_merge_receipt"
 capability = "lokay_step"
-conduction = ["verify_merge_provenance", "read_merge_postcondition", "verify_linked_issue_closed"]
+conduction = ["verify_merge_provenance", "read_merge_postcondition", "verify_linked_issue_closed", "decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.build_merge_receipt" }
 
@@ -621,7 +621,7 @@ config = { handler = "lokay.steps.triage.read_receipt_merge_provenance" }
 [[correlation_paths.effectors]]
 id = "publish_merge_receipt"
 capability = "lokay_step"
-conduction = ["read_receipt_merge_provenance"]
+conduction = ["read_receipt_merge_provenance", "decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.publish_merge_receipt" }
 
@@ -1803,7 +1803,7 @@ config = { handler = "lokay.steps.triage.decide_pr_assignee" }
 [[correlation_paths.effectors]]
 id = "triage_assign_pr"
 capability = "lokay_step"
-conduction = ["triage_decide_pr_assignee"]
+conduction = ["triage_decide_pr_assignee", "triage_decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.assign_pr" }
 
@@ -1852,7 +1852,7 @@ config = { handler = "lokay.steps.triage.read_merge_preconditions" }
 [[correlation_paths.effectors]]
 id = "triage_merge_pr"
 capability = "lokay_step"
-conduction = ["triage_read_merge_preconditions"]
+conduction = ["triage_read_merge_preconditions", "triage_decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.merge_pr" }
 
@@ -1887,7 +1887,7 @@ config = { handler = "lokay.steps.triage.read_linked_issue_state" }
 [[correlation_paths.effectors]]
 id = "triage_close_linked_issue"
 capability = "lokay_step"
-conduction = ["triage_read_linked_issue_state"]
+conduction = ["triage_read_linked_issue_state", "triage_decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.close_linked_issue" }
 
@@ -1901,7 +1901,7 @@ config = { handler = "lokay.steps.triage.verify_linked_issue_closed" }
 [[correlation_paths.effectors]]
 id = "triage_build_merge_receipt"
 capability = "lokay_step"
-conduction = ["triage_verify_merge_provenance", "triage_read_merge_postcondition", "triage_verify_linked_issue_closed"]
+conduction = ["triage_verify_merge_provenance", "triage_read_merge_postcondition", "triage_verify_linked_issue_closed", "triage_decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.build_merge_receipt" }
 
@@ -1915,7 +1915,7 @@ config = { handler = "lokay.steps.triage.read_receipt_merge_provenance" }
 [[correlation_paths.effectors]]
 id = "triage_publish_merge_receipt"
 capability = "lokay_step"
-conduction = ["triage_read_receipt_merge_provenance"]
+conduction = ["triage_read_receipt_merge_provenance", "triage_decide_triage_action"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.publish_merge_receipt" }
 

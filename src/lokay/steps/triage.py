@@ -204,6 +204,9 @@ def _atomic_context(request: Request, *, kind: str = "pr") -> dict[str, Any]:
     ).strip()
     if head_oid:
         context["head_oid"] = head_oid
+    action = str(data.get("action") or upstream.get("action") or "").strip()
+    if action:
+        context["action"] = action
     return context
 
 

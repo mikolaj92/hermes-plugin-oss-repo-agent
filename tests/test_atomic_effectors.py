@@ -2734,28 +2734,44 @@ class TriageTests(unittest.TestCase):
         selected = triage.decide_pr_assignee(req({
             "conduction": {"triage_read_pr_assignees": assignees},
         }))
-        assigned = triage.assign_pr(req({
-            "dry_run": True,
-            "conduction": {
-                "triage_decide_triage_action": decision,
-                "triage_decide_pr_assignee": selected,
-            },
-        }))
-        verified = triage.verify_pr_assignee(req({
-            "dry_run": True,
-            "conduction": {
-                "triage_assign_pr": assigned,
-                "triage_decide_pr_assignee": selected,
-            },
-        }))
-        preconditions = triage.read_merge_preconditions(req({
-            "dry_run": True,
-            "conduction": {"triage_verify_pr_assignee": verified},
-        }))
+        with mock.patch("lokay.steps.triage.run_cmd"):
+            assigned = triage.assign_pr(req({
+                "conduction": {
+                    "triage_decide_pr_assignee": selected,
+                    "triage_decide_triage_action": decision,
+                },
+            }))
+        assigned_readback = mock.Mock(stdout='{"assignees": [{"login": "mikolaj92"}]}')
+        with mock.patch("lokay.steps.triage._pr_view", return_value=assigned_readback):
+            verified = triage.verify_pr_assignee(req({
+                "conduction": {
+                    "triage_assign_pr": assigned,
+                    "triage_decide_pr_assignee": selected,
+                },
+            }))
+        merge_view = {"state": "OPEN", "headRefOid": "abc"}
+        with mock.patch("lokay.steps.triage._read_merge_view", return_value=merge_view):
+            preconditions = triage.read_merge_preconditions(req({
+                "dry_run": False,
+                "conduction": {"triage_verify_pr_assignee": verified},
+            }))
         self.assertEqual(
-            (preconditions["repo"], preconditions["number"], preconditions["head_oid"]),
-            ("o/r", 5, "abc"),
+            (
+                preconditions["status"],
+                preconditions["repo"],
+                preconditions["number"],
+                preconditions["head_oid"],
+            ),
+            ("merge_preconditions_read", "o/r", 5, "abc"),
         )
+        merged = triage.merge_pr(req({
+            "dry_run": True,
+            "conduction": {
+                "triage_read_merge_preconditions": preconditions,
+                "triage_decide_triage_action": decision,
+            },
+        }))
+        self.assertEqual((merged["status"], merged["repo"], merged["number"]), ("planned", "o/r", 5))
 
 
     def test_evaluate_checks_pass_and_fail(self) -> None:
