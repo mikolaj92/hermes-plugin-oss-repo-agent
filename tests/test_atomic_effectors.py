@@ -1006,6 +1006,33 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(out["decision"], "invoke")
         self.assertTrue(out["authorize"])
         self.assertEqual(out["failures"], [{"identity": "ci", "conclusion": "FAILURE"}])
+    def test_decide_repair_attempt_invokes_for_missing_test_evidence(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+
+        out = decide_repair_attempt(req({
+            "enabled": True,
+            "live": True,
+            "dry_run": False,
+            "repo": "o/r",
+            "number": 1,
+            "verified_head": "abc",
+            "candidate": "c1",
+            "run_id": "r1",
+            "checks": [{"name": "ci", "conclusion": "SUCCESS"}],
+            "conduction": {
+                "triage_decide_triage_action": {
+                    "ok": True,
+                    "status": "decided",
+                    "action": "repair",
+                    "reason": "missing_test_evidence",
+                },
+            },
+        }))
+        self.assertEqual(out["status"], "invoke")
+        self.assertTrue(out["authorize"])
+        self.assertEqual(out["reason"], "missing_test_evidence")
+        self.assertEqual(out["failures"], [])
+
 
 
     def test_decide_repair_attempt_repeated_head_blocks_changed_checks(self) -> None:

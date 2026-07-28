@@ -1214,12 +1214,20 @@ def decide_repair_attempt(request: Request) -> Result:
     if pending:
         return ok(status="pending", decision="wait", authorize=False, reason="checks_pending", checks=checks, **identity)
     failures = [item for item in checks if item["conclusion"] in {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"}]
-    if not failures:
+    triage = cond_blob(request, "decide_triage_action", "triage_decide_triage_action")
+    missing_test_evidence = (
+        triage.get("ok") is True
+        and triage.get("status") == "decided"
+        and triage.get("action") == "repair"
+        and triage.get("reason") == "missing_test_evidence"
+    )
+    if not failures and not missing_test_evidence:
         return ok(status="already_repaired", decision="already_repaired", authorize=False, reason="checks_passed", checks=checks, **identity)
     return ok(
         status="invoke",
         decision="invoke",
         authorize=True,
+        reason="missing_test_evidence" if missing_test_evidence and not failures else "checks_failed",
         checks=checks,
         failures=failures,
         attempt_state=_repair_attempt_state(identity, checks),
