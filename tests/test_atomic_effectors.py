@@ -1221,7 +1221,7 @@ CREATE TABLE runs (
                 **context,
                 "number": 1,
                 "verified_head": "a" * 40,
-                "conduction": {"reserve_repair_attempt": reserved},
+                "conduction": {"reserve_repair_attempt": reserved, "read_repair_context": {"ok": True, "status": "read", **ctx}},
             }))
             self.assertTrue(verified_reservation["verified"])
             persist("run-a", "triage_verify_repair_attempt_reservation", verified_reservation)
@@ -1951,10 +1951,12 @@ CREATE TABLE runs (
                 "recovery_claim": claim,
             }
             out = repair.verify_repair_attempt_reservation(req({
-                "candidate": "new-candidate",
-                "run_id": "new-run",
+                "repo": "o/r", "number": 1, "verified_head": "head-a",
+                "candidate": "new-candidate", "run_id": "new-run",
+                "branch": "branch-a", "local_branch": "local-branch-a", "worktree_path": "worktree-path-a",
                 "conduction": {
                     "reserve_repair_attempt": reserved,
+                    "read_repair_context": {"ok": True, "status": "read", "repo": "o/r", "pr_number": 1, "branch": "branch-a", "local_branch": "local-branch-a", "worktree_path": "worktree-path-a"},
                     "verify_repair_attempt_recovery": verified,
                     "verify_repair_recovery_continuation": {
                         "ok": True,

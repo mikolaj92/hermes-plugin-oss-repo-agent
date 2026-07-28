@@ -1055,30 +1055,52 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
     gated = _repair_decision_gate(request)
     if gated is not None:
         return gated
-    peers = ("reserve_repair_attempt", "verify_repair_attempt_recovery", "verify_repair_recovery_continuation")
+    peers = ("reserve_repair_attempt", "read_repair_context", "verify_repair_attempt_recovery", "verify_repair_recovery_continuation")
     upstream = _repair_upstream(request, "verify_repair_attempt_reservation", *peers)
     if upstream:
         return upstream
     source = cond_blob(request, "reserve_repair_attempt")
+    context_blob = cond_blob(request, "read_repair_context")
     path = str(input_of(request).get("reservation_path") or source.get("reservation_path") or "")
     if not path:
         return fail("missing_repair_attempt_reservation", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation")
+    if source.get("status") != "recovered" and (context_blob.get("ok") is not True or context_blob.get("status") != "read"):
+        return fail("repair_attempt_context_required", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return fail("repair_attempt_reservation_readback_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", error=str(exc), reservation_path=path)
     stored = _reservation_identity(payload)
-    if stored is None:
+    reserved = source.get("reservation") if isinstance(source.get("reservation"), dict) else None
+    reserved_identity = _reservation_identity(reserved)
+    if stored is None or (source.get("status") != "recovered" and (reserved_identity is None or stored != reserved_identity)):
         return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="invalid_reservation_identity")
     required_baseline = ("pre_head", "pre_status", "repo_branch", "local_branch", "worktree_path")
     if payload.get("status") != "reserved" or payload.get("attempted") is not True or any(key not in payload for key in required_baseline):
         return fail("repair_attempt_reservation_invalid", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
+    if source.get("status") != "recovered":
+        context = {key: str(context_blob.get(key) or "") for key in ("repo", "pr_number", "branch", "local_branch", "worktree_path")}
+        try:
+            context_pr = int(context["pr_number"])
+        except (TypeError, ValueError):
+            context_pr = 0
+        if (
+            not context["repo"] or context_pr <= 0
+            or str(stored["repo"]) != context["repo"]
+            or int(stored["pr_number"]) != context_pr
+            or str(payload.get("repo_branch") or "") != context["branch"]
+            or str(payload.get("local_branch") or "") != context["local_branch"]
+            or Path(str(payload.get("worktree_path") or "")).resolve() != Path(context["worktree_path"]).resolve()
+        ):
+            return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="reservation_context_mismatch")
+    current_candidate = str(input_of(request).get("candidate") or input_of(request).get("candidate_id") or cfg_of(request).get("candidate") or "")
+    current_run_id = str(input_of(request).get("run_id") or cfg_of(request).get("run_id") or "")
+    if source.get("status") != "recovered" and (not current_candidate or not current_run_id or current_candidate != str(stored["candidate"]) or current_run_id != str(stored["run_id"])):
+        return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="missing_repair_provenance")
     if source.get("status") == "recovered":
         recovery = cond_blob(request, "verify_repair_attempt_recovery")
         continuation = cond_blob(request, "verify_repair_recovery_continuation")
         claim = source.get("recovery_claim")
-        current_run_id = str(input_of(request).get("run_id") or cfg_of(request).get("run_id") or "")
-        current_candidate = str(input_of(request).get("candidate") or input_of(request).get("candidate_id") or cfg_of(request).get("candidate") or "")
         original = bool(isinstance(claim, dict) and str(claim.get("recovery_candidate") or "") == current_candidate and str(claim.get("recovery_run_id") or "") == current_run_id)
         continued = bool(continuation.get("ok") is True and continuation.get("status") in {"original", "verified"} and continuation.get("continuation_verified") is True)
         valid = bool(
@@ -1092,18 +1114,11 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
             and str(claim.get("verified_head") or "") == str(stored["verified_head"])
             and str(claim.get("reservation_candidate") or "") == str(stored["candidate"])
             and str(claim.get("reservation_run_id") or "") == str(stored["run_id"])
-            and current_candidate
-            and current_run_id
             and (original or continued)
         )
         if not valid:
             return fail("repair_attempt_recovery_claim_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
         return ok(status="verified", operation="verify_repair_attempt_reservation", verified=True, recovered=True, reservation=payload, recovery_claim=claim, continuation=continuation.get("continuation"), reservation_path=path, mutated=False)
-    identity, error = _repair_identity(request)
-    if identity is None:
-        return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict=error)
-    if any(str(stored.get(key)) != str(identity.get(key)) for key in ("repo", "pr_number", "verified_head", "candidate", "run_id")):
-        return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict=error)
     return ok(status="verified", operation="verify_repair_attempt_reservation", verified=True, reservation=payload, reservation_path=path, mutated=False)
 
 
