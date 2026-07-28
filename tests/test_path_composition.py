@@ -86,6 +86,10 @@ class PackageStructureTests(unittest.TestCase):
                     by_id[f"{prefix}post_pr_comment"]["conduction"],
                     [f"{prefix}decide_pr_comment", f"{prefix}decide_triage_action", f"{prefix}load_pr_fields"],
                 )
+                self.assertEqual(
+                    by_id[f"{prefix}verify_pr_comment"]["conduction"],
+                    [f"{prefix}post_pr_comment", f"{prefix}decide_pr_comment", f"{prefix}load_pr_fields"],
+                )
                 self.assertEqual(by_id[f"{prefix}read_existing_repair_pr"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}verify_repair_push_oid"])
                 self.assertEqual(
                     by_id[f"{prefix}build_repair_receipt"]["conduction"],

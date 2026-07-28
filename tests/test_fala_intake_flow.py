@@ -295,6 +295,9 @@ class IntakeFlowE2ETests(unittest.TestCase):
         self.assertEqual(decision["action"], "comment_block")
         self.assertEqual(by_step["triage_post_pr_comment"].status, "succeeded")
         self.assertEqual(process_values({"output": by_step["triage_post_pr_comment"].output})["status"], "planned")
+        verified_comment = process_values({"output": by_step["triage_verify_pr_comment"].output})
+        self.assertEqual(verified_comment["status"], "planned")
+        self.assertEqual((verified_comment["repo"], verified_comment["number"]), ("o/r", 9))
         self.assertTrue(all(process.status == "succeeded" for process in processes), msg=str(processes))
         self.assertNotIn("pr comment", call_log)
 

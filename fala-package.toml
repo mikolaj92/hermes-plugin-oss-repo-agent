@@ -544,7 +544,7 @@ config = { handler = "lokay.steps.triage.post_pr_comment" }
 [[correlation_paths.effectors]]
 id = "verify_pr_comment"
 capability = "lokay_step"
-conduction = ["post_pr_comment", "decide_pr_comment"]
+conduction = ["post_pr_comment", "decide_pr_comment", "load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.verify_pr_comment" }
 
@@ -1838,7 +1838,7 @@ config = { handler = "lokay.steps.triage.post_pr_comment" }
 [[correlation_paths.effectors]]
 id = "triage_verify_pr_comment"
 capability = "lokay_step"
-conduction = ["triage_post_pr_comment", "triage_decide_pr_comment"]
+conduction = ["triage_post_pr_comment", "triage_decide_pr_comment", "triage_load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.verify_pr_comment" }
 
