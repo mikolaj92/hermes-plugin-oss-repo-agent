@@ -1707,6 +1707,8 @@ def _repair_lifecycle_gate(request: Request, operation: str, *peers: str) -> Res
      lifecycle = cond_blob(request, "lifecycle_decide_lifecycle_transition")
      if not lifecycle:
          return None
+     if lifecycle.get("status") == "noop":
+         return noop(str(lifecycle.get("reason") or "no_selected_pr"), operation=operation)
      if lifecycle.get("ok") is not True or lifecycle.get("status") in {"failed", "cancelled", "timed_out"}:
          return fail("upstream_failed", failure_class="terminal", retry_safe=False, operation=operation, upstream=lifecycle)
      outcome = str(lifecycle.get("outcome") or lifecycle.get("action") or "")

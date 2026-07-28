@@ -82,6 +82,14 @@ class LifecycleReconcileTests(unittest.TestCase):
         result = cleanup_reconcile._resolve_lifecycle_context({"input": {"conduction": conduction}, "config": self.config})
         self.assertEqual((result["status"], result["repo"], result["issue"], result["pr_number"]), ("resolved", "owner/repo", 10, 11))
 
+    def test_lifecycle_decision_propagates_inactive_readers(self):
+        conduction = {
+            "lifecycle_read_lifecycle_github_state": {"ok": True, "status": "noop", "reason": "no_open_prs"},
+            "lifecycle_read_lifecycle_local_evidence": {"ok": True, "status": "noop", "reason": "no_open_prs"},
+        }
+        result = cleanup_reconcile.decide_lifecycle_transition({"input": {"conduction": conduction}, "config": self.config})
+        self.assertEqual((result["status"], result["reason"]), ("noop", "no_open_prs"))
+
     def test_failed_open_pr_resumes_repair_without_label_mutation(self):
         result = self._decide(self._conduction())
         self.assertEqual(result["outcome"], "resume_repair")

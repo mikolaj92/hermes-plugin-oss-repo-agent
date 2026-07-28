@@ -585,6 +585,17 @@ class RepairTests(unittest.TestCase):
                     self.assertEqual(result["status"], expected)
                     self.assertEqual(result["reason"], outcome)
 
+        inactive = repair._repair_lifecycle_gate(req({
+            "conduction": {
+                "lifecycle_decide_lifecycle_transition": {
+                    "ok": True,
+                    "status": "noop",
+                    "reason": "no_open_prs",
+                }
+            }
+        }), operation, "lifecycle_decide_lifecycle_transition")
+        self.assertEqual((inactive["status"], inactive["reason"]), ("noop", "no_open_prs"))
+
         malformed = repair._repair_lifecycle_gate(req({
             "conduction": {
                 "lifecycle_decide_lifecycle_transition": {

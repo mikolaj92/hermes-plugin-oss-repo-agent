@@ -862,6 +862,10 @@ def decide_lifecycle_transition(request: Request) -> Result:
     upstream = _reconcile_upstream_failure(request, "decide_lifecycle_transition", "read_lifecycle_github_state", "read_lifecycle_local_evidence")
     if upstream:
         return upstream
+    github_idle = upstream_noop(request, "read_lifecycle_github_state")
+    local_idle = upstream_noop(request, "read_lifecycle_local_evidence")
+    if github_idle and local_idle:
+        return noop(str(github_idle.get("reason") or local_idle.get("reason") or "no_selected_pr"), operation="decide_lifecycle_transition", worked=False)
     data = input_of(request)
     github = cond_blob(request, "read_lifecycle_github_state")
     local = cond_blob(request, "read_lifecycle_local_evidence")
