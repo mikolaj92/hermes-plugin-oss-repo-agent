@@ -1827,7 +1827,7 @@ def decide_repair_worktree_fast_forward_execution(request: Request) -> Result:
 
 def fast_forward_repair_worktree(request: Request) -> Result:
     """Guarded ff mutation: revalidate branch, HEAD, and status under the worktree lock."""
-    upstream = _repair_upstream(request, "fast_forward_repair_worktree", "decide_repair_worktree_fast_forward_execution")
+    upstream = _repair_upstream(request, "fast_forward_repair_worktree", "verify_legacy_repair_pr_head", "decide_repair_worktree_fast_forward_execution")
     if upstream:
         return upstream
     decision = cond_blob(request, "decide_repair_worktree_fast_forward_execution")
