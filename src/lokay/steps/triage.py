@@ -179,7 +179,14 @@ def _comment_bodies(value: Any) -> list[str]:
 def _atomic_context(request: Request, *, kind: str = "pr") -> dict[str, Any]:
     data = input_of(request)
     cfg = cfg_of(request)
-    upstream = cond_blob(request, "load_pr_fields", "read_open_prs", "select_fix_pr")
+    upstream = cond_blob(
+        request,
+        "load_pr_fields",
+        "read_open_prs",
+        "select_fix_pr",
+        "decide_triage_action",
+        "triage_decide_triage_action",
+    )
     pr = data.get("pr") if isinstance(data.get("pr"), dict) else upstream.get("pr", {})
     repo = str(data.get("repo") or upstream.get("repo") or cfg.get("repo") or "")
     number = int(data.get("number") or data.get("pr_number") or upstream.get("number") or (pr.get("number") if isinstance(pr, dict) else 0) or 0)

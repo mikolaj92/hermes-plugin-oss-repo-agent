@@ -2702,6 +2702,21 @@ class TriageTests(unittest.TestCase):
         self.assertFalse(out["mutated"])
         read.assert_not_called()
 
+    def test_merge_action_carries_identity_into_assignee_read(self) -> None:
+        decision = {
+            "status": "decided",
+            "ok": True,
+            "action": "merge",
+            "reason": "ready",
+            "repo": "o/r",
+            "number": 5,
+        }
+        readback = mock.Mock(stdout='{"assignees": [{"login": "mikolaj92"}]}')
+        with mock.patch("lokay.steps.triage._pr_view", return_value=readback) as read:
+            out = triage.read_pr_assignees(req({"conduction": {"triage_decide_triage_action": decision}}))
+        self.assertEqual((out["repo"], out["number"]), ("o/r", 5))
+        read.assert_called_once_with("gh", "o/r", 5, "assignees")
+
 
     def test_evaluate_checks_pass_and_fail(self) -> None:
         good = triage.evaluate_checks(req({"pr": {"statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS", "state": "SUCCESS"}]}}))
