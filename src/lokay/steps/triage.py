@@ -894,7 +894,12 @@ def decide_triage_action(request: Request) -> Result:
             review_decision=review_decision,
         )
     if automerge:
-        return ok(status="decided", action="merge", reason="ready")
+        return ok(
+            status="decided",
+            action="merge",
+            reason="ready",
+            **_atomic_context(request),
+        )
     return ok(status="decided", action="comment_block", reason="automerge_disabled")
 
 

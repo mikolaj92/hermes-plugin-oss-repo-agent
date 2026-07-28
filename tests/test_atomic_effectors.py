@@ -2732,6 +2732,24 @@ class TriageTests(unittest.TestCase):
         base = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "labels": [], "author": {"login": "o"}}, "checks_pass": True, "evidence_pass": True, "automerge": True}
         self.assertEqual(triage.decide_triage_action(req(base))["action"], "merge")
         self.assertEqual(triage.decide_triage_action(req({**base, "checks_pass": False}))["action"], "repair")
+        conducted = {
+            "conduction": {
+                "triage_load_pr_fields": {
+                    "repo": "o/r",
+                    "number": 5,
+                    "pr": {
+                        **base["pr"],
+                        "headRefName": "ai/fix/5",
+                        "baseRefName": "main",
+                    },
+                },
+                "triage_evaluate_checks": {"pass_": True},
+                "triage_evaluate_test_evidence": {"pass_": True},
+            },
+            "automerge": True,
+        }
+        merge = triage.decide_triage_action(req(conducted))
+        self.assertEqual((merge["repo"], merge["number"]), ("o/r", 5))
         self.assertEqual(triage.decide_triage_action(req({**base, "evidence_pass": False}))["action"], "repair")
         approval_required = {**base, "require_human_approval": True}
         approval_required["pr"] = {**base["pr"], "reviewDecision": ""}
