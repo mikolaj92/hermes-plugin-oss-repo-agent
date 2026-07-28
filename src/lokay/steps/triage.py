@@ -740,7 +740,12 @@ def evaluate_test_evidence(request: Request) -> Result:
     comments = pr.get("comments") or []
     if not isinstance(comments, list) or any(not isinstance(item, dict) for item in comments):
         return fail("invalid_test_evidence", failure_class="terminal", retry_safe=False)
-    evidence = "\n".join([body, *(str(item.get("body") or "") for item in comments)])
+    comment_bodies = [
+        str(item.get("body") or "")
+        for item in comments
+        if "<!-- lokay:" not in str(item.get("body") or "")
+    ]
+    evidence = "\n".join([body, *comment_bodies])
     markers = data.get("markers") or [
         "Test plan",
         "test evidence",

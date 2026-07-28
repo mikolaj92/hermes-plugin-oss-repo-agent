@@ -2720,6 +2720,13 @@ class TriageTests(unittest.TestCase):
             "require_test_evidence": True,
         }))
         self.assertTrue(comment_hit["pass_"])
+        automated_comment = triage.evaluate_test_evidence(req({
+            "pr": {"body": "", "comments": [{
+                "body": "Please add test evidence or address blockers.\n\n<!-- lokay:o/r:5:triage -->",
+            }]},
+            "require_test_evidence": True,
+        }))
+        self.assertFalse(automated_comment["pass_"])
 
     def test_decide_triage_action_routes(self) -> None:
         base = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "labels": [], "author": {"login": "o"}}, "checks_pass": True, "evidence_pass": True, "automerge": True}
