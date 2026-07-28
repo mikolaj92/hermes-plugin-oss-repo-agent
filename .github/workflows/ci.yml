@@ -17,6 +17,16 @@ jobs:
           path: Fala
           ref: b5f9a6d500a442a1c79060a862fe4b9da87bc98f
           submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          repository: bgreni/EmberJson
+          path: Fala/vendor/EmberJson
+          ref: 882acf141301db4ee797228016982ad6acc71a6f
+      - uses: actions/checkout@v4
+        with:
+          repository: mikolaj92/sqlite.fire
+          path: Fala/vendor/sqlite.fire
+          ref: 3d482362c863e769d018443045b27ca5db645b3c
       - uses: prefix-dev/setup-pixi@v0.8.10
         with:
           manifest-path: Fala/pixi.toml
