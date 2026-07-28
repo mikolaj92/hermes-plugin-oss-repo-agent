@@ -408,7 +408,7 @@ def verify_pr_assignee(request: Request) -> Result:
     if terminal is not None:
         return terminal
     idle = _upstream_noop(request, "verify_pr_assignee", "assign_pr", "decide_pr_assignee")
-    if idle is not None:
+    if idle is not None and idle.get("reason") != "already_assigned":
         return idle
     c = _atomic_context(request); data, cfg = input_of(request), cfg_of(request)
     assignee = str(data.get("assignee") or cond_get(request, "assignee", "decide_pr_assignee") or cfg.get("assignee") or "mikolaj92")
@@ -523,7 +523,7 @@ def verify_pr_comment(request: Request) -> Result:
 
 
 def read_merge_preconditions(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "read_merge_preconditions", "verify_pr_assignee")
+    terminal = _atomic_terminal(request, "read_merge_preconditions", "verify_pr_assignee", "verify_pr_comment")
     if terminal is not None:
         return terminal
     idle = _upstream_noop(request, "read_merge_preconditions", "verify_pr_assignee")

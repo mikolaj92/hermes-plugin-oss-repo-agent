@@ -2782,6 +2782,57 @@ class TriageTests(unittest.TestCase):
         }))
         self.assertEqual((merged["status"], merged["repo"], merged["number"]), ("planned", "o/r", 5))
 
+    def test_existing_assignee_is_verified_for_merge(self) -> None:
+        decision = {
+            "status": "noop",
+            "ok": True,
+            "reason": "already_assigned",
+            "repo": "o/r",
+            "number": 5,
+            "head_oid": "abc",
+            "assignee": "mikolaj92",
+        }
+        assigned = {**decision, "operation": "assign_pr"}
+        readback = mock.Mock(stdout='{"assignees": [{"login": "mikolaj92"}]}')
+        with mock.patch("lokay.steps.triage._pr_view", return_value=readback):
+            result = triage.verify_pr_assignee(req({
+                "dry_run": False,
+                "conduction": {
+                    "triage_assign_pr": assigned,
+                    "triage_decide_pr_assignee": decision,
+                },
+            }))
+        self.assertEqual((result["status"], result["repo"], result["number"]), ("assignee_verified", "o/r", 5))
+
+    def test_unselected_assignee_verification_remains_noop(self) -> None:
+        result = triage.verify_pr_assignee(req({
+            "conduction": {
+                "triage_assign_pr": {
+                    "status": "noop",
+                    "ok": True,
+                    "reason": "not_selected",
+                    "operation": "assign_pr",
+                },
+            },
+        }))
+        self.assertEqual((result["status"], result["reason"]), ("noop", "not_selected"))
+
+    def test_merge_preconditions_reject_failed_comment_verification(self) -> None:
+        result = triage.read_merge_preconditions(req({
+            "repo": "o/r",
+            "number": 5,
+            "head_oid": "abc",
+            "conduction": {
+                "triage_verify_pr_assignee": {"status": "assignee_verified", "ok": True},
+                "triage_verify_pr_comment": {
+                    "status": "failed",
+                    "ok": False,
+                    "reason": "comment_verify_failed",
+                },
+            },
+        }))
+        self.assertEqual((result["status"], result["reason"]), ("failed", "upstream_failed"))
+
 
     def test_evaluate_checks_pass_and_fail(self) -> None:
         good = triage.evaluate_checks(req({"pr": {"statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS", "state": "SUCCESS"}]}}))
