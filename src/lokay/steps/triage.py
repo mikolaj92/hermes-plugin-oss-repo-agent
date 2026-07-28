@@ -179,20 +179,32 @@ def _comment_bodies(value: Any) -> list[str]:
 def _atomic_context(request: Request, *, kind: str = "pr") -> dict[str, Any]:
     data = input_of(request)
     cfg = cfg_of(request)
-    upstream = cond_blob(
-        request,
-        "load_pr_fields",
-        "read_open_prs",
-        "select_fix_pr",
-        "decide_triage_action",
-        "triage_decide_triage_action",
+    conduction = data.get("conduction")
+    upstream_rows = list(conduction.values()) if isinstance(conduction, dict) else []
+    upstream = next(
+        (
+            row
+            for row in upstream_rows
+            if isinstance(row, dict) and (row.get("repo") or row.get("number"))
+        ),
+        {},
     )
     pr = data.get("pr") if isinstance(data.get("pr"), dict) else upstream.get("pr", {})
     repo = str(data.get("repo") or upstream.get("repo") or cfg.get("repo") or "")
     number = int(data.get("number") or data.get("pr_number") or upstream.get("number") or (pr.get("number") if isinstance(pr, dict) else 0) or 0)
     if kind == "issue":
         number = int(data.get("issue") or data.get("issue_number") or number or 0)
-    return {"repo": repo, "number": number}
+    context: dict[str, Any] = {"repo": repo, "number": number}
+    head_oid = str(
+        data.get("head_oid")
+        or data.get("headRefOid")
+        or upstream.get("head_oid")
+        or (pr.get("headRefOid") if isinstance(pr, dict) else "")
+        or ""
+    ).strip()
+    if head_oid:
+        context["head_oid"] = head_oid
+    return context
 
 
 def _atomic_terminal(request: Request, operation: str, *peers: str) -> Result | None:
@@ -398,7 +410,7 @@ def verify_pr_assignee(request: Request) -> Result:
     c = _atomic_context(request); data, cfg = input_of(request), cfg_of(request)
     assignee = str(data.get("assignee") or cond_get(request, "assignee", "decide_pr_assignee") or cfg.get("assignee") or "mikolaj92")
     if dry_run_flag(request):
-        return planned(repo=c["repo"], number=c["number"], assignee=assignee)
+        return planned(**c, assignee=assignee)
     try:
         proc = _pr_view(str(cfg.get("gh_cli") or "gh"), c["repo"], c["number"], "assignees")
         payload = json.loads(getattr(proc, "stdout", "") or "")
@@ -514,7 +526,7 @@ def read_merge_preconditions(request: Request) -> Result:
     idle = _upstream_noop(request, "read_merge_preconditions", "verify_pr_assignee", "verify_pr_comment")
     if idle is not None:
         return idle
-    c = _atomic_context(request); data, cfg = input_of(request), cfg_of(request); head = str(data.get("head_oid") or data.get("headRefOid") or "").strip(); c["head_oid"] = head
+    c = _atomic_context(request); data, cfg = input_of(request), cfg_of(request); head = str(data.get("head_oid") or data.get("headRefOid") or c.get("head_oid") or "").strip(); c["head_oid"] = head
     if not c["repo"] or not c["number"] or not head:
         return fail("missing_repo_number_or_head_oid", failure_class="terminal", retry_safe=False, **c)
     if dry_run_flag(request):
@@ -898,14 +910,15 @@ def decide_triage_action(request: Request) -> Result:
             status="decided",
             action="comment_block",
             reason="approval_required",
-            review_decision=review_decision,
         )
     if automerge:
+        context = _atomic_context(request)
+        context["head_oid"] = str(pr.get("headRefOid") or "").strip()
         return ok(
             status="decided",
             action="merge",
             reason="ready",
-            **_atomic_context(request),
+            **context,
         )
     return ok(status="decided", action="comment_block", reason="automerge_disabled")
 
