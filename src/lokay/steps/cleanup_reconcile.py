@@ -15,7 +15,7 @@ from typing import Any
 
 from lokay.adapters_cli import CommandError, run_cmd
 from lokay.adapters_git import parse_worktree_porcelain, worktree_list
-from lokay.envelope import Request, Result, cfg_of, cond_blob, dry_run_flag, fail, input_of, ok, planned
+from lokay.envelope import Request, Result, cfg_of, cond_blob, dry_run_flag, fail, input_of, noop, ok, planned, upstream_noop
 from lokay.steps.cleanup import _publish_cleanup_receipt, _receipt_directory_lock
 from lokay.steps.claim import _claim_file, _read_claim, claim_directory_lock
 
@@ -541,6 +541,10 @@ def _resolve_lifecycle_context(request: Request) -> Result:
     )
     if upstream:
         return upstream
+    load_idle = upstream_noop(request, "triage_load_pr_fields", "load_pr_fields")
+    decide_idle = upstream_noop(request, "triage_decide_triage_action", "decide_triage_action")
+    if load_idle and decide_idle:
+        return noop(str(decide_idle.get("reason") or load_idle.get("reason") or "no_selected_pr"), operation="resolve_lifecycle_context", worked=False)
     load = cond_blob(request, "triage_load_pr_fields", "load_pr_fields")
     decide = cond_blob(request, "triage_decide_triage_action", "decide_triage_action", "decide")
     conduction = [blob for blob in (load, decide) if blob]
@@ -733,11 +737,8 @@ def _github_lifecycle_not_found(exc: CommandError, object_type: str) -> bool:
 
 def read_lifecycle_github_state(request: Request) -> Result:
     """Read one authoritative GitHub issue/PR/link/head/check snapshot."""
-    upstream = _reconcile_upstream_failure(request, "read_lifecycle_github_state", "validate_reconcile_identity")
-    if upstream:
-        return upstream
     context = _resolve_lifecycle_context(request)
-    if context.get("ok") is not True:
+    if context.get("ok") is not True or context.get("status") != "resolved":
         return context
     repo = str(context["repo"])
     issue_number = context["issue"]
@@ -818,11 +819,8 @@ def read_lifecycle_github_state(request: Request) -> Result:
 
 def read_lifecycle_local_evidence(request: Request) -> Result:
     """Read local claim/task/process/worktree/receipt ledgers without mutation."""
-    upstream = _reconcile_upstream_failure(request, "read_lifecycle_local_evidence", "validate_reconcile_identity")
-    if upstream:
-        return upstream
     context = _resolve_lifecycle_context(request)
-    if context.get("ok") is not True:
+    if context.get("ok") is not True or context.get("status") != "resolved":
         return context
     data, cfg = input_of(request), cfg_of(request)
     repo = str(context["repo"])

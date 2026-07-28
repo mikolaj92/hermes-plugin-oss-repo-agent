@@ -55,6 +55,33 @@ class LifecycleReconcileTests(unittest.TestCase):
     def _decide(self, conduction):
         return cleanup_reconcile.decide_lifecycle_transition({"input": self.data | {"conduction": conduction}, "config": self.config})
 
+    def test_lifecycle_readers_propagate_no_selected_pr(self):
+        conduction = {
+            "triage_load_pr_fields": {"ok": True, "status": "noop", "reason": "no_open_prs", "mutated": False},
+            "triage_decide_triage_action": {"ok": True, "status": "noop", "reason": "no_open_prs", "mutated": False},
+        }
+        request = {"input": {"conduction": conduction}, "config": self.config}
+        with mock.patch.object(cleanup_reconcile, "run_cmd") as run_cmd:
+            github = cleanup_reconcile.read_lifecycle_github_state(request)
+            local = cleanup_reconcile.read_lifecycle_local_evidence(request)
+        self.assertEqual((github["status"], github["reason"]), ("noop", "no_open_prs"))
+        self.assertEqual((local["status"], local["reason"]), ("noop", "no_open_prs"))
+        run_cmd.assert_not_called()
+
+    def test_lifecycle_context_ignores_one_noop_when_peer_has_identity(self):
+        selected = {
+            "number": 11,
+            "headRefName": self.data["branch"],
+            "headRefOid": self.data["head_oid"],
+            "closingIssuesReferences": [{"number": 10}],
+        }
+        conduction = {
+            "triage_load_pr_fields": {"ok": True, "status": "noop", "reason": "unrelated_branch", "mutated": False},
+            "triage_decide_triage_action": {"ok": True, "status": "decided", "action": "merge", "repo": "owner/repo", "pr": selected},
+        }
+        result = cleanup_reconcile._resolve_lifecycle_context({"input": {"conduction": conduction}, "config": self.config})
+        self.assertEqual((result["status"], result["repo"], result["issue"], result["pr_number"]), ("resolved", "owner/repo", 10, 11))
+
     def test_failed_open_pr_resumes_repair_without_label_mutation(self):
         result = self._decide(self._conduction())
         self.assertEqual(result["outcome"], "resume_repair")
