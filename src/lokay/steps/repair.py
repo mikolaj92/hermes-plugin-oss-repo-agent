@@ -2479,7 +2479,7 @@ def _legacy_refresh_value(request: Request, *keys: str) -> str:
     data, cfg = input_of(request), cfg_of(request)
     state = _legacy_refresh_state(request)
     pr = _legacy_refresh_pr(request)
-    blobs = [data, cfg, state, pr, cond_blob(request, "read_repair_base_head"), cond_blob(request, "decide_legacy_repair_head_refresh")]
+    blobs = [data, cfg, state, pr, cond_blob(request, "read_repair_context"), cond_blob(request, "read_repair_remote_head"), cond_blob(request, "read_repair_base_head"), cond_blob(request, "decide_legacy_repair_head_refresh")]
     for blob in blobs:
         for key in keys:
             if isinstance(blob, dict) and blob.get(key) not in (None, ""):

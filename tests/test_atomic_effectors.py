@@ -2189,6 +2189,12 @@ CREATE TABLE runs (
             self.assertFalse(terminal["mutated"])
             self.assertEqual((terminal["pre_head"], terminal["pre_status"], terminal["post_head"], terminal["post_status"]), ("head-a", "", "head-a", ""))
 
+    def test_repair_base_head_uses_conducted_context_repo(self) -> None:
+        with mock.patch("lokay.steps.repair.run_cmd", return_value=SimpleNamespace(stdout="a" * 40)) as run:
+            out = repair.read_repair_base_head(req({"base_branch": "main", "conduction": {"triage_read_repair_context": {"ok": True, "repo": "owner/repo"}}}))
+        self.assertTrue(out["ok"])
+        self.assertEqual(run.call_args.args[0][2], "repos/owner/repo/git/ref/heads/main")
+
     def test_legacy_base_refresh_eligible_and_partial_fail_closed(self) -> None:
         state = {
             "repo": "mikolaj92/lokay",
