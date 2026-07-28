@@ -982,7 +982,7 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
 
 def reserve_repair_attempt(request: Request) -> Result:
     """Atomically reserve the immutable head before invoking OMP."""
-    peers = ("read_repair_attempt_baseline", "verify_repair_attempt_recovery", "verify_repair_recovery_continuation")
+    peers = ("read_repair_attempt_baseline", "read_repair_context", "verify_repair_attempt_recovery", "verify_repair_recovery_continuation")
     gated = _repair_execution_gate(request, "reserve_repair_attempt", *peers)
     if gated:
         return gated
@@ -1008,8 +1008,12 @@ def reserve_repair_attempt(request: Request) -> Result:
         return fail("repair_attempt_baseline_required", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt")
     pre_head = str(baseline.get("pre_head") or "")
     pre_status = str(baseline.get("pre_status") or "")
-    context = _repair_context(request)
-    if pre_head != str(identity["verified_head"]) or any(str(baseline.get(key) or "") != context[key] for key in ("branch", "local_branch", "worktree_path")):
+    baseline_context = {key: str(baseline.get(key) or "") for key in ("repo", "pr_number", "branch", "local_branch", "worktree_path")}
+    expected_context = _repair_context(request)
+    if (
+        pre_head != str(identity["verified_head"])
+        or any(baseline_context[key] != expected_context[key] for key in baseline_context)
+    ):
         return fail("repair_attempt_baseline_mismatch", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", expected_head=identity["verified_head"], actual_head=pre_head)
     payload = {**identity, "checks": decision.get("checks") or [], "status": "reserved", "attempted": True, "kind": "repair_attempt_reservation", "pre_head": pre_head, "pre_status": pre_status, "repo_branch": str(baseline["branch"]), "local_branch": str(baseline["local_branch"]), "worktree_path": str(baseline["worktree_path"])}
     data = input_of(request)

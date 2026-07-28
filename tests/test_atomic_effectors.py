@@ -1200,10 +1200,13 @@ CREATE TABLE runs (
                 "verified_head": "a" * 40,
                 "conduction": {
                     "decide_repair_attempt": first_decision,
+                    "read_repair_context": {"ok": True, "status": "read", **ctx},
                     "read_repair_attempt_baseline": {
                         "ok": True,
                         "status": "read",
                         "baseline_verified": True,
+                        "repo": ctx["repo"],
+                        "pr_number": ctx["pr_number"],
                         "pre_head": "a" * 40,
                         "pre_status": "",
                         "branch": ctx["branch"],
@@ -1383,6 +1386,64 @@ CREATE TABLE runs (
             self.assertEqual(len([row for row in all_rows if row.step_id == "triage_push_repair_branch" and row.output.get("status") == "pushed"]), 1)
 
 
+    def test_reserve_repair_attempt_uses_conducted_baseline_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            branch = "ai/fix/10"
+            worktree_root = str(Path(tmp) / "worktrees")
+            local_branch = repair._repair_local_branch("o/r", "11", branch)
+            worktree_path = str(Path(worktree_root) / local_branch)
+            request = req({
+                "enabled": True,
+                "live": True,
+                "dry_run": False,
+                "candidate": "a" * 64,
+                "run_id": "run-a",
+                "repair_state_root": tmp,
+                "conduction": {
+                    "decide_repair_attempt": {
+                        "ok": True,
+                        "status": "invoke",
+                        "authorize": True,
+                        "repo": "o/r",
+                        "pr_number": 11,
+                        "verified_head": "head-a",
+                        "candidate": "a" * 64,
+                        "run_id": "run-a",
+                        "checks": [{"identity": "ci", "conclusion": "FAILURE"}],
+                    },
+                    "read_repair_context": {
+                        "ok": True,
+                        "status": "read",
+                        "repo": "o/r",
+                        "pr_number": "11",
+                        "branch": branch,
+                        "local_branch": local_branch,
+                        "worktree_root": worktree_root,
+                        "worktree_path": worktree_path,
+                    },
+                    "read_repair_attempt_baseline": {
+                        "ok": True,
+                        "status": "read",
+                        "baseline_verified": True,
+                        "repo": "o/r",
+                        "pr_number": "11",
+                        "pre_head": "head-a",
+                        "pre_status": "",
+                        "branch": branch,
+                        "local_branch": local_branch,
+                        "worktree_path": worktree_path,
+                    },
+                    "verify_repair_attempt_recovery": {"ok": True, "status": "inactive"},
+                    "verify_repair_recovery_continuation": {"ok": True, "status": "inactive"},
+                },
+            })
+            reserved = repair.reserve_repair_attempt(request)
+            self.assertEqual(reserved["status"], "reserved")
+            self.assertEqual(reserved["reservation"]["repo_branch"], branch)
+            self.assertEqual(reserved["reservation"]["local_branch"], local_branch)
+            self.assertEqual(reserved["reservation"]["worktree_path"], worktree_path)
+
+
     def test_repair_reservation_restart_blocks_changed_checks_and_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = {
@@ -1396,10 +1457,13 @@ CREATE TABLE runs (
             ctx = repair._repair_context(req(base))
             reserved = repair.reserve_repair_attempt(req(dict(base, conduction={
                 "decide_repair_attempt": first,
+                "read_repair_context": {"ok": True, "status": "read", **ctx},
                 "read_repair_attempt_baseline": {
                     "ok": True,
                     "status": "read",
                     "baseline_verified": True,
+                    "repo": ctx["repo"],
+                    "pr_number": ctx["pr_number"],
                     "pre_head": "head-a",
                     "pre_status": "",
                     "branch": ctx["branch"],
