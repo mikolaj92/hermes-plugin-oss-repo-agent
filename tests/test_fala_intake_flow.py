@@ -242,7 +242,61 @@ class IntakeFlowE2ETests(unittest.TestCase):
         # dry-run claim/kanban use status planned (envelope)
         self.assertIn(result.summary["claim_status"], ("planned", "claimed"))
         self.assertEqual(result.summary["kanban_status"], "intake_reconciled")
+
         self.assertEqual(result.fala_version, "0.7.15")
+
+    def test_auto_worker_runs_pr_lane_when_issue_intake_is_idle(self) -> None:
+        from lokay.flows.common import process_values
+        from lokay.flows.runtime import read_journal_processes
+        from lokay.tick_all import run_all
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls = root / "gh-calls"
+            gh = root / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"$*\" >> {calls}\n"
+                "case \"$1 $2\" in\n"
+                "  \"issue list\") printf '%s\\n' '[]' ;;\n"
+                "  \"pr list\") printf '%s\\n' '[{\"number\":9,\"title\":\"review me\",\"url\":\"https://example/9\",\"body\":\"Test plan: unit tests\",\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"ai/fix/9\",\"headRefOid\":\"abc123\",\"baseRefName\":\"main\",\"baseRefOid\":\"base123\",\"author\":{\"login\":\"o\"},\"labels\":[],\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"SUCCESS\"}],\"commits\":[],\"closingIssuesReferences\":[{\"number\":10}]}]' ;;\n"
+                "  \"issue view\") printf '%s\\n' '{\"number\":10,\"state\":\"OPEN\",\"labels\":[],\"assignees\":[]}' ;;\n"
+                "  \"pr view\") case \"$*\" in\n"
+                "    *\"--json comments\"*) printf '%s\\n' '{\"comments\":[]}' ;;\n"
+                "    *) printf '%s\\n' '{\"number\":9,\"title\":\"review me\",\"url\":\"https://example/9\",\"body\":\"Test plan: unit tests\",\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"ai/fix/9\",\"headRefOid\":\"abc123\",\"baseRefName\":\"main\",\"baseRefOid\":\"base123\",\"author\":{\"login\":\"o\"},\"labels\":[],\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"SUCCESS\"}],\"commits\":[],\"closingIssuesReferences\":[{\"number\":10}]}' ;;\n"
+                "  esac ;;\n"
+                "  *) printf '%s\\n' 'unexpected gh mutation' >&2; exit 97 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            cfg = AgentConfig(
+                mode="dry-run",
+                gh_cli=str(gh),
+                repos=(RepoEntry(repo="o/r", board="board-r", clone_path=str(root / "clone"), priority=1),),
+            )
+            db = root / "state.sqlite"
+            fala_home = Path(fala.__file__).resolve().parents[2]
+            if not (fala_home / "mojo" / "fala").is_dir():
+                self.skipTest("installed Fala package does not include its Mojo source checkout")
+            with mock.patch.dict(os.environ, {"FALA_HOME": str(fala_home)}, clear=False):
+                result = asyncio.run(run_all(db_path=db, config=cfg, dry_run=True, limit=1))
+            processes = read_journal_processes(db, result["run_id"])
+            call_log = calls.read_text(encoding="utf-8")
+            self.assertFalse(result["any_failed"], msg=str([(process.step_id, process.status, process.output, process.error) for process in processes if process.status != "succeeded"]))
+        by_step = {process.step_id: process for process in processes}
+        self.assertEqual(result["path_id"], "auto_worker")
+        self.assertEqual(by_step["intake_read_open_issues"].status, "succeeded")
+        self.assertIsNone(process_values({"output": by_step["intake_select_issue_candidate"].output})["selected"])
+        self.assertEqual(by_step["triage_read_open_prs"].status, "succeeded")
+        selected = process_values({"output": by_step["triage_select_fix_pr"].output})
+        self.assertEqual((selected["repo"], selected["number"]), ("o/r", 9))
+        decision = process_values({"output": by_step["triage_decide_triage_action"].output})
+        self.assertEqual(decision["action"], "comment_block")
+        self.assertEqual(by_step["triage_post_pr_comment"].status, "succeeded")
+        self.assertEqual(process_values({"output": by_step["triage_post_pr_comment"].output})["status"], "planned")
+        self.assertTrue(all(process.status == "succeeded" for process in processes), msg=str(processes))
+        self.assertNotIn("pr comment", call_log)
 
 
 if __name__ == "__main__":

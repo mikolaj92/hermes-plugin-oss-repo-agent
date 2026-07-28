@@ -395,10 +395,13 @@ class PrDecideMatrixTests(unittest.TestCase):
 
         with mock.patch("lokay.steps.triage.run_cmd", side_effect=fake_run):
             loaded = triage.load_pr_fields(
-                req({"repo": "owner/repo", "number": 8})
+                req({"repo": "owner/repo", "number": 8, "gh_cli": "input-gh"})
+                | {"config": {"gh_cli": "config-gh"}}
             )
         self.assertEqual(loaded["status"], "loaded")
         self.assertTrue(captured, "expected gh pr view call")
+        self.assertEqual(captured[0][0], "input-gh")
+
         fields_arg = ""
         for cmd in captured:
             if "pr" in cmd and "view" in cmd and "--json" in cmd:

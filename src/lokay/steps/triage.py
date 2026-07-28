@@ -311,6 +311,9 @@ def read_pr_assignees(request: Request) -> Result:
     terminal = _atomic_terminal(request, "read_pr_assignees", "decide_triage_action")
     if terminal is not None:
         return terminal
+    gate = _decision_gate(request, allowed="merge")
+    if gate is not None:
+        return gate
     idle = _upstream_noop(request, "read_pr_assignees", "decide_triage_action")
     if idle is not None:
         return idle
@@ -403,17 +406,20 @@ def verify_pr_assignee(request: Request) -> Result:
 
 
 def read_pr_comments(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "read_pr_comments", "decide_triage_action")
+    terminal = _atomic_terminal(request, "read_pr_comments", "decide_triage_action", "verify_pr_assignee")
     if terminal is not None:
         return terminal
-    idle = _upstream_noop(request, "read_pr_comments", "decide_triage_action", "verify_pr_assignee")
+    gate = _decision_gate(request, allowed="comment_block")
+    if gate is not None:
+        return gate
+    idle = _upstream_noop(request, "read_pr_comments", "decide_triage_action")
     if idle is not None:
         return idle
     c = _atomic_context(request); data, cfg = input_of(request), cfg_of(request)
     if not c["repo"] or not c["number"]:
         return fail("missing_repo_or_number", failure_class="terminal", retry_safe=False, **c)
     try:
-        proc = _pr_view(str(cfg.get("gh_cli") or "gh"), c["repo"], c["number"], "comments")
+        proc = _pr_view(str(data.get("gh_cli") or cfg.get("gh_cli") or "gh"), c["repo"], c["number"], "comments")
         payload = json.loads(getattr(proc, "stdout", "") or "")
         comments = payload.get("comments") if isinstance(payload, dict) else payload
         if not isinstance(comments, list) or any(not isinstance(item, dict) or not isinstance(item.get("body"), str) for item in comments):
@@ -592,15 +598,15 @@ def load_pr_fields(request: Request) -> Result:
     upstream = upstream_noop(request, "select_fix_pr", "filter_fix_prs", "read_open_prs")
     if upstream:
         return noop(str(upstream.get("reason") or "no_open_prs"))
-    number = int(data.get("number") or data.get("pr_number") or 0)
-    selected_pr: dict[str, Any] = {}
+    selected_pr = listed.get("pr") if isinstance(listed.get("pr"), dict) else {}
+    number = int(data.get("number") or data.get("pr_number") or listed.get("number") or selected_pr.get("number") or 0)
     if not number:
         prs = listed.get("prs") or []
         if isinstance(prs, list) and prs:
             selected_pr = prs[0] if isinstance(prs[0], dict) else {}
             number = int(selected_pr.get("number") or 0)
     repo = str(data.get("repo") or selected_pr.get("repo") or listed.get("repo") or cfg.get("repo") or "")
-    gh = str(cfg.get("gh_cli") or "gh")
+    gh = str(data.get("gh_cli") or cfg.get("gh_cli") or "gh")
     if not repo or not number:
         return fail("missing_repo_or_number", failure_class="terminal", retry_safe=False)
     try:

@@ -562,6 +562,12 @@ def _repair_restart_recovery(request: Request, state: dict[str, object], reserva
 
 def read_repair_attempt_recovery_evidence(request: Request) -> Result:
     """Validate configured recovery against the immutable reservation and process journal."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    upstream = _repair_upstream(request, "read_repair_attempt_recovery_evidence", "read_repair_attempt_state", "read_repair_attempt_reconciliation")
+    if upstream:
+        return upstream
     source = cond_blob(request, "read_repair_attempt_state")
     state = source.get("attempt_state")
     path = str(source.get("reservation_path") or "")
@@ -580,6 +586,12 @@ def read_repair_attempt_recovery_evidence(request: Request) -> Result:
 
 def claim_repair_attempt_recovery(request: Request) -> Result:
     """Publish the one immutable recovery transition."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    upstream = _repair_upstream(request, "claim_repair_attempt_recovery", "read_repair_attempt_recovery_evidence")
+    if upstream:
+        return upstream
     evidence = cond_blob(request, "read_repair_attempt_recovery_evidence")
     if evidence.get("status") == "inactive":
         return ok(status="inactive", operation="claim_repair_attempt_recovery", recovery_active=False, mutated=False)
@@ -601,6 +613,12 @@ def claim_repair_attempt_recovery(request: Request) -> Result:
 
 def verify_repair_attempt_recovery(request: Request) -> Result:
     """Read back the immutable recovery transition before authorization."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    upstream = _repair_upstream(request, "verify_repair_attempt_recovery", "claim_repair_attempt_recovery")
+    if upstream:
+        return upstream
     claimed = cond_blob(request, "claim_repair_attempt_recovery")
     if claimed.get("status") == "inactive":
         return ok(status="inactive", operation="verify_repair_attempt_recovery", recovery_active=False, mutated=False)
@@ -621,6 +639,12 @@ def verify_repair_attempt_recovery(request: Request) -> Result:
 
 def read_repair_recovery_continuation_evidence(request: Request) -> Result:
     """Validate the unique chain from explicit historical no-mutation evidence."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    upstream = _repair_upstream(request, "read_repair_recovery_continuation_evidence", "verify_repair_attempt_recovery", "read_repair_attempt_state")
+    if upstream:
+        return upstream
     verified = cond_blob(request, "verify_repair_attempt_recovery")
     if verified.get("status") == "inactive":
         return ok(status="inactive", operation="read_repair_recovery_continuation_evidence", recovery_active=False, mutated=False)
@@ -716,6 +740,12 @@ def read_repair_recovery_continuation_evidence(request: Request) -> Result:
     return ok(status="validated", operation="read_repair_recovery_continuation_evidence", continuation_required=True, continuation=continuation, continuation_path=str(path), recovery_claim=claim, reservation_path=str(reservation_path), mutated=False)
 
 def claim_repair_recovery_continuation(request: Request) -> Result:
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    upstream = _repair_upstream(request, "claim_repair_recovery_continuation", "read_repair_recovery_continuation_evidence")
+    if upstream:
+        return upstream
     evidence = cond_blob(request, "read_repair_recovery_continuation_evidence")
     if evidence.get("status") in {"inactive", "original"}:
         return ok(status=str(evidence.get("status")), operation="claim_repair_recovery_continuation", continuation_required=False, recovery_claim=evidence.get("recovery_claim"), mutated=False)
@@ -746,6 +776,12 @@ def claim_repair_recovery_continuation(request: Request) -> Result:
 
 
 def verify_repair_recovery_continuation(request: Request) -> Result:
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    upstream = _repair_upstream(request, "verify_repair_recovery_continuation", "claim_repair_recovery_continuation", "verify_repair_attempt_recovery", "read_repair_attempt_state")
+    if upstream:
+        return upstream
     claimed = cond_blob(request, "claim_repair_recovery_continuation")
     if claimed.get("status") in {"inactive", "original"}:
         return ok(status=str(claimed.get("status")), operation="verify_repair_recovery_continuation", continuation_verified=claimed.get("status") == "original", recovery_claim=claimed.get("recovery_claim"), mutated=False)
@@ -784,6 +820,12 @@ def verify_repair_recovery_continuation(request: Request) -> Result:
 
 def read_repair_attempt_state(request: Request) -> Result:
     """Read one stable head-bound reservation; absence is safe and malformed is terminal."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    upstream = _repair_upstream(request, "read_repair_attempt_state", "evaluate_checks", "load_pr_fields", "read_repair_remote_head", "lifecycle_decide_lifecycle_transition")
+    if upstream:
+        return upstream
     identity, error = _repair_identity(request)
     if identity is None:
         return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_state", conflict=error)
@@ -811,6 +853,12 @@ def read_repair_attempt_state(request: Request) -> Result:
 
 def read_repair_completed_receipt(request: Request) -> Result:
     """Read one durable completed repair receipt for the current head identity."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    upstream = _repair_upstream(request, "read_repair_completed_receipt", "load_pr_fields", "read_repair_remote_head", "lifecycle_decide_lifecycle_transition")
+    if upstream:
+        return upstream
     identity, error = _repair_identity(request)
     if identity is None:
         return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="read_repair_completed_receipt", conflict=error)
@@ -844,6 +892,15 @@ def read_repair_attempt_baseline(request: Request) -> Result:
 
 def read_repair_attempt_reconciliation(request: Request) -> Result:
     """Classify an interrupted reservation from immutable baseline and live Git state."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    terminal = _atomic_terminal(request, "read_repair_attempt_reconciliation", "read_repair_attempt_state", "read_repair_completed_receipt", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance")
+    if terminal is not None:
+        return terminal
+    idle = upstream_noop(request, "read_repair_attempt_state", "read_repair_completed_receipt", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance")
+    if idle:
+        return noop(str(idle.get("reason") or "repair_reconciliation_prerequisite_inactive"), operation="read_repair_attempt_reconciliation")
     state_read = cond_blob(request, "read_repair_attempt_state")
     completed = cond_blob(request, "read_repair_completed_receipt")
     if state_read.get("status") == "absent" or completed.get("status") == "found":
@@ -851,6 +908,9 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
     state = state_read.get("attempt_state")
     if state_read.get("ok") is not True or state_read.get("status") != "found" or not isinstance(state, dict):
         return fail("repair_attempt_reconciliation_state_required", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation")
+    idle = upstream_noop(request, "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance")
+    if idle:
+        return noop(str(idle.get("reason") or "repair_reconciliation_prerequisite_inactive"), operation="read_repair_attempt_reconciliation")
     required_baseline = ("pre_head", "pre_status", "repo_branch", "local_branch", "worktree_path")
     if any(key not in state for key in required_baseline) or any(not isinstance(state.get(key), str) for key in required_baseline):
         return fail("repair_attempt_reconciliation_legacy_missing_baseline", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", mutated=False)
@@ -919,9 +979,13 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
 
 def reserve_repair_attempt(request: Request) -> Result:
     """Atomically reserve the immutable head before invoking OMP."""
-    gated = _repair_execution_gate(request, "reserve_repair_attempt")
+    peers = ("read_repair_attempt_baseline", "verify_repair_attempt_recovery", "verify_repair_recovery_continuation")
+    gated = _repair_execution_gate(request, "reserve_repair_attempt", *peers)
     if gated:
         return gated
+    upstream = _repair_upstream(request, "reserve_repair_attempt", *peers)
+    if upstream:
+        return upstream
     decision = cond_blob(request, "decide_repair_attempt")
     recovery = cond_blob(request, "verify_repair_attempt_recovery")
     if decision.get("reason") == "verified_failed_attempt_recovery":
@@ -981,10 +1045,14 @@ def reserve_repair_attempt(request: Request) -> Result:
 
 def verify_repair_attempt_reservation(request: Request) -> Result:
     """Read the immutable reservation and bind it to a normal or recovered attempt."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    peers = ("reserve_repair_attempt", "verify_repair_attempt_recovery", "verify_repair_recovery_continuation")
+    upstream = _repair_upstream(request, "verify_repair_attempt_reservation", *peers)
+    if upstream:
+        return upstream
     source = cond_blob(request, "reserve_repair_attempt")
-    idle = upstream_noop(request, "reserve_repair_attempt")
-    if idle:
-        return noop(str(idle.get("reason") or "repair_attempt_not_authorized"), operation="verify_repair_attempt_reservation")
     path = str(input_of(request).get("reservation_path") or source.get("reservation_path") or "")
     if not path:
         return fail("missing_repair_attempt_reservation", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation")
@@ -1041,6 +1109,16 @@ def _repair_attempt_state(
 
 def decide_repair_attempt(request: Request) -> Result:
     """Pure authorization gate for exactly one OMP repair attempt."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    predecessors = ("read_repair_attempt_state", "read_repair_completed_receipt", "verify_repair_attempt_recovery", "verify_repair_recovery_continuation", "evaluate_checks", "load_pr_fields", "read_repair_remote_head", "lifecycle_decide_lifecycle_transition")
+    terminal = _atomic_terminal(request, "decide_repair_attempt", *predecessors)
+    if terminal is not None:
+        return terminal
+    idle = upstream_noop(request, *predecessors)
+    if idle:
+        return noop(str(idle.get("reason") or "repair_attempt_prerequisite_inactive"), decision="wait", authorize=False)
     data = input_of(request)
     cfg = cfg_of(request)
     enabled = data.get("executor_enabled", data.get("enabled", cfg.get("executor_enabled", cfg.get("enabled", False))))
@@ -1258,6 +1336,16 @@ def build_repair_prompt(request: Request) -> Result:
     gated = _repair_decision_gate(request)
     if gated is not None:
         return gated
+    upstream = _repair_upstream(
+        request,
+        "build_repair_prompt",
+        "evaluate_checks",
+        "load_pr_fields",
+        "create_review_task",
+        "reconcile_review_task",
+    )
+    if upstream:
+        return upstream
     data = input_of(request)
     decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
     checks = cond_blob(request, "evaluate_checks", "checks", "triage_evaluate_checks")
@@ -1312,6 +1400,8 @@ from lokay.steps.issue_to_pr import (
 )
 
 def read_review_tasks(request: Request) -> Result:
+    gated = _repair_decision_gate(request)
+    if gated is not None: return gated
     terminal = _atomic_terminal(request, "read_review_tasks", "decide_triage_action", "verify_merge_receipt")
     if terminal: return terminal
     idle = upstream_noop(request, "decide_triage_action", "verify_merge_receipt")
@@ -1324,6 +1414,8 @@ def read_review_tasks(request: Request) -> Result:
     return ok(status="read", operation="read_review_tasks", board=board, tasks=tasks)
 
 def find_review_marker(request: Request) -> Result:
+    gated = _repair_decision_gate(request)
+    if gated is not None: return gated
     terminal = _atomic_terminal(request, "find_review_marker", "read_review_tasks")
     if terminal: return terminal
     idle = upstream_noop(request, "read_review_tasks")
@@ -1350,6 +1442,8 @@ def create_review_task(request: Request) -> Result:
     return ok(status="created", operation="create_review_task", board=board, title=title, marker=marker, stdout=(proc.stdout or "")[-400:], mutated=True)
 
 def reconcile_review_task(request: Request) -> Result:
+    gated = _repair_decision_gate(request)
+    if gated is not None: return gated
     terminal = _atomic_terminal(request, "reconcile_review_task", "create_review_task")
     if terminal: return terminal
     idle = upstream_noop(request, "create_review_task")
@@ -1357,6 +1451,8 @@ def reconcile_review_task(request: Request) -> Result:
     return _reconcile_kanban_marker(request, "reconcile_review_task", "create_review_task", "fix-pr-review")
 
 def read_task_for_block(request: Request) -> Result:
+    gated = _repair_decision_gate(request)
+    if gated is not None: return gated
     terminal = _atomic_terminal(request, "read_task_for_block", "build_repair_prompt")
     if terminal: return terminal
     idle = upstream_noop(request, "build_repair_prompt")
@@ -1370,6 +1466,8 @@ def read_task_for_block(request: Request) -> Result:
     return ok(status="read", operation="read_task_for_block", board=board, task=matches[0], task_id=task_id)
 
 def decide_task_block(request: Request) -> Result:
+    gated = _repair_decision_gate(request)
+    if gated is not None: return gated
     terminal = _atomic_terminal(request, "decide_task_block", "read_task_for_block")
     if terminal: return terminal
     idle = upstream_noop(request, "read_task_for_block")
@@ -1380,6 +1478,8 @@ def decide_task_block(request: Request) -> Result:
     return ok(status="should_block", operation="decide_task_block", should_block=True)
 
 def block_task(request: Request) -> Result:
+    gated = _repair_decision_gate(request)
+    if gated is not None: return gated
     terminal = _atomic_terminal(request, "block_task", "decide_task_block")
     if terminal: return terminal
     idle = upstream_noop(request, "decide_task_block")
@@ -1393,6 +1493,8 @@ def block_task(request: Request) -> Result:
     return ok(status="blocked", operation="block_task", board=board, task_id=task_id, mutated=True)
 
 def verify_task_blocked(request: Request) -> Result:
+    gated = _repair_decision_gate(request)
+    if gated is not None: return gated
     terminal = _atomic_terminal(request, "verify_task_blocked", "block_task")
     if terminal: return terminal
     idle = upstream_noop(request, "block_task")
@@ -1526,6 +1628,9 @@ def _repair_context_error(context: dict[str, str]) -> str | None:
      return None
 
 def _repair_upstream(request: Request, operation: str, *peers: str) -> Result | None:
+     gated = _repair_decision_gate(request)
+     if gated is not None:
+         return gated
      terminal = _atomic_terminal(request, operation, *peers)
      if terminal:
          return terminal
@@ -1537,14 +1642,16 @@ def _repair_upstream(request: Request, operation: str, *peers: str) -> Result | 
      if idle:
          return noop(str(idle.get("reason") or "no_selected_pr"), operation=operation)
      return None
-
 def read_repair_context(request: Request) -> Result:
-     terminal = _atomic_terminal(request, "read_repair_context", "build_repair_prompt")
-     if terminal is not None:
-         return terminal
      gated = _repair_decision_gate(request)
      if gated is not None:
          return gated
+     terminal = _atomic_terminal(request, "read_repair_context", "build_repair_prompt")
+     if terminal is not None:
+         return terminal
+     idle = upstream_noop(request, "build_repair_prompt")
+     if idle:
+         return noop(str(idle.get("reason") or "not_selected"), operation="read_repair_context", worked=False)
      context = _repair_context(request)
      error = _repair_context_error(context)
      if error:
@@ -2081,6 +2188,9 @@ from lokay.steps.cleanup import _publish_cleanup_receipt, _receipt_directory_loc
 
 def _repair_execution_gate(request: Request, operation: str, *peers: str) -> Result | None:
     """Require the explicit live authorization atom before any execution."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
     terminal = _atomic_terminal(request, operation, "decide_repair_attempt", *peers)
     if terminal:
         return terminal
@@ -2118,15 +2228,16 @@ def read_repair_omp_preconditions(request: Request) -> Result:
 
 
 def invoke_repair_omp(request: Request) -> Result:
-    gated = _repair_execution_gate(request, "invoke_repair_omp", "read_repair_omp_preconditions", "verify_repair_attempt_reservation")
+    peers = ("read_repair_omp_preconditions", "verify_repair_attempt_reservation", "build_repair_prompt")
+    gated = _repair_execution_gate(request, "invoke_repair_omp", *peers)
     if gated:
         return gated
+    upstream = _repair_upstream(request, "invoke_repair_omp", *peers)
+    if upstream:
+        return upstream
     reservation = cond_blob(request, "verify_repair_attempt_reservation")
     if reservation.get("verified") is not True:
         return fail("repair_attempt_reservation_required", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp")
-    upstream = _repair_upstream(request, "invoke_repair_omp", "read_repair_omp_preconditions", "verify_repair_attempt_reservation")
-    if upstream:
-        return upstream
     data, cfg = input_of(request), cfg_of(request)
     pre = cond_blob(request, "read_repair_omp_preconditions")
     path = str(data.get("worktree_path") or pre.get("worktree_path") or _repair_context(request)["worktree_path"])
@@ -2340,10 +2451,11 @@ def verify_repair_push_oid(request: Request) -> Result:
     return ok(status="verified", operation="verify_repair_push_oid", local_oid=local, remote_oid=remote, mutated=False)
 
 def update_repair_branch_provenance(request: Request) -> Result:
-    gated = _repair_execution_gate(request, "update_repair_branch_provenance", "verify_repair_receipt")
+    peers = ("verify_repair_receipt", "verify_repair_push_oid")
+    gated = _repair_execution_gate(request, "update_repair_branch_provenance", *peers)
     if gated:
         return gated
-    upstream = _repair_upstream(request, "update_repair_branch_provenance", "verify_repair_receipt")
+    upstream = _repair_upstream(request, "update_repair_branch_provenance", *peers)
     if upstream:
         return upstream
     context = _repair_context(request)
@@ -2488,8 +2600,24 @@ def _legacy_refresh_value(request: Request, *keys: str) -> str:
 
 
 def read_repair_base_head(request: Request) -> Result:
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    upstream = _repair_upstream(request, "read_repair_base_head", "read_repair_attempt_state", "read_repair_context", "read_repair_remote_head")
+    if upstream:
+        return upstream
     data, cfg = input_of(request), cfg_of(request)
     repo = str(data.get("repo") or cfg.get("repo") or "")
+    state_read = cond_blob(request, "read_repair_attempt_state")
+    terminal = _atomic_terminal(request, "read_repair_base_head", "read_repair_attempt_state")
+    if terminal is not None:
+        return terminal
+    if state_read.get("status") == "absent":
+        return ok(status="inactive", operation="read_repair_base_head", reason="no_repair_reservation", mutated=False)
+    if state_read.get("status") == "found":
+        state = state_read.get("attempt_state")
+        if not isinstance(state, dict) or state.get("attempted") is not True or str(state.get("status") or "") not in {"reserved", "invoked"}:
+            return fail("legacy_repair_reservation_invalid_state", failure_class="terminal", retry_safe=False, operation="read_repair_base_head", mutated=False)
     base = str(data.get("base_branch") or cfg.get("base_branch") or "")
     if not repo:
         repo = _legacy_refresh_value(request, "repo")
@@ -2510,7 +2638,24 @@ def read_repair_base_head(request: Request) -> Result:
 
 def decide_legacy_repair_head_refresh(request: Request) -> Result:
     """Pure, exact authorization for refreshing a stale legacy PR base."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    terminal = _atomic_terminal(
+        request,
+        "decide_legacy_repair_head_refresh",
+        "read_repair_attempt_state",
+        "read_repair_base_head",
+        "load_pr_fields",
+    )
+    if terminal is not None:
+        return terminal
     action = str(input_of(request).get("action") or cond_blob(request, "decide_triage_action", "decide").get("action") or "")
+    state_read = cond_blob(request, "read_repair_attempt_state")
+    if state_read.get("status") == "found":
+        nested = state_read.get("attempt_state")
+        if not isinstance(nested, dict) or nested.get("attempted") is not True or str(nested.get("status") or "") not in {"reserved", "invoked"}:
+            return fail("legacy_repair_reservation_invalid_state", failure_class="terminal", retry_safe=False, operation="decide_legacy_repair_head_refresh", mutated=False)
     state = _legacy_refresh_state(request)
     if action != "repair":
         return ok(status="inactive", operation="decide_legacy_repair_head_refresh", should_refresh=False, reason="not_repair", mutated=False)
@@ -2554,6 +2699,9 @@ def decide_legacy_repair_head_refresh(request: Request) -> Result:
 
 def update_legacy_repair_pr_branch(request: Request) -> Result:
     """Merge the live base into the legacy PR branch with optimistic head protection."""
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
     terminal = _atomic_terminal(request, "update_legacy_repair_pr_branch", "decide_legacy_repair_head_refresh")
     if terminal:
         return terminal
@@ -2573,7 +2721,10 @@ def update_legacy_repair_pr_branch(request: Request) -> Result:
 
 def verify_legacy_repair_pr_head(request: Request) -> Result:
     """Separately read back the PR and prove a changed head and exact identity/base."""
-    terminal = _atomic_terminal(request, "verify_legacy_repair_pr_head", "update_legacy_repair_pr_branch")
+    gated = _repair_decision_gate(request)
+    if gated is not None:
+        return gated
+    terminal = _atomic_terminal(request, "verify_legacy_repair_pr_head", "decide_legacy_repair_head_refresh", "update_legacy_repair_pr_branch")
     if terminal:
         return terminal
     update = cond_blob(request, "update_legacy_repair_pr_branch")
@@ -2610,10 +2761,11 @@ def _repair_attempt_receipt(request: Request, payload: dict[str, Any]) -> str:
     return str(path) if path is not None else ""
 
 def build_repair_receipt(request: Request) -> Result:
-    gated = _repair_execution_gate(request, "build_repair_receipt", "verify_existing_repair_pr")
+    peers = ("verify_existing_repair_pr", "verify_repair_push_oid", "verify_repair_omp_postconditions", "invoke_repair_omp")
+    gated = _repair_execution_gate(request, "build_repair_receipt", *peers)
     if gated:
         return gated
-    upstream = _repair_upstream(request, "build_repair_receipt", "verify_existing_repair_pr")
+    upstream = _repair_upstream(request, "build_repair_receipt", *peers)
     if upstream:
         return upstream
     data, cfg = input_of(request), cfg_of(request)
@@ -2668,10 +2820,11 @@ def publish_repair_receipt(request: Request) -> Result:
         return fail("repair_receipt_write_failed", failure_class="terminal", retry_safe=False, operation="publish_repair_receipt", error=str(exc), receipt_path=path)
 
 def verify_repair_receipt(request: Request) -> Result:
-    gated = _repair_execution_gate(request, "verify_repair_receipt", "publish_repair_receipt")
+    peers = ("publish_repair_receipt", "build_repair_receipt")
+    gated = _repair_execution_gate(request, "verify_repair_receipt", *peers)
     if gated:
         return gated
-    upstream = _repair_upstream(request, "verify_repair_receipt", "publish_repair_receipt")
+    upstream = _repair_upstream(request, "verify_repair_receipt", *peers)
     if upstream:
         return upstream
     publication = cond_blob(request, "publish_repair_receipt")

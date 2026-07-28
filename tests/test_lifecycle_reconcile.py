@@ -64,6 +64,11 @@ class LifecycleReconcileTests(unittest.TestCase):
         result = self._decide(self._conduction(checks=[{"state": "IN_PROGRESS", "conclusion": ""}]))
         self.assertEqual(result["outcome"], "wait_pending_checks")
         self.assertFalse(result["mutated"])
+    def test_green_checks_continue_to_merge(self):
+        result = self._decide(self._conduction(checks=[{"state": "COMPLETED", "conclusion": "SUCCESS"}]))
+        self.assertEqual(result["outcome"], "ready_for_merge")
+        self.assertFalse(result["mutated"])
+
 
     def test_merged_and_closed_are_finalized(self):
         self.assertEqual(self._decide(self._conduction(state="MERGED", checks=[{"state": "COMPLETED", "conclusion": "SUCCESS"}]))["outcome"], "finalize_merged")
@@ -89,6 +94,37 @@ class LifecycleReconcileTests(unittest.TestCase):
                 CommandError(["gh"], 1, "", marker), "pr"
             )
         )
+
+    def test_github_reader_prefers_input_cli(self):
+        commands: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            commands.append(list(cmd))
+            if cmd[1:3] == ["issue", "view"]:
+                payload = {"number": 10, "state": "OPEN", "labels": [], "assignees": []}
+            elif cmd[1:3] == ["pr", "view"]:
+                payload = {
+                    "number": 11,
+                    "state": "OPEN",
+                    "headRefName": self.data["branch"],
+                    "headRefOid": self.data["head_oid"],
+                    "baseRefName": "main",
+                    "closingIssuesReferences": [{"number": 10}],
+                    "statusCheckRollup": [],
+                }
+            else:
+                payload = []
+            return mock.Mock(stdout=json.dumps(payload))
+
+        request = {
+            "input": self.data | {"gh_cli": "input-gh"},
+            "config": self.config | {"gh_cli": "config-gh"},
+        }
+        with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=fake_run):
+            result = cleanup_reconcile.read_lifecycle_github_state(request)
+        self.assertEqual(result["status"], "read")
+        self.assertTrue(commands)
+        self.assertTrue(all(command[0] == "input-gh" for command in commands))
 
     def test_unrelated_missing_error_is_retryable_and_cannot_delete_claim(self):
         error = CommandError(["gh"], 1, "", "missing authentication token")

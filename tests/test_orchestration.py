@@ -35,6 +35,12 @@ class AggregateLaneResultsTests(unittest.TestCase):
         self.assertEqual(out["terminal_failures"], [{"lane": "dispatch", "reason": "push_failed", "failure_class": "terminal"}])
         self.assertEqual(out["lanes"]["dispatch"], dispatch)
         self.assertEqual(out["lanes"]["triage"], triage)
+    def test_adapter_failure_is_terminal(self) -> None:
+        adapter_failure = {"code": "adapter_failed", "message": "subprocess adapter failed"}
+        out = aggregate_lane_results(request({"auto_worker_lifecycle_decide_lifecycle_transition": adapter_failure}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["terminal_failures"], [{"lane": "lifecycle", "reason": "adapter_failed", "failure_class": "terminal"}])
+
 
     def test_pending_repair_has_no_cleanup_identity(self) -> None:
         pending = {"status": "decided", "ok": True, "mutated": False, "outcome": "wait_pending_checks", "identity": {"repo": "o/r", "issue": 7, "pr_number": 8, "branch": "ai/fix/7", "head_oid": "abc"}}

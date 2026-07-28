@@ -523,21 +523,21 @@ config = { handler = "lokay.steps.triage.verify_pr_assignee" }
 [[correlation_paths.effectors]]
 id = "read_pr_comments"
 capability = "lokay_step"
-conduction = ["decide_triage_action", "verify_pr_assignee"]
+conduction = ["decide_triage_action", "verify_pr_assignee", "load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.read_pr_comments" }
 
 [[correlation_paths.effectors]]
 id = "decide_pr_comment"
 capability = "lokay_step"
-conduction = ["read_pr_comments", "decide_triage_action"]
+conduction = ["read_pr_comments", "decide_triage_action", "load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.decide_pr_comment" }
 
 [[correlation_paths.effectors]]
 id = "post_pr_comment"
 capability = "lokay_step"
-conduction = ["decide_pr_comment"]
+conduction = ["decide_pr_comment", "decide_triage_action", "load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.post_pr_comment" }
 
@@ -769,7 +769,7 @@ config = { handler = "lokay.steps.repair.read_repair_attempt_state" }
 [[correlation_paths.effectors]]
 id = "read_repair_base_head"
 capability = "lokay_step"
-conduction = ["read_repair_context", "read_repair_remote_head"]
+conduction = ["read_repair_attempt_state", "read_repair_context", "read_repair_remote_head"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_base_head" }
 
@@ -1817,21 +1817,21 @@ config = { handler = "lokay.steps.triage.verify_pr_assignee" }
 [[correlation_paths.effectors]]
 id = "triage_read_pr_comments"
 capability = "lokay_step"
-conduction = ["triage_decide_triage_action", "triage_verify_pr_assignee"]
+conduction = ["triage_decide_triage_action", "triage_verify_pr_assignee", "triage_load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.read_pr_comments" }
 
 [[correlation_paths.effectors]]
 id = "triage_decide_pr_comment"
 capability = "lokay_step"
-conduction = ["triage_read_pr_comments", "triage_decide_triage_action"]
+conduction = ["triage_read_pr_comments", "triage_decide_triage_action", "triage_load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.decide_pr_comment" }
 
 [[correlation_paths.effectors]]
 id = "triage_post_pr_comment"
 capability = "lokay_step"
-conduction = ["triage_decide_pr_comment"]
+conduction = ["triage_decide_pr_comment", "triage_decide_triage_action", "triage_load_pr_fields"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.triage.post_pr_comment" }
 
@@ -2100,7 +2100,7 @@ config = { handler = "lokay.steps.repair.read_repair_attempt_state" }
 [[correlation_paths.effectors]]
 id = "triage_read_repair_base_head"
 capability = "lokay_step"
-conduction = ["triage_read_repair_context", "triage_read_repair_remote_head"]
+conduction = ["triage_read_repair_attempt_state", "triage_read_repair_context", "triage_read_repair_remote_head"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_base_head" }
 

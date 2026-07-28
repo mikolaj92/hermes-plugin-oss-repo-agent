@@ -744,8 +744,8 @@ def read_lifecycle_github_state(request: Request) -> Result:
     pr_number = context["pr_number"]
     branch = str(context["branch"])
     expected_head = str(context.get("head_oid") or "")
-    cfg = cfg_of(request)
-    gh = str(cfg.get("gh_cli") or "gh")
+    data, cfg = input_of(request), cfg_of(request)
+    gh = str(data.get("gh_cli") or cfg.get("gh_cli") or "gh")
     missing_issue = False
     missing_pr = False
     try:
@@ -921,6 +921,8 @@ def decide_lifecycle_transition(request: Request) -> Result:
         return ok(status="decided", outcome="wait_pending_checks", action="wait_pending_checks", mutated=False, identity=identity, checks_state=check_state)
     if check_state == "failed":
         return ok(status="decided", outcome="resume_repair", action="resume_repair", mutated=False, identity=identity, checks_state=check_state, labels=sorted(labels))
+    if check_state == "passed":
+        return ok(status="decided", outcome="ready_for_merge", action="ready_for_merge", mutated=False, identity=identity, checks_state=check_state, labels=sorted(labels))
     return fail("lifecycle_state_conflict", failure_class="terminal", retry_safe=False, mutated=False, error="open PR has no actionable failed or pending check state")
 
 

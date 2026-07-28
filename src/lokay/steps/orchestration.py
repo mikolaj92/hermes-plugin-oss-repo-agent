@@ -59,10 +59,11 @@ def _lane_result(request: Request, lane: str) -> dict[str, Any]:
 
 def _terminal_failure(lane: str, receipt: Mapping[str, Any]) -> dict[str, Any] | None:
     status = str(receipt.get("status") or "")
-    if receipt.get("ok") is False or status in _TERMINAL:
+    code = str(receipt.get("code") or "")
+    if receipt.get("ok") is False or status in _TERMINAL or code:
         return {
             "lane": lane,
-            "reason": str(receipt.get("reason") or status or "lane_failed"),
+            "reason": str(receipt.get("reason") or code or status or "lane_failed"),
             "failure_class": str(receipt.get("failure_class") or "terminal"),
         }
     return None

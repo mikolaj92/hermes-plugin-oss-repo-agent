@@ -376,6 +376,46 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(out["reason"], "upstream_failed")
         self.assertFalse(out.get("mutated"))
 
+    def test_repair_noop_gates_context_base_and_tail(self) -> None:
+        decision = {"status": "decided", "ok": True, "action": "comment_block", "reason": "missing_test_evidence"}
+        request = req({"conduction": {"triage_decide_triage_action": decision}})
+        with mock.patch("lokay.steps.repair.run_cmd") as run:
+            for result in (
+                repair.read_repair_context(request),
+                repair.read_repair_base_head(request),
+                repair.read_repair_remote_head(request),
+            ):
+                self.assertEqual(result["status"], "noop")
+                self.assertEqual(result["reason"], "not_selected")
+                self.assertFalse(result["mutated"])
+        run.assert_not_called()
+
+    def test_repair_tail_rejects_failed_conducted_evidence(self) -> None:
+        failed = {"status": "failed", "ok": False, "reason": "broken", "mutated": False}
+        authorized = {"status": "authorized", "ok": True, "authorize": True}
+        base = {"conduction": {"decide_repair_attempt": authorized}}
+
+        prompt = repair.build_repair_prompt(req({"pr": {"closingIssuesReferences": [{"number": 10}]}, "conduction": {"evaluate_checks": failed}}))
+        self.assertEqual(prompt["reason"], "upstream_failed")
+
+        cases = (
+            (repair.reserve_repair_attempt, "read_repair_attempt_baseline"),
+            (repair.verify_repair_attempt_reservation, "verify_repair_attempt_recovery"),
+            (repair.invoke_repair_omp, "build_repair_prompt"),
+            (repair.update_repair_branch_provenance, "verify_repair_push_oid"),
+            (repair.build_repair_receipt, "verify_repair_omp_postconditions"),
+            (repair.verify_repair_receipt, "build_repair_receipt"),
+        )
+        with mock.patch("lokay.steps.repair.run_omp") as run_omp, mock.patch("lokay.steps.repair.branch_config_set") as config_set:
+            for handler, peer in cases:
+                with self.subTest(handler=handler.__name__, peer=peer):
+                    out = handler(req({**base, "conduction": {**base["conduction"], peer: failed}}))
+                    self.assertEqual(out["status"], "failed")
+                    self.assertEqual(out["reason"], "upstream_failed")
+                    self.assertFalse(out["mutated"])
+        run_omp.assert_not_called()
+        config_set.assert_not_called()
+
     def test_build_repair_prompt_requires_linked_issue_in_standalone_input(self) -> None:
         out = repair.build_repair_prompt(req({"pr": {"number": 11, "title": "fix"}, "failures": ["ci"]}))
         self.assertFalse(out["ok"])
@@ -1951,6 +1991,21 @@ CREATE TABLE runs (
             self.assertEqual(out["status"], "failed")
             self.assertEqual(out["reason"], "repair_attempt_baseline_mismatch")
 
+    def test_repair_reconciliation_propagates_nonselected_state(self) -> None:
+        out = repair.read_repair_attempt_reconciliation(req({
+            "conduction": {
+                "read_repair_attempt_state": {
+                    "ok": True,
+                    "status": "noop",
+                    "reason": "not_selected",
+                    "mutated": False,
+                }
+            }
+        }))
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "not_selected")
+        self.assertTrue(out["ok"])
+
     def test_read_repair_attempt_reconciliation_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2274,11 +2329,82 @@ CREATE TABLE runs (
                 rejected = repair.verify_legacy_repair_pr_head(req(request_data))
             self.assertFalse(rejected["ok"])
 
+    def test_failed_reservation_state_blocks_refresh_and_fast_forward(self) -> None:
+        failed_state = {
+            "ok": False,
+            "status": "failed",
+            "reason": "repair_attempt_state_malformed",
+        }
+        decision = repair.decide_legacy_repair_head_refresh(req({
+            "action": "repair",
+            "conduction": {"read_repair_attempt_state": failed_state},
+        }))
+        self.assertFalse(decision["ok"])
+        self.assertEqual(decision["reason"], "upstream_failed")
+        with mock.patch("lokay.steps.repair.git") as git:
+            out = repair.fast_forward_repair_worktree(req({
+                "action": "repair",
+                "conduction": {
+                    "verify_legacy_repair_pr_head": decision,
+                    "decide_repair_worktree_fast_forward_execution": {
+                        "ok": True,
+                        "status": "authorized",
+                        "should_fast_forward": True,
+                    },
+                },
+            }))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "upstream_failed")
+        git.assert_not_called()
+
+    def test_nested_failed_reservation_blocks_refresh_and_fast_forward(self) -> None:
+        state_read = {
+            "ok": True,
+            "status": "found",
+            "attempt_state": {
+                "attempted": True,
+                "status": "failed",
+                "repo": "o/r",
+                "pr_number": 7,
+                "verified_head": "a" * 40,
+            },
+        }
+        decision = repair.decide_legacy_repair_head_refresh(req({
+            "action": "repair",
+            "conduction": {"read_repair_attempt_state": state_read},
+        }))
+        self.assertFalse(decision["ok"])
+        self.assertEqual(decision["reason"], "legacy_repair_reservation_invalid_state")
+        with mock.patch("lokay.steps.repair.git") as git:
+            out = repair.fast_forward_repair_worktree(req({
+                "action": "repair",
+                "conduction": {
+                    "verify_legacy_repair_pr_head": decision,
+                    "decide_repair_worktree_fast_forward_execution": {
+                        "ok": True,
+                        "status": "authorized",
+                        "should_fast_forward": True,
+                    },
+                },
+            }))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "upstream_failed")
+        git.assert_not_called()
+
     def test_legacy_base_refresh_downstream_gate(self) -> None:
         refreshed = {"status": "refreshed", "ok": True, "refresh_kind": "legacy_base_synchronization"}
         out = repair._repair_upstream(req({"conduction": {"verify_legacy_repair_pr_head": refreshed}}), "next_repair_atom", "verify_legacy_repair_pr_head")
         self.assertEqual(out["status"], "noop")
         self.assertEqual(out["reason"], "legacy_base_refreshed")
+
+    def test_non_repair_action_noops_before_review_task_read(self) -> None:
+        decision = {"status": "decided", "ok": True, "action": "comment_block", "reason": "missing_test_evidence"}
+        with mock.patch("lokay.steps.repair.hermes_kanban_json") as read:
+            out = repair.read_review_tasks(req({"conduction": {"triage_decide_triage_action": decision}}))
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "not_selected")
+        self.assertFalse(out["mutated"])
+        read.assert_not_called()
 
 class TriageTests(unittest.TestCase):
     def test_verify_merge_receipt_propagates_publisher_noop(self) -> None:
@@ -2288,6 +2414,16 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(out["reason"], "not_selected")
         self.assertEqual(out["operation"], "verify_merge_receipt")
         self.assertFalse(out["mutated"])
+
+    def test_non_merge_action_noops_before_assignee_read(self) -> None:
+        decision = {"status": "decided", "ok": True, "action": "comment_block", "reason": "missing_test_evidence"}
+        with mock.patch("lokay.steps.triage._pr_view") as read:
+            out = triage.read_pr_assignees(req({"conduction": {"triage_decide_triage_action": decision}}))
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "not_selected")
+        self.assertFalse(out["mutated"])
+        read.assert_not_called()
+
 
     def test_evaluate_checks_pass_and_fail(self) -> None:
         good = triage.evaluate_checks(req({"pr": {"statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS", "state": "SUCCESS"}]}}))
