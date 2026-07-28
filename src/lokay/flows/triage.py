@@ -187,6 +187,9 @@ async def run_pr_triage_decide(
     candidate_sha = str(cfg.raw.get("candidate_sha") or candidate)
     head_sha = str(cfg.raw.get("head_sha") or cfg.raw.get("verified_head") or cfg.raw.get("head_oid") or "")
     check_run_id = str(cfg.raw.get("check_run_id") or "")
+    raw = cfg.raw if isinstance(cfg.raw, dict) else {}
+    attempt_recovery = raw.get("attempt_recovery") if isinstance(raw.get("attempt_recovery"), dict) and raw.get("attempt_recovery") else None
+    repair_creation_recovery = raw.get("repair_creation_recovery") if isinstance(raw.get("repair_creation_recovery"), dict) and raw.get("repair_creation_recovery") else None
     configured_repos = [
         {"repo": entry.repo, "board": entry.board, "clone_path": entry.clone_path, "priority": entry.priority}
         for entry in cfg.repos
@@ -227,6 +230,9 @@ async def run_pr_triage_decide(
         "receipt_path": repair_receipt,
         "repair_receipt_path": repair_receipt,
         "base_branch": step_config["base_branch"],
+        "db_path": str(db_path),
+        "attempt_recovery": attempt_recovery,
+        "repair_creation_recovery": repair_creation_recovery,
     }
     effector_inputs: dict[str, dict[str, Any]] = {
         "read_open_prs": list_input,
@@ -247,9 +253,12 @@ async def run_pr_triage_decide(
         "triage_build_repair_prompt": dict(repair_input),
         **{step_id: dict(repair_input) for step_id in (
             "decide_repair_attempt", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory",
-            "read_repair_branch_provenance", "decide_repair_worktree_ownership", "create_repair_branch", "write_repair_branch_provenance",
-            "add_repair_worktree", "prepare_repair_worktree", "verify_repair_worktree", "verify_repair_worktree_head",
-            "read_repair_attempt_state", "reserve_repair_attempt", "verify_repair_attempt_reservation",
+            "read_repair_branch_provenance", "read_repair_creation_evidence", "decide_repair_worktree_ownership", "create_repair_branch", "write_repair_branch_provenance",
+            "add_repair_worktree", "prepare_repair_worktree", "verify_repair_worktree", "verify_repair_worktree_head", "read_repair_attempt_baseline",
+            "read_repair_attempt_state", "read_repair_completed_receipt", "read_repair_attempt_reconciliation", "read_repair_attempt_recovery_evidence",
+            "claim_repair_attempt_recovery", "verify_repair_attempt_recovery", "read_repair_recovery_continuation_evidence",
+            "claim_repair_recovery_continuation", "verify_repair_recovery_continuation",
+            "reserve_repair_attempt", "verify_repair_attempt_reservation",
             "read_repair_omp_preconditions", "invoke_repair_omp", "verify_repair_omp_postconditions", "read_repair_worktree_head",
             "decide_repair_push", "push_repair_branch", "read_repair_pushed_ref", "verify_repair_push_oid",
             "update_repair_branch_provenance", "verify_updated_repair_branch_provenance",
@@ -257,9 +266,12 @@ async def run_pr_triage_decide(
         )},
         **{f"triage_{step_id}": dict(repair_input) for step_id in (
             "decide_repair_attempt", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory",
-            "read_repair_branch_provenance", "decide_repair_worktree_ownership", "create_repair_branch", "write_repair_branch_provenance",
-            "add_repair_worktree", "prepare_repair_worktree", "verify_repair_worktree", "verify_repair_worktree_head",
-            "read_repair_attempt_state", "reserve_repair_attempt", "verify_repair_attempt_reservation",
+            "read_repair_branch_provenance", "read_repair_creation_evidence", "decide_repair_worktree_ownership", "create_repair_branch", "write_repair_branch_provenance",
+            "add_repair_worktree", "prepare_repair_worktree", "verify_repair_worktree", "verify_repair_worktree_head", "read_repair_attempt_baseline",
+            "read_repair_attempt_state", "read_repair_completed_receipt", "read_repair_attempt_reconciliation", "read_repair_attempt_recovery_evidence",
+            "claim_repair_attempt_recovery", "verify_repair_attempt_recovery", "read_repair_recovery_continuation_evidence",
+            "claim_repair_recovery_continuation", "verify_repair_recovery_continuation",
+            "reserve_repair_attempt", "verify_repair_attempt_reservation",
             "read_repair_omp_preconditions", "invoke_repair_omp", "verify_repair_omp_postconditions", "read_repair_worktree_head",
             "decide_repair_push", "push_repair_branch", "read_repair_pushed_ref", "verify_repair_push_oid",
             "update_repair_branch_provenance", "verify_updated_repair_branch_provenance",

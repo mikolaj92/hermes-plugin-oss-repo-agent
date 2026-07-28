@@ -156,9 +156,10 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
         "triage_read_review_tasks": {}, "triage_find_review_marker": {}, "triage_create_review_task": {}, "triage_reconcile_review_task": {},
         "triage_build_repair_prompt": {},
         # Repair attempt state is immutable and never shares dispatch/merge receipts.
-        "triage_read_repair_attempt_state": {}, "triage_read_repair_completed_receipt": {}, "triage_read_repair_attempt_recovery_evidence": {},
+        "triage_read_repair_attempt_state": {}, "triage_read_repair_completed_receipt": {}, "triage_read_repair_attempt_reconciliation": {}, "triage_read_repair_attempt_recovery_evidence": {},
         "triage_claim_repair_attempt_recovery": {}, "triage_verify_repair_attempt_recovery": {},
-        "triage_decide_repair_attempt": {}, "triage_reserve_repair_attempt": {}, "triage_verify_repair_attempt_reservation": {},
+        "triage_read_repair_recovery_continuation_evidence": {}, "triage_claim_repair_recovery_continuation": {}, "triage_verify_repair_recovery_continuation": {},
+        "triage_decide_repair_attempt": {}, "triage_read_repair_attempt_baseline": {}, "triage_reserve_repair_attempt": {}, "triage_verify_repair_attempt_reservation": {},
         "triage_read_repair_context": {}, "triage_read_repair_remote_head": {},
         "triage_read_repair_worktree_inventory": {}, "triage_read_repair_branch_provenance": {},
         "triage_read_repair_creation_evidence": {},

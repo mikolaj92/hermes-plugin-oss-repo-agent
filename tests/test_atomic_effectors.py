@@ -20,6 +20,11 @@ from lokay.steps.claim import _reserve_claim
 def req(input_data=None, config=None):
     return {"input": input_data or {}, "config": config or {}}
 
+def invoke_req(input_data=None, config=None, *, process_id):
+    request = req(input_data, config)
+    request["process_id"] = process_id
+    return request
+
 def triage_req(action, input_data=None, config=None):
     data = dict(input_data or {})
     data["conduction"] = {
@@ -894,11 +899,24 @@ CREATE TABLE runs (
             }))
             self.assertEqual(first_decision["status"], "invoke")
             persist("run-a", "triage_decide_repair_attempt", first_decision)
+            ctx = repair._repair_context(req({**context, "number": 1, "verified_head": "a" * 40}))
             reserved = repair.reserve_repair_attempt(req({
                 **context,
                 "number": 1,
                 "verified_head": "a" * 40,
-                "conduction": {"decide_repair_attempt": first_decision},
+                "conduction": {
+                    "decide_repair_attempt": first_decision,
+                    "read_repair_attempt_baseline": {
+                        "ok": True,
+                        "status": "read",
+                        "baseline_verified": True,
+                        "pre_head": "a" * 40,
+                        "pre_status": "",
+                        "branch": ctx["branch"],
+                        "local_branch": ctx["local_branch"],
+                        "worktree_path": ctx["worktree_path"],
+                    },
+                },
             }))
             self.assertEqual(reserved["status"], "reserved")
             persist("run-a", "triage_reserve_repair_attempt", reserved)
@@ -910,12 +928,15 @@ CREATE TABLE runs (
             }))
             self.assertTrue(verified_reservation["verified"])
             persist("run-a", "triage_verify_repair_attempt_reservation", verified_reservation)
-            with mock.patch("lokay.steps.repair.run_omp", return_value={"status": "completed", "stdout": "ok"}) as run_omp:
-                invoked = repair.invoke_repair_omp(req({
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="a" * 40),
+                mock.patch("lokay.steps.repair.git", return_value=""),
+                mock.patch("lokay.steps.repair.run_omp", return_value={"status": "completed", "stdout": "ok"}) as run_omp,
+            ):
+                invoked = repair.invoke_repair_omp(invoke_req({
                     **context,
                     "prompt": "fix checks",
                     "worktree_path": str(root / "worktrees" / "wt"),
-                    "process_id": "run-a:auto_worker:triage_invoke_repair_omp",
                     "conduction": {
                         "decide_repair_attempt": first_decision,
                         "verify_repair_attempt_reservation": verified_reservation,
@@ -926,7 +947,7 @@ CREATE TABLE runs (
                             "pre_head": "a" * 40,
                         },
                     },
-                }))
+                }, process_id="run-a:auto_worker:triage_invoke_repair_omp"))
             self.assertEqual(invoked["status"], "invoked")
             run_omp.assert_called_once()
             persist("run-a", "triage_invoke_repair_omp", invoked)
@@ -1070,10 +1091,28 @@ CREATE TABLE runs (
 
     def test_repair_reservation_restart_blocks_changed_checks_and_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            base = {"enabled": True, "live": True, "dry_run": False, "repo": "o/r", "number": 1, "verified_head": "head-a", "candidate": "candidate-a", "run_id": "run-a", "repair_state_root": tmp, "checks": [{"name": "ci", "conclusion": "FAILURE"}]}
+            base = {
+                "enabled": True, "live": True, "dry_run": False, "repo": "o/r", "number": 1, "verified_head": "head-a",
+                "candidate": "candidate-a", "run_id": "run-a", "repair_state_root": tmp, "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+                "branch": "ai/fix/1",
+                "worktree_root": str(Path(tmp) / "worktrees"),
+            }
             first = repair.decide_repair_attempt(req(base))
             self.assertTrue(first["authorize"])
-            reserved = repair.reserve_repair_attempt(req(dict(base, conduction={"decide_repair_attempt": first})))
+            ctx = repair._repair_context(req(base))
+            reserved = repair.reserve_repair_attempt(req(dict(base, conduction={
+                "decide_repair_attempt": first,
+                "read_repair_attempt_baseline": {
+                    "ok": True,
+                    "status": "read",
+                    "baseline_verified": True,
+                    "pre_head": "head-a",
+                    "pre_status": "",
+                    "branch": ctx["branch"],
+                    "local_branch": ctx["local_branch"],
+                    "worktree_path": ctx["worktree_path"],
+                }
+            })))
             self.assertEqual(reserved["status"], "reserved")
             restart = dict(base, candidate="candidate-b", run_id="run-b", checks=[{"name": "ci", "conclusion": "ERROR"}])
             read = repair.read_repair_attempt_state(req(restart))
@@ -1101,6 +1140,140 @@ CREATE TABLE runs (
         with mock.patch("lokay.steps.repair.run_omp") as run:
             out = repair.invoke_repair_omp(req({"dry_run": False, "conduction": {"decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True}, "read_repair_omp_preconditions": {"status": "ready", "ok": True, "worktree_path": "/tmp", "pre_head": "head"}}}))
             self.assertEqual(out["reason"], "repair_attempt_reservation_required")
+            run.assert_not_called()
+
+    def test_repair_invoke_timeout_records_observed_mutation_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            reservation = Path(tmp) / "reservation.json"
+            reservation.write_text("{}\n", encoding="utf-8")
+            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            request = invoke_req({
+                "dry_run": False,
+                "prompt": "fix checks",
+                "worktree_path": "/tmp/worktree",
+                "conduction": {
+                    "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True},
+                    "read_repair_omp_preconditions": {
+                        "ok": True,
+                        "status": "ready",
+                        "worktree_path": "/tmp/worktree",
+                        "pre_head": "head-a",
+                    },
+                    "verify_repair_attempt_reservation": {
+                        "ok": True,
+                        "status": "verified",
+                        "verified": True,
+                        "reservation_path": str(reservation),
+                    },
+                },
+            }, process_id=process_id)
+            timeout = subprocess.TimeoutExpired(["omp"], 30)
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", side_effect=["head-a", "head-a"]),
+                mock.patch("lokay.steps.repair.git", side_effect=["", " M changed.py"]),
+                mock.patch("lokay.steps.repair.run_omp", side_effect=timeout),
+            ):
+                out = repair.invoke_repair_omp(request)
+            self.assertEqual(out["reason"], "repair_omp_failed")
+            self.assertTrue(out["mutated"])
+            terminal = json.loads(repair._repair_invoke_terminal_evidence_path(reservation, process_id).read_text(encoding="utf-8"))
+            self.assertEqual(terminal["status"], "timed_out")
+            self.assertEqual(terminal["post_head"], "head-a")
+            self.assertEqual(terminal["post_status"], " M changed.py")
+
+    def test_repair_invoke_rejects_timeout_beyond_fala_boundary(self) -> None:
+        request = req({
+            "dry_run": False,
+            "prompt": "fix checks",
+            "worktree_path": "/tmp/worktree",
+            "timeout_seconds": 7201,
+            "conduction": {
+                "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True},
+                "read_repair_omp_preconditions": {
+                    "ok": True,
+                    "status": "ready",
+                    "worktree_path": "/tmp/worktree",
+                    "pre_head": "head-a",
+                },
+                "verify_repair_attempt_reservation": {"ok": True, "status": "verified", "verified": True},
+            },
+        })
+        with (
+            mock.patch("lokay.steps.repair.rev_parse", return_value="head-a"),
+            mock.patch("lokay.steps.repair.git", return_value=""),
+            mock.patch("lokay.steps.repair.run_omp") as run,
+        ):
+            out = repair.invoke_repair_omp(request)
+        self.assertEqual(out["reason"], "invalid_repair_omp_timeout")
+        self.assertFalse(out["mutated"])
+        run.assert_not_called()
+
+    def test_invoke_evidence_requires_started_and_terminal_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            reservation = Path(tmp) / "reservation.json"
+            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            started_path = repair._repair_invoke_evidence_path(reservation, process_id)
+            terminal_path = repair._repair_invoke_terminal_evidence_path(reservation, process_id)
+            started_path.parent.mkdir(parents=True, exist_ok=True)
+            started = {"kind": "repair_invoke_evidence", "process_id": process_id, "status": "started", "pre_head": "head", "pre_status": "", "mutated": None}
+            started_path.write_text(json.dumps(started) + "\n", encoding="utf-8")
+            self.assertEqual(repair._read_repair_invoke_evidence(reservation, process_id)["status"], "unknown")
+            terminal = {**started, "status": "failed", "post_head": "head", "post_status": "", "mutated": False, "error": "failed"}
+            terminal_path.write_text(json.dumps(terminal) + "\n", encoding="utf-8")
+            self.assertEqual(repair._read_repair_invoke_evidence(reservation, process_id)["status"], "failed")
+            terminal_path.unlink()
+            terminal["process_id"] = "other-process"
+            terminal_path.write_text(json.dumps(terminal) + "\n", encoding="utf-8")
+            malformed = repair._read_repair_invoke_evidence(reservation, process_id)
+            self.assertEqual(malformed["reason"], "repair_invoke_evidence_malformed")
+
+    def test_invoke_evidence_orphan_terminal_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            reservation = Path(tmp) / "reservation.json"
+            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            terminal_path = repair._repair_invoke_terminal_evidence_path(reservation, process_id)
+            terminal_path.parent.mkdir(parents=True, exist_ok=True)
+            terminal_path.write_text(json.dumps({"kind": "repair_invoke_evidence", "process_id": process_id, "status": "failed", "pre_head": "head", "pre_status": "", "post_head": "head", "post_status": "", "mutated": False, "error": "failed"}) + "\n", encoding="utf-8")
+            self.assertEqual(repair._read_repair_invoke_evidence(reservation, process_id)["reason"], "repair_invoke_evidence_malformed")
+
+    def test_invoke_repair_omp_prepublication_failure_does_not_run_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, reservation = Path(tmp), Path(tmp) / "reservation.json"
+            reservation.write_text("{}\n")
+            request = invoke_req({"repo": "o/r", "number": 1, "verified_head": "head", "worktree_path": str(root / "wt"), "prompt": "fix", "conduction": {"verify_repair_attempt_reservation": {"ok": True, "status": "verified", "verified": True, "reservation_path": str(reservation)}, "read_repair_omp_preconditions": {"ok": True, "status": "ready", "worktree_path": str(root / "wt"), "pre_head": "head"}, "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True}}}, process_id="run:auto_worker:triage_invoke_repair_omp")
+            with mock.patch("lokay.steps.repair.rev_parse", return_value="head"), mock.patch("lokay.steps.repair.git", return_value=""), mock.patch("lokay.steps.repair._write_invoke_evidence", side_effect=OSError("publish")), mock.patch("lokay.steps.repair.run_omp") as run:
+                out = repair.invoke_repair_omp(request)
+            self.assertEqual(out["reason"], "repair_invoke_evidence_write_failed")
+            self.assertFalse(out["mutated"])
+            run.assert_not_called()
+
+    def test_invoke_repair_omp_terminal_publication_failure_reports_mutated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, reservation = Path(tmp), Path(tmp) / "reservation.json"
+            reservation.write_text("{}\n")
+            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            request = invoke_req({"repo": "o/r", "number": 1, "verified_head": "head", "worktree_path": str(root / "wt"), "prompt": "fix", "conduction": {"verify_repair_attempt_reservation": {"ok": True, "status": "verified", "verified": True, "reservation_path": str(reservation)}, "read_repair_omp_preconditions": {"ok": True, "status": "ready", "worktree_path": str(root / "wt"), "pre_head": "head"}, "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True}}}, process_id=process_id)
+            calls = {"count": 0}
+            def write(path, payload, exclusive=False):
+                calls["count"] += 1
+                if not exclusive:
+                    raise OSError("terminal publish")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            with mock.patch("lokay.steps.repair.rev_parse", return_value="head"), mock.patch("lokay.steps.repair.git", return_value=""), mock.patch("lokay.steps.repair._write_invoke_evidence", side_effect=write), mock.patch("lokay.steps.repair.run_omp", return_value={"status": "completed"}):
+                out = repair.invoke_repair_omp(request)
+            self.assertEqual(out["reason"], "repair_invoke_evidence_write_failed")
+            self.assertTrue(out["mutated"])
+
+    def test_invoke_repair_omp_requires_invocation_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, reservation = Path(tmp), Path(tmp) / "reservation.json"
+            reservation.write_text("{}\n")
+            request = req({"repo": "o/r", "number": 1, "verified_head": "head", "worktree_path": str(root / "wt"), "prompt": "fix", "conduction": {"verify_repair_attempt_reservation": {"ok": True, "status": "verified", "verified": True, "reservation_path": str(reservation)}, "read_repair_omp_preconditions": {"ok": True, "status": "ready", "worktree_path": str(root / "wt"), "pre_head": "head"}, "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True}}})
+            with mock.patch("lokay.steps.repair.rev_parse", return_value="head"), mock.patch("lokay.steps.repair.git", return_value=""), mock.patch("lokay.steps.repair.run_omp") as run:
+                out = repair.invoke_repair_omp(request)
+            self.assertEqual(out["reason"], "repair_invoke_evidence_identity_required")
+            self.assertFalse(out["mutated"])
             run.assert_not_called()
 
     def test_repair_attempt_recovery_inactive_without_config(self) -> None:
@@ -1173,6 +1346,7 @@ CREATE TABLE runs (
                 "candidate": "old-candidate",
                 "run_id": "old-run",
             }
+
             reservation = {**identity, "status": "reserved", "attempted": True, "kind": "repair_attempt_reservation", "checks": []}
             path = root / "repair-attempts" / "o__r" / "1" / "reservation.json"
             path.parent.mkdir(parents=True)
@@ -1239,6 +1413,37 @@ CREATE TABLE runs (
             self.assertEqual(verified["status"], "failed")
             self.assertEqual(verified["reason"], "repair_attempt_recovery_claim_mismatch")
 
+    def test_repair_attempt_recovery_accepts_failed_mutation_false_terminal_evidence(self) -> None:
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "state" / "state.sqlite"
+            db.parent.mkdir(parents=True)
+            candidate = "old-candidate"
+            expected_cwd = db.resolve().parent.parent / "deployment" / "versions" / candidate / "source" / "project"
+            expected_cwd.mkdir(parents=True)
+            reservation = root / "reservation.json"
+            reservation.write_text("{}\n")
+            state = {"repo": "o/r", "pr_number": 1, "verified_head": "head-a", "candidate": candidate, "run_id": "old-run", "pre_head": "head-a", "pre_status": ""}
+            process_id = "old-run:auto_worker:triage_verify_repair_attempt_reservation"
+            invoke_id = "old-run:auto_worker:triage_invoke_repair_omp"
+            started = {"kind": "repair_invoke_evidence", "process_id": invoke_id, "status": "started", "pre_head": "head-a", "pre_status": "", "mutated": None}
+            terminal = {**started, "status": "failed", "post_head": "head-a", "post_status": "", "mutated": False, "error": "failed"}
+            repair._repair_invoke_evidence_path(reservation, invoke_id).write_text(json.dumps(started) + "\n", encoding="utf-8")
+            repair._repair_invoke_terminal_evidence_path(reservation, invoke_id).write_text(json.dumps(terminal) + "\n", encoding="utf-8")
+            process_input = {"candidate": candidate, "candidate_id": candidate, "conduction": {"triage_reserve_repair_attempt": {"ok": True, "mutated": True, "reservation_path": str(reservation), "reservation": state}}}
+            with sqlite3.connect(db) as connection:
+                connection.execute("CREATE TABLE processes (run_id TEXT, id TEXT, status TEXT, input_json TEXT, output_json TEXT, error_json TEXT, metadata TEXT)")
+                connection.execute("INSERT INTO processes VALUES (?,?,?,?,?,?,?)", ("old-run", process_id, "failed", json.dumps(process_input), "{}", json.dumps({"code": "adapter_failed"}), json.dumps({"__adapter_binding": {"cwd": str(expected_cwd)}})))
+            out = repair.read_repair_attempt_recovery_evidence(req({
+                "run_id": "new-run", "candidate": "new-candidate", "repo": "o/r", "number": 1, "verified_head": "head-a", "db_path": str(db),
+                "attempt_recovery": {"run_id": "old-run", "process_id": process_id, "candidate": candidate, "path_id": "auto_worker", "effector_id": "triage_verify_repair_attempt_reservation", "repo": "o/r", "pr_number": 1, "verified_head": "head-a"},
+                "conduction": {"read_repair_attempt_state": {"ok": True, "status": "found", "attempt_state": state, "reservation_path": str(reservation)}, "read_repair_attempt_reconciliation": {"ok": True, "status": "unchanged", "authorize_reinvoke": True, "snapshot": {"pre_head": "head-a", "pre_status": ""}}}
+            }))
+            self.assertEqual(out["status"], "validated", out)
+            self.assertFalse(out["mutated"])
+            self.assertEqual(out["recovery_claim"]["evidence_process_id"], process_id)
+
     def test_repair_attempt_recovery_authorizes_composite_reservation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1255,6 +1460,11 @@ CREATE TABLE runs (
                 "attempted": True,
                 "kind": "repair_attempt_reservation",
                 "checks": [{"identity": "ci", "conclusion": "FAILURE"}],
+                "pre_head": "head-a",
+                "pre_status": "",
+                "repo_branch": "branch-a",
+                "local_branch": "local-branch-a",
+                "worktree_path": "worktree-path-a",
             }
             path = root / "repair-attempts" / "o__r" / "1" / "reservation.json"
             path.parent.mkdir(parents=True)
@@ -1294,6 +1504,11 @@ CREATE TABLE runs (
                 "conduction": {
                     "read_repair_attempt_state": state,
                     "verify_repair_attempt_recovery": verified,
+                    "verify_repair_recovery_continuation": {
+                        "ok": True,
+                        "status": "original",
+                        "continuation_verified": True,
+                    },
                 },
             }))
             self.assertEqual(decision["status"], "invoke")
@@ -1318,6 +1533,11 @@ CREATE TABLE runs (
                 "conduction": {
                     "reserve_repair_attempt": reserved,
                     "verify_repair_attempt_recovery": verified,
+                    "verify_repair_recovery_continuation": {
+                        "ok": True,
+                        "status": "original",
+                        "continuation_verified": True,
+                    },
                 },
             }))
             self.assertEqual(verified_reservation["status"], "verified")
@@ -1340,6 +1560,11 @@ CREATE TABLE runs (
                 "attempted": True,
                 "kind": "repair_attempt_reservation",
                 "checks": [{"identity": "ci", "conclusion": "FAILURE"}],
+                "pre_head": "head-a",
+                "pre_status": "",
+                "repo_branch": "branch-a",
+                "local_branch": "local-branch-a",
+                "worktree_path": "worktree-path-a",
             }
             path = root / "reservation.json"
             path.write_text(json.dumps(reservation, sort_keys=True) + "\n", encoding="utf-8")
@@ -1373,6 +1598,11 @@ CREATE TABLE runs (
                 "conduction": {
                     "reserve_repair_attempt": reserved,
                     "verify_repair_attempt_recovery": verified,
+                    "verify_repair_recovery_continuation": {
+                        "ok": True,
+                        "status": "original",
+                        "continuation_verified": True,
+                    },
                 },
             }))
             self.assertEqual(out["status"], "verified")
@@ -1389,6 +1619,499 @@ CREATE TABLE runs (
 
 
 
+    def test_recovery_continuation_authorizes_next_link_and_rejects_second_contender(self) -> None:
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reservation_path = root / "reservation.json"
+            head = "a" * 40
+            reconciliation = {"pre_head": head, "pre_status": "", "actual_head": head, "actual_status": ""}
+            claim = {
+                "kind": "repair_attempt_recovery_claim",
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": head,
+                "reservation_run_id": "old-run",
+                "reservation_candidate": "old-candidate",
+                "evidence_process_id": "old-run:auto_worker:triage_verify_repair_attempt_reservation",
+                "recovery_run_id": "run-b",
+                "recovery_candidate": "candidate-b",
+                "reconciliation": reconciliation,
+            }
+            claim_path = root / "claim.json"
+            claim_path.write_text(json.dumps(claim, sort_keys=True) + "\n", encoding="utf-8")
+            reservation_path.write_text("{}\n", encoding="utf-8")
+            db = root / "state.sqlite"
+            invoke_process_id = "run-b:auto_worker:triage_invoke_repair_omp"
+            started = {"kind": "repair_invoke_evidence", "process_id": invoke_process_id, "status": "started", "pre_head": head, "pre_status": "", "mutated": None}
+            terminal = {**started, "status": "failed", "post_head": head, "post_status": "", "mutated": False, "error": "failed"}
+            repair._repair_invoke_evidence_path(reservation_path, invoke_process_id).write_text(json.dumps(started) + "\n", encoding="utf-8")
+            repair._repair_invoke_terminal_evidence_path(reservation_path, invoke_process_id).write_text(json.dumps(terminal) + "\n", encoding="utf-8")
+            with sqlite3.connect(db) as connection:
+                connection.execute(
+                    "CREATE TABLE processes (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL, output_json TEXT NOT NULL, error_json TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO processes VALUES (?,?,?,?,?)",
+                    (
+                        "run-b:auto_worker:triage_invoke_repair_omp",
+                        "run-b",
+                        "failed",
+                        "{}",
+                        json.dumps({"code": "adapter_failed", "message": "pre-omp crash", "mutated": False}, sort_keys=True),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO processes VALUES (?,?,?,?,?)",
+                    (
+                        "run-b:auto_worker:triage_push_repair_branch",
+                        "run-b",
+                        "succeeded",
+                        json.dumps({"values": {"ok": True, "status": "noop", "mutated": False}}, sort_keys=True),
+                        "{}",
+                    ),
+                )
+            verified = {
+                "ok": True,
+                "status": "verified",
+                "recovery_verified": True,
+                "recovery_claim": claim,
+                "recovery_claim_path": str(claim_path),
+                "reservation_path": str(reservation_path),
+            }
+            state = {"ok": True, "status": "found", "reservation_path": str(reservation_path)}
+            evidence = repair.read_repair_recovery_continuation_evidence(req({
+                "run_id": "run-c",
+                "candidate": "candidate-c",
+                "db_path": str(db),
+                "path_id": "auto_worker",
+                "conduction": {
+                    "verify_repair_attempt_recovery": verified,
+                    "read_repair_attempt_state": state,
+                },
+            }))
+            self.assertEqual(evidence["status"], "validated", evidence)
+            claimed = repair.claim_repair_recovery_continuation(req({
+                "dry_run": False,
+                "conduction": {"read_repair_recovery_continuation_evidence": evidence},
+            }))
+            self.assertEqual(claimed["status"], "claimed")
+            contender = dict(evidence["continuation"])
+            contender["continuation_run_id"] = "run-d"
+            contender["continuation_candidate"] = "candidate-d"
+            second = repair.claim_repair_recovery_continuation(req({
+                "dry_run": False,
+                "conduction": {
+                    "read_repair_recovery_continuation_evidence": {
+                        "ok": True,
+                        "status": "validated",
+                        "continuation": contender,
+                        "continuation_path": evidence["continuation_path"],
+                        "reservation_path": str(reservation_path),
+                    }
+                },
+            }))
+            self.assertEqual(second["status"], "failed")
+            self.assertEqual(second["reason"], "repair_recovery_continuation_conflict")
+            verified_link = repair.verify_repair_recovery_continuation(req({
+                "dry_run": False,
+                "conduction": {
+                    "claim_repair_recovery_continuation": claimed,
+                    "verify_repair_attempt_recovery": verified,
+                    "read_repair_attempt_state": state,
+                },
+            }))
+            self.assertEqual(verified_link["status"], "verified")
+            decision = repair.decide_repair_attempt(req({
+                "enabled": True, "live": True, "dry_run": False,
+                "repo": "o/r", "number": 1, "verified_head": head,
+                "candidate": "candidate-c", "run_id": "run-c",
+                "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+                "conduction": {
+                    "read_repair_attempt_state": {
+                        "ok": True,
+                        "status": "found",
+                        "attempt_state": {
+                            "repo": "o/r",
+                            "pr_number": 1,
+                            "verified_head": head,
+                            "candidate": "old-candidate",
+                            "run_id": "old-run",
+                            "status": "reserved",
+                            "attempted": True,
+                        },
+                        "reservation_path": str(reservation_path),
+                    },
+                    "verify_repair_attempt_recovery": verified,
+                    "verify_repair_recovery_continuation": verified_link,
+                },
+            }))
+            self.assertEqual(decision["status"], "invoke")
+            self.assertTrue(decision["authorize"])
+
+    def test_recovery_continuation_blocks_without_explicit_mutation_evidence(self) -> None:
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reservation_path = root / "reservation.json"
+            head = "a" * 40
+            claim = {
+                "kind": "repair_attempt_recovery_claim",
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": head,
+                "reservation_run_id": "old-run",
+                "reservation_candidate": "old-candidate",
+                "evidence_process_id": "old-run:auto_worker:triage_verify_repair_attempt_reservation",
+                "recovery_run_id": "run-b",
+                "recovery_candidate": "candidate-b",
+            }
+            claim_path = root / "claim.json"
+            claim_path.write_text(json.dumps(claim, sort_keys=True) + "\n", encoding="utf-8")
+            reservation_path.write_text("{}\n", encoding="utf-8")
+            db = root / "state.sqlite"
+            with sqlite3.connect(db) as connection:
+                connection.execute(
+                    "CREATE TABLE processes (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL, output_json TEXT NOT NULL, error_json TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO processes VALUES (?,?,?,?,?)",
+                    (
+                        "run-b:auto_worker:triage_invoke_repair_omp",
+                        "run-b",
+                        "failed",
+                        "{}",
+                        json.dumps({"code": "adapter_failed"}, sort_keys=True),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO processes VALUES (?,?,?,?,?)",
+                    (
+                        "run-b:auto_worker:triage_push_repair_branch",
+                        "run-b",
+                        "succeeded",
+                        json.dumps({"values": {"ok": True, "status": "noop", "mutated": False}}, sort_keys=True),
+                        "{}",
+                    ),
+                )
+            evidence = repair.read_repair_recovery_continuation_evidence(req({
+                "run_id": "run-c",
+                "candidate": "candidate-c",
+                "db_path": str(db),
+                "path_id": "auto_worker",
+                "conduction": {
+                    "verify_repair_attempt_recovery": {
+                        "ok": True,
+                        "status": "verified",
+                        "recovery_verified": True,
+                        "recovery_claim": claim,
+                        "recovery_claim_path": str(claim_path),
+                        "reservation_path": str(reservation_path),
+                    },
+                    "read_repair_attempt_state": {"ok": True, "status": "found", "reservation_path": str(reservation_path)},
+                },
+            }))
+            self.assertEqual(evidence["status"], "failed")
+            self.assertEqual(evidence["reason"], "repair_recovery_continuation_mutation_unknown")
+    def test_read_repair_attempt_baseline_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+                "conduction": {
+                    "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True},
+                    "verify_repair_worktree": {"ok": True, "status": "verified", "head": "head-a"}
+                }
+            })
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="head-a"),
+                mock.patch("lokay.steps.repair.git", return_value=""),
+            ):
+                out = repair.read_repair_attempt_baseline(request)
+            self.assertEqual(out["status"], "read")
+            self.assertEqual(out["pre_head"], "head-a")
+            self.assertEqual(out["pre_status"], "")
+            self.assertTrue(out["baseline_verified"])
+
+    def test_read_repair_attempt_baseline_dirty_or_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+                "conduction": {
+                    "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True},
+                    "verify_repair_worktree": {"ok": True, "status": "verified", "head": "head-a"}
+                }
+            })
+            # Scenario 1: head mismatch
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="head-b"),
+                mock.patch("lokay.steps.repair.git", return_value=""),
+            ):
+                out = repair.read_repair_attempt_baseline(request)
+            self.assertEqual(out["status"], "failed")
+            self.assertEqual(out["reason"], "repair_attempt_baseline_mismatch")
+            # Scenario 2: dirty status
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="head-a"),
+                mock.patch("lokay.steps.repair.git", return_value="M file.py"),
+            ):
+                out = repair.read_repair_attempt_baseline(request)
+            self.assertEqual(out["status"], "failed")
+            self.assertEqual(out["reason"], "repair_attempt_baseline_mismatch")
+
+    def test_read_repair_attempt_reconciliation_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_req = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+            })
+            ctx = repair._repair_context(base_req)
+            local_branch = ctx["local_branch"]
+            wt_path = ctx["worktree_path"]
+            request = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+                "conduction": {
+                    "read_repair_completed_receipt": {"ok": True, "status": "absent"},
+                    "read_repair_attempt_state": {
+                        "ok": True, "status": "found",
+                        "attempt_state": {
+                            "repo": "o/r", "pr_number": 1, "verified_head": "head-a",
+                            "pre_head": "head-a", "pre_status": "",
+                            "repo_branch": "ai/fix/1", "local_branch": local_branch,
+                            "worktree_path": wt_path, "candidate": "cand", "run_id": "run"
+                        }
+                    },
+                    "read_repair_remote_head": {"ok": True, "remote_oid": "head-a"},
+                    "read_repair_worktree_inventory": {"ok": True, "worktrees": [{"path": wt_path, "branch": local_branch}]},
+                    "read_repair_branch_provenance": {
+                        "ok": True, "exists": True, "branch_head": "head-a",
+                        "provenance": {"repo": "o/r", "pr": "1", "remote_oid": "head-a", "target_branch": "ai/fix/1"}
+                    }
+                }
+            })
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="head-a"),
+                mock.patch("lokay.steps.repair.git", return_value=""),
+            ):
+                out = repair.read_repair_attempt_reconciliation(request)
+            self.assertEqual(out["status"], "unchanged")
+            self.assertTrue(out["authorize_reinvoke"])
+
+    def test_read_repair_attempt_reconciliation_committed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_req = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+            })
+            ctx = repair._repair_context(base_req)
+            local_branch = ctx["local_branch"]
+            wt_path = ctx["worktree_path"]
+            request = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+                "conduction": {
+                    "read_repair_completed_receipt": {"ok": True, "status": "absent"},
+                    "read_repair_attempt_state": {
+                        "ok": True, "status": "found",
+                        "attempt_state": {
+                            "repo": "o/r", "pr_number": 1, "verified_head": "head-a",
+                            "pre_head": "head-a", "pre_status": "",
+                            "repo_branch": "ai/fix/1", "local_branch": local_branch,
+                            "worktree_path": wt_path, "candidate": "cand", "run_id": "run"
+                        }
+                    },
+                    "read_repair_remote_head": {"ok": True, "remote_oid": "head-a"},
+                    "read_repair_worktree_inventory": {"ok": True, "worktrees": [{"path": wt_path, "branch": local_branch}]},
+                    "read_repair_branch_provenance": {
+                        "ok": True, "exists": True, "branch_head": "head-a",
+                        "provenance": {"repo": "o/r", "pr": "1", "remote_oid": "head-a", "target_branch": "ai/fix/1"}
+                    }
+                }
+            })
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="head-committed-new"),
+                mock.patch("lokay.steps.repair.git", return_value=""),
+            ):
+                out = repair.read_repair_attempt_reconciliation(request)
+            self.assertEqual(out["status"], "committed")
+            self.assertFalse(out["authorize_reinvoke"])
+            self.assertTrue(out["resume_postconditions"])
+
+    def test_read_repair_attempt_reconciliation_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_req = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+            })
+            ctx = repair._repair_context(base_req)
+            local_branch = ctx["local_branch"]
+            wt_path = ctx["worktree_path"]
+            request = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+                "conduction": {
+                    "read_repair_completed_receipt": {"ok": True, "status": "absent"},
+                    "read_repair_attempt_state": {
+                        "ok": True, "status": "found",
+                        "attempt_state": {
+                            "repo": "o/r", "pr_number": 1, "verified_head": "head-a",
+                            "pre_head": "head-a", "pre_status": "",
+                            "repo_branch": "ai/fix/1", "local_branch": local_branch,
+                            "worktree_path": wt_path, "candidate": "cand", "run_id": "run"
+                        }
+                    },
+                    "read_repair_remote_head": {"ok": True, "remote_oid": "head-a"},
+                    "read_repair_worktree_inventory": {"ok": True, "worktrees": [{"path": wt_path, "branch": local_branch}]},
+                    "read_repair_branch_provenance": {
+                        "ok": True, "exists": True, "branch_head": "head-a",
+                        "provenance": {"repo": "o/r", "pr": "1", "remote_oid": "head-a", "target_branch": "ai/fix/1"}
+                    }
+                }
+            })
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="head-a"),
+                mock.patch("lokay.steps.repair.git", return_value="M file.py"),
+            ):
+                out = repair.read_repair_attempt_reconciliation(request)
+            self.assertEqual(out["status"], "failed")
+            self.assertEqual(out["reason"], "repair_attempt_reconciliation_dirty")
+
+    def test_read_repair_attempt_reconciliation_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_req = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+            })
+            ctx = repair._repair_context(base_req)
+            local_branch = ctx["local_branch"]
+            wt_path = ctx["worktree_path"]
+            request = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+                "conduction": {
+                    "read_repair_completed_receipt": {"ok": True, "status": "absent"},
+                    "read_repair_attempt_state": {
+                        "ok": True, "status": "found",
+                        "attempt_state": {
+                            "repo": "o/r", "pr_number": 1, "verified_head": "head-a",
+                            "pre_head": "head-a", "pre_status": "",
+                            "repo_branch": "ai/fix/1", "local_branch": local_branch,
+                            "worktree_path": wt_path, "candidate": "cand", "run_id": "run"
+                        }
+                    },
+                    "read_repair_remote_head": {"ok": True, "remote_oid": "head-a"},
+                    "read_repair_worktree_inventory": {"ok": True, "worktrees": [{"path": wt_path, "branch": local_branch}]},
+                    "read_repair_branch_provenance": {
+                        "ok": True, "exists": True, "branch_head": "head-a",
+                        "provenance": {"repo": "wrong/repo", "pr": "1", "remote_oid": "head-a", "target_branch": "ai/fix/1"}
+                    }
+                }
+            })
+            out = repair.read_repair_attempt_reconciliation(request)
+            self.assertEqual(out["status"], "failed")
+            self.assertEqual(out["reason"], "repair_attempt_reconciliation_mismatch")
+
+    def test_reconciliation_legacy_reservation_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+                "conduction": {
+                    "read_repair_completed_receipt": {"ok": True, "status": "absent"},
+                    "read_repair_attempt_state": {
+                        "ok": True, "status": "found",
+                        "attempt_state": {
+                            "repo": "o/r", "pr_number": 1, "verified_head": "head-a",
+                            # pre_head/pre_status/repo_branch etc. are missing
+                        }
+                    }
+                }
+            })
+            out = repair.read_repair_attempt_reconciliation(request)
+            self.assertEqual(out["status"], "failed")
+            self.assertEqual(out["reason"], "repair_attempt_reconciliation_legacy_missing_baseline")
+
+    def test_reconciliation_with_mutated_invoke_evidence_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = {"repo": "o/r", "pr_number": 1, "branch": "ai/fix/1", "worktree_root": str(root / "worktrees")}
+            ctx = repair._repair_context(req(base))
+            res_path = root / "reservation.json"
+            res_path.write_text("{}\n")
+            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            started = {"kind": "repair_invoke_evidence", "process_id": process_id, "status": "started", "pre_head": "head-a", "pre_status": "", "mutated": None}
+            terminal = {**started, "status": "succeeded", "post_head": "head-a", "post_status": " M changed.py", "mutated": True}
+            repair._repair_invoke_evidence_path(res_path, process_id).parent.mkdir(parents=True, exist_ok=True)
+            repair._repair_invoke_evidence_path(res_path, process_id).write_text(json.dumps(started) + "\n", encoding="utf-8")
+            repair._repair_invoke_terminal_evidence_path(res_path, process_id).write_text(json.dumps(terminal) + "\n", encoding="utf-8")
+            request = req({**base, "attempt_recovery": {"run_id": "run", "path_id": "auto_worker", "candidate": "cand"}, "conduction": {"read_repair_completed_receipt": {"ok": True, "status": "absent"}, "read_repair_attempt_state": {"ok": True, "status": "found", "reservation_path": str(res_path), "attempt_state": {"repo": "o/r", "pr_number": 1, "verified_head": "head-a", "pre_head": "head-a", "pre_status": "", "repo_branch": "ai/fix/1", "local_branch": ctx["local_branch"], "worktree_path": ctx["worktree_path"], "candidate": "cand", "run_id": "run"}}}})
+            out = repair.read_repair_attempt_reconciliation(request)
+            self.assertEqual(out["status"], "failed")
+            self.assertEqual(out["reason"], "repair_attempt_reconciliation_mutated_blocked")
+
+    def test_invoke_repair_omp_writes_started_and_success_invoke_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            res_path = root / "reservation.json"
+            res_path.write_text("{}\n")
+            process_id = "run-p:auto_worker:triage_invoke_repair_omp"
+            request = invoke_req({"repo": "o/r", "number": 1, "verified_head": "head-a", "worktree_path": str(root / "worktree"), "prompt": "fix it", "conduction": {"verify_repair_attempt_reservation": {"ok": True, "status": "verified", "verified": True, "reservation_path": str(res_path)}, "read_repair_omp_preconditions": {"ok": True, "status": "ready", "worktree_path": str(root / "worktree"), "pre_head": "head-a"}, "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True, "verified_head": "head-a"}}}, process_id=process_id)
+            started_path = repair._repair_invoke_evidence_path(res_path, process_id)
+            terminal_path = repair._repair_invoke_terminal_evidence_path(res_path, process_id)
+            with mock.patch("lokay.steps.repair.rev_parse", return_value="head-a"), mock.patch("lokay.steps.repair.git", return_value=""), mock.patch("lokay.steps.repair.run_omp", return_value={"status": "completed"}):
+                out = repair.invoke_repair_omp(request)
+            self.assertEqual(out["status"], "invoked")
+            started = json.loads(started_path.read_text(encoding="utf-8"))
+            terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
+            self.assertEqual(started["status"], "started")
+            self.assertIsNone(started["mutated"])
+            self.assertEqual(terminal["status"], "succeeded")
+            self.assertFalse(terminal["mutated"])
+            self.assertEqual((terminal["pre_head"], terminal["pre_status"], terminal["post_head"], terminal["post_status"]), ("head-a", "", "head-a", ""))
+
+    def test_invoke_repair_omp_writes_failed_invoke_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            res_path = root / "reservation.json"
+            res_path.write_text("{}\n")
+            process_id = "run-p:auto_worker:triage_invoke_repair_omp"
+            request = invoke_req({
+                "repo": "o/r", "number": 1, "verified_head": "head-a",
+                "worktree_path": str(root / "worktree"), "prompt": "fix it",
+                "conduction": {
+                    "verify_repair_attempt_reservation": {"ok": True, "status": "verified", "verified": True, "reservation_path": str(res_path)},
+                    "read_repair_omp_preconditions": {"ok": True, "status": "ready", "worktree_path": str(root / "worktree"), "pre_head": "head-a"},
+                    "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True, "verified_head": "head-a"},
+                }
+            }, process_id=process_id)
+            started_path = repair._repair_invoke_evidence_path(res_path, process_id)
+            terminal_path = repair._repair_invoke_terminal_evidence_path(res_path, process_id)
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="head-a"),
+                mock.patch("lokay.steps.repair.git", return_value=""),
+                mock.patch("lokay.steps.repair.run_omp", side_effect=subprocess.TimeoutExpired(cmd=["omp"], timeout=10.0)),
+            ):
+                out = repair.invoke_repair_omp(request)
+            self.assertEqual(out["status"], "failed")
+            self.assertFalse(out["mutated"])
+            started = json.loads(started_path.read_text(encoding="utf-8"))
+            terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
+            self.assertEqual(started["status"], "started")
+            self.assertIsNone(started["mutated"])
+            self.assertEqual(terminal["status"], "timed_out")
+            self.assertFalse(terminal["mutated"])
+            self.assertEqual((terminal["pre_head"], terminal["pre_status"], terminal["post_head"], terminal["post_status"]), ("head-a", "", "head-a", ""))
 
 class TriageTests(unittest.TestCase):
     def test_verify_merge_receipt_propagates_publisher_noop(self) -> None:

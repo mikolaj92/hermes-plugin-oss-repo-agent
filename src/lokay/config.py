@@ -95,6 +95,9 @@ class DirectionConfig:
         )
 
 
+MAX_EXECUTOR_TIMEOUT_SECONDS = 7200.0
+
+
 @dataclass(frozen=True)
 class ExecutorConfig:
     enabled: bool = False
@@ -104,8 +107,8 @@ class ExecutorConfig:
     timeout_seconds: float = 7200.0
 
     def __post_init__(self) -> None:
-        if self.timeout_seconds <= 0:
-            raise ConfigError("executor.timeout_seconds must be greater than 0")
+        if not 0 < self.timeout_seconds <= MAX_EXECUTOR_TIMEOUT_SECONDS:
+            raise ConfigError(f"executor.timeout_seconds must be greater than 0 and at most {MAX_EXECUTOR_TIMEOUT_SECONDS:g}")
         if self.enabled and not self.command.strip():
             raise ConfigError("executor.command must not be empty when enabled")
         if self.enabled and not self.model.strip():

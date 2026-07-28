@@ -5,8 +5,10 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 
 from lokay.adapters_cli import CommandError, hermes_kanban_json, run_cmd
+from lokay.config import MAX_EXECUTOR_TIMEOUT_SECONDS
 from lokay.envelope import (
     Request,
     Result,
@@ -173,6 +175,169 @@ def _repair_recovery_claim_path(reservation_path: Path, evidence_process_id: str
     digest = hashlib.sha256(evidence_process_id.encode()).hexdigest()[:32]
     return reservation_path.with_name(f"{reservation_path.stem}.recovery.{digest}.json")
 
+def _repair_invoke_evidence_path(reservation_path: Path, process_id: str) -> Path:
+    digest = hashlib.sha256(process_id.encode()).hexdigest()[:32]
+    return reservation_path.with_name(f"{reservation_path.stem}.invoke.{digest}.json")
+def _repair_invoke_terminal_evidence_path(reservation_path: Path, process_id: str) -> Path:
+    started = _repair_invoke_evidence_path(reservation_path, process_id)
+    return started.with_name(f"{started.stem}.terminal.json")
+
+
+
+def _read_repair_invoke_evidence(reservation_path: Path, process_id: str) -> dict[str, object] | None | Result:
+    started_path = _repair_invoke_evidence_path(reservation_path, process_id)
+    terminal_path = _repair_invoke_terminal_evidence_path(reservation_path, process_id)
+    try:
+        started = json.loads(started_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        if terminal_path.exists():
+            return fail("repair_invoke_evidence_malformed", failure_class="terminal", retry_safe=False, operation="read_repair_invoke_evidence", invoke_evidence_path=str(terminal_path))
+        return None
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("repair_invoke_evidence_read_failed", failure_class="terminal", retry_safe=False, operation="read_repair_invoke_evidence", error=str(exc), invoke_evidence_path=str(started_path))
+    if (
+        not isinstance(started, dict)
+        or started.get("kind") != "repair_invoke_evidence"
+        or started.get("process_id") != process_id
+        or started.get("status") != "started"
+        or not isinstance(started.get("pre_head"), str)
+        or not isinstance(started.get("pre_status"), str)
+        or started.get("mutated") is not None
+    ):
+        return fail("repair_invoke_evidence_malformed", failure_class="terminal", retry_safe=False, operation="read_repair_invoke_evidence", invoke_evidence_path=str(started_path))
+    try:
+        terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {**started, "status": "unknown"}
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("repair_invoke_evidence_read_failed", failure_class="terminal", retry_safe=False, operation="read_repair_invoke_evidence", error=str(exc), invoke_evidence_path=str(terminal_path))
+    if (
+        not isinstance(terminal, dict)
+        or terminal.get("kind") != "repair_invoke_evidence"
+        or terminal.get("process_id") != process_id
+        or terminal.get("status") not in {"failed", "succeeded", "timed_out"}
+        or type(terminal.get("mutated")) is not bool
+        or not isinstance(terminal.get("post_head"), str)
+        or not isinstance(terminal.get("post_status"), str)
+        or any(terminal.get(key) != started.get(key) for key in ("kind", "process_id", "pre_head", "pre_status"))
+        or (terminal.get("mutated") is False and any(terminal.get(post) != terminal.get(pre) for pre, post in (("pre_head", "post_head"), ("pre_status", "post_status"))))
+        or (terminal.get("status") == "failed" and not isinstance(terminal.get("error"), str))
+    ):
+        return fail("repair_invoke_evidence_malformed", failure_class="terminal", retry_safe=False, operation="read_repair_invoke_evidence", invoke_evidence_path=str(terminal_path))
+    return terminal
+
+def _write_invoke_evidence(path: Path, payload: dict[str, object], exclusive: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    target = path
+    if not exclusive:
+        try:
+            started = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise OSError(f"cannot read started invoke evidence: {exc}") from exc
+        if (
+            not isinstance(started, dict)
+            or started.get("status") != "started"
+            or started.get("mutated") is not None
+            or any(started.get(key) != payload.get(key) for key in ("kind", "process_id", "pre_head", "pre_status"))
+        ):
+            raise OSError("invoke evidence transition mismatch")
+        target = path.with_name(f"{path.stem}.terminal.json")
+    import tempfile
+    temp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=str(target.parent), delete=False, encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_name = handle.name
+        os.link(temp_name, target)
+    finally:
+        if temp_name:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+    parent_fd = os.open(str(target.parent), os.O_RDONLY)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+def _repair_recovery_continuation_path(reservation_path: Path, predecessor_sha256: str) -> Path:
+    digest = str(predecessor_sha256 or "").strip()
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise ValueError("invalid predecessor_sha256")
+    return reservation_path.with_name(f"{reservation_path.stem}.continuation.{digest}.json")
+
+
+def _repair_recovery_transition_hash(payload: dict[str, object]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _load_repair_recovery_continuation_chain(
+    reservation_path: Path,
+    claim: dict[str, object],
+    recovery_claim_path: str,
+) -> tuple[str, str, str, str, str] | Result:
+    """Return (predecessor_hash, predecessor_kind, latest_run_id, latest_candidate, latest_path) or fail Result."""
+    claim_hash = _repair_recovery_transition_hash(claim)
+    try:
+        candidates = sorted(reservation_path.parent.glob(f"{reservation_path.stem}.continuation.*.json"))
+        if len(candidates) > 64:
+            return fail("repair_recovery_continuation_chain_too_long", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", count=len(candidates))
+        links = [(path, json.loads(path.read_text(encoding="utf-8"))) for path in candidates]
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("repair_recovery_continuation_chain_read_failed", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", error=str(exc))
+    by_predecessor: dict[str, list[tuple[Path, dict[str, object]]]] = {}
+    for path, link in links:
+        if not isinstance(link, dict):
+            return fail("repair_recovery_continuation_chain_malformed", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", continuation_path=str(path))
+        try:
+            expected_path = _repair_recovery_continuation_path(reservation_path, str(link.get("predecessor_sha256") or ""))
+        except ValueError:
+            return fail("repair_recovery_continuation_chain_malformed", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", continuation_path=str(path))
+        valid_link = bool(
+            link.get("kind") == "repair_attempt_recovery_continuation"
+            and str(link.get("repo") or "") == str(claim.get("repo") or "")
+            and str(link.get("pr_number") or "") == str(claim.get("pr_number") or "")
+            and str(link.get("verified_head") or "") == str(claim.get("verified_head") or "")
+            and str(link.get("recovery_claim_path") or "") == recovery_claim_path
+            and str(link.get("predecessor_sha256") or "")
+            and path == expected_path
+            and str(link.get("prior_recovery_run_id") or "")
+            and str(link.get("prior_recovery_candidate") or "")
+            and str(link.get("continuation_run_id") or "")
+            and str(link.get("continuation_candidate") or "")
+        )
+        if not valid_link:
+            return fail("repair_recovery_continuation_chain_malformed", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", continuation_path=str(path))
+        by_predecessor.setdefault(str(link["predecessor_sha256"]), []).append((path, link))
+    predecessor_hash = claim_hash
+    predecessor_kind = "repair_attempt_recovery_claim"
+    latest_run_id = str(claim.get("recovery_run_id") or "")
+    latest_candidate = str(claim.get("recovery_candidate") or "")
+    visited: set[Path] = set()
+    latest_path = recovery_claim_path
+    while predecessor_hash in by_predecessor:
+        successors = by_predecessor[predecessor_hash]
+        if len(successors) != 1:
+            return fail("repair_recovery_continuation_fork", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", count=len(successors))
+        path, link = successors[0]
+        if path in visited or str(link.get("predecessor_kind") or "") != predecessor_kind or str(link.get("prior_recovery_run_id") or "") != latest_run_id or str(link.get("prior_recovery_candidate") or "") != latest_candidate:
+            return fail("repair_recovery_continuation_chain_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", continuation_path=str(path))
+        visited.add(path)
+        predecessor_hash = _repair_recovery_transition_hash(link)
+        predecessor_kind = "repair_attempt_recovery_continuation"
+        latest_run_id = str(link["continuation_run_id"])
+        latest_candidate = str(link["continuation_candidate"])
+        latest_path = str(path)
+    if len(visited) != len(links):
+        return fail("repair_recovery_continuation_orphan", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", count=len(links) - len(visited))
+    return predecessor_hash, predecessor_kind, latest_run_id, latest_candidate, latest_path
+
+
 
 def _write_exclusive_json(path: Path, payload: dict[str, object]) -> bool:
     """Publish one durable JSON claim; return false when it already exists."""
@@ -278,7 +443,7 @@ def _repair_completed_receipt(
         )
     return str(path), payload
 
-def _repair_restart_recovery(request: Request, state: dict[str, object], reservation_path: Path, current: dict[str, object] | None = None) -> Result:
+def _repair_restart_recovery(request: Request, state: dict[str, object], reservation_path: Path, current: dict[str, object] | None = None, reconciliation: dict[str, object] | None = None) -> Result:
     """Read and validate one exact failed read-only pre-OMP process row."""
     data, cfg = input_of(request), cfg_of(request)
     recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
@@ -329,6 +494,16 @@ def _repair_restart_recovery(request: Request, state: dict[str, object], reserva
     reserve_key = "triage_reserve_repair_attempt" if path_id == "auto_worker" else "reserve_repair_attempt"
     reservation = conduction.get(reserve_key) if isinstance(conduction, dict) else None
     reservation_values = reservation.get("reservation") if isinstance(reservation, dict) else None
+    invoke_process_id = f"{run_id}:{path_id}:{'triage_invoke_repair_omp' if path_id == 'auto_worker' else 'invoke_repair_omp'}"
+    invoke_evidence = _read_repair_invoke_evidence(reservation_path, invoke_process_id)
+    invoke_no_mutation = bool(
+        isinstance(invoke_evidence, dict)
+        and invoke_evidence.get("ok", True)
+        and invoke_evidence.get("status") == "failed"
+        and invoke_evidence.get("mutated") is False
+        and invoke_evidence.get("pre_head") == state.get("pre_head")
+        and invoke_evidence.get("pre_status") == state.get("pre_status")
+    )
     binding = metadata.get("__adapter_binding") if isinstance(metadata, dict) else None
     expected_cwd = (Path(db_path).resolve().parent.parent / "deployment" / "versions" / candidate / "source" / "project").resolve()
     valid = bool(
@@ -339,7 +514,7 @@ def _repair_restart_recovery(request: Request, state: dict[str, object], reserva
         and not process_output
         and isinstance(process_error, dict)
         and process_error.get("code") == "adapter_failed"
-        and process_error.get("mutated") is not True
+        and invoke_no_mutation
         and isinstance(reservation, dict)
         and reservation.get("ok") is True
         and reservation.get("mutated") is True
@@ -364,6 +539,11 @@ def _repair_restart_recovery(request: Request, state: dict[str, object], reserva
         or str(current.get("verified_head") or state.get("verified_head") or "") != str(state.get("verified_head") or "")
     ):
         return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence", conflict="missing_repair_provenance")
+    if reconciliation is None:
+        reconciliation_blob = cond_blob(request, "read_repair_attempt_reconciliation")
+        if reconciliation_blob.get("ok") is not True or reconciliation_blob.get("status") != "unchanged" or reconciliation_blob.get("authorize_reinvoke") is not True or not isinstance(reconciliation_blob.get("snapshot"), dict):
+            return fail("repair_attempt_reconciliation_required", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_recovery_evidence")
+        reconciliation = reconciliation_blob["snapshot"]
     claim = {
         "kind": "repair_attempt_recovery_claim",
         "repo": state["repo"],
@@ -374,6 +554,7 @@ def _repair_restart_recovery(request: Request, state: dict[str, object], reserva
         "evidence_process_id": process_id,
         "recovery_run_id": recovery_run_id,
         "recovery_candidate": recovery_candidate,
+        "reconciliation": reconciliation,
     }
     return ok(status="validated", operation="read_repair_attempt_recovery_evidence", recovery_claim=claim, recovery_claim_path=str(_repair_recovery_claim_path(reservation_path, process_id)), reservation_path=str(reservation_path), mutated=False)
 
@@ -437,6 +618,169 @@ def verify_repair_attempt_recovery(request: Request) -> Result:
     return ok(status="verified", operation="verify_repair_attempt_recovery", recovery_verified=True, recovery_claim=actual, recovery_claim_path=path, mutated=False)
 
 
+def read_repair_recovery_continuation_evidence(request: Request) -> Result:
+    """Validate the unique chain from explicit historical no-mutation evidence."""
+    verified = cond_blob(request, "verify_repair_attempt_recovery")
+    if verified.get("status") == "inactive":
+        return ok(status="inactive", operation="read_repair_recovery_continuation_evidence", recovery_active=False, mutated=False)
+    if verified.get("ok") is not True or verified.get("status") != "verified":
+        return fail("repair_attempt_recovery_verification_required", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence")
+    claim = verified.get("recovery_claim")
+    data, cfg = input_of(request), cfg_of(request)
+    current_run_id = str(data.get("run_id") or cfg.get("run_id") or "").strip()
+    current_candidate = str(data.get("candidate") or data.get("candidate_id") or cfg.get("candidate") or "").strip()
+    db_path = str(data.get("db_path") or cfg.get("db_path") or "").strip()
+    reservation_path_value = str(cond_blob(request, "read_repair_attempt_state").get("reservation_path") or verified.get("reservation_path") or "")
+    recovery_claim_path = str(verified.get("recovery_claim_path") or "")
+    if not isinstance(claim, dict) or not current_run_id or not current_candidate or not db_path or not reservation_path_value or not recovery_claim_path:
+        return fail("invalid_repair_recovery_continuation", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence")
+    reservation_path = Path(reservation_path_value)
+    loaded = _load_repair_recovery_continuation_chain(reservation_path, claim, recovery_claim_path)
+    if isinstance(loaded, dict):
+        return loaded
+    predecessor_hash, predecessor_kind, latest_run_id, latest_candidate, latest_path = loaded
+    if current_run_id == latest_run_id and current_candidate == latest_candidate:
+        return ok(status="original", operation="read_repair_recovery_continuation_evidence", continuation_required=False, continuation_verified=True, recovery_claim=claim, latest_transition_path=latest_path, mutated=False)
+    path_id = str(data.get("path_id") or cfg.get("path_id") or "")
+    invoke_id = "triage_invoke_repair_omp" if path_id == "auto_worker" else "invoke_repair_omp"
+    push_id = "triage_push_repair_branch" if path_id == "auto_worker" else "push_repair_branch"
+    if path_id not in {"auto_worker", "pr_triage"}:
+        return fail("invalid_repair_recovery_continuation", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence")
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+            rows = connection.execute(
+                "SELECT id,status,output_json,error_json FROM processes WHERE run_id=? AND id IN (?,?) ORDER BY id",
+                (latest_run_id, f"{latest_run_id}:{path_id}:{invoke_id}", f"{latest_run_id}:{path_id}:{push_id}"),
+            ).fetchall()
+    except (OSError, sqlite3.Error) as exc:
+        return fail("repair_recovery_continuation_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_recovery_continuation_evidence", error=str(exc))
+    if len(rows) != 2:
+        return fail("repair_recovery_continuation_not_unique", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", count=len(rows))
+    observed: dict[str, tuple[str, dict[str, object], dict[str, object]]] = {}
+    try:
+        for process_id, status, raw_output, raw_error in rows:
+            observed[str(process_id).rsplit(":", 1)[-1]] = (str(status), json.loads(raw_output), json.loads(raw_error))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("repair_recovery_continuation_malformed", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", error=str(exc))
+    invoke_status, invoke_output, invoke_error = observed.get(invoke_id, ("", {}, {}))
+    push_status, push_output, _ = observed.get(push_id, ("", {}, {}))
+    push_values = push_output.get("values") if isinstance(push_output, dict) else None
+    invoke_process_id = f"{latest_run_id}:{path_id}:{invoke_id}"
+    invoke_evidence = _read_repair_invoke_evidence(reservation_path, invoke_process_id)
+    reconciliation = claim.get("reconciliation") if isinstance(claim.get("reconciliation"), dict) else {}
+    invoke_no_mutation = bool(
+        isinstance(invoke_evidence, dict)
+        and invoke_evidence.get("ok", True)
+        and invoke_evidence.get("status") == "failed"
+        and invoke_evidence.get("mutated") is False
+        and invoke_evidence.get("pre_head") == reconciliation.get("pre_head")
+        and invoke_evidence.get("pre_status") == reconciliation.get("pre_status")
+        and invoke_evidence.get("post_head") == reconciliation.get("actual_head")
+        and invoke_evidence.get("post_status") == reconciliation.get("actual_status")
+        and reconciliation.get("actual_head") == reconciliation.get("pre_head")
+        and reconciliation.get("actual_status") == reconciliation.get("pre_status")
+    )
+    if not (
+        invoke_status == "failed"
+        and not invoke_output
+        and isinstance(invoke_error, dict)
+        and invoke_error.get("code") == "adapter_failed"
+        and invoke_no_mutation
+        and push_status == "succeeded"
+        and isinstance(push_values, dict)
+        and push_values.get("ok") is True
+        and push_values.get("status") == "noop"
+        and push_values.get("mutated") is False
+    ):
+        return fail("repair_recovery_continuation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", conflict="journal_boundary_not_noop")
+    continuation = {
+        "kind": "repair_attempt_recovery_continuation",
+        "repo": claim.get("repo"),
+        "pr_number": claim.get("pr_number"),
+        "verified_head": claim.get("verified_head"),
+        "recovery_claim_path": recovery_claim_path,
+        "predecessor_kind": predecessor_kind,
+        "predecessor_sha256": predecessor_hash,
+        "prior_recovery_run_id": latest_run_id,
+        "prior_recovery_candidate": latest_candidate,
+        "continuation_run_id": current_run_id,
+        "continuation_candidate": current_candidate,
+        "invoke_process_id": f"{latest_run_id}:{path_id}:{invoke_id}",
+        "push_process_id": f"{latest_run_id}:{path_id}:{push_id}",
+    }
+    try:
+        path = _repair_recovery_continuation_path(reservation_path, predecessor_hash)
+    except ValueError as exc:
+        return fail("invalid_repair_recovery_continuation", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence", error=str(exc))
+    return ok(status="validated", operation="read_repair_recovery_continuation_evidence", continuation_required=True, continuation=continuation, continuation_path=str(path), recovery_claim=claim, reservation_path=str(reservation_path), mutated=False)
+
+def claim_repair_recovery_continuation(request: Request) -> Result:
+    evidence = cond_blob(request, "read_repair_recovery_continuation_evidence")
+    if evidence.get("status") in {"inactive", "original"}:
+        return ok(status=str(evidence.get("status")), operation="claim_repair_recovery_continuation", continuation_required=False, recovery_claim=evidence.get("recovery_claim"), mutated=False)
+    continuation = evidence.get("continuation")
+    path = str(evidence.get("continuation_path") or "")
+    reservation_path_value = str(evidence.get("reservation_path") or cond_blob(request, "read_repair_attempt_state").get("reservation_path") or "")
+    if evidence.get("ok") is not True or evidence.get("status") != "validated" or not isinstance(continuation, dict) or not path or not reservation_path_value:
+        return fail("repair_recovery_continuation_evidence_required", failure_class="terminal", retry_safe=False, operation="claim_repair_recovery_continuation")
+    predecessor_hash = str(continuation.get("predecessor_sha256") or "")
+    try:
+        expected_path = _repair_recovery_continuation_path(Path(reservation_path_value), predecessor_hash)
+    except ValueError as exc:
+        return fail("invalid_repair_recovery_continuation", failure_class="terminal", retry_safe=False, operation="claim_repair_recovery_continuation", error=str(exc))
+    if Path(path) != expected_path:
+        return fail("repair_recovery_continuation_path_mismatch", failure_class="terminal", retry_safe=False, operation="claim_repair_recovery_continuation", continuation_path=path)
+    if dry_run_flag(request):
+        return planned(operation="claim_repair_recovery_continuation", continuation=continuation, continuation_path=path)
+    try:
+        created = _write_exclusive_json(Path(path), continuation)
+        if not created:
+            existing = json.loads(Path(path).read_text(encoding="utf-8"))
+            if existing != continuation:
+                return fail("repair_recovery_continuation_conflict", failure_class="terminal", retry_safe=False, operation="claim_repair_recovery_continuation", continuation_path=path)
+            return ok(status="exists", operation="claim_repair_recovery_continuation", continuation=continuation, continuation_path=path, reservation_path=reservation_path_value, mutated=False)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("repair_recovery_continuation_claim_failed", failure_class="terminal", retry_safe=False, operation="claim_repair_recovery_continuation", error=str(exc), continuation_path=path)
+    return ok(status="claimed", operation="claim_repair_recovery_continuation", continuation=continuation, continuation_path=path, reservation_path=reservation_path_value, mutated=True)
+
+
+def verify_repair_recovery_continuation(request: Request) -> Result:
+    claimed = cond_blob(request, "claim_repair_recovery_continuation")
+    if claimed.get("status") in {"inactive", "original"}:
+        return ok(status=str(claimed.get("status")), operation="verify_repair_recovery_continuation", continuation_verified=claimed.get("status") == "original", recovery_claim=claimed.get("recovery_claim"), mutated=False)
+    expected = claimed.get("continuation")
+    path = str(claimed.get("continuation_path") or "")
+    if claimed.get("ok") is not True or claimed.get("status") not in {"claimed", "exists", "planned"} or not isinstance(expected, dict) or not path:
+        return fail("repair_recovery_continuation_claim_required", failure_class="terminal", retry_safe=False, operation="verify_repair_recovery_continuation")
+    if dry_run_flag(request):
+        return planned(operation="verify_repair_recovery_continuation", continuation=expected, continuation_path=path)
+    recovery = cond_blob(request, "verify_repair_attempt_recovery")
+    claim = recovery.get("recovery_claim")
+    recovery_claim_path = str(recovery.get("recovery_claim_path") or "")
+    reservation_path_value = str(claimed.get("reservation_path") or cond_blob(request, "read_repair_attempt_state").get("reservation_path") or "")
+    if not isinstance(claim, dict) or not recovery_claim_path or not reservation_path_value:
+        return fail("repair_recovery_continuation_claim_required", failure_class="terminal", retry_safe=False, operation="verify_repair_recovery_continuation")
+    try:
+        actual = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("repair_recovery_continuation_readback_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_recovery_continuation", error=str(exc), continuation_path=path)
+    if actual != expected:
+        return fail("repair_recovery_continuation_claim_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_recovery_continuation", continuation_path=path)
+    loaded = _load_repair_recovery_continuation_chain(Path(reservation_path_value), claim, recovery_claim_path)
+    if isinstance(loaded, dict):
+        return loaded
+    predecessor_hash, _predecessor_kind, latest_run_id, latest_candidate, latest_path = loaded
+    if (
+        latest_path != path
+        or latest_run_id != str(expected.get("continuation_run_id") or "")
+        or latest_candidate != str(expected.get("continuation_candidate") or "")
+        or predecessor_hash != _repair_recovery_transition_hash(expected)
+    ):
+        return fail("repair_recovery_continuation_not_head", failure_class="terminal", retry_safe=False, operation="verify_repair_recovery_continuation", continuation_path=path)
+    return ok(status="verified", operation="verify_repair_recovery_continuation", continuation_verified=True, continuation=actual, continuation_path=path, recovery_claim=claim, mutated=False)
+
+
+
 def read_repair_attempt_state(request: Request) -> Result:
     """Read one stable head-bound reservation; absence is safe and malformed is terminal."""
     identity, error = _repair_identity(request)
@@ -477,6 +821,101 @@ def read_repair_completed_receipt(request: Request) -> Result:
     receipt_path, receipt = completed
     return ok(status="found", operation="read_repair_completed_receipt", receipt=receipt, receipt_path=receipt_path, **identity)
 
+def read_repair_attempt_baseline(request: Request) -> Result:
+    """Read the exact clean worktree baseline before immutable reservation."""
+    upstream = _repair_upstream(request, "read_repair_attempt_baseline", "verify_repair_worktree")
+    if upstream:
+        return upstream
+    verified = cond_blob(request, "verify_repair_worktree")
+    context = _repair_context(request)
+    expected = str(verified.get("head") or "")
+    if verified.get("ok") is not True or verified.get("status") != "verified" or not expected:
+        return fail("repair_attempt_baseline_worktree_required", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_baseline")
+    try:
+        actual_head = rev_parse(context["worktree_path"])
+        status = git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=context["worktree_path"])
+    except (CommandError, OSError) as exc:
+        return fail("repair_attempt_baseline_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_attempt_baseline", error=str(exc), mutated=False)
+    if actual_head != expected or status:
+        return fail("repair_attempt_baseline_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_baseline", expected_head=expected, actual_head=actual_head, dirty=bool(status), mutated=False)
+    return ok(status="read", operation="read_repair_attempt_baseline", baseline_verified=True, pre_head=actual_head, pre_status=status, **context, mutated=False)
+
+
+def read_repair_attempt_reconciliation(request: Request) -> Result:
+    """Classify an interrupted reservation from immutable baseline and live Git state."""
+    state_read = cond_blob(request, "read_repair_attempt_state")
+    completed = cond_blob(request, "read_repair_completed_receipt")
+    if state_read.get("status") == "absent" or completed.get("status") == "found":
+        return ok(status="inactive", operation="read_repair_attempt_reconciliation", reconciliation_required=False, mutated=False)
+    state = state_read.get("attempt_state")
+    if state_read.get("ok") is not True or state_read.get("status") != "found" or not isinstance(state, dict):
+        return fail("repair_attempt_reconciliation_state_required", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation")
+    required_baseline = ("pre_head", "pre_status", "repo_branch", "local_branch", "worktree_path")
+    if any(key not in state for key in required_baseline) or any(not isinstance(state.get(key), str) for key in required_baseline):
+        return fail("repair_attempt_reconciliation_legacy_missing_baseline", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", mutated=False)
+    context = _repair_context(request)
+    data, cfg = input_of(request), cfg_of(request)
+    recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
+    if isinstance(recovery, dict):
+        reservation_path = str(state_read.get("reservation_path") or "").strip()
+        run_id = str(recovery.get("run_id") or "").strip()
+        path_id = str(recovery.get("path_id") or "").strip()
+        if not reservation_path:
+            return fail("repair_attempt_reconciliation_state_required", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation")
+        if path_id not in {"auto_worker", "pr_triage"} or not run_id:
+            return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke identity unknown")
+        invoke_effector = "triage_invoke_repair_omp" if path_id == "auto_worker" else "invoke_repair_omp"
+        invoke_process_id = f"{run_id}:{path_id}:{invoke_effector}"
+        invoke_evidence = _read_repair_invoke_evidence(Path(reservation_path), invoke_process_id)
+        if isinstance(invoke_evidence, dict) and not invoke_evidence.get("ok", True):
+            return invoke_evidence
+        if invoke_evidence is None:
+            return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke evidence absent")
+        if invoke_evidence.get("mutated") is True:
+            return fail("repair_attempt_reconciliation_mutated_blocked", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="explicit invoke mutated blocks recovery")
+        if invoke_evidence.get("status") != "failed" or invoke_evidence.get("mutated") is not False:
+            return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke mutation unknown")
+    remote = cond_blob(request, "read_repair_remote_head")
+    inventory = cond_blob(request, "read_repair_worktree_inventory")
+    provenance_read = cond_blob(request, "read_repair_branch_provenance")
+    expected = {key: str(state.get(key) or "") for key in ("verified_head", "pre_head", "pre_status", "repo_branch", "local_branch", "worktree_path")}
+    rows = inventory.get("worktrees") if isinstance(inventory.get("worktrees"), list) else []
+    matching = [row for row in rows if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == Path(context["worktree_path"]).resolve()]
+    provenance = provenance_read.get("provenance") if isinstance(provenance_read.get("provenance"), dict) else {}
+    valid = bool(
+        completed.get("status") in {None, "", "absent"}
+        and all(expected[key] or key == "pre_status" for key in expected)
+        and expected["verified_head"] == expected["pre_head"]
+        and expected["repo_branch"] == context["branch"]
+        and expected["local_branch"] == context["local_branch"]
+        and Path(expected["worktree_path"]).resolve() == Path(context["worktree_path"]).resolve()
+        and remote.get("ok") is True
+        and str(remote.get("remote_oid") or "") == expected["verified_head"]
+        and provenance_read.get("ok") is True
+        and provenance_read.get("exists") is True
+        and str(provenance_read.get("branch_head") or "") == expected["verified_head"]
+        and str(provenance.get("repo") or "") == str(state.get("repo") or "")
+        and str(provenance.get("pr") or "") == str(state.get("pr_number") or "")
+        and str(provenance.get("remote_oid") or "") == expected["verified_head"]
+        and str(provenance.get("target_branch") or "") == expected["repo_branch"]
+        and len(matching) == 1
+        and str(matching[0].get("branch") or "") == expected["local_branch"]
+    )
+    if not valid:
+        return fail("repair_attempt_reconciliation_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", mutated=False)
+    try:
+        actual_head = rev_parse(context["worktree_path"])
+        actual_status = git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=context["worktree_path"])
+    except (CommandError, OSError) as exc:
+        return fail("repair_attempt_reconciliation_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_attempt_reconciliation", error=str(exc), mutated=False)
+    snapshot = {"pre_head": expected["pre_head"], "pre_status": expected["pre_status"], "actual_head": actual_head, "actual_status": actual_status, "remote_oid": str(remote.get("remote_oid") or ""), "worktree_path": expected["worktree_path"], "local_branch": expected["local_branch"], "repo_branch": expected["repo_branch"]}
+    if actual_head == expected["pre_head"] and actual_status == expected["pre_status"]:
+        return ok(status="unchanged", operation="read_repair_attempt_reconciliation", reconciliation_required=True, authorize_reinvoke=True, snapshot=snapshot, mutated=False)
+    if actual_head != expected["pre_head"] and actual_status == "":
+        return ok(status="committed", operation="read_repair_attempt_reconciliation", reconciliation_required=True, authorize_reinvoke=False, resume_postconditions=True, snapshot=snapshot, mutated=False)
+    return fail("repair_attempt_reconciliation_dirty", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", snapshot=snapshot, mutated=False)
+
+
 def reserve_repair_attempt(request: Request) -> Result:
     """Atomically reserve the immutable head before invoking OMP."""
     gated = _repair_execution_gate(request, "reserve_repair_attempt")
@@ -496,7 +935,15 @@ def reserve_repair_attempt(request: Request) -> Result:
     if _repair_state_root(request) is None:
         return fail("missing_repair_state_root", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", **identity)
     path = _repair_reservation_path(request, identity)
-    payload = {**identity, "checks": decision.get("checks") or [], "status": "reserved", "attempted": True, "kind": "repair_attempt_reservation"}
+    baseline = cond_blob(request, "read_repair_attempt_baseline")
+    if baseline.get("ok") is not True or baseline.get("status") != "read" or baseline.get("baseline_verified") is not True:
+        return fail("repair_attempt_baseline_required", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt")
+    pre_head = str(baseline.get("pre_head") or "")
+    pre_status = str(baseline.get("pre_status") or "")
+    context = _repair_context(request)
+    if pre_head != str(identity["verified_head"]) or any(str(baseline.get(key) or "") != context[key] for key in ("branch", "local_branch", "worktree_path")):
+        return fail("repair_attempt_baseline_mismatch", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", expected_head=identity["verified_head"], actual_head=pre_head)
+    payload = {**identity, "checks": decision.get("checks") or [], "status": "reserved", "attempted": True, "kind": "repair_attempt_reservation", "pre_head": pre_head, "pre_status": pre_status, "repo_branch": str(baseline["branch"]), "local_branch": str(baseline["local_branch"]), "worktree_path": str(baseline["worktree_path"])}
     data = input_of(request)
     if data.get("check_run_id") or decision.get("check_run_id"):
         payload["check_run_id"] = data.get("check_run_id") or decision.get("check_run_id")
@@ -547,13 +994,17 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
     stored = _reservation_identity(payload)
     if stored is None:
         return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="invalid_reservation_identity")
-    if payload.get("status") != "reserved" or payload.get("attempted") is not True:
+    required_baseline = ("pre_head", "pre_status", "repo_branch", "local_branch", "worktree_path")
+    if payload.get("status") != "reserved" or payload.get("attempted") is not True or any(key not in payload for key in required_baseline):
         return fail("repair_attempt_reservation_invalid", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
     if source.get("status") == "recovered":
         recovery = cond_blob(request, "verify_repair_attempt_recovery")
+        continuation = cond_blob(request, "verify_repair_recovery_continuation")
         claim = source.get("recovery_claim")
         current_run_id = str(input_of(request).get("run_id") or cfg_of(request).get("run_id") or "")
         current_candidate = str(input_of(request).get("candidate") or input_of(request).get("candidate_id") or cfg_of(request).get("candidate") or "")
+        original = bool(isinstance(claim, dict) and str(claim.get("recovery_candidate") or "") == current_candidate and str(claim.get("recovery_run_id") or "") == current_run_id)
+        continued = bool(continuation.get("ok") is True and continuation.get("status") in {"original", "verified"} and continuation.get("continuation_verified") is True)
         valid = bool(
             recovery.get("ok") is True
             and recovery.get("status") == "verified"
@@ -565,12 +1016,13 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
             and str(claim.get("verified_head") or "") == str(stored["verified_head"])
             and str(claim.get("reservation_candidate") or "") == str(stored["candidate"])
             and str(claim.get("reservation_run_id") or "") == str(stored["run_id"])
-            and str(claim.get("recovery_candidate") or "") == current_candidate
-            and str(claim.get("recovery_run_id") or "") == current_run_id
+            and current_candidate
+            and current_run_id
+            and (original or continued)
         )
         if not valid:
             return fail("repair_attempt_recovery_claim_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
-        return ok(status="verified", operation="verify_repair_attempt_reservation", verified=True, recovered=True, reservation=payload, recovery_claim=claim, reservation_path=path, mutated=False)
+        return ok(status="verified", operation="verify_repair_attempt_reservation", verified=True, recovered=True, reservation=payload, recovery_claim=claim, continuation=continuation.get("continuation"), reservation_path=path, mutated=False)
     identity, error = _repair_identity(request)
     if identity is None:
         return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict=error)
@@ -659,11 +1111,16 @@ def decide_repair_attempt(request: Request) -> Result:
                 return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict=f"{key}_mismatch", **identity)
         prior_status = str(state.get("status") or state.get("decision") or "").lower()
         recovery = cond_blob(request, "verify_repair_attempt_recovery")
+        continuation = cond_blob(request, "verify_repair_recovery_continuation")
         if recovery.get("ok") is True and recovery.get("status") == "verified" and recovery.get("recovery_verified") is True:
             claim = recovery.get("recovery_claim")
-            if not isinstance(claim, dict) or any(str(claim.get(key) or "") != str(identity[value]) for key, value in (("repo", "repo"), ("pr_number", "pr_number"), ("verified_head", "verified_head"), ("recovery_candidate", "candidate"), ("recovery_run_id", "run_id"))):
+            if not isinstance(claim, dict) or any(str(claim.get(key) or "") != str(identity[value]) for key, value in (("repo", "repo"), ("pr_number", "pr_number"), ("verified_head", "verified_head"))):
                 return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict="repair_recovery_identity_mismatch", **identity)
-            return ok(status="invoke", decision="invoke", authorize=True, reason="verified_failed_attempt_recovery", checks=checks, attempt_state=_repair_attempt_state(identity, checks), reservation_path=str(cond_blob(request, "read_repair_attempt_state").get("reservation_path") or ""), recovery_claim=claim, recovery_claim_path=recovery.get("recovery_claim_path"), **identity)
+            original = str(claim.get("recovery_candidate") or "") == str(identity["candidate"]) and str(claim.get("recovery_run_id") or "") == str(identity["run_id"])
+            continued = bool(continuation.get("ok") is True and continuation.get("status") in {"original", "verified"} and continuation.get("continuation_verified") is True)
+            if not original and not continued:
+                return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict="repair_recovery_continuation_required", **identity)
+            return ok(status="invoke", decision="invoke", authorize=True, reason="verified_failed_attempt_recovery", checks=checks, attempt_state=_repair_attempt_state(identity, checks), reservation_path=str(cond_blob(request, "read_repair_attempt_state").get("reservation_path") or ""), recovery_claim=claim, recovery_claim_path=recovery.get("recovery_claim_path"), continuation=continuation.get("continuation"), continuation_path=continuation.get("continuation_path"), **identity)
         if prior_status in {"pending", "waiting", "awaiting_checks", "running", "authorized"}:
             return ok(status="pending", decision="wait", authorize=False, reason="awaiting_checks", **identity)
         if prior_status in {"reserved", "repaired", "succeeded", "completed", "invoked", "failed", "already_repaired"} or state.get("attempted") is True:
@@ -1394,10 +1851,88 @@ def invoke_repair_omp(request: Request) -> Result:
     prompt = str(data.get("prompt") or cond_blob(request, "build_repair_prompt").get("prompt") or "")
     if not path or not prompt:
         return fail("missing_repair_worktree_or_prompt", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp")
+    pre_head = str(pre.get("pre_head") or "")
     try:
-        out = run_omp(prompt=prompt, cwd=path, command=str(data.get("command") or cfg.get("executor_command") or "omp"), model=str(data.get("model") or cfg.get("model") or "omniroute/omp/default"), thinking=str(data.get("thinking") or cfg.get("thinking") or "medium"), timeout=float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800), dry_run=False)
-    except CommandError as exc:
-        return fail("repair_omp_failed", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", error=str(exc), mutated=True)
+        actual_pre_head = rev_parse(path)
+        pre_status = git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=path)
+    except (CommandError, OSError) as exc:
+        return fail("repair_omp_precondition_failed", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", error=str(exc), mutated=False)
+    if not pre_head or actual_pre_head != pre_head or pre_status:
+        return fail("repair_omp_precondition_failed", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", expected_head=pre_head, actual_head=actual_pre_head, dirty=bool(pre_status), mutated=False)
+    try:
+        timeout = float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800)
+    except (TypeError, ValueError) as exc:
+        return fail("invalid_repair_omp_timeout", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", error=str(exc), mutated=False)
+    if not 0 < timeout <= MAX_EXECUTOR_TIMEOUT_SECONDS:
+        return fail("invalid_repair_omp_timeout", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", timeout_seconds=timeout, mutated=False)
+    res_path_str = str(reservation.get("reservation_path") or "").strip()
+    process_id = str(request.get("process_id") or "").strip()
+    if not res_path_str or not process_id:
+        return fail("repair_invoke_evidence_identity_required", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", mutated=False)
+    res_path = Path(res_path_str)
+    invoke_path = _repair_invoke_evidence_path(res_path, process_id)
+    pre_info = {
+        "kind": "repair_invoke_evidence",
+        "process_id": process_id,
+        "status": "started",
+        "pre_head": pre_head,
+        "pre_status": pre_status,
+        "mutated": None,
+    }
+    try:
+        _write_invoke_evidence(invoke_path, pre_info, exclusive=True)
+    except OSError as exc:
+        return fail("repair_invoke_evidence_write_failed", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", error=str(exc), mutated=False)
+    try:
+        out = run_omp(prompt=prompt, cwd=path, command=str(data.get("command") or cfg.get("executor_command") or "omp"), model=str(data.get("model") or cfg.get("model") or "omniroute/omp/default"), thinking=str(data.get("thinking") or cfg.get("thinking") or "medium"), timeout=timeout, dry_run=False)
+    except (CommandError, subprocess.TimeoutExpired) as exc:
+        evidence_status = "timed_out" if isinstance(exc, subprocess.TimeoutExpired) else "failed"
+        try:
+            post_head = rev_parse(path)
+            post_status = git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=path)
+            mutated = post_head != pre_head or post_status != pre_status
+        except (CommandError, OSError):
+            post_head = ""
+            post_status = ""
+            mutated = True
+        try:
+            post_info = {
+                "kind": "repair_invoke_evidence",
+                "process_id": process_id,
+                "status": evidence_status,
+                "pre_head": pre_head,
+                "pre_status": pre_status,
+                "post_head": post_head,
+                "post_status": post_status,
+                "mutated": mutated,
+                "error": str(exc),
+            }
+            _write_invoke_evidence(invoke_path, post_info)
+        except OSError as write_exc:
+            return fail("repair_invoke_evidence_write_failed", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", error=str(write_exc), mutated=True)
+        return fail("repair_omp_failed", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", error=str(exc), pre_head=pre_head, mutated=mutated)
+    try:
+        post_head = rev_parse(path)
+        post_status = git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=path)
+        mutated_success = post_head != pre_head or post_status != pre_status
+    except (CommandError, OSError):
+        post_head = ""
+        post_status = ""
+        mutated_success = True
+    try:
+        post_info = {
+            "kind": "repair_invoke_evidence",
+            "process_id": process_id,
+            "status": "succeeded",
+            "pre_head": pre_head,
+            "pre_status": pre_status,
+            "post_head": post_head,
+            "post_status": post_status,
+            "mutated": mutated_success,
+        }
+        _write_invoke_evidence(invoke_path, post_info)
+    except OSError as exc:
+        return fail("repair_invoke_evidence_write_failed", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", error=str(exc), mutated=True)
     decision = cond_blob(request, "decide_repair_attempt")
     pre_head = str(pre.get("pre_head") or decision.get("verified_head") or "")
     attempt_state = {
@@ -1411,7 +1946,7 @@ def invoke_repair_omp(request: Request) -> Result:
         "status": "invoked",
         "attempted": True,
     }
-    return ok(status="invoked", operation="invoke_repair_omp", omp=out, omp_process_id=str(request.get("process_id") or ""), worktree_path=path, pre_head=pre_head, attempt_state=attempt_state, mutated=True)
+    return ok(status="invoked", operation="invoke_repair_omp", omp=out, omp_process_id=process_id, worktree_path=path, pre_head=pre_head, attempt_state=attempt_state, mutated=mutated_success)
 
 
 def verify_repair_omp_postconditions(request: Request) -> Result:
