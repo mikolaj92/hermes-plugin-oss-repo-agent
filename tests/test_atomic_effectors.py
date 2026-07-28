@@ -2749,11 +2749,20 @@ class TriageTests(unittest.TestCase):
                     "triage_decide_pr_assignee": selected,
                 },
             }))
+        comment_noop = {
+            "status": "noop",
+            "ok": True,
+            "reason": "not_selected",
+            "operation": "verify_pr_comment",
+        }
         merge_view = {"state": "OPEN", "headRefOid": "abc"}
         with mock.patch("lokay.steps.triage._read_merge_view", return_value=merge_view):
             preconditions = triage.read_merge_preconditions(req({
                 "dry_run": False,
-                "conduction": {"triage_verify_pr_assignee": verified},
+                "conduction": {
+                    "triage_verify_pr_assignee": verified,
+                    "triage_verify_pr_comment": comment_noop,
+                },
             }))
         self.assertEqual(
             (

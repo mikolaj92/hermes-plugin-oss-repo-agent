@@ -526,7 +526,7 @@ def read_merge_preconditions(request: Request) -> Result:
     terminal = _atomic_terminal(request, "read_merge_preconditions", "verify_pr_assignee")
     if terminal is not None:
         return terminal
-    idle = _upstream_noop(request, "read_merge_preconditions", "verify_pr_assignee", "verify_pr_comment")
+    idle = _upstream_noop(request, "read_merge_preconditions", "verify_pr_assignee")
     if idle is not None:
         return idle
     c = _atomic_context(request); data, cfg = input_of(request), cfg_of(request); head = str(data.get("head_oid") or data.get("headRefOid") or c.get("head_oid") or "").strip(); c["head_oid"] = head
