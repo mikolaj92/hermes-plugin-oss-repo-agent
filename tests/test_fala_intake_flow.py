@@ -333,6 +333,10 @@ class IntakeFlowE2ETests(unittest.TestCase):
         self.assertEqual(remote_head["remote_oid"], head_oid)
         preparation = process_values({"output": by_step["triage_add_repair_worktree"].output})
         self.assertEqual(preparation["status"], "planned")
+        attempt = process_values({"output": by_step["triage_decide_repair_attempt"].output})
+        self.assertEqual(attempt["status"], "noop")
+        self.assertFalse(attempt["authorize"])
+        self.assertEqual(attempt["reason"], "executor_disabled")
         self.assertEqual(process_values({"output": by_step["triage_post_pr_comment"].output})["status"], "noop")
         failed = [
             (process.step_id, process.status, process.error, process_values({"output": process.output}))

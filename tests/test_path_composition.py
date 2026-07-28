@@ -130,6 +130,7 @@ class PackageStructureTests(unittest.TestCase):
                     expected_completed.append(f"{prefix}read_repair_remote_head")
                 self.assertEqual(by_id[f"{prefix}read_repair_completed_receipt"]["conduction"], expected_completed)
                 self.assertIn(f"{prefix}read_repair_completed_receipt", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
+                self.assertIn(f"{prefix}decide_triage_action", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
                 self.assertEqual(by_id[f"{prefix}read_repair_attempt_reconciliation"]["conduction"], [f"{prefix}read_repair_attempt_state", f"{prefix}read_repair_completed_receipt", f"{prefix}read_repair_remote_head", f"{prefix}read_repair_worktree_inventory", f"{prefix}read_repair_branch_provenance"])
                 self.assertIn(f"{prefix}fetch_repair_remote_head", by_id)
                 self.assertIn(f"{prefix}verify_fetched_repair_remote_head", by_id)
