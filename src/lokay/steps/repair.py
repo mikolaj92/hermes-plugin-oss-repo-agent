@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 import hashlib
+import re
 import json
 import os
 import sqlite3
 import subprocess
-
+from lokay.steps.claim import claim_directory_lock
 from lokay.adapters_cli import CommandError, hermes_kanban_json, run_cmd
 from lokay.config import MAX_EXECUTOR_TIMEOUT_SECONDS
 from lokay.envelope import (
@@ -1420,12 +1421,23 @@ from lokay.adapters_git import (
 
 _REPAIR_CONTEXT_ALIASES = (
     "build_repair_prompt", "triage_build_repair_prompt", "read_repair_context",
-    "read_repair_remote_head", "read_repair_worktree_inventory",
+    "read_repair_remote_head", "fetch_repair_remote_head", "verify_fetched_repair_remote_head", "read_repair_worktree_inventory",
     "read_repair_branch_provenance", "read_repair_creation_evidence",
-    "decide_repair_worktree_ownership", "create_repair_branch",
-    "write_repair_branch_provenance", "add_repair_worktree",
+    "read_repair_worktree_cleanliness", "read_repair_remote_ancestry",
+    "decide_repair_worktree_fast_forward", "read_repair_worktree_branch_before_fast_forward", "read_repair_worktree_head_before_fast_forward", "read_repair_worktree_cleanliness_before_fast_forward", "decide_repair_worktree_fast_forward_execution", "fast_forward_repair_worktree",
+    "decide_repair_worktree_ownership", "create_repair_branch", "write_repair_branch_provenance", "add_repair_worktree",
     "prepare_repair_worktree", "verify_repair_worktree",
 )
+def _repair_blob(request: Request, name: str) -> dict[str, Any]:
+     """Read a canonical conduction blob, including its triage-prefixed alias."""
+     return cond_blob(request, name)
+
+def _repair_acquired_ref(context: dict[str, str], remote_oid: str) -> str:
+     """Return a deterministic ref unique to this exact advertised head."""
+     digest = hashlib.sha256(
+         f"{context['repo']}\0{context['pr_number']}\0{context['branch']}\0{remote_oid}".encode()
+     ).hexdigest()
+     return f"refs/lokay/repair-acquire/{digest}"
 
 def _repair_blobs(request: Request) -> list[dict[str, Any]]:
      conduction = input_of(request).get("conduction")
@@ -1433,12 +1445,12 @@ def _repair_blobs(request: Request) -> list[dict[str, Any]]:
          return []
      found: list[dict[str, Any]] = []
      for name, value in conduction.items():
-         if not isinstance(value, dict):
-             continue
-         if name in _REPAIR_CONTEXT_ALIASES or any(name.endswith(f"_{alias}") for alias in _REPAIR_CONTEXT_ALIASES):
-             if value not in found:
-                 found.append(dict(value))
+         if isinstance(value, dict) and (name in _REPAIR_CONTEXT_ALIASES or any(name.endswith(f"_{alias}") for alias in _REPAIR_CONTEXT_ALIASES)) and value not in found:
+             found.append(dict(value))
      return found
+
+
+
 
 def _repair_values(request: Request, key: str) -> list[str]:
      values: list[str] = []
@@ -1517,6 +1529,10 @@ def _repair_upstream(request: Request, operation: str, *peers: str) -> Result | 
      terminal = _atomic_terminal(request, operation, *peers)
      if terminal:
          return terminal
+     for peer in peers:
+         refreshed = cond_blob(request, peer)
+         if refreshed.get("status") == "refreshed" and refreshed.get("refresh_kind") == "legacy_base_synchronization":
+             return noop("legacy_base_refreshed", operation=operation, refresh_kind="legacy_base_synchronization", worked=False)
      idle = upstream_noop(request, *peers)
      if idle:
          return noop(str(idle.get("reason") or "no_selected_pr"), operation=operation)
@@ -1587,6 +1603,269 @@ def read_repair_branch_provenance(request: Request) -> Result:
     except (CommandError, OSError) as exc:
         return fail("repair_branch_provenance_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_branch_provenance", error=str(exc), **context)
     return ok(status="read", operation="read_repair_branch_provenance", exists=exists, provenance=provenance, branch_head=branch_head, **context)
+def fetch_repair_remote_head(request: Request) -> Result:
+    """Acquire the authoritative PR head into an isolated, exact-OID ref."""
+    upstream = _repair_upstream(request, "fetch_repair_remote_head", "read_repair_remote_head")
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    error = _repair_context_error(context)
+    if error:
+        return fail(error, failure_class="terminal", retry_safe=False, operation="fetch_repair_remote_head")
+    head = cond_blob(request, "read_repair_remote_head")
+    remote_oid = str(head.get("remote_oid") or "").strip()
+    if not remote_oid:
+        return fail("missing_repair_remote_head", failure_class="terminal", retry_safe=False, operation="fetch_repair_remote_head", **context)
+    acquired_ref = _repair_acquired_ref(context, remote_oid)
+    if dry_run_flag(request):
+        return planned(operation="fetch_repair_remote_head", remote=context["remote"], branch=context["branch"], remote_oid=remote_oid, acquired_ref=acquired_ref)
+    try:
+        git(["fetch", "--no-tags", context["remote"], f"refs/heads/{context['branch']}:{acquired_ref}"], cwd=context["clone_path"])
+    except (CommandError, OSError) as exc:
+        # Fetch is a mutation atom: an error cannot prove that no ref update occurred.
+        return fail("repair_remote_head_fetch_failed", failure_class="reconcile_then_retry", retry_safe=False, mutated=True, mutation_unknown=True, operation="fetch_repair_remote_head", error=str(exc), remote_oid=remote_oid, acquired_ref=acquired_ref, **context)
+    return ok(status="fetched", operation="fetch_repair_remote_head", remote_oid=remote_oid, acquired_ref=acquired_ref, mutated=True, **context)
+
+
+def verify_fetched_repair_remote_head(request: Request) -> Result:
+    """Read the acquired ref once and prove it equals the advertised remote head."""
+    upstream = _repair_upstream(request, "verify_fetched_repair_remote_head", "fetch_repair_remote_head")
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    fetched = cond_blob(request, "fetch_repair_remote_head")
+    remote_oid = str(fetched.get("remote_oid") or "").strip()
+    acquired_ref = str(fetched.get("acquired_ref") or "").strip()
+    if fetched.get("ok") is not True or fetched.get("status") != "fetched" or not remote_oid or not acquired_ref:
+        return fail("repair_remote_head_not_fetched", failure_class="terminal", retry_safe=False, operation="verify_fetched_repair_remote_head", remote_oid=remote_oid, acquired_ref=acquired_ref, **context)
+    if dry_run_flag(request):
+        return planned(operation="verify_fetched_repair_remote_head", remote_oid=remote_oid, acquired_ref=acquired_ref)
+    try:
+        acquired_oid = rev_parse(context["clone_path"], acquired_ref)
+    except (CommandError, OSError) as exc:
+        return fail("repair_remote_head_verification_missing", failure_class="terminal", retry_safe=False, operation="verify_fetched_repair_remote_head", error=str(exc), remote_oid=remote_oid, acquired_ref=acquired_ref, **context)
+    if acquired_oid != remote_oid:
+        return fail("repair_remote_head_verification_mismatch", failure_class="terminal", retry_safe=False, operation="verify_fetched_repair_remote_head", remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+    return ok(status="verified", operation="verify_fetched_repair_remote_head", verified=True, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+
+def _repair_inventory_row(request: Request) -> dict[str, Any] | None:
+    inventory = cond_blob(request, "read_repair_worktree_inventory")
+    rows = inventory.get("worktrees")
+    if not isinstance(rows, list):
+        row = inventory.get("worktree")
+        rows = [row] if isinstance(row, dict) else []
+    context = _repair_context(request)
+    target = Path(context.get("worktree_path") or "").resolve()
+    for row in rows:
+        if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == target:
+            return dict(row)
+    return None
+
+
+def read_repair_worktree_cleanliness(request: Request) -> Result:
+    """Read the owned target worktree status exactly once."""
+    upstream = _repair_upstream(
+        request, "read_repair_worktree_cleanliness", "read_repair_context",
+        "read_repair_remote_head", "read_repair_worktree_inventory",
+        "read_repair_branch_provenance",
+    )
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    row = _repair_inventory_row(request)
+    if row is None:
+        return ok(status="inactive", operation="read_repair_worktree_cleanliness", worktree_present=False, clean=False, **context)
+    try:
+        status = git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=context["worktree_path"])
+    except (CommandError, OSError) as exc:
+        return fail("repair_worktree_cleanliness_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_worktree_cleanliness", error=str(exc), **context)
+    return ok(status="read", operation="read_repair_worktree_cleanliness", worktree_present=True, clean=not bool(status), dirty=bool(status), porcelain=status, **context)
+
+
+def read_repair_remote_ancestry(request: Request) -> Result:
+    """Read whether the existing local head is an ancestor of the verified PR head."""
+    upstream = _repair_upstream(
+        request, "read_repair_remote_ancestry", "read_repair_context",
+        "read_repair_remote_head", "fetch_repair_remote_head", "verify_fetched_repair_remote_head",
+        "read_repair_worktree_inventory", "read_repair_branch_provenance",
+    )
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    verified = cond_blob(request, "verify_fetched_repair_remote_head")
+    remote_oid = str(verified.get("remote_oid") or "")
+    acquired_oid = str(verified.get("acquired_oid") or "")
+    acquired_ref = str(verified.get("acquired_ref") or "")
+    if verified.get("ok") is not True or verified.get("status") != "verified" or verified.get("verified") is not True or not acquired_ref or not acquired_oid or acquired_oid != remote_oid:
+        return fail("repair_remote_head_not_verified", failure_class="terminal", retry_safe=False, operation="read_repair_remote_ancestry", remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+    row = _repair_inventory_row(request)
+    if row is None:
+        return ok(status="inactive", operation="read_repair_remote_ancestry", worktree_present=False, descendant=False, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+    local_oid = str(_repair_field(request, "local_head", "branch_head") or row.get("head") or "")
+    if not local_oid:
+        return fail("missing_repair_ancestry_head", failure_class="terminal", retry_safe=False, operation="read_repair_remote_ancestry", remote_oid=remote_oid, local_oid=local_oid, **context)
+    try:
+        proc = run_cmd(["git", "merge-base", "--is-ancestor", local_oid, acquired_ref], cwd=context["clone_path"], check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return fail("repair_remote_ancestry_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_remote_ancestry", error=str(exc), local_oid=local_oid, remote_oid=remote_oid, **context)
+    if proc.returncode == 0:
+        return ok(status="read", operation="read_repair_remote_ancestry", descendant=True, local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+    if proc.returncode == 1:
+        return fail("repair_worktree_diverged", failure_class="terminal", retry_safe=False, operation="read_repair_remote_ancestry", descendant=False, local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+    return fail("repair_remote_ancestry_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_remote_ancestry", error=(proc.stderr or proc.stdout or "").strip(), local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+
+
+def decide_repair_worktree_fast_forward(request: Request) -> Result:
+    """Purely authorize one safe fast-forward of an owned repair worktree."""
+    upstream = _repair_upstream(
+        request, "decide_repair_worktree_fast_forward", "read_repair_context",
+        "read_repair_remote_head", "read_repair_worktree_inventory",
+        "read_repair_branch_provenance", "read_repair_worktree_cleanliness",
+        "read_repair_remote_ancestry",
+    )
+    if upstream:
+        return upstream
+    context = _repair_context(request)
+    inventory = cond_blob(request, "read_repair_worktree_inventory")
+    branch_read = cond_blob(request, "read_repair_branch_provenance")
+    cleanliness = cond_blob(request, "read_repair_worktree_cleanliness")
+    ancestry = cond_blob(request, "read_repair_remote_ancestry")
+    row = _repair_inventory_row(request)
+    if row is None:
+        return ok(status="inactive", operation="decide_repair_worktree_fast_forward", should_fast_forward=False, worktree_present=False, **context)
+    if str(row.get("branch") or "") != context["local_branch"]:
+        return fail("foreign_repair_worktree", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_fast_forward", actual_branch=row.get("branch"), **context)
+    provenance = dict(branch_read.get("provenance") or {})
+    expected = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "target_branch": context["branch"]}
+    if not branch_read.get("exists") or any(provenance.get(key) != value for key, value in expected.items() if value or key == "task"):
+        return fail("foreign_repair_branch_ownership", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_fast_forward", expected=expected, actual=provenance, **context)
+    if cleanliness.get("clean") is not True:
+        return fail("repair_worktree_dirty", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_fast_forward", dirty=True, **context)
+    remote_oid = str(cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
+    local_oid = str(row.get("head") or branch_read.get("branch_head") or "")
+    if not remote_oid or not local_oid:
+        return fail("missing_repair_ancestry_head", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_fast_forward", **context)
+    if local_oid == remote_oid:
+        return ok(status="inactive", operation="decide_repair_worktree_fast_forward", should_fast_forward=False, already_current=True, local_oid=local_oid, remote_oid=remote_oid, **context)
+    if ancestry.get("descendant") is not True:
+        return fail("repair_worktree_diverged", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_fast_forward", descendant=ancestry.get("descendant"), local_oid=local_oid, remote_oid=remote_oid, **context)
+    return ok(status="authorized", operation="decide_repair_worktree_fast_forward", should_fast_forward=True, local_oid=local_oid, remote_oid=remote_oid, **context)
+
+def read_repair_worktree_branch_before_fast_forward(request: Request) -> Result:
+    """Read the checked-out branch immediately before fast-forward execution."""
+    upstream = _repair_upstream(request, "read_repair_worktree_branch_before_fast_forward", "decide_repair_worktree_fast_forward")
+    if upstream:
+        return upstream
+    decision = cond_blob(request, "decide_repair_worktree_fast_forward")
+    context = _repair_context(request)
+    if decision.get("status") == "inactive":
+        return ok(status="inactive", operation="read_repair_worktree_branch_before_fast_forward", current_branch="", **context)
+    try:
+        current_branch = git(["branch", "--show-current"], cwd=context["worktree_path"])
+    except (CommandError, OSError) as exc:
+        return fail("repair_fast_forward_branch_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_worktree_branch_before_fast_forward", error=str(exc), **context)
+    return ok(status="read", operation="read_repair_worktree_branch_before_fast_forward", current_branch=current_branch, **context)
+
+
+def read_repair_worktree_head_before_fast_forward(request: Request) -> Result:
+    """Read HEAD immediately before fast-forward execution."""
+    upstream = _repair_upstream(request, "read_repair_worktree_head_before_fast_forward", "decide_repair_worktree_fast_forward")
+    if upstream:
+        return upstream
+    decision = cond_blob(request, "decide_repair_worktree_fast_forward")
+    context = _repair_context(request)
+    if decision.get("status") == "inactive":
+        return ok(status="inactive", operation="read_repair_worktree_head_before_fast_forward", local_oid="", **context)
+    try:
+        local_oid = rev_parse(context["worktree_path"])
+    except (CommandError, OSError) as exc:
+        return fail("repair_fast_forward_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_worktree_head_before_fast_forward", error=str(exc), **context)
+    return ok(status="read", operation="read_repair_worktree_head_before_fast_forward", local_oid=local_oid, **context)
+
+
+def read_repair_worktree_cleanliness_before_fast_forward(request: Request) -> Result:
+    """Read exact porcelain cleanliness immediately before fast-forward execution."""
+    upstream = _repair_upstream(request, "read_repair_worktree_cleanliness_before_fast_forward", "decide_repair_worktree_fast_forward")
+    if upstream:
+        return upstream
+    decision = cond_blob(request, "decide_repair_worktree_fast_forward")
+    context = _repair_context(request)
+    if decision.get("status") == "inactive":
+        return ok(status="inactive", operation="read_repair_worktree_cleanliness_before_fast_forward", clean=False, dirty=False, porcelain="", **context)
+    try:
+        porcelain = git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=context["worktree_path"])
+    except (CommandError, OSError) as exc:
+        return fail("repair_fast_forward_cleanliness_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_worktree_cleanliness_before_fast_forward", error=str(exc), **context)
+    return ok(status="read", operation="read_repair_worktree_cleanliness_before_fast_forward", clean=not bool(porcelain), dirty=bool(porcelain), porcelain=porcelain, **context)
+
+
+def decide_repair_worktree_fast_forward_execution(request: Request) -> Result:
+    """Bind fresh worktree state to the original fast-forward authorization."""
+    upstream = _repair_upstream(request, "decide_repair_worktree_fast_forward_execution", "decide_repair_worktree_fast_forward", "read_repair_worktree_branch_before_fast_forward", "read_repair_worktree_head_before_fast_forward", "read_repair_worktree_cleanliness_before_fast_forward")
+    if upstream:
+        return upstream
+    decision = cond_blob(request, "decide_repair_worktree_fast_forward")
+    context = _repair_context(request)
+    if decision.get("status") == "inactive":
+        return ok(status="inactive", operation="decide_repair_worktree_fast_forward_execution", should_fast_forward=False, **context)
+    if decision.get("ok") is not True or decision.get("should_fast_forward") is not True:
+        return fail("repair_fast_forward_not_authorized", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_fast_forward_execution", **context)
+    branch = cond_blob(request, "read_repair_worktree_branch_before_fast_forward")
+    head = cond_blob(request, "read_repair_worktree_head_before_fast_forward")
+    cleanliness = cond_blob(request, "read_repair_worktree_cleanliness_before_fast_forward")
+    expected_branch = str(decision.get("local_branch") or context["local_branch"])
+    expected_head = str(decision.get("local_oid") or "")
+    actual_branch = str(branch.get("current_branch") or "")
+    actual_head = str(head.get("local_oid") or "")
+    if actual_branch != expected_branch:
+        return fail("repair_fast_forward_branch_changed", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_fast_forward_execution", expected_branch=expected_branch, actual_branch=actual_branch, **context)
+    if actual_head != expected_head:
+        return fail("repair_fast_forward_head_changed", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_fast_forward_execution", expected_head=expected_head, actual_head=actual_head, **context)
+    if cleanliness.get("clean") is not True:
+        return fail("repair_fast_forward_worktree_dirty", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_fast_forward_execution", dirty=True, **context)
+    return ok(status="authorized", operation="decide_repair_worktree_fast_forward_execution", should_fast_forward=True, authorized_branch=expected_branch, authorized_local_oid=expected_head, remote_oid=str(decision.get("remote_oid") or ""), **context)
+
+def fast_forward_repair_worktree(request: Request) -> Result:
+    """Guarded ff mutation: revalidate branch, HEAD, and status under the worktree lock."""
+    upstream = _repair_upstream(request, "fast_forward_repair_worktree", "decide_repair_worktree_fast_forward_execution")
+    if upstream:
+        return upstream
+    decision = cond_blob(request, "decide_repair_worktree_fast_forward_execution")
+    context = _repair_context(request)
+    if decision.get("status") == "inactive":
+        return ok(status="inactive", operation="fast_forward_repair_worktree", should_fast_forward=False, **context)
+    if decision.get("ok") is not True or decision.get("should_fast_forward") is not True:
+        return fail("repair_fast_forward_not_authorized", failure_class="terminal", retry_safe=False, operation="fast_forward_repair_worktree", **context)
+    remote_oid = str(decision.get("remote_oid") or "")
+    expected_branch = str(decision.get("authorized_branch") or "")
+    expected_head = str(decision.get("authorized_local_oid") or "")
+    if not remote_oid or not expected_branch or not expected_head:
+        return fail("repair_fast_forward_guard_missing", failure_class="terminal", retry_safe=False, operation="fast_forward_repair_worktree", **context)
+    if dry_run_flag(request):
+        return planned(operation="fast_forward_repair_worktree", remote_oid=remote_oid, worktree_path=context["worktree_path"])
+    try:
+        # Serialize cooperating worktree mutations while checking and merging.
+        with claim_directory_lock(Path(context["worktree_path"])):
+            current_branch = git(["branch", "--show-current"], cwd=context["worktree_path"])
+            current_head = rev_parse(context["worktree_path"])
+            porcelain = git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=context["worktree_path"])
+            if current_branch != expected_branch:
+                return fail("repair_fast_forward_branch_changed", failure_class="terminal", retry_safe=False, operation="fast_forward_repair_worktree", expected_branch=expected_branch, actual_branch=current_branch, mutated=False, **context)
+            if current_head != expected_head:
+                return fail("repair_fast_forward_head_changed", failure_class="terminal", retry_safe=False, operation="fast_forward_repair_worktree", expected_head=expected_head, actual_head=current_head, mutated=False, **context)
+            if porcelain:
+                return fail("repair_fast_forward_worktree_dirty", failure_class="terminal", retry_safe=False, operation="fast_forward_repair_worktree", dirty=True, porcelain=porcelain, mutated=False, **context)
+            git(["merge", "--ff-only", remote_oid], cwd=context["worktree_path"])
+            observed_head = rev_parse(context["worktree_path"])
+            if observed_head != remote_oid:
+                return fail("repair_fast_forward_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, operation="fast_forward_repair_worktree", expected_head=remote_oid, actual_head=observed_head, mutated=True, **context)
+    except CommandError as exc:
+        return fail("repair_fast_forward_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="fast_forward_repair_worktree", error=str(exc), mutated=True, **context)
+    except OSError as exc:
+        return fail("repair_fast_forward_lock_failed", failure_class="retryable_read", retry_safe=True, operation="fast_forward_repair_worktree", error=str(exc), mutated=False, **context)
+    return ok(status="advanced", operation="fast_forward_repair_worktree", local_oid=remote_oid, remote_oid=remote_oid, mutated=True, **context)
+
+
 def read_repair_creation_evidence(request: Request) -> Result:
     """Read one explicitly configured, exact prior branch-creation process."""
     upstream = _repair_upstream(request, "read_repair_creation_evidence", "read_repair_context", "read_repair_remote_head", "read_repair_branch_provenance")
@@ -1662,7 +1941,7 @@ def read_repair_creation_evidence(request: Request) -> Result:
     return ok(status="verified", operation="read_repair_creation_evidence", verified=True, run_id=run_id, process_id=process_id, candidate=candidate, remote_oid=remote_oid, **context)
 
 def decide_repair_worktree_ownership(request: Request) -> Result:
-    upstream = _repair_upstream(request, "decide_repair_worktree_ownership", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance", "read_repair_creation_evidence")
+    upstream = _repair_upstream(request, "decide_repair_worktree_ownership", "verify_legacy_repair_pr_head", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance", "read_repair_creation_evidence", "read_repair_worktree_cleanliness", "read_repair_remote_ancestry", "decide_repair_worktree_fast_forward", "fast_forward_repair_worktree")
     if upstream:
         return upstream
     context = _repair_context(request)
@@ -1674,19 +1953,22 @@ def decide_repair_worktree_ownership(request: Request) -> Result:
     branch_read = cond_blob(request, "read_repair_branch_provenance")
     evidence = cond_blob(request, "read_repair_creation_evidence")
     remote_oid = str(remote.get("remote_oid") or _repair_field(request, "remote_oid"))
+    ff = cond_blob(request, "fast_forward_repair_worktree")
     if not remote_oid:
         return fail("missing_repair_remote_oid", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership")
     expected = {"task": context["task_id"], "issue": context["issue"], "repo": context["repo"], "pr": context["pr_number"], "receipt": context["receipt"], "remote_oid": remote_oid, "target_branch": context["branch"]}
     actual = dict(branch_read.get("provenance") or {})
     recover_branch = bool(branch_read.get("exists") and not any(actual.values()) and evidence.get("verified") is True and str(evidence.get("remote_oid") or "") == remote_oid and str(branch_read.get("branch_head") or "") == remote_oid)
-    if branch_read.get("exists") and not recover_branch and any(actual.get(key) != value for key, value in expected.items() if value or key == "task" and actual.get(key)):
+    sync_verified = ff.get("status") in {"advanced", "inactive", "planned"} or not branch_read.get("exists")
+    mismatches = [key for key, value in expected.items() if key != "remote_oid" and (value or key == "task") and actual.get(key) != value]
+    if branch_read.get("exists") and not recover_branch and (mismatches or (actual.get("remote_oid") != remote_oid and not sync_verified)):
         return fail("foreign_repair_branch_ownership", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected=expected, actual=actual)
     rows = inventory.get("worktrees") if isinstance(inventory.get("worktrees"), list) else []
     target = Path(context["worktree_path"]).resolve()
     matching = [row for row in rows if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == target]
     if matching and any(str(row.get("branch") or "") != context["local_branch"] for row in matching):
         return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
-    if matching and str(matching[0].get("head") or "") != remote_oid:
+    if matching and str(matching[0].get("head") or "") != remote_oid and ff.get("status") not in {"advanced", "planned"}:
         return fail("stale_repair_remote_head", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected_head=remote_oid, actual_head=matching[0].get("head"))
     if (target.exists() or target.is_symlink()) and not matching:
         return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
@@ -2153,6 +2435,168 @@ def verify_existing_repair_pr(request: Request) -> Result:
     if str(actual_repo or "") != context["repo"] or actual_number_int != expected_number or str(pr.get("headRefName") or "") != context["branch"] or (expected_oid and str(pr.get("headRefOid") or "") != expected_oid):
         return fail("repair_pr_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_existing_repair_pr", expected={"repo": context["repo"], "number": expected_number, "branch": context["branch"], "head": expected_oid}, actual=pr)
     return ok(status="verified", operation="verify_existing_repair_pr", repo=context["repo"], pr_number=expected_number, branch=context["branch"], head_oid=expected_oid, pr=pr, mutated=False)
+
+
+def _legacy_refresh_source(request: Request, *names: str) -> object:
+    data, cfg = input_of(request), cfg_of(request)
+    sources: list[object] = [data, cfg]
+    for name in names:
+        blob = cond_blob(request, name)
+        if blob:
+            sources.append(blob)
+    for source in sources:
+        if isinstance(source, dict):
+            for key in ("pr", "attempt_state", "reservation", "repo", "pr_number", "number", "branch", "headRefName", "base_branch", "baseRefName", "verified_head", "headRefOid"):
+                if key in source and source[key] not in (None, "", {}):
+                    return source[key]
+    return None
+
+
+def _legacy_refresh_pr(request: Request) -> dict[str, object] | None:
+    data = input_of(request)
+    for source in (data.get("pr"), cond_blob(request, "load_pr_fields").get("pr"), cond_blob(request, "triage_load_pr_fields").get("pr"), cond_blob(request, "read_existing_repair_pr").get("pr"), cond_blob(request, "read_legacy_repair_pr").get("pr")):
+        if isinstance(source, dict):
+            return source
+    return None
+
+def _legacy_refresh_state(request: Request) -> dict[str, object] | None:
+    data = input_of(request)
+    conducted = cond_blob(request, "read_repair_attempt_state")
+    if conducted:
+        if str(conducted.get("status") or "") != "found" or conducted.get("ok") is False:
+            return None
+        source = conducted.get("attempt_state") or conducted.get("reservation") or conducted.get("state")
+        if not isinstance(source, dict) or source.get("attempted") is not True or str(source.get("status") or "") not in {"reserved", "invoked"}:
+            return None
+        return source
+    for source in (data.get("attempt_state"), data.get("repair_attempt"), data.get("reservation"), cond_blob(request, "read_legacy_repair_attempt_state").get("attempt_state")):
+        if isinstance(source, dict):
+            return source
+    return None
+
+
+def _legacy_refresh_value(request: Request, *keys: str) -> str:
+    data, cfg = input_of(request), cfg_of(request)
+    state = _legacy_refresh_state(request)
+    pr = _legacy_refresh_pr(request)
+    blobs = [data, cfg, state, pr, cond_blob(request, "read_repair_base_head"), cond_blob(request, "decide_legacy_repair_head_refresh")]
+    for blob in blobs:
+        for key in keys:
+            if isinstance(blob, dict) and blob.get(key) not in (None, ""):
+                return str(blob[key]).strip()
+    return ""
+
+
+def read_repair_base_head(request: Request) -> Result:
+    data, cfg = input_of(request), cfg_of(request)
+    repo = str(data.get("repo") or cfg.get("repo") or "")
+    base = str(data.get("base_branch") or cfg.get("base_branch") or "")
+    if not repo:
+        repo = _legacy_refresh_value(request, "repo")
+    if not base:
+        base = _legacy_refresh_value(request, "base_branch", "baseRefName")
+    if not repo or not base:
+        return fail("missing_repair_base_identity", failure_class="terminal", retry_safe=False, operation="read_repair_base_head")
+    gh = str(cfg_of(request).get("gh_cli") or "gh")
+    try:
+        proc = run_cmd([gh, "api", f"repos/{repo}/git/ref/heads/{base}", "--jq", ".object.sha"], timeout=120)
+        oid = (proc.stdout or "").strip()
+    except (CommandError, OSError) as exc:
+        return fail("base_ref_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_base_head", error=str(exc), repo=repo, base_branch=base)
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", oid):
+        return fail("repair_base_head_invalid", failure_class="terminal", retry_safe=False, operation="read_repair_base_head", repo=repo, base_branch=base, output=oid)
+    return ok(status="read", operation="read_repair_base_head", repo=repo, base_branch=base, base_ref_oid=oid, mutated=False)
+
+
+def decide_legacy_repair_head_refresh(request: Request) -> Result:
+    """Pure, exact authorization for refreshing a stale legacy PR base."""
+    action = str(input_of(request).get("action") or cond_blob(request, "decide_triage_action", "decide").get("action") or "")
+    state = _legacy_refresh_state(request)
+    if action != "repair":
+        return ok(status="inactive", operation="decide_legacy_repair_head_refresh", should_refresh=False, reason="not_repair", mutated=False)
+    if state is None:
+        return ok(status="inactive", operation="decide_legacy_repair_head_refresh", should_refresh=False, reason="no_legacy_reservation", mutated=False)
+    keys = ("pre_head", "pre_status", "repo_branch", "local_branch", "worktree_path")
+    present = [key for key in keys if key in state]
+    if present and len(present) != len(keys):
+        return fail("legacy_repair_reservation_partial_baseline", failure_class="terminal", retry_safe=False, operation="decide_legacy_repair_head_refresh", present_baseline=present, mutated=False)
+    if present:
+        return ok(status="inactive", operation="decide_legacy_repair_head_refresh", should_refresh=False, reason="nonlegacy_reservation", mutated=False)
+    repo = str(state.get("repo") or _legacy_refresh_value(request, "repo"))
+    try:
+        number = int(state.get("pr_number") or _legacy_refresh_value(request, "pr_number", "number") or 0)
+    except (TypeError, ValueError):
+        number = 0
+    branch = _legacy_refresh_value(request, "branch", "headRefName")
+    base = _legacy_refresh_value(request, "base_branch", "baseRefName")
+    old_head = str(state.get("verified_head") or _legacy_refresh_value(request, "verified_head", "headRefOid"))
+    pr = _legacy_refresh_pr(request)
+    base_read = cond_blob(request, "read_repair_base_head")
+    live_base = str(base_read.get("base_ref_oid") or "")
+    if not repo or number <= 0 or not branch or not base or not old_head or not isinstance(pr, dict) or not live_base:
+        return fail("legacy_repair_identity_missing", failure_class="terminal", retry_safe=False, operation="decide_legacy_repair_head_refresh", mutated=False)
+    repository = pr.get("repository")
+    loaded = cond_blob(request, "load_pr_fields", "triage_load_pr_fields")
+    actual_repo = repository.get("nameWithOwner") if isinstance(repository, dict) else repository or loaded.get("repo")
+    try:
+        actual_number = int(pr.get("number") or 0)
+    except (TypeError, ValueError):
+        actual_number = 0
+    actual = {"repo": actual_repo or "", "number": actual_number, "state": str(pr.get("state") or "").upper(), "branch": pr.get("headRefName"), "base": pr.get("baseRefName"), "head": pr.get("headRefOid")}
+    expected = {"repo": repo, "number": number, "state": "OPEN", "branch": branch, "base": base, "head": old_head}
+    if actual != expected:
+        return fail("legacy_repair_pr_identity_mismatch", failure_class="terminal", retry_safe=False, operation="decide_legacy_repair_head_refresh", expected=expected, actual=actual, mutated=False)
+    observed_base = str(pr.get("baseRefOid") or "")
+    if observed_base == live_base:
+        return ok(status="inactive", operation="decide_legacy_repair_head_refresh", should_refresh=False, reason="base_current", mutated=False)
+    return ok(status="refresh", operation="decide_legacy_repair_head_refresh", should_refresh=True, refresh_kind="legacy_base_synchronization", repo=repo, pr_number=number, branch=branch, base_branch=base, old_head=old_head, observed_base_ref_oid=observed_base, authoritative_base_ref_oid=live_base, mutated=False)
+
+
+def update_legacy_repair_pr_branch(request: Request) -> Result:
+    """Merge the live base into the legacy PR branch with optimistic head protection."""
+    terminal = _atomic_terminal(request, "update_legacy_repair_pr_branch", "decide_legacy_repair_head_refresh")
+    if terminal:
+        return terminal
+    decision = cond_blob(request, "decide_legacy_repair_head_refresh")
+    if decision.get("status") == "inactive" or decision.get("should_refresh") is not True:
+        return noop(str(decision.get("reason") or "legacy_refresh_inactive"), operation="update_legacy_repair_pr_branch", refresh_kind="legacy_base_synchronization")
+    if dry_run_flag(request):
+        return planned(operation="update_legacy_repair_pr_branch", refresh_kind="legacy_base_synchronization", expected_head_sha=decision["old_head"], update_method="merge", repo=decision["repo"], pr_number=decision["pr_number"])
+    gh = str(cfg_of(request).get("gh_cli") or "gh")
+    cmd = [gh, "api", "--method", "PUT", f"repos/{decision['repo']}/pulls/{decision['pr_number']}/update-branch", "-f", f"expected_head_sha={decision['old_head']}", "-f", "update_method=merge"]
+    try:
+        proc = run_cmd(cmd, timeout=120)
+    except (CommandError, OSError) as exc:
+        return fail("legacy_repair_base_refresh_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="update_legacy_repair_pr_branch", error=str(exc), mutated=True)
+    return ok(status="updated", operation="update_legacy_repair_pr_branch", refresh_kind="legacy_base_synchronization", expected_head_sha=decision["old_head"], stdout_tail=(proc.stdout or "")[-400:], mutated=True)
+
+
+def verify_legacy_repair_pr_head(request: Request) -> Result:
+    """Separately read back the PR and prove a changed head and exact identity/base."""
+    terminal = _atomic_terminal(request, "verify_legacy_repair_pr_head", "update_legacy_repair_pr_branch")
+    if terminal:
+        return terminal
+    update = cond_blob(request, "update_legacy_repair_pr_branch")
+    decision = cond_blob(request, "decide_legacy_repair_head_refresh")
+    if update.get("status") == "noop" or decision.get("status") == "inactive":
+        return ok(status="inactive", operation="verify_legacy_repair_pr_head", reason=str(decision.get("reason") or "legacy_refresh_inactive"), mutated=False)
+    if update.get("status") == "planned" or dry_run_flag(request):
+        return planned(operation="verify_legacy_repair_pr_head", refresh_kind="legacy_base_synchronization")
+    gh = str(cfg_of(request).get("gh_cli") or "gh")
+    try:
+        proc = run_cmd([gh, "pr", "view", str(decision["pr_number"]), "--repo", str(decision["repo"]), "--json", "number,state,headRefName,headRefOid,baseRefName,baseRefOid"], timeout=120)
+        pr = json.loads(proc.stdout or "")
+    except (CommandError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("legacy_repair_pr_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="verify_legacy_repair_pr_head", error=str(exc), mutated=True)
+    try:
+        actual_number = int(pr.get("number") or 0) if isinstance(pr, dict) else 0
+    except (TypeError, ValueError):
+        actual_number = 0
+    actual_head = str(pr.get("headRefOid") or "") if isinstance(pr, dict) else ""
+    valid = isinstance(pr, dict) and actual_number == int(decision["pr_number"]) and str(pr.get("state") or "").upper() == "OPEN" and str(pr.get("headRefName") or "") == str(decision["branch"]) and str(pr.get("baseRefName") or "") == str(decision["base_branch"]) and actual_head and actual_head != str(decision["old_head"]) and str(pr.get("baseRefOid") or "") == str(decision["authoritative_base_ref_oid"])
+    if not valid:
+        return fail("legacy_repair_pr_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_legacy_repair_pr_head", expected=decision, actual=pr, mutated=True)
+    return ok(status="refreshed", operation="verify_legacy_repair_pr_head", refresh_kind="legacy_base_synchronization", repo=decision["repo"], pr_number=decision["pr_number"], branch=decision["branch"], base_branch=decision["base_branch"], old_head=decision["old_head"], new_head=actual_head, base_ref_oid=pr["baseRefOid"], pr=pr, mutated=False)
 
 
 def _repair_attempt_receipt(request: Request, payload: dict[str, Any]) -> str:

@@ -119,9 +119,11 @@ class TriagePackageFlowTests(unittest.TestCase):
             "read_repair_creation_evidence", "read_repair_attempt_baseline", "read_repair_completed_receipt", "read_repair_attempt_reconciliation",
             "read_repair_attempt_recovery_evidence", "claim_repair_attempt_recovery", "verify_repair_attempt_recovery",
             "read_repair_recovery_continuation_evidence", "claim_repair_recovery_continuation", "verify_repair_recovery_continuation",
+            "read_repair_base_head", "decide_legacy_repair_head_refresh", "update_legacy_repair_pr_branch", "verify_legacy_repair_pr_head",
             "triage_read_repair_creation_evidence", "triage_read_repair_attempt_baseline", "triage_read_repair_completed_receipt", "triage_read_repair_attempt_reconciliation",
             "triage_read_repair_attempt_recovery_evidence", "triage_claim_repair_attempt_recovery", "triage_verify_repair_attempt_recovery",
             "triage_read_repair_recovery_continuation_evidence", "triage_claim_repair_recovery_continuation", "triage_verify_repair_recovery_continuation",
+            "triage_read_repair_base_head", "triage_decide_legacy_repair_head_refresh", "triage_update_legacy_repair_pr_branch", "triage_verify_legacy_repair_pr_head",
         }
         for step_id in expected_ids:
             with self.subTest(step_id=step_id):

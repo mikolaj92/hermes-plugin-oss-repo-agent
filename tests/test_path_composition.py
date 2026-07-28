@@ -97,6 +97,11 @@ class PackageStructureTests(unittest.TestCase):
                 self.assertEqual(by_id[f"{prefix}read_repair_completed_receipt"]["conduction"], expected_completed)
                 self.assertIn(f"{prefix}read_repair_completed_receipt", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
                 self.assertEqual(by_id[f"{prefix}read_repair_attempt_reconciliation"]["conduction"], [f"{prefix}read_repair_attempt_state", f"{prefix}read_repair_completed_receipt", f"{prefix}read_repair_remote_head", f"{prefix}read_repair_worktree_inventory", f"{prefix}read_repair_branch_provenance"])
+                self.assertIn(f"{prefix}fetch_repair_remote_head", by_id)
+                self.assertIn(f"{prefix}verify_fetched_repair_remote_head", by_id)
+                self.assertEqual(by_id[f"{prefix}fetch_repair_remote_head"]["conduction"], [f"{prefix}read_repair_context", f"{prefix}read_repair_remote_head"])
+                self.assertEqual(by_id[f"{prefix}verify_fetched_repair_remote_head"]["conduction"], [f"{prefix}fetch_repair_remote_head"])
+                self.assertIn(f"{prefix}verify_fetched_repair_remote_head", by_id[f"{prefix}read_repair_remote_ancestry"]["conduction"])
                 self.assertEqual(by_id[f"{prefix}read_repair_attempt_recovery_evidence"]["conduction"], [f"{prefix}read_repair_attempt_state", f"{prefix}read_repair_attempt_reconciliation"])
                 self.assertEqual(by_id[f"{prefix}claim_repair_attempt_recovery"]["conduction"], [f"{prefix}read_repair_attempt_recovery_evidence"])
                 self.assertEqual(by_id[f"{prefix}verify_repair_attempt_recovery"]["conduction"], [f"{prefix}claim_repair_attempt_recovery"])
@@ -109,6 +114,13 @@ class PackageStructureTests(unittest.TestCase):
                 self.assertEqual(by_id[f"{prefix}reserve_repair_attempt"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}read_repair_attempt_baseline", f"{prefix}verify_repair_attempt_recovery", f"{prefix}verify_repair_recovery_continuation"])
                 self.assertEqual(by_id[f"{prefix}verify_repair_attempt_reservation"]["conduction"], [f"{prefix}reserve_repair_attempt", f"{prefix}verify_repair_attempt_recovery", f"{prefix}verify_repair_recovery_continuation"])
                 self.assertGreater(by_id[f"{prefix}invoke_repair_omp"]["adapter"]["timeout_seconds"], 7200)
+                self.assertEqual(
+                    by_id[f"{prefix}decide_legacy_repair_head_refresh"]["conduction"],
+                    [f"{prefix}decide_triage_action", f"{prefix}read_repair_attempt_state", f"{prefix}load_pr_fields", f"{prefix}read_repair_base_head"],
+                )
+                self.assertEqual(by_id[f"{prefix}update_legacy_repair_pr_branch"]["conduction"], [f"{prefix}decide_legacy_repair_head_refresh"])
+                self.assertEqual(by_id[f"{prefix}verify_legacy_repair_pr_head"]["conduction"], [f"{prefix}decide_legacy_repair_head_refresh", f"{prefix}update_legacy_repair_pr_branch"])
+                self.assertIn(f"{prefix}verify_legacy_repair_pr_head", by_id[f"{prefix}decide_repair_worktree_ownership"]["conduction"])
 
             if path["id"] == "auto_worker":
                 self.assertTrue(

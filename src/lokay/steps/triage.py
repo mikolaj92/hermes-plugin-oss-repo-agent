@@ -613,7 +613,7 @@ def load_pr_fields(request: Request) -> Result:
                 "--repo",
                 repo,
                 "--json",
-                "number,title,url,body,state,isDraft,headRefName,headRefOid,baseRefName,"
+                "number,title,url,body,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid,"
                 "author,labels,mergeable,reviewDecision,statusCheckRollup,commits,closingIssuesReferences",
             ],
             timeout=60,

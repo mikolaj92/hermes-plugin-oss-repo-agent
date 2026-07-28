@@ -680,6 +680,19 @@ capability = "lokay_step"
 conduction = ["read_repair_context"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_remote_head" }
+[[correlation_paths.effectors]]
+id = "fetch_repair_remote_head"
+capability = "lokay_step"
+conduction = ["read_repair_context", "read_repair_remote_head"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.fetch_repair_remote_head" }
+[[correlation_paths.effectors]]
+id = "verify_fetched_repair_remote_head"
+capability = "lokay_step"
+conduction = ["fetch_repair_remote_head"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.verify_fetched_repair_remote_head" }
+
 
 [[correlation_paths.effectors]]
 id = "read_repair_worktree_inventory"
@@ -695,17 +708,103 @@ conduction = ["read_repair_context", "read_repair_remote_head", "read_repair_wor
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_branch_provenance" }
 [[correlation_paths.effectors]]
+id = "read_repair_worktree_cleanliness"
+capability = "lokay_step"
+conduction = ["read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_worktree_cleanliness" }
+
+[[correlation_paths.effectors]]
+id = "read_repair_remote_ancestry"
+capability = "lokay_step"
+conduction = ["read_repair_context", "read_repair_remote_head", "fetch_repair_remote_head", "verify_fetched_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_remote_ancestry" }
+
+[[correlation_paths.effectors]]
+id = "decide_repair_worktree_fast_forward"
+capability = "lokay_step"
+conduction = ["read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance", "read_repair_worktree_cleanliness", "read_repair_remote_ancestry"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.decide_repair_worktree_fast_forward" }
+
+[[correlation_paths.effectors]]
+id = "read_repair_worktree_branch_before_fast_forward"
+capability = "lokay_step"
+conduction = ["decide_repair_worktree_fast_forward"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_worktree_branch_before_fast_forward" }
+[[correlation_paths.effectors]]
+id = "read_repair_worktree_head_before_fast_forward"
+capability = "lokay_step"
+conduction = ["decide_repair_worktree_fast_forward"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_worktree_head_before_fast_forward" }
+[[correlation_paths.effectors]]
+id = "read_repair_worktree_cleanliness_before_fast_forward"
+capability = "lokay_step"
+conduction = ["decide_repair_worktree_fast_forward"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_worktree_cleanliness_before_fast_forward" }
+[[correlation_paths.effectors]]
+id = "decide_repair_worktree_fast_forward_execution"
+capability = "lokay_step"
+conduction = ["decide_repair_worktree_fast_forward", "read_repair_worktree_branch_before_fast_forward", "read_repair_worktree_head_before_fast_forward", "read_repair_worktree_cleanliness_before_fast_forward"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.decide_repair_worktree_fast_forward_execution" }
+[[correlation_paths.effectors]]
+id = "fast_forward_repair_worktree"
+capability = "lokay_step"
+conduction = ["decide_repair_worktree_fast_forward", "decide_repair_worktree_fast_forward_execution"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.fast_forward_repair_worktree" }
+[[correlation_paths.effectors]]
 id = "read_repair_creation_evidence"
 capability = "lokay_step"
 conduction = ["read_repair_context", "read_repair_remote_head", "read_repair_branch_provenance"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_creation_evidence" }
 
+[[correlation_paths.effectors]]
+id = "read_repair_attempt_state"
+capability = "lokay_step"
+conduction = ["decide_triage_action", "evaluate_checks", "load_pr_fields", "read_repair_remote_head"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_attempt_state" }
+
+[[correlation_paths.effectors]]
+id = "read_repair_base_head"
+capability = "lokay_step"
+conduction = ["read_repair_context", "read_repair_remote_head"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_base_head" }
+
+[[correlation_paths.effectors]]
+id = "decide_legacy_repair_head_refresh"
+capability = "lokay_step"
+conduction = ["decide_triage_action", "read_repair_attempt_state", "load_pr_fields", "read_repair_base_head"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.decide_legacy_repair_head_refresh" }
+
+[[correlation_paths.effectors]]
+id = "update_legacy_repair_pr_branch"
+capability = "lokay_step"
+conduction = ["decide_legacy_repair_head_refresh"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.update_legacy_repair_pr_branch" }
+
+[[correlation_paths.effectors]]
+id = "verify_legacy_repair_pr_head"
+capability = "lokay_step"
+conduction = ["decide_legacy_repair_head_refresh", "update_legacy_repair_pr_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.verify_legacy_repair_pr_head" }
+
 
 [[correlation_paths.effectors]]
 id = "decide_repair_worktree_ownership"
 capability = "lokay_step"
-conduction = ["read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance", "read_repair_creation_evidence"]
+conduction = ["read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance", "read_repair_creation_evidence", "verify_legacy_repair_pr_head", "fast_forward_repair_worktree"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.decide_repair_worktree_ownership" }
 
@@ -744,12 +843,6 @@ conduction = ["verify_repair_worktree"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_attempt_baseline" }
 
-[[correlation_paths.effectors]]
-id = "read_repair_attempt_state"
-capability = "lokay_step"
-conduction = ["decide_triage_action", "evaluate_checks", "load_pr_fields", "read_repair_remote_head", "verify_repair_worktree"]
-adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
-config = { handler = "lokay.steps.repair.read_repair_attempt_state" }
 
 [[correlation_paths.effectors]]
 id = "read_repair_completed_receipt"
@@ -1917,6 +2010,19 @@ capability = "lokay_step"
 conduction = ["triage_read_repair_context"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_remote_head" }
+[[correlation_paths.effectors]]
+id = "triage_fetch_repair_remote_head"
+capability = "lokay_step"
+conduction = ["triage_read_repair_context", "triage_read_repair_remote_head"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.fetch_repair_remote_head" }
+[[correlation_paths.effectors]]
+id = "triage_verify_fetched_repair_remote_head"
+capability = "lokay_step"
+conduction = ["triage_fetch_repair_remote_head"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.verify_fetched_repair_remote_head" }
+
 
 [[correlation_paths.effectors]]
 id = "triage_read_repair_worktree_inventory"
@@ -1932,17 +2038,102 @@ conduction = ["triage_read_repair_context", "triage_read_repair_remote_head", "t
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_branch_provenance" }
 [[correlation_paths.effectors]]
+id = "triage_read_repair_worktree_cleanliness"
+capability = "lokay_step"
+conduction = ["triage_read_repair_context", "triage_read_repair_remote_head", "triage_read_repair_worktree_inventory", "triage_read_repair_branch_provenance"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_worktree_cleanliness" }
+
+[[correlation_paths.effectors]]
+id = "triage_read_repair_remote_ancestry"
+capability = "lokay_step"
+conduction = ["triage_read_repair_context", "triage_read_repair_remote_head", "triage_fetch_repair_remote_head", "triage_verify_fetched_repair_remote_head", "triage_read_repair_worktree_inventory", "triage_read_repair_branch_provenance"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_remote_ancestry" }
+
+[[correlation_paths.effectors]]
+id = "triage_decide_repair_worktree_fast_forward"
+capability = "lokay_step"
+conduction = ["triage_read_repair_context", "triage_read_repair_remote_head", "triage_read_repair_worktree_inventory", "triage_read_repair_branch_provenance", "triage_read_repair_worktree_cleanliness", "triage_read_repair_remote_ancestry"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.decide_repair_worktree_fast_forward" }
+
+[[correlation_paths.effectors]]
+id = "triage_read_repair_worktree_branch_before_fast_forward"
+capability = "lokay_step"
+conduction = ["triage_decide_repair_worktree_fast_forward"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_worktree_branch_before_fast_forward" }
+[[correlation_paths.effectors]]
+id = "triage_read_repair_worktree_head_before_fast_forward"
+capability = "lokay_step"
+conduction = ["triage_decide_repair_worktree_fast_forward"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_worktree_head_before_fast_forward" }
+[[correlation_paths.effectors]]
+id = "triage_read_repair_worktree_cleanliness_before_fast_forward"
+capability = "lokay_step"
+conduction = ["triage_decide_repair_worktree_fast_forward"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_worktree_cleanliness_before_fast_forward" }
+[[correlation_paths.effectors]]
+id = "triage_decide_repair_worktree_fast_forward_execution"
+capability = "lokay_step"
+conduction = ["triage_decide_repair_worktree_fast_forward", "triage_read_repair_worktree_branch_before_fast_forward", "triage_read_repair_worktree_head_before_fast_forward", "triage_read_repair_worktree_cleanliness_before_fast_forward"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.decide_repair_worktree_fast_forward_execution" }
+[[correlation_paths.effectors]]
+id = "triage_fast_forward_repair_worktree"
+capability = "lokay_step"
+conduction = ["triage_decide_repair_worktree_fast_forward", "triage_decide_repair_worktree_fast_forward_execution"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.fast_forward_repair_worktree" }
+[[correlation_paths.effectors]]
 id = "triage_read_repair_creation_evidence"
 capability = "lokay_step"
 conduction = ["triage_read_repair_context", "triage_read_repair_remote_head", "triage_read_repair_branch_provenance"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_creation_evidence" }
 
+[[correlation_paths.effectors]]
+id = "triage_read_repair_attempt_state"
+capability = "lokay_step"
+conduction = ["triage_decide_triage_action", "triage_evaluate_checks", "triage_load_pr_fields", "triage_read_repair_remote_head", "lifecycle_decide_lifecycle_transition"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_attempt_state" }
+
+[[correlation_paths.effectors]]
+id = "triage_read_repair_base_head"
+capability = "lokay_step"
+conduction = ["triage_read_repair_context", "triage_read_repair_remote_head"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.read_repair_base_head" }
+
+[[correlation_paths.effectors]]
+id = "triage_decide_legacy_repair_head_refresh"
+capability = "lokay_step"
+conduction = ["triage_decide_triage_action", "triage_read_repair_attempt_state", "triage_load_pr_fields", "triage_read_repair_base_head"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.decide_legacy_repair_head_refresh" }
+
+[[correlation_paths.effectors]]
+id = "triage_update_legacy_repair_pr_branch"
+capability = "lokay_step"
+conduction = ["triage_decide_legacy_repair_head_refresh"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.update_legacy_repair_pr_branch" }
+
+[[correlation_paths.effectors]]
+id = "triage_verify_legacy_repair_pr_head"
+capability = "lokay_step"
+conduction = ["triage_decide_legacy_repair_head_refresh", "triage_update_legacy_repair_pr_branch"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.repair.verify_legacy_repair_pr_head" }
 
 [[correlation_paths.effectors]]
 id = "triage_decide_repair_worktree_ownership"
 capability = "lokay_step"
-conduction = ["triage_read_repair_context", "triage_read_repair_remote_head", "triage_read_repair_worktree_inventory", "triage_read_repair_branch_provenance", "triage_read_repair_creation_evidence"]
+conduction = ["triage_read_repair_context", "triage_read_repair_remote_head", "triage_read_repair_worktree_inventory", "triage_read_repair_branch_provenance", "triage_read_repair_creation_evidence", "triage_verify_legacy_repair_pr_head", "triage_fast_forward_repair_worktree"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.decide_repair_worktree_ownership" }
 
@@ -1981,12 +2172,6 @@ conduction = ["triage_verify_repair_worktree"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_attempt_baseline" }
 
-[[correlation_paths.effectors]]
-id = "triage_read_repair_attempt_state"
-capability = "lokay_step"
-conduction = ["triage_decide_triage_action", "triage_evaluate_checks", "triage_load_pr_fields", "triage_read_repair_remote_head", "triage_verify_repair_worktree", "lifecycle_decide_lifecycle_transition"]
-adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
-config = { handler = "lokay.steps.repair.read_repair_attempt_state" }
 
 [[correlation_paths.effectors]]
 id = "triage_read_repair_completed_receipt"

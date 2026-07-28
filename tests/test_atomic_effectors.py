@@ -399,6 +399,82 @@ class RepairTests(unittest.TestCase):
         self.assertFalse(blocked["mutated"])
 
 
+    def test_fetch_repair_remote_head_targets_exact_branch_without_force_or_reset(self) -> None:
+        context = {"repo": "owner/repo", "issue": "10", "pr_number": "11", "branch": "feature/x", "clone_path": "/clone", "worktree_root": "/worktrees", "remote": "upstream"}
+        remote_oid = "a" * 40
+        with mock.patch("lokay.steps.repair.git") as git_call, mock.patch("lokay.steps.repair.rev_parse") as rev_parse_call:
+            out = repair.fetch_repair_remote_head(req({**context, "dry_run": False, "conduction": {
+                "read_repair_remote_head": {"ok": True, "status": "read", "remote_oid": remote_oid},
+            }}))
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["mutated"])
+        rev_parse_call.assert_not_called()
+        command = git_call.call_args.args[0]
+        self.assertEqual(command[:3], ["fetch", "--no-tags", "upstream"])
+        self.assertEqual(command[3], "refs/heads/feature/x:" + out["acquired_ref"])
+        self.assertNotIn("--force", command)
+        self.assertNotIn("reset", command)
+    def test_fast_forward_rejects_boundary_branch_head_and_dirty_drift(self) -> None:
+        context = {"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "feature/x", "clone_path": "/clone", "worktree_root": "/worktrees"}
+        expected = "a" * 40
+        remote = "b" * 40
+        cases = (("branch", "foreign-branch", expected, ""), ("head", "lokay/repair/x", "c" * 40, ""), ("dirty", "lokay/repair/x", expected, " M file"))
+        for label, branch, head, porcelain in cases:
+            decision = {"ok": True, "status": "authorized", "should_fast_forward": True, "authorized_branch": "lokay/repair/x", "authorized_local_oid": expected, "remote_oid": remote}
+            with self.subTest(label=label), mock.patch("lokay.steps.repair.git", side_effect=[branch, porcelain] if label == "branch" else [branch, porcelain]) as git_call, mock.patch("lokay.steps.repair.rev_parse", return_value=head):
+                out = repair.fast_forward_repair_worktree(req({**context, "dry_run": False, "conduction": {"decide_repair_worktree_fast_forward_execution": decision}}))
+            self.assertFalse(out["ok"])
+            self.assertFalse(out.get("mutated"))
+            self.assertFalse(any(call.args and call.args[0][:1] == ["merge"] for call in git_call.call_args_list))
+
+    def test_fast_forward_requires_exact_post_merge_head(self) -> None:
+        context = {"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "feature/x", "clone_path": "/clone", "worktree_root": "/worktrees"}
+        expected = "a" * 40
+        remote = "b" * 40
+        decision = {"ok": True, "status": "authorized", "should_fast_forward": True, "authorized_branch": "lokay/repair/x", "authorized_local_oid": expected, "remote_oid": remote}
+        with mock.patch("lokay.steps.repair.claim_directory_lock") as lock, mock.patch("lokay.steps.repair.git", side_effect=["lokay/repair/x", "", ""]), mock.patch("lokay.steps.repair.rev_parse", side_effect=[expected, "c" * 40]):
+            lock.return_value.__enter__.return_value = None
+            out = repair.fast_forward_repair_worktree(req({**context, "dry_run": False, "conduction": {"decide_repair_worktree_fast_forward_execution": decision}}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "repair_fast_forward_readback_mismatch")
+        self.assertTrue(out["mutated"])
+
+    def test_ownership_propagates_legacy_refresh_failure(self) -> None:
+        failed = {"ok": False, "status": "failed", "reason": "legacy_refresh_failed", "mutated": False}
+        out = repair.decide_repair_worktree_ownership(req({"conduction": {"verify_legacy_repair_pr_head": failed}}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "upstream_failed")
+
+    def test_fetch_repair_remote_head_failure_is_mutation_unknown(self) -> None:
+        context = {"repo": "owner/repo", "issue": "10", "pr_number": "11", "branch": "feature/x", "clone_path": "/clone", "worktree_root": "/worktrees"}
+        with mock.patch("lokay.steps.repair.git", side_effect=CommandError(["git", "fetch"], 1, "", "fetch failed")):
+            out = repair.fetch_repair_remote_head(req({**context, "dry_run": False, "conduction": {
+                "read_repair_remote_head": {"ok": True, "status": "read", "remote_oid": "a" * 40},
+            }}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["failure_class"], "reconcile_then_retry")
+        self.assertFalse(out["retry_safe"])
+        self.assertTrue(out["mutated"])
+        self.assertTrue(out["mutation_unknown"])
+
+    def test_verify_fetched_repair_remote_head_fails_closed_on_oid_mismatch(self) -> None:
+        context = {"repo": "owner/repo", "issue": "10", "pr_number": "11", "branch": "feature/x", "clone_path": "/clone", "worktree_root": "/worktrees"}
+        fetched = {"ok": True, "status": "fetched", "remote_oid": "a" * 40, "acquired_ref": "refs/lokay/acquired"}
+        with mock.patch("lokay.steps.repair.rev_parse", return_value="b" * 40) as rev_parse_call:
+            out = repair.verify_fetched_repair_remote_head(req({**context, "dry_run": False, "conduction": {"fetch_repair_remote_head": fetched}}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "repair_remote_head_verification_mismatch")
+        self.assertFalse(out["retry_safe"])
+        rev_parse_call.assert_called_once_with("/clone", "refs/lokay/acquired")
+
+    def test_verify_fetched_repair_remote_head_exposes_verified_oid(self) -> None:
+        context = {"repo": "owner/repo", "issue": "10", "pr_number": "11", "branch": "feature/x", "clone_path": "/clone", "worktree_root": "/worktrees"}
+        oid = "a" * 40
+        with mock.patch("lokay.steps.repair.rev_parse", return_value=oid):
+            out = repair.verify_fetched_repair_remote_head(req({**context, "dry_run": False, "conduction": {"fetch_repair_remote_head": {"ok": True, "status": "fetched", "remote_oid": oid, "acquired_ref": "refs/lokay/acquired"}}}))
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["verified"])
+        self.assertEqual(out["acquired_oid"], oid)
     def test_repair_ownership_allows_empty_dispatch_task(self) -> None:
         context = {
             "repo": "owner/repo", "issue": 10, "pr_number": 11,
@@ -2112,6 +2188,80 @@ CREATE TABLE runs (
             self.assertEqual(terminal["status"], "timed_out")
             self.assertFalse(terminal["mutated"])
             self.assertEqual((terminal["pre_head"], terminal["pre_status"], terminal["post_head"], terminal["post_status"]), ("head-a", "", "head-a", ""))
+
+    def test_legacy_base_refresh_eligible_and_partial_fail_closed(self) -> None:
+        state = {
+            "repo": "mikolaj92/lokay",
+            "pr_number": 11,
+            "verified_head": "ccc470458c0f4eb3cc96da7ea1cfcfc7915c98a7",
+            "attempted": True,
+            "status": "reserved",
+        }
+        pr = {
+            "repository": {"nameWithOwner": "mikolaj92/lokay"},
+            "number": 11,
+            "state": "OPEN",
+            "headRefName": "ai/fix/10-issue-mikolaj92-lokay-10-canary-test-ta",
+            "headRefOid": "ccc470458c0f4eb3cc96da7ea1cfcfc7915c98a7",
+            "baseRefName": "main",
+            "baseRefOid": "738508805bd4c089ac22efc8e89dfce88b5b7560",
+            "mergeStateStatus": "UNSTABLE",
+        }
+        base = {
+            "action": "repair",
+            "attempt_state": state,
+            "pr": pr,
+            "branch": pr["headRefName"],
+            "base_branch": "main",
+            "conduction": {
+                "read_repair_attempt_state": {"ok": True, "status": "found", "attempt_state": state},
+                "read_repair_base_head": {"ok": True, "status": "read", "base_ref_oid": "f34b909af9d948179cf630540b94da87bed9465b"},
+            },
+        }
+        out = repair.decide_legacy_repair_head_refresh(req(base))
+        self.assertTrue(out["should_refresh"])
+        self.assertEqual(out["observed_base_ref_oid"], "738508805bd4c089ac22efc8e89dfce88b5b7560")
+        self.assertEqual(out["authoritative_base_ref_oid"], "f34b909af9d948179cf630540b94da87bed9465b")
+        self.assertEqual(out["refresh_kind"], "legacy_base_synchronization")
+        partial = repair.decide_legacy_repair_head_refresh(req({**base, "attempt_state": {**state, "pre_head": "old"}, "conduction": {**base["conduction"], "read_repair_attempt_state": {"ok": True, "status": "found", "attempt_state": {**state, "pre_head": "old"}}}}))
+        self.assertFalse(partial["ok"])
+        self.assertEqual(partial["reason"], "legacy_repair_reservation_partial_baseline")
+
+    def test_legacy_base_refresh_dry_run_mutation_conflict_and_no_force(self) -> None:
+        decision = {"status": "refresh", "ok": True, "should_refresh": True, "repo": "o/r", "pr_number": 7, "old_head": "old", "refresh_kind": "legacy_base_synchronization"}
+        planned = repair.update_legacy_repair_pr_branch(req({"dry_run": True, "conduction": {"decide_legacy_repair_head_refresh": decision}}))
+        self.assertEqual(planned["status"], "planned")
+        with mock.patch("lokay.steps.repair.run_cmd") as run:
+            run.return_value = SimpleNamespace(stdout="", stderr="")
+            out = repair.update_legacy_repair_pr_branch(req({"dry_run": False, "conduction": {"decide_legacy_repair_head_refresh": decision}}))
+        self.assertEqual(out["status"], "updated")
+        command = run.call_args.args[0]
+        self.assertEqual(command, ["gh", "api", "--method", "PUT", "repos/o/r/pulls/7/update-branch", "-f", "expected_head_sha=old", "-f", "update_method=merge"])
+        self.assertNotIn("--force", command)
+        with mock.patch("lokay.steps.repair.run_cmd", side_effect=CommandError(["gh"], 409, "", "conflict")):
+            conflict = repair.update_legacy_repair_pr_branch(req({"dry_run": False, "conduction": {"decide_legacy_repair_head_refresh": decision}}))
+        self.assertEqual(conflict["failure_class"], "reconcile_then_retry")
+        self.assertTrue(conflict["mutated"])
+
+    def test_legacy_base_refresh_readback_requires_new_head_identity_and_base(self) -> None:
+        decision = {"status": "refresh", "ok": True, "should_refresh": True, "repo": "o/r", "pr_number": 7, "branch": "feat", "base_branch": "main", "old_head": "old", "authoritative_base_ref_oid": "base-new"}
+        update = {"status": "updated", "ok": True, "mutated": True}
+        good = {"repository": {"nameWithOwner": "o/r"}, "number": 7, "state": "OPEN", "headRefName": "feat", "headRefOid": "new", "baseRefName": "main", "baseRefOid": "base-new"}
+        request_data = {"dry_run": False, "conduction": {"decide_legacy_repair_head_refresh": decision, "update_legacy_repair_pr_branch": update}}
+        with mock.patch("lokay.steps.repair.run_cmd", return_value=SimpleNamespace(stdout=json.dumps(good))):
+            refreshed = repair.verify_legacy_repair_pr_head(req(request_data))
+        self.assertEqual(refreshed["status"], "refreshed")
+        for field, value in (("headRefOid", "old"), ("baseRefOid", "wrong"), ("headRefName", "other"), ("number", 8)):
+            bad = dict(good, **{field: value})
+            with mock.patch("lokay.steps.repair.run_cmd", return_value=SimpleNamespace(stdout=json.dumps(bad))):
+                rejected = repair.verify_legacy_repair_pr_head(req(request_data))
+            self.assertFalse(rejected["ok"])
+
+    def test_legacy_base_refresh_downstream_gate(self) -> None:
+        refreshed = {"status": "refreshed", "ok": True, "refresh_kind": "legacy_base_synchronization"}
+        out = repair._repair_upstream(req({"conduction": {"verify_legacy_repair_pr_head": refreshed}}), "next_repair_atom", "verify_legacy_repair_pr_head")
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "legacy_base_refreshed")
 
 class TriageTests(unittest.TestCase):
     def test_verify_merge_receipt_propagates_publisher_noop(self) -> None:
