@@ -16,8 +16,8 @@ generated = "ai:generated"
 
 [automation]
 max_active_issues = 1
-automerge = false
-require_human_approval = true
+automerge = true
+require_human_approval = false
 require_checks = true
 require_test_evidence = true
 fixer_assignee = "lokay-fixer"

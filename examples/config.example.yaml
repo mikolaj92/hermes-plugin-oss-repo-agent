@@ -3,10 +3,10 @@ mode: live
 clone_root: /absolute/path/to/repos
 worktree_root: /absolute/path/to/worktrees
 branch_prefix: ai/fix
-# Safe defaults: automerge is disabled until human approval, passing checks,
-# and test evidence are all present.
-automerge: false
-require_human_approval: true
+# Guarded-autonomous production policy: executor and automerge require live mode,
+# checks and test evidence remain mandatory, and no separate approval is needed.
+automerge: true
+require_human_approval: false
 require_checks: true
 require_test_evidence: true
 github:

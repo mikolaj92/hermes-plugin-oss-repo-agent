@@ -44,71 +44,33 @@ from lokay.envelope import (
     planned,
     upstream_noop,
 )
-
-@dataclass(frozen=True)
-class KanbanTaskResolution:
-    task_id: str | None
-    status: str
-    error: str | None = None
-
-
-_TRIAGE_REPAIR_ALIASES = (
-    "triage_create_review_fix_task",
+_PROVENANCE_ALIASES = (
     "triage_build_repair_prompt",
     "triage_decide_triage_action",
     "triage_load_pr_fields",
-    "triage_repair_prepare_worktree",
-    "create_review_fix_task",
     "build_repair_prompt",
     "decide_triage_action",
     "load_pr_fields",
-)
-_ISSUE_TO_PR_ALIASES = (
-    "parse_issue_ref",
-    "parse_issue_ref_from_task",
     "dispatch_parse_issue_ref",
-    "load_kanban_task",
-    "dispatch_load_kanban_task",
+    "parse_issue_ref_from_task",
+    "select_dispatch_task",
+    "read_dispatch_tasks",
+    "read_fix_tasks",
+    "read_clone_preconditions",
+    "read_base_ref",
+    "read_worktree_inventory",
+    "read_branch_provenance",
 )
-_PROVENANCE_ALIASES = _TRIAGE_REPAIR_ALIASES + _ISSUE_TO_PR_ALIASES + (
-    "triage_repair_prepare_worktree",
-    "repair_prepare_worktree",
-)
-
-def _repair_action_gate(request: Request) -> Result | None:
-    """Prevent shared repair handlers from running for another triage action."""
-    decision = cond_blob(
-        request,
-        "decide_triage_action",
-        "triage_decide_triage_action",
-        "decide",
-    )
-    if not decision:
-        return None
-    if decision.get("status") == "noop":
-        return noop("not_selected", upstream=decision)
-    if decision.get("status") == "failed" or decision.get("ok") is False:
-        return fail(
-            "upstream_decision_failed",
-            failure_class="terminal",
-            retry_safe=False,
-            upstream=decision,
-        )
-    if decision.get("action") != "repair":
-        return noop("not_selected", action=decision.get("action"), upstream=decision)
-    return None
-
 
 def _conduction_blobs(request: Request, aliases: tuple[str, ...]) -> list[dict[str, Any]]:
-    """Read only the named path aliases, preserving path ownership boundaries."""
     conduction = input_of(request).get("conduction")
     if not isinstance(conduction, dict):
         return []
     blobs: list[dict[str, Any]] = []
     for alias in aliases:
         for name, value in conduction.items():
-            if name == alias or name.endswith(f"_{alias}"):
-                if isinstance(value, dict) and value and value not in blobs:
+            if (name == alias or name.endswith(f"_{alias}")) and isinstance(value, dict) and value:
+                if value not in blobs:
                     blobs.append(dict(value))
     return blobs
 
@@ -116,119 +78,30 @@ def _conduction_blobs(request: Request, aliases: tuple[str, ...]) -> list[dict[s
 
 
 
-def resolve_kanban_task_id_after_create_result(
-    *,
-    board: str,
-    task_title: str,
-    stdout: str = "",
-) -> KanbanTaskResolution:
-    """Re-list board and classify authoritative post-create read-back."""
-    try:
-        tasks = hermes_kanban_json(
-            ["--board", board, "list", "--json", "--sort", "created-desc"]
-        )
-    except CommandError as exc:
-        return KanbanTaskResolution(None, "read_failed", str(exc))
-    if not isinstance(tasks, list) or any(not isinstance(task, dict) for task in tasks):
-        return KanbanTaskResolution(None, "malformed", "invalid Kanban list read-back shape")
-    matches = [
-        task
-        for task in tasks
-        if str(task.get("title") or "") == task_title and _task_id_from_row(task)
-    ]
-    if not matches:
-        return KanbanTaskResolution(None, "unresolved", "created task was not found")
-    if len(matches) > 1:
-        return KanbanTaskResolution(None, "ambiguous", "multiple tasks matched created title")
-    return KanbanTaskResolution(_task_id_from_row(matches[0]), "resolved")
-
-def _task_id_from_row(task: dict[str, Any]) -> str | None:
-    tid = task.get("id") or task.get("task_id")
-    return str(tid) if tid is not None and str(tid) else None
-
-
-def _parse_task_id_from_stdout(stdout: str) -> str | None:
-    """Best-effort extract task id from hermes kanban create stdout."""
-    text = stdout or ""
-    # Common patterns: "Created task t_abc", "task_id=...", bare t_hex / UUID
-    for pattern in (
-        r"\b(t_[A-Za-z0-9]+)\b",
-        r"\btask[_-]?id[=:\s]+([A-Za-z0-9_-]+)\b",
-        r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
-    ):
-        m = re.search(pattern, text, re.I)
-        if m:
-            return m.group(1)
-    return None
 
 
 
 
-def load_kanban_task(request: Request) -> Result:
-    """Read one Kanban task by id (or first ready [fix-pr]/[issue])."""
-    data = input_of(request)
-    cfg = cfg_of(request)
-    upstream = upstream_noop(request, "intake_kanban")
-    if upstream:
-        return noop(
-            str(upstream.get("reason") or "no_intake_work"),
-            worked=False,
-        )
-    intake = cond_blob(request, "intake_kanban")
-    if intake.get("status") == "planned":
-        return noop("intake_planned", worked=False)
-    selected = cond_get(
-        request,
-        "selected",
-        "intake_kanban",
-        "intake_claim",
-        "intake_poll",
-        default={},
-    )
-    if not isinstance(selected, dict):
-        selected = {}
-    board = str(data.get("board") or selected.get("board") or cfg.get("board") or "")
-    task_id = data.get("task_id")
-    if not board:
-        return fail("missing_board", failure_class="terminal", retry_safe=False)
-    try:
-        tasks = hermes_kanban_json(
-            ["--board", board, "list", "--json", "--sort", "created-desc"]
-        )
-    except CommandError as exc:
-        return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), board=board, task_id=task_id, idempotency_key=f"kanban:{board}:{task_id or 'ready'}:load")
-    if not isinstance(tasks, list) or any(not isinstance(task, dict) for task in tasks):
-        return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False)
-    matches = [
-        t for t in tasks
-        if isinstance(t, dict) and str(t.get("id") or t.get("task_id")) == str(task_id)
-    ] if task_id else []
-    context = {
-        key: selected[key]
-        for key in ("repo", "board", "clone_path", "priority")
-        if selected.get(key) not in (None, "")
-    }
-    if task_id and not matches:
-        return fail("task_not_found", failure_class="terminal", retry_safe=False, task_id=task_id, board=board)
-    if task_id and matches:
-        return ok(status="loaded", task=matches[0], board=board, **context)
-    # pick first ready-ish fix-pr / issue
-    for t in tasks:
-        if str(t.get("status") or "") in ("done", "archived"):
-            continue
-        title = str(t.get("title") or "")
-        if title.startswith(("[fix-pr]", "[issue]", "[fix-pr-review]")):
-            return ok(status="loaded", task=t, board=board, **context)
-    return noop("no_ready_task", board=board, **context)
+
+
+
+
+
+
+
+
+
+
+
 
 
 def parse_issue_ref_from_task(request: Request) -> Result:
     """Pure: extract owner/repo#N and preferred branch from task title/body."""
     data = input_of(request)
-    upstream = upstream_noop(request, "load_kanban_task")
+    upstream = upstream_noop(request, "select_dispatch_task")
     if upstream:
         return noop(str(upstream.get("reason") or "no_ready_task"))
-    task = data.get("task") or cond_get(request, "task", "load_kanban_task")
+    task = data.get("task") or cond_get(request, "task", "select_dispatch_task")
     if not task:
         return fail("missing_task", failure_class="terminal", retry_safe=False)
     title = str(task.get("title") or "")
@@ -244,7 +117,7 @@ def parse_issue_ref_from_task(request: Request) -> Result:
             repo, issue = br.group(1), int(bi.group(1))
     if not repo or not issue:
         return fail("unparseable_issue_ref", failure_class="terminal", retry_safe=False, title=title)
-    loaded = cond_blob(request, "load_kanban_task")
+    loaded = cond_blob(request, "select_dispatch_task")
     context = {
         key: loaded[key]
         for key in ("board", "clone_path", "priority")
@@ -257,206 +130,10 @@ def parse_issue_ref_from_task(request: Request) -> Result:
 
 
 
-def create_fix_pr_task(request: Request) -> Result:
-    """Create Kanban [fix-pr] task for an issue (idempotent-ish skip if exists)."""
-    data = input_of(request)
-    cfg = cfg_of(request)
-    dry = dry_run_flag(request)
-    board = str(data.get("board") or cfg.get("board") or "")
-    repo = str(data.get("repo") or "")
-    issue = int(data.get("issue") or 0)
-    title_hint = str(data.get("title") or f"Fix {repo}#{issue}")
-    assignee = str(cfg.get("fixer_assignee") or "lokay-fixer")
-    if not board or not repo or not issue:
-        return fail("missing_board_repo_issue", failure_class="terminal", retry_safe=False)
-    task_title = f"[fix-pr] {repo}#{issue}: {title_hint}"
-    body = (
-        f"Repository: {repo}\nIssue: #{issue}\n"
-        f"Idempotency-Key: fix-pr:{repo}:{issue}\n"
-    )
-    if dry:
-        return planned(board=board, title=task_title, assignee=assignee, body=body)
-    try:
-        tasks = hermes_kanban_json(
-            ["--board", board, "list", "--json", "--sort", "created-desc"]
-        )
-    except CommandError as exc:
-        return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), board=board, repo=repo, issue=issue, idempotency_key=f"kanban:{board}:{repo}:{issue}:create")
-    if not isinstance(tasks, list) or any(not isinstance(task, dict) for task in tasks):
-        return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, board=board)
-    for t in tasks if isinstance(tasks, list) else []:
-        tt = str(t.get("title") or "")
-        if f"{repo}#{issue}" in tt and tt.startswith(("[fix-pr]", "[fix-pr-review]")):
-            if str(t.get("status") or "") != "done":
-                return ok(
-                    status="exists",
-                    task_id=t.get("id") or t.get("task_id"),
-                    title=tt,
-                    mutated=False,
-                )
-    try:
-        proc = run_cmd(
-            [
-                "hermes",
-                "kanban",
-                "--board",
-                board,
-                "create",
-                "--title",
-                task_title,
-                "--body",
-                body,
-                "--assignee",
-                assignee,
-            ],
-            timeout=90,
-        )
-    except CommandError as exc:
-        return fail("kanban_create_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), stderr=exc.stderr[-400:], mutated=True)
-    resolution = resolve_kanban_task_id_after_create_result(
-        board=board, task_title=task_title, stdout=proc.stdout or ""
-    )
-    if not resolution.task_id:
-        if resolution.status == "read_failed":
-            return fail(
-                "kanban_create_readback_failed",
-                failure_class="reconcile_then_retry",
-                retry_safe=False,
-                error=resolution.error,
-                title=task_title,
-                board=board,
-                repo=repo,
-                issue=issue,
-                idempotency_key=f"kanban:{board}:{repo}:{issue}:create",
-                stdout=(proc.stdout or "")[-400:],
-                mutated=True,
-            )
-        return fail(
-            "created_but_unresolved_task_id",
-            failure_class="terminal",
-            retry_safe=False,
-            error=resolution.error,
-            title=task_title,
-            board=board,
-            repo=repo,
-            issue=issue,
-            idempotency_key=f"kanban:{board}:{repo}:{issue}:create",
-            stdout=(proc.stdout or "")[-400:],
-            mutated=True,
-        )
-    task_id = resolution.task_id
-    repo = str(data.get("repo") or cond_get(request, "repo", "parse_issue_ref", "load_kanban_task") or "")
-    return ok(
-        status="created",
-        task_id=task_id,
-        board=board,
-        repo=repo,
-        task_title=task_title,
-        stdout=(proc.stdout or "")[-400:],
-        mutated=True,
-    )
 
 
-def complete_kanban_task(request: Request) -> Result:
-    """Mark one Kanban task done with a short result string."""
-    data = input_of(request)
-    cfg = cfg_of(request)
-    dry = dry_run_flag(request)
-    board = str(
-        data.get("board")
-        or cond_get(request, "board", "load_kanban_task", "parse_issue_ref")
-        or cfg.get("board")
-        or ""
-    )
-    task_id = str(
-        data.get("task_id")
-        or cond_get(request, "task_id", "load_kanban_task", "parse_issue_ref")
-        or ""
-    )
-    if not task_id:
-        loaded = cond_blob(request, "load_kanban_task")
-        task = loaded.get("task") if isinstance(loaded.get("task"), dict) else {}
-        task_id = str(task.get("id") or task.get("task_id") or "")
-        if not board:
-            board = str(loaded.get("board") or board)
-    terminal = _terminal_upstream(request, "write_dispatch_receipt")
-    if terminal is not None:
-        return terminal
-    upstream = upstream_noop(request, "load_kanban_task", "parse_issue_ref")
-    if upstream:
-        return noop(str(upstream.get("reason") or "no_ready_task"))
-    result_text = str(data.get("result") or "completed")
-    if not board or not task_id:
-        return fail("missing_board_or_task_id", failure_class="terminal", retry_safe=False)
-    if dry:
-        return planned(board=board, task_id=task_id, result=result_text, repo=str(data.get("repo") or cond_get(request, "repo", "parse_issue_ref", "load_kanban_task") or ""))
-    try:
-        current = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
-    except CommandError as exc:
-        return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), board=board, task_id=task_id, idempotency_key=f"kanban:{board}:{task_id}:complete", mutated=False)
-    if not isinstance(current, list) or any(not isinstance(task, dict) for task in current):
-        return fail(
-            "kanban_list_failed",
-            failure_class="terminal",
-            retry_safe=False,
-            board=board,
-            task_id=task_id,
-            error="invalid Kanban list read-back shape",
-        )
-    matching = [task for task in current if str(task.get("id") or task.get("task_id") or "") == task_id]
-    if not matching:
-        return fail("task_not_found", failure_class="terminal", retry_safe=False, board=board, task_id=task_id)
-    if str(matching[0].get("status") or "").lower() in {"done", "completed", "archived"}:
-        return ok(status="already_completed", board=board, task_id=task_id, repo=str(data.get("repo") or cond_get(request, "repo", "parse_issue_ref", "load_kanban_task") or ""), mutated=False)
-    try:
-        run_cmd(
-            [
-                "hermes", "kanban", "--board", board, "complete", task_id,
-                "--result", result_text, "--summary", result_text,
-            ],
-            timeout=60,
-        )
-    except CommandError as exc:
-        return fail(
-            "complete_failed",
-            failure_class="reconcile_then_retry",
-            retry_safe=False,
-            error=str(exc),
-            stderr=(exc.stderr or "")[-400:],
-            board=board,
-            task_id=task_id,
-            result=result_text,
-            idempotency_key=f"kanban:{board}:{task_id}:complete",
-            mutated=True,
-        )
-    return ok(status="completed", board=board, task_id=task_id, repo=str(data.get("repo") or cond_get(request, "repo", "parse_issue_ref", "load_kanban_task") or ""), result=result_text, idempotency_key=f"kanban:{board}:{task_id}:complete", mutated=True)
 
 
-def refresh_clone_base(request: Request) -> Result:
-    """Fetch origin only from a clean clone and read back exact base ref."""
-    data = input_of(request)
-    dry = dry_run_flag(request)
-    clone_path = str(data.get("clone_path") or cond_get(request, "clone_path", "parse_issue_ref", "load_kanban_task") or cfg_of(request).get("clone_path") or "")
-    base_branch = str(data.get("base_branch") or cfg_of(request).get("base_branch") or "main")
-    if not clone_path:
-        return fail("missing_clone_path", failure_class="terminal", retry_safe=False)
-    if dry:
-        return planned(clone_path=clone_path, base_branch=base_branch, actions=["fetch", "read_origin_ref"])
-    clone = Path(clone_path)
-    if not (clone / ".git").exists():
-        return fail("clone_missing", failure_class="terminal", retry_safe=False, clone_path=clone_path, mutated=False)
-    try:
-        status = status_porcelain(clone)
-        if status.strip():
-            return fail("clone_dirty", failure_class="terminal", retry_safe=False, clone_path=clone_path, clone_status=status, mutated=False)
-        origin = remote_url(clone)
-        if not origin.strip():
-            return fail("origin_missing", failure_class="terminal", retry_safe=False, clone_path=clone_path, mutated=False)
-        git(["fetch", "origin", "--prune"], cwd=clone)
-        base_head = remote_ref(clone, "origin", base_branch)
-    except CommandError as exc:
-        return fail("refresh_clone_check_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone_path, base_branch=base_branch, mutated=False)
-    return ok(status="refreshed", clone_path=clone_path, base_branch=base_branch, base_head=base_head, origin=origin, mutated=True)
 
 
 def _identity_values(
@@ -524,7 +201,7 @@ def _worktree_branch(request: Request) -> tuple[str, list[str]]:
     """Resolve branch from current input/config and upstream conduction."""
     aliases = (
         "triage_build_repair_prompt", "build_repair_prompt",
-        "triage_repair_prepare_worktree", "repair_prepare_worktree",
+        "read_worktree_inventory", "read_branch_provenance",
         "dispatch_parse_issue_ref", "parse_issue_ref", "parse_issue_ref_from_task",
         "load_pr_fields", "triage_load_pr_fields",
     )
@@ -548,7 +225,6 @@ def _branch_provenance(clone_path: str, branch: str) -> dict[str, str]:
         except CommandError:
             values[key] = ""
     return values
-
 def _provenance_matches(expected: dict[str, str], actual: dict[str, str]) -> bool:
     """Accept reuse only when every recorded ownership field matches exactly."""
     return all(
@@ -563,121 +239,12 @@ def _provenance_matches(expected: dict[str, str], actual: dict[str, str]) -> boo
     )
 
 
+def _update_receipt_if_needed(clone_path: str, branch: str, expected_receipt: str, actual_receipt: str) -> None:
+    if expected_receipt and expected_receipt != actual_receipt:
+        branch_config_set(clone_path, branch, "lokay-receipt", expected_receipt)
 
 
-def prepare_worktree(request: Request) -> Result:
-    """Create/reuse a worktree only after clone, ref, and ownership read-backs."""
-    data = input_of(request)
-    cfg = cfg_of(request)
-    dry = dry_run_flag(request)
-    upstream = upstream_noop(
-        request,
-        "parse_issue_ref",
-        "dispatch_parse_issue_ref",
-        "triage_load_pr_fields",
-        "load_pr_fields",
-        "triage_build_repair_prompt",
-        "build_repair_prompt",
-    )
-    if upstream:
-        return noop(str(upstream.get("reason") or "no_ready_task"))
-    clone_path = str(data.get("clone_path") or cond_get(request, "clone_path", "refresh_clone_base", "parse_issue_ref", "dispatch_parse_issue_ref", "load_kanban_task", "dispatch_load_kanban_task", "triage_load_pr_fields", "load_pr_fields") or cfg.get("clone_path") or "")
-    branch, branch_values = _worktree_branch(request)
-    if not branch and branch_values:
-        branch = branch_values[0]
-    if dry and not branch:
-        branch = str(data.get("branch") or "").strip()
-    worktree_root = str(data.get("worktree_root") or cfg.get("worktree_root") or "")
-    base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
-    expected_head = str(data.get("expected_head") or cond_get(request, "expected_head", "prepare_worktree", "repair_prepare_worktree", "triage_repair_prepare_worktree", "write_dispatch_receipt", "dispatch_write_dispatch_receipt") or "").strip()
-    if not clone_path or not branch or not worktree_root:
-        return fail("missing_clone_branch_or_root", failure_class="terminal", retry_safe=False)
-    safe = re.sub(r"[^a-zA-Z0-9._/-]+", "-", branch)
-    path = Path(worktree_root) / safe
-    provenance = _worktree_provenance(request, branch)
-    provenance_error = _worktree_provenance_error(request, provenance)
-    if not dry and (provenance_error["missing"] or provenance_error["conflicts"] or len(branch_values) != 1):
-        return fail(
-            "conflicting_worktree_provenance" if provenance_error["conflicts"] or len(branch_values) != 1 else "missing_worktree_provenance",
-            failure_class="terminal",
-            retry_safe=False,
-            branch=branch,
-            branch_values=branch_values,
-            provenance=provenance,
-            **provenance_error,
-            mutated=False,
-        )
-    if dry:
-        return planned(clone_path=clone_path, branch=branch, worktree_path=str(path), base_branch=base_branch, create_branch=True, provenance=provenance)
 
-    clone = Path(clone_path)
-    if not (clone / ".git").exists():
-        return fail("clone_missing", failure_class="terminal", retry_safe=False, clone_path=clone_path, mutated=False)
-    # Read all clone state before any fetch, branch, or worktree mutation.
-    try:
-        clone_status = status_porcelain(clone)
-        if clone_status.strip():
-            return fail("clone_dirty", failure_class="terminal", retry_safe=False, clone_status=clone_status, clone_path=clone_path, mutated=False)
-        origin = remote_url(clone)
-        if not origin.strip():
-            return fail("origin_missing", failure_class="terminal", retry_safe=False, clone_path=clone_path, mutated=False)
-        git(["fetch", "origin", "--prune"], cwd=clone)
-        base_head = remote_ref(clone, "origin", base_branch)
-    except CommandError as exc:
-        return fail("clone_ref_check_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone_path, base_branch=base_branch, mutated=False)
-    try:
-        rows = parse_worktree_porcelain(worktree_list(clone_path))
-    except CommandError as exc:
-        return fail("worktree_list_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), worktree_path=str(path), branch=branch, mutated=False)
-    resolved_path = str(path.resolve())
-    matches = [row for row in rows if str(Path(row.get("path") or "").resolve()) == resolved_path]
-    if matches:
-        row = matches[0]
-        actual_branch = str(row.get("branch") or "")
-        if row.get("locked") or actual_branch != branch:
-            return fail("worktree_provenance_mismatch", failure_class="terminal", retry_safe=False, worktree_path=str(path), branch=branch, actual_branch=actual_branch, locked=bool(row.get("locked")), mutated=False)
-        if is_dirty(str(path)):
-            return fail("worktree_dirty", failure_class="terminal", retry_safe=False, worktree_path=str(path), branch=branch, mutated=False)
-        actual = _branch_provenance(clone_path, branch)
-        if not _provenance_matches(provenance, actual):
-            return fail("foreign_worktree_ownership", failure_class="terminal", retry_safe=False, worktree_path=str(path), branch=branch, provenance=provenance, actual_provenance=actual, mutated=False)
-        try:
-            head = rev_parse(str(path))
-        except CommandError as exc:
-            return fail("worktree_rev_parse_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), worktree_path=str(path), branch=branch, mutated=False)
-        if expected_head and head != expected_head:
-            return fail("worktree_head_mismatch", failure_class="terminal", retry_safe=False, expected_head=expected_head, head=head, mutated=False)
-        return ok(status="reused", clone_path=clone_path, worktree_path=str(path), branch=branch, head=head, base_head=base_head, origin=origin, provenance=provenance, mutated=False)
-    if path.exists():
-        return fail("worktree_path_collision", failure_class="terminal", retry_safe=False, worktree_path=str(path), branch=branch, mutated=False)
-
-    try:
-        exists = branch_exists(clone_path, branch)
-        if exists:
-            actual = _branch_provenance(clone_path, branch)
-            if not _provenance_matches(provenance, actual):
-                return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, branch=branch, provenance=provenance, actual_provenance=actual, mutated=False)
-            current_head = local_branch_head(clone_path, branch)
-            if expected_head and current_head != expected_head:
-                return fail("branch_head_mismatch", failure_class="terminal", retry_safe=False, branch=branch, expected_head=expected_head, head=current_head, mutated=False)
-            if not expected_head and current_head != base_head:
-                return fail("branch_stale", failure_class="terminal", retry_safe=False, branch=branch, head=current_head, base_head=base_head, mutated=False)
-            worktree_add(clone_path, str(path), branch, create_branch=False)
-        else:
-            git(["branch", branch, base_head], cwd=clone)
-            for key, value in (("task", provenance["task_id"]), ("issue", provenance["issue"]), ("receipt", provenance["receipt"]), ("repo", provenance["repo"]), ("base", base_head)):
-                if value:
-                    branch_config_set(clone_path, branch, f"lokay-{key}", value)
-            worktree_add(clone_path, str(path), branch, create_branch=False)
-    except CommandError as exc:
-        return fail("worktree_prepare_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), worktree_path=str(path), branch=branch, mutated=True)
-    try:
-        head = rev_parse(str(path))
-    except CommandError as exc:
-        return fail("worktree_rev_parse_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), worktree_path=str(path), branch=branch, mutated=True)
-    if head != base_head:
-        return fail("worktree_base_mismatch", failure_class="terminal", retry_safe=False, head=head, base_head=base_head, worktree_path=str(path), branch=branch, mutated=True)
-    return ok(status="prepared", clone_path=clone_path, worktree_path=str(path), branch=branch, head=head, base_head=base_head, origin=origin, provenance=provenance, mutated=True)
 
 
 def _omp_diff_paths(worktree_path: str) -> list[str]:
@@ -709,257 +276,12 @@ def _escaped_omp_paths(worktree_path: str, paths: list[str]) -> list[str]:
             escaped.append(value)
     return escaped
 
-def run_omp_worker(request: Request) -> Result:
-    """Single OMP invocation in a worktree (no PR open, no labels)."""
-    data = input_of(request)
-    cfg = cfg_of(request)
-    gated = _repair_action_gate(request)
-    if gated is not None:
-        return gated
-    dry = dry_run_flag(request)
-    upstream = upstream_noop(request, "prepare_worktree", "parse_issue_ref")
-    if upstream:
-        return noop(str(upstream.get("reason") or "no_ready_task"))
-    worktree_path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "prepare_worktree") or "")
-    prompt = str(data.get("prompt") or cond_get(request, "prompt", "build_repair_prompt") or "")
-    if not prompt:
-        parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
-        if parsed.get("repo") and parsed.get("issue"):
-            prompt = (f"Implement a minimal fix for {parsed['repo']}#{parsed['issue']}.\n"
-                      f"Branch: {parsed.get('branch') or ''}\n"
-                      f"Task: {parsed.get('task_title') or ''}\n"
-                      "Keep scope tight. Do not force-push. Do not open/merge PRs.\n")
-    command = str(data.get("command") or cfg.get("executor_command") or "omp")
-    model = str(data.get("model") or cfg.get("model") or "omniroute/omp/default")
-    thinking = str(data.get("thinking") or cfg.get("thinking") or "medium")
-    timeout = float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800)
-
-    intended_branch = str(data.get("branch") or cond_get(request, "branch", "prepare_worktree") or cond_get(request, "branch", "parse_issue_ref") or "")
-    clone_path = str(data.get("clone_path") or cond_get(request, "clone_path", "refresh_clone_base", "prepare_worktree") or cfg.get("clone_path") or "")
-    base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
-    if not worktree_path or not prompt:
-        return fail("missing_worktree_or_prompt", failure_class="terminal", retry_safe=False)
-    if not dry and not bool(data.get("executor_enabled", cfg.get("executor_enabled", True))):
-        return fail("executor_disabled", failure_class="terminal", retry_safe=False)
-    if not dry:
-        try:
-            if git(["rev-parse", "--is-inside-work-tree"], cwd=worktree_path) != "true":
-                return fail("omp_worktree_invalid", failure_class="terminal", retry_safe=False)
-            top_level = git(["rev-parse", "--show-toplevel"], cwd=worktree_path)
-            if not top_level or Path(top_level).resolve() != Path(worktree_path).resolve():
-                return fail("omp_worktree_confinement", failure_class="terminal", retry_safe=False, top_level=top_level)
-            if not intended_branch:
-                return fail("omp_postcondition_failed", failure_class="terminal", retry_safe=False, detail="missing_intended_branch")
-            pre_branch = git(["branch", "--show-current"], cwd=worktree_path)
-            pre_head = rev_parse(worktree_path)
-            base = rev_parse(clone_path or worktree_path, f"origin/{base_branch}")
-            if pre_branch != intended_branch:
-                return fail("omp_branch_mismatch", failure_class="terminal", retry_safe=False, expected_branch=intended_branch, actual_branch=pre_branch)
-        except CommandError as exc:
-            return fail("omp_worktree_invalid", failure_class="terminal", retry_safe=False, error=str(exc))
-    try:
-        out = run_omp(
-            prompt=prompt,
-            cwd=worktree_path,
-            command=command,
-            model=model,
-            thinking=thinking,
-            timeout=timeout,
-            dry_run=dry,
-        )
-
-    except CommandError as exc:
-        return fail("omp_failed", failure_class="terminal", retry_safe=False, error=str(exc), stderr=exc.stderr[-500:], mutated=True)
-    if dry:
-        return planned(worktree_path=worktree_path, model=model, omp=out, prompt_len=out.get("prompt_len"))
-    try:
-        post_top_level = git(["rev-parse", "--show-toplevel"], cwd=worktree_path)
-        if not post_top_level or Path(post_top_level).resolve() != Path(worktree_path).resolve():
-            return fail("omp_worktree_confinement", failure_class="terminal", retry_safe=False, top_level=post_top_level)
-        post_branch = git(["branch", "--show-current"], cwd=worktree_path)
-        if post_branch != intended_branch:
-            return fail("omp_branch_mismatch", failure_class="terminal", retry_safe=False, expected_branch=intended_branch, actual_branch=post_branch)
-        post_head = rev_parse(worktree_path)
-        if post_head == pre_head:
-            return fail("omp_head_unchanged", failure_class="terminal", retry_safe=False, head=post_head, pre_head=pre_head)
-        if post_head == base:
-            return fail("omp_no_new_commits", failure_class="terminal", retry_safe=False, head=post_head, base=base)
-        escaped = _escaped_omp_paths(worktree_path, _omp_diff_paths(worktree_path))
-        if escaped:
-            return fail("omp_diff_path_escape", failure_class="terminal", retry_safe=False, paths=escaped)
-    except CommandError as exc:
-        return fail("omp_postcondition_failed", failure_class="terminal", retry_safe=False, error=str(exc))
-    except (OSError, ValueError) as exc:
-        return fail("omp_postcondition_failed", failure_class="terminal", retry_safe=False, error=str(exc))
-    return ok(status="omp_finished", worktree_path=worktree_path, model=model, omp=out, pre_head=pre_head, head=post_head, base=base, branch=post_branch, mutated=True)
 
 
-def verify_branch_has_commits(request: Request) -> Result:
-    """Check worktree HEAD differs from base_branch without reading planned paths."""
-    upstream = upstream_noop(request, "prepare_worktree", "run_omp")
-    if upstream:
-        return noop(str(upstream.get("reason") or "no_ready_task"))
-    data = input_of(request)
-    worktree_path = str(
-        data.get("worktree_path")
-        or cond_get(request, "worktree_path", "prepare_worktree", "run_omp")
-        or ""
-    )
-    clone_path = str(
-        data.get("clone_path")
-        or cond_get(request, "clone_path", "refresh_clone_base", "prepare_worktree")
-        or cfg_of(request).get("clone_path")
-        or ""
-    )
-    base_branch = str(data.get("base_branch") or cfg_of(request).get("base_branch") or "main")
-    if not worktree_path:
-        return fail("missing_worktree_path", failure_class="terminal", retry_safe=False)
-    if dry_run_flag(request):
-        return planned(worktree_path=worktree_path, clone_path=clone_path, base_branch=base_branch)
-    try:
-        head = rev_parse(worktree_path)
-        base = rev_parse(clone_path or worktree_path, f"origin/{base_branch}")
-    except CommandError as exc:
-        return fail("rev_parse_failed", failure_class="retryable_read", retry_safe=True, error=str(exc))
-    if head == base:
-        return fail("no_new_commits", failure_class="terminal", retry_safe=False, head=head, base=base)
-    return ok(status="has_commits", head=head, base=base)
 
 
-def open_pull_request(request: Request) -> Result:
-    """Open one PR for branch → base (gh pr create)."""
-    import json
-
-    data = input_of(request)
-    cfg = cfg_of(request)
-    dry = dry_run_flag(request)
-    parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
-    upstream = upstream_noop(request, "prepare_worktree", "verify_branch", "parse_issue_ref")
-    if upstream:
-        return noop(str(upstream.get("reason") or "no_ready_task"))
-    prep = cond_blob(request, "prepare_worktree")
-    repo = str(data.get("repo") or parsed.get("repo") or "")
-    branch = str(data.get("branch") or prep.get("branch") or parsed.get("branch") or "")
-    base = str(data.get("base_branch") or cfg.get("base_branch") or "main")
-    issue = parsed.get("issue") or data.get("issue")
-    title = str(data.get("title") or (f"fix: {repo}#{issue}" if repo and issue else f"fix: {branch}"))
-    body = str(
-        data.get("body")
-        or (
-            f"Automated fix for {repo}#{issue} via lokay.\n\nCloses #{issue}\n"
-            if issue
-            else "Automated fix via lokay."
-        )
-    )
-    if not repo or not branch:
-        return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False)
-    gh = str(cfg.get("gh_cli") or "gh")
-    if dry:
-        return planned(repo=repo, branch=branch, base=base, title=title)
-
-    def list_open() -> list[dict[str, Any]]:
-        proc = run_cmd(
-            [gh, "pr", "list", "--repo", repo, "--head", branch, "--base", base, "--state", "open", "--json", "number,url,baseRefName,headRefName"],
-        )
-        listed = json.loads(proc.stdout or "[]")
-        if not isinstance(listed, list) or any(not isinstance(row, dict) for row in listed):
-            raise ValueError("invalid pull request list")
-        return listed
-
-    try:
-        existing = list_open()
-    except CommandError as exc:
-        return fail("pr_create_failed", failure_class="retryable_read", retry_safe=True, repo=repo, branch=branch, base=base, idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", error=str(exc))
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        return fail("invalid_pr_list", failure_class="terminal", retry_safe=False, error=str(exc))
-    if len(existing) > 1:
-        return fail("ambiguous_existing_prs", failure_class="terminal", retry_safe=False, repo=repo, branch=branch, prs=existing)
-    if existing:
-        pr = existing[0]
-        return ok(status="exists", repo=repo, branch=branch, base=base, number=pr.get("number"), url=pr.get("url"), idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", mutated=False)
-
-    try:
-        proc = run_cmd(
-            [gh, "pr", "create", "--repo", repo, "--base", base, "--head", branch, "--title", title, "--body", body],
-            timeout=120,
-        )
-    except CommandError as exc:
-        try:
-            reconciled = list_open()
-        except (CommandError, json.JSONDecodeError, TypeError, ValueError):
-            reconciled = []
-        if len(reconciled) == 1:
-            pr = reconciled[0]
-            return ok(status="exists", repo=repo, branch=branch, base=base, number=pr.get("number"), url=pr.get("url"), idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", reconciled=True, mutated=True)
-        if len(reconciled) > 1:
-            return fail("ambiguous_pr_create", failure_class="terminal", retry_safe=False, repo=repo, branch=branch, base=base, prs=reconciled, idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", mutated=True)
-        return fail("pr_create_unresolved", failure_class="reconcile_then_retry", retry_safe=False, repo=repo, branch=branch, base=base, idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", error=str(exc), mutated=True)
-
-    try:
-        listed = list_open()
-    except CommandError as exc:
-        return fail("pr_created_but_unresolved", failure_class="reconcile_then_retry", retry_safe=False, repo=repo, branch=branch, base=base, idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", error=str(exc), mutated=True)
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        return fail("pr_created_but_unresolved", failure_class="terminal", retry_safe=False, repo=repo, branch=branch, base=base, idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", error=str(exc), mutated=True)
-    if len(listed) != 1:
-        if len(listed) > 1:
-            return fail("ambiguous_pr_create", failure_class="terminal", retry_safe=False, repo=repo, branch=branch, base=base, prs=listed, idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", mutated=True)
-        return fail("pr_created_but_unresolved", failure_class="reconcile_then_retry", retry_safe=False, repo=repo, branch=branch, base=base, prs=listed, idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", mutated=True)
-    pr = listed[0]
-    number = pr.get("number")
-    if not number:
-        return fail("pr_created_but_unresolved", failure_class="reconcile_then_retry", retry_safe=False, repo=repo, branch=branch, base=base, idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", mutated=True)
-    return ok(status="created", repo=repo, branch=branch, base=base, number=number, url=pr.get("url"), idempotency_key=f"pr:{repo}:head:{branch}:base:{base}:create", mutated=True)
 
 
-def apply_pr_labels(request: Request) -> Result:
-    """Add labels to an existing PR (e.g. ai:generated, ai:pr-opened)."""
-    data = input_of(request)
-    cfg = cfg_of(request)
-    dry = dry_run_flag(request)
-    upstream = upstream_noop(request, "open_pull_request", "parse_issue_ref")
-    if upstream:
-        return noop(str(upstream.get("reason") or "no_ready_task"))
-    opened = cond_blob(request, "open_pull_request", "open_pr")
-    parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
-    repo = str(data.get("repo") or opened.get("repo") or parsed.get("repo") or "")
-    number = int(
-        data.get("number")
-        or data.get("pr_number")
-        or opened.get("number")
-        or 0
-    )
-    labels = data.get("labels") or ["ai:generated", "ai:pr-opened"]
-    gh = str(cfg.get("gh_cli") or "gh")
-    if not repo or not number:
-        return fail("missing_repo_or_number", failure_class="terminal", retry_safe=False)
-    if dry:
-        return planned(repo=repo, number=number, labels=list(labels))
-    applied = []
-    label_key = f"pr:{repo}:{number}:labels:{','.join(sorted(str(label) for label in labels))}"
-    for label in labels:
-        try:
-            run_cmd(
-                [
-                    gh,
-                    "pr",
-                    "edit",
-                    str(number),
-                    "--repo",
-                    repo,
-                    "--add-label",
-                    str(label),
-                ],
-                timeout=60,
-            )
-            applied.append({"label": label, "ok": True})
-        except CommandError as exc:
-            applied.append({"label": label, "ok": False, "error": exc.stderr[-200:]})
-    if not any(a["ok"] for a in applied):
-        return fail("all_labels_failed", failure_class="reconcile_then_retry", retry_safe=False, repo=repo, number=number, labels=list(labels), actions=applied, idempotency_key=label_key, mutated=True)
-    if any(not a["ok"] for a in applied):
-        return fail("partial_labels_failed", failure_class="reconcile_then_retry", retry_safe=False, repo=repo, number=number, labels=list(labels), actions=applied, idempotency_key=label_key, mutated=True)
-    return ok(status="labeled", repo=repo, number=number, labels=list(labels), actions=applied, idempotency_key=label_key, mutated=True)
 
 
 _UPSTREAM_TERMINAL = {"failed", "cancelled", "timed_out"}
@@ -995,138 +317,8 @@ def _receipt_metadata(request: Request, payload: dict[str, Any], *, entity: dict
     }
 
 
-def _terminal_upstream(request: Request, *effector_ids: str) -> Result | None:
-    for effector_id in effector_ids:
-        blob = cond_blob(request, effector_id)
-        if blob and (blob.get("ok") is False or blob.get("status") in _UPSTREAM_TERMINAL):
-            return fail("upstream_failed", failure_class="terminal", retry_safe=False, upstream=blob, mutated=False)
-    return None
 
 
-def write_dispatch_receipt(request: Request) -> Result:
-    """Write a receipt once, using durable atomic no-clobber publication."""
-    data = input_of(request)
-    dry = dry_run_flag(request)
-    terminal = _terminal_upstream(
-        request, "parse_issue_ref", "prepare_worktree", "open_pull_request", "apply_pr_labels"
-    )
-    if terminal is not None:
-        return terminal
-    upstream = upstream_noop(
-        request, "parse_issue_ref", "prepare_worktree", "open_pull_request", "apply_pr_labels"
-    )
-    if upstream:
-        return noop(str(upstream.get("reason") or "no_ready_task"))
-    path = str(data.get("receipt_path") or cfg_of(request).get("receipt_path") or "")
-    payload = data.get("payload")
-    if not isinstance(payload, dict) or not payload:
-        parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
-        opened = cond_blob(request, "open_pull_request", "open_pr")
-        prep = cond_blob(request, "prepare_worktree")
-        payload = {
-            "phase": "DISPATCHED",
-            "repo": parsed.get("repo") or opened.get("repo"),
-            "issue": parsed.get("issue"),
-            "branch": prep.get("branch") or parsed.get("branch"),
-            "pr_number": opened.get("number"),
-            "pr_url": opened.get("url"),
-            "worktree_path": prep.get("worktree_path"),
-            "dry_run": dry,
-        }
-    else:
-        payload = dict(payload)
-    parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
-    opened = cond_blob(request, "open_pull_request", "open_pr")
-    prep = cond_blob(request, "prepare_worktree")
-    entity = {
-        "repo": payload.get("repo") or parsed.get("repo") or opened.get("repo"),
-        "issue": payload.get("issue") or parsed.get("issue"),
-        "branch": payload.get("branch") or prep.get("branch") or parsed.get("branch"),
-        "pr_number": payload.get("pr_number") or opened.get("number"),
-    }
-    payload.update(_receipt_metadata(request, payload, entity=entity))
-    if not path:
-        return fail("missing_receipt_path", failure_class="terminal", retry_safe=False)
-    p = Path(path)
-
-    def existing_result() -> Result | None:
-        if not p.exists():
-            return None
-        try:
-            existing = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
-        if existing == payload:
-            try:
-                dir_fd = os.open(str(p.parent), os.O_RDONLY)
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
-            except OSError as exc:
-                return fail("receipt_durability_unconfirmed", failure_class="terminal", retry_safe=False, error=str(exc), receipt_path=path)
-            return ok(status="exists", receipt_path=path, payload=payload, mutated=False)
-        return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
-
-    prior = existing_result()
-    if prior is not None:
-        return prior
-    if dry:
-        return planned(receipt_path=path, payload=payload)
-
-    tmp_path: Path | None = None
-    published_identity: tuple[int, int] | None = None
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
-        tmp_path = Path(tmp_name)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-            published = os.fstat(fh.fileno())
-            published_identity = (published.st_dev, published.st_ino)
-        try:
-            os.link(tmp_path, p)
-        except FileExistsError:
-            prior = existing_result()
-            if prior is not None:
-                return prior
-            return fail("receipt_conflict", failure_class="terminal", retry_safe=False, receipt_path=path)
-        os.unlink(tmp_path)
-        tmp_path = None
-        dir_fd = os.open(str(p.parent), os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-        if not p.is_file() or json.loads(p.read_text(encoding="utf-8")) != payload:
-            raise ValueError("receipt read-back mismatch")
-    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        rollback_error: Exception | None = None
-        if published_identity is not None:
-            try:
-                current = p.stat()
-                if (current.st_dev, current.st_ino) == published_identity:
-                    os.unlink(p)
-                dir_fd = os.open(str(p.parent), os.O_RDONLY)
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
-            except Exception as rollback_exc:
-                rollback_error = rollback_exc
-        error = str(exc)
-        if rollback_error is not None:
-            error = f"{error}; receipt rollback durability unconfirmed: {rollback_error}"
-        return fail("receipt_write_failed", failure_class="terminal", retry_safe=False, error=error, receipt_path=path, mutated=True)
-    finally:
-        if tmp_path is not None:
-            try:
-                os.unlink(tmp_path)
-            except FileNotFoundError:
-                pass
-    return ok(status="written", receipt_path=path, payload=payload, mutated=True)
 
 
 def check_worktree_dirty(request: Request) -> Result:
@@ -1167,110 +359,671 @@ def list_controlled_worktrees(request: Request) -> Result:
     return ok(status="listed", clone_path=clone_path, count=len(rows), worktrees=rows)
 
 
-def push_branch(request: Request) -> Result:
-    """Atomic push with local/remote OID reconciliation and no force push."""
+
+
+
+# Fala 0.7.15 atomic dispatch operations: one external read, mutation, or
+# pure transform per process.
+from lokay.envelope import terminal_upstream
+
+
+def _atomic_terminal(request: Request, operation: str, *peers: str) -> Result | None:
+    return terminal_upstream(request, operation, *peers)
+
+
+_DISPATCH_TAIL_ANCESTRY = (
+    "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt",
+    "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label",
+    "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr",
+    "read_open_pr_for_branch", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head",
+    "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp",
+    "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch",
+    "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions",
+    "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks",
+    "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result",
+)
+def _atomic_board(request: Request) -> str:
+    data, cfg = input_of(request), cfg_of(request)
+    return str(data.get("board") or cond_get(request, "board", "read_dispatch_tasks", "read_fix_tasks") or cfg.get("board") or "")
+
+
+def _atomic_repo(request: Request) -> str:
     data = input_of(request)
-    dry = dry_run_flag(request)
-    prep = cond_blob(request, "prepare_worktree")
-    parsed = cond_blob(request, "parse_issue_ref", "parse_issue_ref_from_task")
-    worktree_path = str(data.get("worktree_path") or prep.get("worktree_path") or "")
-    gated = _repair_action_gate(request)
-    if gated is not None:
-        return gated
-    upstream = upstream_noop(request, "prepare_worktree", "verify_branch", "parse_issue_ref")
-    if upstream:
-        return noop(str(upstream.get("reason") or "no_ready_task"))
-    branch = str(data.get("branch") or prep.get("branch") or parsed.get("branch") or "")
-    if not worktree_path or not branch:
-        return fail("missing_worktree_or_branch", failure_class="terminal", retry_safe=False)
-    if dry:
-        return planned(worktree_path=worktree_path, branch=branch, remote="origin")
-    local_oid = ""
-    remote_oid = ""
-    out = ""
-    push_key = f"push:origin:{branch}:unknown"
+    return str(data.get("repo") or cond_get(request, "repo", "parse_issue_ref_from_task", "select_dispatch_task") or "")
+
+
+def _atomic_rows(request: Request, *ids: str) -> list[dict[str, Any]] | None:
+    blob = cond_blob(request, *ids)
+    rows = blob.get("tasks") or blob.get("rows") or blob.get("items")
+    return rows if isinstance(rows, list) and all(isinstance(row, dict) for row in rows) else None
+
+
+def read_dispatch_tasks(request: Request) -> Result:
+    """Read the dispatch board; policy selection is a separate process."""
+    terminal = _atomic_terminal(request, "read_dispatch_tasks", "intake_kanban")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
+    if idle:
+        return noop(str(idle.get("reason") or "no_selected_issue"), operation="read_dispatch_tasks")
+    board = _atomic_board(request)
+    if not board:
+        return fail("missing_board", failure_class="terminal", retry_safe=False, operation="read_dispatch_tasks")
     try:
-        # Real worktrees are always verified. Test/planning adapters may pass a
-        # non-existent synthetic path, for which no local OID is observable.
-        if Path(worktree_path).exists():
-            local_oid = rev_parse(worktree_path)
-            push_key = f"push:origin:{branch}:{local_oid or 'unknown'}"
-            out = git_push_branch(worktree_path, branch, set_upstream=True)
-            remote_line = git(["ls-remote", "origin", f"refs/heads/{branch}"], cwd=worktree_path)
-            remote_oid = (remote_line.split()[0] if remote_line.split() else "")
-            if not remote_oid or remote_oid != local_oid:
-                return fail(
-                    "push_readback_mismatch",
-                    failure_class="terminal",
-                    retry_safe=False,
-                    worktree_path=worktree_path,
-                    branch=branch,
-                    local_oid=local_oid,
-                    remote_oid=remote_oid,
-                    idempotency_key=push_key,
-                    mutated=True,
-                )
-        else:
-            return fail(
-                "worktree_missing",
-                failure_class="terminal",
-                retry_safe=False,
-                worktree_path=worktree_path,
-                branch=branch,
-                idempotency_key=push_key,
-                mutated=False,
-            )
+        rows = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
     except CommandError as exc:
-        return fail("push_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), stderr=(exc.stderr or "")[-500:], worktree_path=worktree_path, branch=branch, local_oid=local_oid, remote_oid=remote_oid, idempotency_key=push_key, mutated=True)
-    return ok(
-        status="pushed",
-        worktree_path=worktree_path,
-        branch=branch,
-        remote="origin",
-        local_oid=local_oid,
-        remote_oid=remote_oid,
-        idempotency_key=push_key,
-        stdout_tail=(out or "")[-400:],
-        mutated=True,
-    )
+        return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_dispatch_tasks", board=board, error=str(exc))
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="read_dispatch_tasks", board=board)
+    return ok(status="read", operation="read_dispatch_tasks", board=board, tasks=rows)
 
 
-def apply_issue_labels(request: Request) -> Result:
-    """Atomic: add labels to a GitHub issue (e.g. ai:in-progress finish/block)."""
+def select_dispatch_task(request: Request) -> Result:
+    """Purely select the first ready dispatch task."""
+    terminal = _atomic_terminal(request, "select_dispatch_task", "read_dispatch_tasks")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "read_dispatch_tasks", "intake_reconcile_intake_task")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="select_dispatch_task")
     data = input_of(request)
-    cfg = cfg_of(request)
-    dry = dry_run_flag(request)
-    repo = str(data.get("repo") or "")
-    issue = int(data.get("issue") or data.get("number") or 0)
-    labels = data.get("labels") or []
-    gh = str(cfg.get("gh_cli") or "gh")
-    if not repo or not issue:
-        return fail("missing_repo_or_issue", failure_class="terminal", retry_safe=False)
-    if not labels:
-        return fail("missing_labels", failure_class="terminal", retry_safe=False)
-    if dry:
-        return planned(repo=repo, issue=issue, labels=list(labels))
-    applied = []
-    for label in labels:
+    rows = data.get("tasks") if isinstance(data.get("tasks"), list) else _atomic_rows(request, "read_dispatch_tasks")
+    if rows is None:
+        return fail("missing_dispatch_rows", failure_class="terminal", retry_safe=False, operation="select_dispatch_task")
+    requested = str(data.get("task_id") or "")
+    for row in rows:
+        tid = str(row.get("id") or row.get("task_id") or "")
+        state = str(row.get("status") or row.get("state") or "").lower()
+        title = str(row.get("title") or "")
+        if requested and tid != requested:
+            continue
+        if state in {"done", "completed", "archived", "blocked"}:
+            continue
+        if requested or title.startswith(("[fix-pr]", "[issue]", "[fix-pr-review]")):
+            context = {k: row[k] for k in ("repo", "clone_path", "priority", "board") if row.get(k) not in (None, "")}
+            return ok(status="selected", operation="select_dispatch_task", task=row, task_id=tid, **context)
+    return noop("no_ready_task", operation="select_dispatch_task")
+
+
+def read_fix_tasks(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_fix_tasks", "select_dispatch_task", "read_dispatch_tasks")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "select_dispatch_task", "read_dispatch_tasks")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_fix_tasks")
+    board = _atomic_board(request)
+    if not board:
+        return fail("missing_board", failure_class="terminal", retry_safe=False, operation="read_fix_tasks")
+    try:
+        rows = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
+    except CommandError as exc:
+        return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_fix_tasks", board=board, error=str(exc))
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="read_fix_tasks", board=board)
+    return ok(status="read", operation="read_fix_tasks", board=board, tasks=rows)
+
+
+def find_fix_task_marker(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "find_fix_task_marker", "read_fix_tasks")
+    if terminal:
+        return terminal
+    data = input_of(request)
+    rows = data.get("tasks") if isinstance(data.get("tasks"), list) else _atomic_rows(request, "read_fix_tasks")
+    repo, issue = str(data.get("repo") or ""), str(data.get("issue") or data.get("number") or "")
+    marker = str(data.get("idempotency_key") or f"fix-pr:{repo}:{issue}")
+    idle = upstream_noop(request, "read_fix_tasks", "select_dispatch_task")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="find_fix_task_marker")
+    if rows is None:
+        return fail("missing_fix_rows", failure_class="terminal", retry_safe=False, operation="find_fix_task_marker", idempotency_key=marker)
+    matches = [r for r in rows if marker in str(r.get("body") or r.get("description") or "")]
+    if len(matches) > 1:
+        return fail("ambiguous_fix_task", failure_class="terminal", retry_safe=False, operation="find_fix_task_marker", idempotency_key=marker, matches=matches)
+    return ok(status="found" if matches else "absent", operation="find_fix_task_marker", marker=marker, task=matches[0] if matches else None, task_id=(matches[0].get("id") or matches[0].get("task_id")) if matches else None)
+
+
+def create_fix_task(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "create_fix_task", "find_fix_task_marker")
+    if terminal:
+        return terminal
+    data, cfg = input_of(request), cfg_of(request)
+    idle = upstream_noop(request, "find_fix_task_marker", "select_dispatch_task")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="create_fix_task")
+    board, repo, issue = str(data.get("board") or _atomic_board(request)), str(data.get("repo") or ""), str(data.get("issue") or data.get("number") or "")
+    title = str(data.get("title") or f"[fix-pr] {repo}#{issue}: Fix {repo}#{issue}")
+    marker = str(data.get("idempotency_key") or f"fix-pr:{repo}:{issue}")
+    if not board or not repo or not issue:
+        return fail("missing_board_repo_issue", failure_class="terminal", retry_safe=False, operation="create_fix_task", idempotency_key=marker)
+    body = str(data.get("body") or f"Repository: {repo}\nIssue: #{issue}\nIdempotency-Key: {marker}\n")
+    if dry_run_flag(request):
+        return planned(operation="create_fix_task", board=board, title=title, body=body, idempotency_key=marker)
+    try:
+        proc = run_cmd(["hermes", "kanban", "--board", board, "create", "--body", body, "--assignee", str(cfg.get("fixer_assignee") or "lokay-fixer"), "--idempotency-key", marker, title], timeout=90)
+    except CommandError as exc:
+        return fail("kanban_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_fix_task", board=board, idempotency_key=marker, error=str(exc), mutated=True)
+    return ok(status="created", operation="create_fix_task", board=board, title=title, idempotency_key=marker, stdout=(proc.stdout or "")[-400:], mutated=True)
+
+
+def reconcile_fix_task(request: Request) -> Result:
+    """Read authoritative fix-task state after an uncertain create."""
+    return _reconcile_kanban_marker(request, "reconcile_fix_task", "create_fix_task", "fix-pr")
+
+
+def _reconcile_kanban_marker(request: Request, operation: str, peer: str, prefix: str) -> Result:
+    terminal = _atomic_terminal(request, operation, peer)
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "create_fix_task", "find_fix_task_marker", "select_dispatch_task")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation=operation)
+    data = input_of(request); board = str(data.get("board") or _atomic_board(request)); marker = str(data.get("idempotency_key") or "")
+    if not board or not marker:
+        return fail("missing_board_or_marker", failure_class="terminal", retry_safe=False, operation=operation)
+    try: rows = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
+    except CommandError as exc: return fail("reconcile_read_failed", failure_class="retryable_read", retry_safe=True, operation=operation, error=str(exc), board=board)
+    if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows): return fail("invalid_reconcile_read", failure_class="terminal", retry_safe=False, operation=operation)
+    matches = [r for r in rows if marker in str(r.get("body") or r.get("description") or "")]
+    if len(matches) != 1: return fail("reconcile_conflict" if len(matches) > 1 else "created_task_unresolved", failure_class="terminal", retry_safe=False, operation=operation, matches=matches, mutated=False)
+    row = matches[0]; tid = row.get("id") or row.get("task_id")
+    if not tid: return fail("invalid_kanban_task_id", failure_class="terminal", retry_safe=False, operation=operation, mutated=False)
+    return ok(status="reconciled", operation=operation, task=row, task_id=tid, board=board, marker=marker, mutated=False)
+
+
+def read_task_for_completion(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt")
+    if terminal: return terminal
+    idle = upstream_noop(request, "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_task_for_completion")
+    board, task_id = _atomic_board(request), str(input_of(request).get("task_id") or cond_get(request, "task_id", "select_dispatch_task") or "")
+    if not board or not task_id: return fail("missing_board_or_task_id", failure_class="terminal", retry_safe=False, operation="read_task_for_completion")
+    try: rows = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
+    except CommandError as exc: return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_task_for_completion", error=str(exc), board=board, task_id=task_id)
+    if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows): return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="read_task_for_completion")
+    found = [r for r in rows if str(r.get("id") or r.get("task_id") or "") == task_id]
+    if len(found) != 1: return fail("task_not_found" if not found else "ambiguous_task", failure_class="terminal", retry_safe=False, operation="read_task_for_completion", task_id=task_id)
+    return ok(status="read", operation="read_task_for_completion", board=board, task=found[0], task_id=task_id)
+
+
+def decide_task_completion(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "decide_task_completion", "read_task_for_completion")
+    if terminal: return terminal
+    task = input_of(request).get("task") or cond_get(request, "task", "read_task_for_completion") or {}
+    state = str(task.get("status") or task.get("state") or "").lower() if isinstance(task, dict) else ""
+    if state in {"done", "completed", "archived"}: return ok(status="already_completed", operation="decide_task_completion", should_complete=False)
+    return ok(status="should_complete", operation="decide_task_completion", should_complete=True)
+
+
+def complete_task(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "complete_task", "decide_task_completion", "read_task_for_completion", "select_dispatch_task")
+    if terminal: return terminal
+    idle = upstream_noop(request, "decide_task_completion", "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="complete_task")
+    data, cfg = input_of(request), cfg_of(request); board = _atomic_board(request); tid = str(data.get("task_id") or cond_get(request, "task_id", "read_task_for_completion", "select_dispatch_task") or ""); text = str(data.get("result") or "completed")
+    decision = cond_blob(request, "decide_task_completion")
+    if decision.get("should_complete") is False: return ok(status="already_completed", operation="complete_task", board=board, task_id=tid, mutated=False)
+    if not board or not tid: return fail("missing_board_or_task_id", failure_class="terminal", retry_safe=False, operation="complete_task")
+    if dry_run_flag(request): return planned(operation="complete_task", board=board, task_id=tid, result=text)
+    try: run_cmd(["hermes", "kanban", "--board", board, "complete", tid, "--result", text, "--summary", text], timeout=60)
+    except CommandError as exc: return fail("complete_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="complete_task", error=str(exc), board=board, task_id=tid, mutated=True)
+    return ok(status="completed", operation="complete_task", board=board, task_id=tid, result=text, mutated=True)
+
+
+def verify_task_completed(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "verify_task_completed", "complete_task")
+    if terminal: return terminal
+    idle = upstream_noop(request, "complete_task", "decide_task_completion", "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_task_completed")
+    read = read_task_for_completion(request)
+    if read.get("ok") is False: return read
+    state = str(read["task"].get("status") or read["task"].get("state") or "").lower()
+    return ok(status="verified" if state in {"done", "completed", "archived"} else "not_completed", operation="verify_task_completed", task_id=read["task_id"], completed=state in {"done", "completed", "archived"})
+
+
+def read_clone_preconditions(request: Request) -> Result:
+    data, cfg = input_of(request), cfg_of(request); clone_path = str(data.get("clone_path") or cfg.get("clone_path") or ""); base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
+    idle = upstream_noop(request, "reconcile_fix_task", "select_dispatch_task")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_clone_preconditions")
+    if not clone_path: return fail("missing_clone_path", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions")
+    clone = Path(clone_path)
+    if not (clone / ".git").exists(): return fail("clone_missing", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path)
+    try: status, origin = status_porcelain(clone), remote_url(clone)
+    except CommandError as exc: return fail("clone_precondition_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_clone_preconditions", error=str(exc), clone_path=clone_path)
+    if status.strip(): return fail("clone_dirty", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, clone_status=status)
+    if not origin.strip(): return fail("origin_missing", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path)
+    return ok(status="ready", operation="read_clone_preconditions", clone_path=clone_path, base_branch=base_branch, origin=origin)
+
+
+def fetch_clone_origin(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "fetch_clone_origin", "read_clone_preconditions")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_clone_preconditions")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="fetch_clone_origin")
+    clone_path = str(input_of(request).get("clone_path") or cond_get(request, "clone_path", "read_clone_preconditions") or "")
+    if dry_run_flag(request): return planned(operation="fetch_clone_origin", clone_path=clone_path)
+    try: git(["fetch", "origin", "--prune"], cwd=clone_path)
+    except CommandError as exc: return fail("fetch_failed", failure_class="retryable", retry_safe=True, operation="fetch_clone_origin", clone_path=clone_path, error=str(exc), mutated=True)
+    return ok(status="fetched", operation="fetch_clone_origin", clone_path=clone_path, mutated=True)
+
+
+def read_base_ref(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_base_ref", "fetch_clone_origin", "read_clone_preconditions")
+    if terminal: return terminal
+    idle = upstream_noop(request, "fetch_clone_origin", "read_clone_preconditions")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_base_ref")
+    data, cfg = input_of(request), cfg_of(request); clone = str(data.get("clone_path") or cond_get(request, "clone_path", "fetch_clone_origin", "read_clone_preconditions") or ""); branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
+    try: head = remote_ref(clone, "origin", branch)
+    except CommandError as exc: return fail("base_ref_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_base_ref", error=str(exc), clone_path=clone, base_branch=branch)
+    return ok(status="read", operation="read_base_ref", clone_path=clone, base_branch=branch, base_head=head)
+
+
+def read_worktree_inventory(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_worktree_inventory", "read_base_ref", "fetch_clone_origin")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_clone_preconditions")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_worktree_inventory")
+    clone = str(input_of(request).get("clone_path") or cond_get(request, "clone_path", "read_clone_preconditions") or "")
+    try: text = worktree_list(clone); rows = parse_worktree_porcelain(text)
+    except (CommandError, ValueError) as exc: return fail("worktree_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_worktree_inventory", error=str(exc))
+    return ok(status="read", operation="read_worktree_inventory", clone_path=clone, worktrees=rows)
+
+
+def read_branch_provenance(request: Request) -> Result:
+    idle = upstream_noop(request, "read_worktree_inventory")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_branch_provenance")
+    data = input_of(request); clone, branch = str(data.get("clone_path") or ""), str(data.get("branch") or "")
+    if not clone or not branch:
+        return fail("missing_clone_or_branch", failure_class="terminal", retry_safe=False, operation="read_branch_provenance")
+    provenance = _branch_provenance(clone, branch)
+    expected = _worktree_provenance(request, branch)
+    error = _worktree_provenance_error(request, expected)
+    if error["missing"] or error["conflicts"]:
+        return fail("missing_worktree_provenance" if error["missing"] else "conflicting_worktree_provenance", failure_class="terminal", retry_safe=False, operation="read_branch_provenance", **error)
+    if branch_exists(clone, branch) and not _provenance_matches(expected, provenance):
+        return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, operation="read_branch_provenance", provenance=provenance, expected=expected)
+    return ok(status="read", operation="read_branch_provenance", provenance=provenance, clone_path=clone, branch=branch)
+
+
+def create_local_branch(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "create_local_branch", "read_base_ref", "read_branch_provenance")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_branch_provenance", "read_clone_preconditions", "reconcile_fix_task")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="create_local_branch")
+    data = input_of(request); clone, branch, base = str(data.get("clone_path") or cond_get(request, "clone_path", "read_base_ref") or ""), str(data.get("branch") or ""), str(data.get("base_head") or cond_get(request, "base_head", "read_base_ref") or "")
+    if not clone or not branch or not base: return fail("missing_branch_inputs", failure_class="terminal", retry_safe=False, operation="create_local_branch")
+    inventory = cond_blob(request, "read_worktree_inventory")
+    path = Path(str(data.get("worktree_path") or "")).resolve()
+    if branch_exists(clone, branch):
+        actual = cond_blob(request, "read_branch_provenance").get("provenance") or _branch_provenance(clone, branch)
+        expected = _worktree_provenance(request, branch)
+        if not _provenance_matches(expected, actual):
+            return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, operation="create_local_branch", mutated=False)
         try:
-            run_cmd(
-                [
-                    gh,
-                    "issue",
-                    "edit",
-                    str(issue),
-                    "--repo",
-                    repo,
-                    "--add-label",
-                    str(label),
-                ],
-                timeout=60,
-            )
-            applied.append({"label": label, "ok": True})
+            head = local_branch_head(clone, branch)
         except CommandError as exc:
-            applied.append({"label": label, "ok": False, "error": exc.stderr[-200:]})
-    if not any(a["ok"] for a in applied):
-        return fail("all_labels_failed", failure_class="terminal", retry_safe=False, repo=repo, issue=issue, labels=list(labels), actions=applied, idempotency_key=f"issue:{repo}:{issue}:labels", mutated=bool(applied))
-    if any(not a["ok"] for a in applied):
-        return fail("partial_labels_failed", failure_class="terminal", retry_safe=False, repo=repo, issue=issue, labels=list(labels), actions=applied, idempotency_key=f"issue:{repo}:{issue}:labels", mutated=True)
-    return ok(status="labeled", repo=repo, issue=issue, labels=list(labels), actions=applied, idempotency_key=f"issue:{repo}:{issue}:labels", mutated=True)
+            return fail("branch_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="create_local_branch", error=str(exc), mutated=False)
+        if head != base:
+            return fail("branch_create_failed", failure_class="terminal", retry_safe=False, operation="create_local_branch", head=head, base_head=base, mutated=False)
+        matching = [row for row in inventory.get("worktrees", []) if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == path]
+        if path.exists() or matching:
+            if any(str(row.get("branch") or "") == branch for row in matching):
+                return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, mutated=False)
+            return fail("worktree_path_collision", failure_class="terminal", retry_safe=False, operation="create_local_branch", worktree_path=str(path))
+        return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, mutated=False)
+    if path.exists() or any(Path(str(row.get("path") or "")).resolve() == path for row in inventory.get("worktrees", []) if isinstance(row, dict)):
+        return fail("worktree_path_collision", failure_class="terminal", retry_safe=False, operation="create_local_branch", worktree_path=str(path))
+    if dry_run_flag(request): return planned(operation="create_local_branch", branch=branch, base_head=base)
+    try: git(["branch", branch, base], cwd=clone)
+    except CommandError as exc: return fail("branch_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_local_branch", error=str(exc), mutated=False)
+    return ok(status="created", operation="create_local_branch", clone_path=clone, branch=branch, mutated=True)
+
+
+def write_branch_provenance(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "write_branch_provenance", "create_local_branch", "read_branch_provenance")
+    if terminal: return terminal
+    idle = upstream_noop(request, "create_local_branch", "read_branch_provenance")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="write_branch_provenance")
+    data = input_of(request); clone, branch = str(data.get("clone_path") or ""), str(data.get("branch") or ""); values = data.get("provenance") or {}
+    if not clone or not branch or not isinstance(values, dict): return fail("missing_branch_provenance", failure_class="terminal", retry_safe=False, operation="write_branch_provenance")
+    if cond_blob(request, "create_local_branch").get("status") == "reused": return ok(status="verified", operation="write_branch_provenance", branch=branch, mutated=False)
+    if dry_run_flag(request): return planned(operation="write_branch_provenance", branch=branch)
+    try:
+        for key, value in values.items():
+            if value: branch_config_set(clone, branch, f"lokay-{key}", str(value))
+    except CommandError as exc: return fail("branch_provenance_write_failed", failure_class="retryable", retry_safe=True, operation="write_branch_provenance", error=str(exc), mutated=True)
+    return ok(status="written", operation="write_branch_provenance", branch=branch, mutated=True)
+
+
+def add_worktree(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "add_worktree", "create_local_branch", "write_branch_provenance")
+    if terminal: return terminal
+    idle = upstream_noop(request, "create_local_branch", "write_branch_provenance")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="add_worktree")
+    data = input_of(request); clone, path, branch = str(data.get("clone_path") or ""), str(data.get("worktree_path") or ""), str(data.get("branch") or "")
+    root = Path(str(data.get("worktree_root") or cfg_of(request).get("worktree_root") or "")).resolve()
+    if not clone or not path or not branch: return fail("missing_worktree_inputs", failure_class="terminal", retry_safe=False, operation="add_worktree")
+    try: Path(path).resolve().relative_to(root)
+    except ValueError: return fail("worktree_path_escape", failure_class="terminal", retry_safe=False, operation="add_worktree", worktree_path=path)
+    inventory = cond_blob(request, "read_worktree_inventory")
+    matching = [row for row in inventory.get("worktrees", []) if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == Path(path).resolve()]
+    if matching and any(str(row.get("branch") or "") == branch for row in matching):
+        return ok(status="reused", operation="add_worktree", worktree_path=path, branch=branch, mutated=False)
+    if dry_run_flag(request): return planned(operation="add_worktree", worktree_path=path, branch=branch)
+    try: worktree_add(clone, path, branch, create_branch=False)
+    except CommandError as exc: return fail("worktree_add_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="add_worktree", error=str(exc), mutated=False)
+    return ok(status="added", operation="add_worktree", worktree_path=path, branch=branch, mutated=True)
+
+
+def verify_worktree_head(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "verify_worktree_head", "add_worktree")
+    if terminal: return terminal
+    idle = upstream_noop(request, "add_worktree")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_worktree_head")
+    data = input_of(request); path = str(data.get("worktree_path") or ""); expected = str(data.get("base_head") or cond_get(request, "base_head", "read_base_ref") or "")
+    try: head = rev_parse(path)
+    except CommandError as exc: return fail("worktree_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="verify_worktree_head", error=str(exc))
+    if expected and head != expected: return fail("worktree_base_mismatch", failure_class="terminal", retry_safe=False, operation="verify_worktree_head", head=head, base_head=expected)
+    return ok(status="verified", operation="verify_worktree_head", head=head)
+
+
+def read_omp_preconditions(request: Request) -> Result:
+    idle = upstream_noop(request, "verify_worktree_head")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_omp_preconditions")
+    data = input_of(request); path, branch = str(data.get("worktree_path") or ""), str(data.get("branch") or "")
+    if not path or not branch: return fail("missing_worktree_or_branch", failure_class="terminal", retry_safe=False, operation="read_omp_preconditions")
+    try: top, actual = git(["rev-parse", "--show-toplevel"], cwd=path), git(["branch", "--show-current"], cwd=path)
+    except CommandError as exc: return fail("omp_precondition_failed", failure_class="terminal", retry_safe=False, operation="read_omp_preconditions", error=str(exc))
+    if Path(top).resolve() != Path(path).resolve(): return fail("omp_worktree_confinement", failure_class="terminal", retry_safe=False, operation="read_omp_preconditions", top_level=top)
+    if actual != branch: return fail("omp_branch_mismatch", failure_class="terminal", retry_safe=False, operation="read_omp_preconditions", expected_branch=branch, actual_branch=actual)
+    try: head = rev_parse(path)
+    except CommandError as exc: return fail("omp_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_omp_preconditions", error=str(exc))
+    return ok(status="ready", operation="read_omp_preconditions", pre_head=head, branch=actual, worktree_path=path)
+
+
+def invoke_omp(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "invoke_omp", "read_omp_preconditions")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_omp_preconditions", "add_worktree")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="invoke_omp")
+    data, cfg = input_of(request), cfg_of(request); path, prompt = str(data.get("worktree_path") or ""), str(data.get("prompt") or "")
+    if not path or not prompt: return fail("missing_worktree_or_prompt", failure_class="terminal", retry_safe=False, operation="invoke_omp")
+    try: out = run_omp(prompt=prompt, cwd=path, command=str(data.get("command") or cfg.get("executor_command") or "omp"), model=str(data.get("model") or cfg.get("model") or "omniroute/omp/default"), thinking=str(data.get("thinking") or cfg.get("thinking") or "medium"), timeout=float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800), dry_run=dry_run_flag(request))
+    except CommandError as exc: return fail("omp_failed", failure_class="terminal", retry_safe=False, operation="invoke_omp", error=str(exc), mutated=True)
+    return planned(operation="invoke_omp", omp=out) if dry_run_flag(request) else ok(status="invoked", operation="invoke_omp", omp=out, mutated=True)
+
+
+def verify_omp_postconditions(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "verify_omp_postconditions", "invoke_omp")
+    if terminal: return terminal
+    idle = upstream_noop(request, "invoke_omp", "read_omp_preconditions")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_omp_postconditions")
+    data = input_of(request); path = str(data.get("worktree_path") or ""); before = str(data.get("pre_head") or cond_get(request, "pre_head", "read_omp_preconditions") or "")
+    try: head = rev_parse(path); paths = _escaped_omp_paths(path, _omp_diff_paths(path))
+    except (CommandError, OSError, ValueError) as exc: return fail("omp_postcondition_failed", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", error=str(exc))
+    if paths: return fail("omp_diff_path_escape", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", paths=paths)
+    if before and head == before: return fail("omp_head_unchanged", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", head=head, pre_head=before)
+    return ok(status="verified", operation="verify_omp_postconditions", head=head)
+
+
+def read_worktree_head(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_worktree_head", "verify_omp_postconditions")
+    if terminal: return terminal
+    idle = upstream_noop(request, "verify_omp_postconditions")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_worktree_head")
+    path = str(input_of(request).get("worktree_path") or "")
+    try: head = rev_parse(path)
+    except CommandError as exc: return fail("worktree_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_worktree_head", error=str(exc))
+    return ok(status="read", operation="read_worktree_head", head=head)
+
+
+def read_base_head(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_base_head", "read_worktree_head")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_worktree_head")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_base_head")
+    return read_base_ref(request)
+
+
+def decide_branch_has_commits(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "decide_branch_has_commits", "read_worktree_head", "read_base_head", "read_base_ref")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_worktree_head", "read_base_head", "read_base_ref", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "select_dispatch_task", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="decide_branch_has_commits")
+    head = cond_get(request, "head", "read_worktree_head"); base = cond_get(request, "base_head", "read_base_head", "read_base_ref") or cond_get(request, "base", "read_base_head")
+    if not head or not base: return fail("missing_head_or_base", failure_class="terminal", retry_safe=False, operation="decide_branch_has_commits")
+    if head == base: return fail("no_new_commits", failure_class="terminal", retry_safe=False, operation="decide_branch_has_commits", head=head, base=base)
+    return ok(status="has_commits", operation="decide_branch_has_commits", head=head, base=base)
+
+
+def read_push_head(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_push_head", "decide_branch_has_commits", "verify_omp_postconditions", "read_worktree_inventory", "read_branch_provenance")
+    if terminal: return terminal
+    idle = upstream_noop(request, "decide_branch_has_commits", "verify_omp_postconditions", "read_worktree_inventory", "read_branch_provenance")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_push_head")
+    data = input_of(request); path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "read_worktree_inventory") or ""); branch = str(data.get("branch") or cond_get(request, "branch", "read_branch_provenance") or "")
+    try: head = rev_parse(path)
+    except CommandError as exc: return fail("push_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_push_head", error=str(exc))
+    return ok(status="read", operation="read_push_head", worktree_path=path, branch=branch, local_oid=head)
+
+
+def push_branch(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "push_branch", "read_push_head")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_push_head")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="push_branch")
+    data = input_of(request); path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "read_push_head") or ""); branch = str(data.get("branch") or cond_get(request, "branch", "read_push_head") or "")
+    if not path or not branch: return fail("missing_worktree_or_branch", failure_class="terminal", retry_safe=False, operation="push_branch")
+    if dry_run_flag(request): return planned(operation="push_branch", branch=branch, remote="origin")
+    try: out = git_push_branch(path, branch, set_upstream=True)
+    except CommandError as exc: return fail("push_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="push_branch", error=str(exc), mutated=True)
+    return ok(status="pushed", operation="push_branch", branch=branch, stdout_tail=(out or "")[-400:], mutated=True)
+
+
+def read_pushed_ref(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_pushed_ref", "push_branch", "read_push_head")
+    if terminal: return terminal
+    idle = upstream_noop(request, "push_branch", "read_push_head")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_pushed_ref")
+    data = input_of(request); path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "read_push_head") or ""); branch = str(data.get("branch") or cond_get(request, "branch", "read_push_head") or "")
+    try: line = git(["ls-remote", "origin", f"refs/heads/{branch}"], cwd=path); oid = line.split()[0] if line.split() else ""
+    except CommandError as exc: return fail("push_readback_failed", failure_class="retryable_read", retry_safe=True, operation="read_pushed_ref", error=str(exc))
+    return ok(status="read", operation="read_pushed_ref", remote_oid=oid, branch=branch)
+
+
+def verify_push_oid(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "verify_push_oid", "read_pushed_ref", "read_push_head")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_pushed_ref", "read_push_head", "push_branch", "decide_branch_has_commits", "verify_omp_postconditions", "read_worktree_head", "read_base_head", "read_base_ref", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "select_dispatch_task", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_push_oid")
+    local = cond_get(request, "local_oid", "read_push_head") or input_of(request).get("local_oid"); remote = cond_get(request, "remote_oid", "read_pushed_ref") or input_of(request).get("remote_oid")
+    if not local or not remote: return fail("missing_push_oids", failure_class="terminal", retry_safe=False, operation="verify_push_oid")
+    if local != remote: return fail("push_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_push_oid", local_oid=local, remote_oid=remote, mutated=True)
+    return ok(status="verified", operation="verify_push_oid", local_oid=local, remote_oid=remote)
+
+
+def read_open_pr_for_branch(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_open_pr_for_branch", "verify_push_oid")
+    if terminal: return terminal
+    idle = upstream_noop(request, "verify_push_oid")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_open_pr_for_branch")
+    import json
+    data, cfg = input_of(request), cfg_of(request); repo, branch, base = str(data.get("repo") or ""), str(data.get("branch") or ""), str(data.get("base_branch") or cfg.get("base_branch") or "main"); gh = str(cfg.get("gh_cli") or "gh")
+    try: proc = run_cmd([gh, "pr", "list", "--repo", repo, "--head", branch, "--base", base, "--state", "open", "--json", "number,url,baseRefName,headRefName"]); rows = json.loads(proc.stdout or "[]")
+    except (CommandError, json.JSONDecodeError) as exc: return fail("pr_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_open_pr_for_branch", error=str(exc))
+    if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows): return fail("invalid_pr_list", failure_class="terminal", retry_safe=False, operation="read_open_pr_for_branch")
+    return ok(status="read", operation="read_open_pr_for_branch", prs=rows, repo=repo, branch=branch, base=base)
+
+
+def decide_existing_pr(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "decide_existing_pr", "read_open_pr_for_branch")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_open_pr_for_branch")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="decide_existing_pr")
+    rows = cond_get(request, "prs", "read_open_pr_for_branch") or []
+    if len(rows) > 1: return fail("ambiguous_existing_prs", failure_class="terminal", retry_safe=False, operation="decide_existing_pr", prs=rows)
+    return ok(status="exists" if rows else "create", operation="decide_existing_pr", existing=rows[0] if rows else None, should_create=not bool(rows))
+
+
+def create_pull_request(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "create_pull_request", "decide_existing_pr")
+    if terminal: return terminal
+    idle = upstream_noop(request, "decide_existing_pr")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="create_pull_request")
+    data, cfg = input_of(request), cfg_of(request); decision = cond_blob(request, "decide_existing_pr"); repo, branch, base = str(data.get("repo") or ""), str(data.get("branch") or ""), str(data.get("base_branch") or cfg.get("base_branch") or "main")
+    if not decision.get("should_create", True): return ok(status="exists", operation="create_pull_request", **(decision.get("existing") or {}), mutated=False)
+    if dry_run_flag(request): return planned(operation="create_pull_request", repo=repo, branch=branch, base=base)
+    gh = str(cfg.get("gh_cli") or "gh"); title = str(data.get("title") or f"fix: {repo}#{data.get('issue', '')}"); body = str(data.get("body") or "Automated fix via lokay.")
+    try: proc = run_cmd([gh, "pr", "create", "--repo", repo, "--base", base, "--head", branch, "--title", title, "--body", body], timeout=120)
+    except CommandError as exc: return fail("pr_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_pull_request", error=str(exc), mutated=True)
+    return ok(status="created", operation="create_pull_request", repo=repo, branch=branch, base=base, stdout=(proc.stdout or "")[-400:], mutated=True)
+
+
+def reconcile_pull_request(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "reconcile_pull_request", "create_pull_request")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "create_pull_request")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="reconcile_pull_request")
+    return read_open_pr_for_branch(request) | {"status": "reconciled", "operation": "reconcile_pull_request"}
+
+
+def normalize_pr_labels(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "normalize_pr_labels", "reconcile_pull_request")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "reconcile_pull_request")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="normalize_pr_labels")
+    labels = input_of(request).get("labels") or ["ai:generated", "ai:pr-opened"]
+    if not isinstance(labels, list) or any(not str(label).strip() for label in labels): return fail("invalid_pr_labels", failure_class="terminal", retry_safe=False, operation="normalize_pr_labels")
+    normalized = list(dict.fromkeys(str(label).strip() for label in labels))
+    return ok(status="normalized", operation="normalize_pr_labels", labels=normalized)
+
+
+def add_pr_label(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "add_pr_label", "normalize_pr_labels")
+    if terminal: return terminal
+    idle = upstream_noop(request, "normalize_pr_labels")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="add_pr_label")
+    data, cfg = input_of(request), cfg_of(request); repo, number, label = str(data.get("repo") or ""), int(data.get("number") or data.get("pr_number") or 0), str(data.get("label") or "")
+    if not repo or not number or not label: return fail("missing_pr_label_inputs", failure_class="terminal", retry_safe=False, operation="add_pr_label")
+    if dry_run_flag(request): return planned(operation="add_pr_label", repo=repo, number=number, label=label)
+    try: run_cmd([str(cfg.get("gh_cli") or "gh"), "pr", "edit", str(number), "--repo", repo, "--add-label", label], timeout=60)
+    except CommandError as exc: return fail("pr_label_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="add_pr_label", error=str(exc), label=label, mutated=True)
+    return ok(status="added", operation="add_pr_label", repo=repo, number=number, label=label, mutated=True)
+
+
+def aggregate_pr_label_results(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "aggregate_pr_label_results", "add_pr_label")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "add_pr_label")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="aggregate_pr_label_results")
+    results = input_of(request).get("results") or []
+    if not isinstance(results, list): return fail("missing_pr_label_results", failure_class="terminal", retry_safe=False, operation="aggregate_pr_label_results")
+    failed = [r for r in results if isinstance(r, dict) and r.get("ok") is False]
+    if failed: return fail("partial_labels_failed" if len(failed) < len(results) else "all_labels_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="aggregate_pr_label_results", results=results, mutated=bool(results))
+    return ok(status="labeled", operation="aggregate_pr_label_results", results=results, mutated=bool(results))
+
+
+def add_issue_label(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "add_issue_label", "aggregate_pr_label_results")
+    if terminal: return terminal
+    idle = upstream_noop(request, "aggregate_pr_label_results")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="add_issue_label")
+    data, cfg = input_of(request), cfg_of(request); repo, issue, label = str(data.get("repo") or ""), int(data.get("issue") or data.get("number") or 0), str(data.get("label") or "")
+    if not repo or not issue or not label: return fail("missing_issue_label_inputs", failure_class="terminal", retry_safe=False, operation="add_issue_label")
+    if dry_run_flag(request): return planned(operation="add_issue_label", repo=repo, issue=issue, label=label)
+    try: run_cmd([str(cfg.get("gh_cli") or "gh"), "issue", "edit", str(issue), "--repo", repo, "--add-label", label], timeout=60)
+    except CommandError as exc: return fail("issue_label_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="add_issue_label", error=str(exc), label=label, mutated=True)
+    return ok(status="added", operation="add_issue_label", repo=repo, issue=issue, label=label, mutated=True)
+
+
+def aggregate_issue_label_results(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "aggregate_issue_label_results", "add_issue_label")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "add_issue_label")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="aggregate_issue_label_results")
+    results = input_of(request).get("results") or []
+    if not isinstance(results, list): return fail("missing_issue_label_results", failure_class="terminal", retry_safe=False, operation="aggregate_issue_label_results")
+    failed = [r for r in results if isinstance(r, dict) and r.get("ok") is False]
+    if failed: return fail("partial_labels_failed" if len(failed) < len(results) else "all_labels_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="aggregate_issue_label_results", results=results, mutated=bool(results))
+    return ok(status="labeled", operation="aggregate_issue_label_results", results=results, mutated=bool(results))
+
+
+def build_dispatch_receipt(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "build_dispatch_receipt", "aggregate_issue_label_results")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "aggregate_issue_label_results")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="build_dispatch_receipt")
+    data = input_of(request); return ok(status="built", operation="build_dispatch_receipt", payload=dict(data.get("payload") or {}))
+
+
+def publish_dispatch_receipt(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "publish_dispatch_receipt", "build_dispatch_receipt")
+    if terminal: return terminal
+    idle = upstream_noop(request, "build_dispatch_receipt")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="publish_dispatch_receipt")
+    data = input_of(request)
+    path = str(data.get("receipt_path") or cfg_of(request).get("receipt_path") or "")
+    payload = data.get("payload") or cond_get(request, "payload", "build_dispatch_receipt")
+    if not path or not isinstance(payload, dict):
+        return fail("missing_receipt_inputs", failure_class="terminal", retry_safe=False, operation="publish_dispatch_receipt")
+    if dry_run_flag(request):
+        return planned(operation="publish_dispatch_receipt", receipt_path=path, payload=payload)
+    try:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except (OSError, TypeError, ValueError) as exc:
+        return fail("receipt_write_failed", failure_class="retryable", retry_safe=True, operation="publish_dispatch_receipt", receipt_path=path, error=str(exc), mutated=True)
+    return ok(status="published", operation="publish_dispatch_receipt", receipt_path=path, payload=payload, mutated=True)
+
+
+def verify_dispatch_receipt(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt")
+    if terminal: return terminal
+    idle = upstream_noop(request, "publish_dispatch_receipt", "build_dispatch_receipt")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_dispatch_receipt")
+    data = input_of(request); path = str(data.get("receipt_path") or cfg_of(request).get("receipt_path") or ""); payload = data.get("payload") or cond_get(request, "payload", "build_dispatch_receipt")
+    if not path or not Path(path).is_file(): return fail("receipt_missing", failure_class="terminal", retry_safe=False, operation="verify_dispatch_receipt")
+    try: actual = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc: return fail("receipt_readback_failed", failure_class="terminal", retry_safe=False, operation="verify_dispatch_receipt", error=str(exc))
+    if payload and actual != payload: return fail("receipt_conflict", failure_class="terminal", retry_safe=False, operation="verify_dispatch_receipt")
+    return ok(status="verified", operation="verify_dispatch_receipt", receipt_path=path)

@@ -45,7 +45,7 @@ require_live = sys.argv[3] == "1"
 deployment_root = pathlib.Path(sys.argv[4]).expanduser().resolve()
 errors = []
 plist_relative = "launchd/com.mikolaj92.lokay.fala-tick-all.plist"
-pinned_commit = "69bc2ec9d4cdf61773114847c0c582fb2652296d"
+pinned_commit = "b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
 
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
@@ -94,7 +94,7 @@ try:
         errors.append("candidate-id-path-mismatch")
     if candidate_id != expected_id:
         errors.append("manifest-hash-mismatch")
-    stable_keys = {"schema", "mode", "plugin_commit", "fala_tag", "fala_commit", "lock_hash", "config_path", "config_hash", "db_path", "metadata_path", "lock_path", "config_artifact_path", "revision_path", "policy"}
+    stable_keys = {"schema", "mode", "plugin_commit", "fala_tag", "fala_commit", "lock_hash", "config_path", "config_hash", "db_path", "metadata_path", "lock_path", "config_artifact_path", "revision_path", "policy", "repos"}
     expected_manifest_keys = stable_keys | {"candidate_id", "identity", "created_at", "program_arguments", "artifacts", "runtime_identity"}
     if set(manifest) != expected_manifest_keys:
         errors.append("manifest-key-set-mismatch")
@@ -105,17 +105,17 @@ try:
             errors.append(f"identity-mismatch:{key}")
     policy = manifest.get("policy")
     policy_keys = {"automerge", "require_human_approval", "require_checks", "require_test_evidence", "executor_enabled"}
-    safe_policy = {
-        "automerge": False,
-        "require_human_approval": True,
+    promotion_policy = {
+        "automerge": True,
+        "require_human_approval": False,
         "require_checks": True,
         "require_test_evidence": True,
-        "executor_enabled": False,
+        "executor_enabled": True,
     }
     if not isinstance(policy, dict) or set(policy) != policy_keys or any(not isinstance(policy.get(key), bool) for key in policy_keys):
         errors.append("identity-policy-invalid")
         policy = policy if isinstance(policy, dict) else {}
-    elif policy != safe_policy:
+    elif policy != promotion_policy:
         errors.append("identity-policy-unsafe")
     try:
         expected_policy = policy_from_toml_text((candidate / "source" / "config.toml").read_text(encoding="utf-8"))
@@ -166,7 +166,7 @@ try:
     for relative, expected in artifacts.items():
         if (not isinstance(relative, str) or not relative or not isinstance(expected, dict) or set(expected) != {"sha256", "bytes"} or not isinstance(expected.get("sha256"), str) or len(expected["sha256"]) != 64 or not isinstance(expected.get("bytes"), int) or expected["bytes"] < 0):
             errors.append(f"identity-artifact-mismatch:{relative}")
-    if manifest.get("fala_tag") != "0.7.9" or manifest.get("fala_commit") != pinned_commit:
+    if manifest.get("fala_tag") != "0.7.15" or manifest.get("fala_commit") != pinned_commit:
         errors.append("fala-provenance-invalid")
     candidate_plist = candidate / plist_relative
     candidate_bytes = candidate_plist.read_bytes()

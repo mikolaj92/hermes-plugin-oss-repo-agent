@@ -127,7 +127,7 @@ else
   managed_python="$DEPLOYMENT_ROOT/runtime/$(basename "$current_target")/.venv/bin/python"
   if [[ "$managed_python" == /* && -x "$managed_python" ]] && "$managed_python" -c 'import sys,tomllib; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1 && fala_check="$("$managed_python" - "$current_target" "$FALA_PLIST" "$FALA_REQUIRE_LIVE" "$DEPLOYMENT_ROOT" <<'PY'
 import hashlib, json, pathlib, plistlib, sys, tomllib
-cand=pathlib.Path(sys.argv[1]).resolve(); installed=pathlib.Path(sys.argv[2]).expanduser(); require_live=sys.argv[3]=="1"; root=pathlib.Path(sys.argv[4]).expanduser().resolve(); errors=[]; plist_relative="launchd/com.mikolaj92.lokay.fala-tick-all.plist"; pinned="69bc2ec9d4cdf61773114847c0c582fb2652296d"
+cand=pathlib.Path(sys.argv[1]).resolve(); installed=pathlib.Path(sys.argv[2]).expanduser(); require_live=sys.argv[3]=="1"; root=pathlib.Path(sys.argv[4]).expanduser().resolve(); errors=[]; plist_relative="launchd/com.mikolaj92.lokay.fala-tick-all.plist"; pinned="b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
 sha=lambda data: hashlib.sha256(data).hexdigest()
 def artifact_path(relative):
     if not isinstance(relative,str) or not relative or "\x00" in relative or pathlib.Path(relative).is_absolute() or ".." in pathlib.Path(relative).parts:
@@ -149,15 +149,15 @@ try:
     if not isinstance(identity,dict): errors.append("manifest-identity-invalid"); identity={}
     if cid != cand.name: errors.append("candidate-id-path-mismatch")
     if sha((json.dumps(identity,sort_keys=True,separators=(",",":"))+"\n").encode()) != cid: errors.append("manifest-hash-mismatch")
-    stable_keys={"schema","mode","plugin_commit","fala_tag","fala_commit","lock_hash","config_path","config_hash","db_path","metadata_path","lock_path","config_artifact_path","revision_path","policy"}
+    stable_keys={"schema","mode","plugin_commit","fala_tag","fala_commit","lock_hash","config_path","config_hash","db_path","metadata_path","lock_path","config_artifact_path","revision_path","policy","repos"}
     expected_manifest_keys=stable_keys|{"candidate_id","identity","created_at","program_arguments","artifacts","runtime_identity"}
     if set(manifest)!=expected_manifest_keys: errors.append("manifest-key-set-mismatch")
     if set(identity)!=stable_keys: errors.append("manifest-identity-key-set-mismatch")
     for key,expected in identity.items():
         if key in stable_keys and manifest.get(key)!=expected: errors.append(f"identity-mismatch:{key}")
-    policy=manifest.get("policy"); policy_keys={"automerge","require_human_approval","require_checks","require_test_evidence","executor_enabled"}
+    policy=manifest.get("policy"); policy_keys={"automerge","require_human_approval","require_checks","require_test_evidence","executor_enabled"}; promotion_policy={"automerge":True,"require_human_approval":False,"require_checks":True,"require_test_evidence":True,"executor_enabled":True}
     if not isinstance(policy,dict) or set(policy)!=policy_keys or any(not isinstance(policy.get(key),bool) for key in policy_keys): errors.append("identity-policy-invalid")
-    elif policy!={"automerge":False,"require_human_approval":True,"require_checks":True,"require_test_evidence":True,"executor_enabled":False}: errors.append("identity-policy-unsafe")
+    elif policy!=promotion_policy: errors.append("identity-policy-unsafe")
     try: expected_policy=policy_from_toml_text((cand/"source"/"config.toml").read_text(encoding="utf-8"))
     except (OSError,UnicodeError,ValueError,tomllib.TOMLDecodeError): errors.append("identity-policy-config-unreadable"); expected_policy=None
     if expected_policy is not None and isinstance(policy,dict) and set(policy)==policy_keys and all(isinstance(policy.get(key),bool) for key in policy_keys) and policy!=expected_policy: errors.append("identity-policy-config-mismatch")
@@ -181,7 +181,7 @@ try:
     if plist_relative not in artifacts: errors.append("identity-artifact-key-set-mismatch")
     for relative,expected in artifacts.items():
         if (not isinstance(relative,str) or not relative or not isinstance(expected,dict) or set(expected)!={"sha256","bytes"} or not isinstance(expected.get("sha256"),str) or len(expected["sha256"])!=64 or not isinstance(expected.get("bytes"),int) or expected["bytes"]<0): errors.append(f"identity-artifact-mismatch:{relative}")
-    if manifest.get("fala_tag") != "0.7.9" or manifest.get("fala_commit") != pinned: errors.append("fala-provenance-invalid")
+    if manifest.get("fala_tag") != "0.7.15" or manifest.get("fala_commit") != pinned: errors.append("fala-provenance-invalid")
     cp=cand/plist_relative; cb=cp.read_bytes(); doc=plistlib.loads(cb); ib=installed.read_bytes(); plistlib.loads(ib); ph=sha(cb)
     runtime=manifest.get("runtime_identity")
     runtime_keys={"program_arguments","working_directory","standard_out_path","standard_error_path","environment_variables","start_interval","run_at_load","process_type","limit_load_to_session_type","plist_sha256"}

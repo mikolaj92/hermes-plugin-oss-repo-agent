@@ -133,7 +133,10 @@ class LokayInitAndDryRunTests(unittest.TestCase):
         self.assertTrue(example.exists())
         loaded = self.config.load_config(str(example))
         self.assertEqual(loaded.mode, "live")
-        self.assertFalse(loaded.automerge)
+        self.assertTrue(loaded.automerge)
+        self.assertFalse(loaded.require_human_approval)
+        self.assertTrue(loaded.require_checks)
+        self.assertTrue(loaded.require_test_evidence)
         self.assertTrue(loaded.executor.enabled)
         self.assertEqual(loaded.executor.command, "omp")
         self.assertTrue(loaded.repos)
@@ -142,7 +145,10 @@ class LokayInitAndDryRunTests(unittest.TestCase):
         example = PLUGIN_ROOT / "examples" / "config.example.yaml"
         loaded = self.config.load_config(str(example))
         self.assertEqual(loaded.mode, "live")
-        self.assertFalse(loaded.automerge)
+        self.assertTrue(loaded.automerge)
+        self.assertFalse(loaded.require_human_approval)
+        self.assertTrue(loaded.require_checks)
+        self.assertTrue(loaded.require_test_evidence)
         self.assertTrue(loaded.executor.enabled)
         self.assertEqual(loaded.executor.command, "omp")
     def test_docs_and_ci_are_present_for_three_minute_path(self):

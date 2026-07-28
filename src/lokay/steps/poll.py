@@ -6,134 +6,163 @@ from typing import Any
 from lokay.envelope import Request, Result
 
 from lokay.adapters_cli import CommandError, gh_json
-from lokay.envelope import cfg_of, dry_run_flag, fail, input_of, ok
+from lokay.envelope import cfg_of, cond_blob, dry_run_flag, fail, input_of, ok, terminal_upstream
 
 
-def _issue_eligible(issue: dict[str, Any], *, ready_label: str, assignee: str) -> tuple[bool, str]:
-    labels = {
-        str(item.get("name") or "")
-        for item in (issue.get("labels") or [])
-        if isinstance(item, dict)
+
+
+def _poll_selected(request: Request) -> dict[str, Any]:
+    data = input_of(request)
+    for key in ("read_open_issues", "issues", "read"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            return dict(value)
+    return cond_blob(request, "read_open_issues")
+
+
+def _repo_entries(data: dict[str, Any], cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return configured repository contexts without collapsing the list."""
+    values = data.get("repos")
+    if not isinstance(values, list):
+        values = cfg.get("repos")
+    entries = [dict(value) for value in values if isinstance(value, dict)] if isinstance(values, list) else []
+    if entries:
+        requested = str(data.get("repo") or "").strip()
+        if requested:
+            entries = [entry for entry in entries if str(entry.get("repo") or "").strip() == requested]
+        return entries
+    entry = data.get("repo") if isinstance(data.get("repo"), dict) else data
+    return [dict(entry)] if isinstance(entry, dict) else []
+
+
+def _repo_context(entry: dict[str, Any], data: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "repo": str(entry.get("repo") or data.get("repo") or cfg.get("repo") or "").strip(),
+        "board": str(entry.get("board") or data.get("board") or cfg.get("board") or ""),
+        "clone_path": str(entry.get("clone_path") or data.get("clone_path") or ""),
+        "priority": entry.get("priority", data.get("priority", 0)),
     }
-    if "ai:blocked" in labels:
-        return False, "ai:blocked"
-    if "ai:in-progress" in labels:
-        return False, "ai:in-progress"
-    if "ai:pr-opened" in labels:
-        return False, "ai:pr-opened"
-    if ready_label not in labels:
-        return False, f"missing:{ready_label}"
-
-    assignees = [
-        str(item.get("login") or "")
-        for item in (issue.get("assignees") or [])
-        if isinstance(item, dict)
-    ]
-    assignees = [a for a in assignees if a]
-    if assignees and assignee not in assignees:
-        return False, f"foreign_assignee:{','.join(assignees)}"
-    return True, "ok"
 
 
-def poll_eligible_issues(request: Request) -> Result:
-    """Atomic: read eligible GitHub issues (gh only)."""
+def read_open_issues(request: Request) -> Result:
+    """Read and aggregate open issues for every configured repository."""
     cfg = cfg_of(request)
     data = input_of(request)
-    repos = data.get("repos") or []
-    limit = int(data.get("limit") or cfg.get("limit") or 10)
-    ready_label = str(cfg.get("ready_label") or "ai:ready")
-    assignee = str(cfg.get("assignee") or "mikolaj92")
-    gh = str(cfg.get("gh_cli") or "gh")
-    dry_run = dry_run_flag(request)
-
-    eligible: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
-
-    for entry in repos:
-        repo = str(entry.get("repo") or "")
-        board = str(entry.get("board") or "")
-        if not repo:
-            continue
+    entries = _repo_entries(data, cfg)
+    if not entries:
+        return fail("missing_repo", failure_class="terminal", retry_safe=False, repository_results=[])
+    limit_value = data.get("limit") or cfg.get("limit") or 10
+    try:
+        limit = int(limit_value)
+    except (TypeError, ValueError):
+        return fail("invalid_limit", failure_class="terminal", retry_safe=False, repository_results=[])
+    results: list[dict[str, Any]] = []
+    aggregate: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for entry in entries:
+        context = _repo_context(entry, data, cfg)
+        repo = context["repo"]
         try:
-            issues = gh_json(
-                [
-                    "issue",
-                    "list",
-                    "--repo",
-                    repo,
-                    "--state",
-                    "open",
-                    "--limit",
-                    str(limit),
-                    "--json",
-                    "number,title,body,url,labels,assignees",
-                ],
-                gh=gh,
-            )
+            context["limit"] = int(entry.get("limit") or limit)
+        except (TypeError, ValueError) as exc:
+            failure = {**context, "reason": "invalid_limit", "failure_class": "terminal", "retry_safe": False, "detail": str(exc)}
+            failures.append(failure)
+            results.append(failure)
+            continue
+        if not repo:
+            failure = {**context, "reason": "missing_repo", "failure_class": "terminal", "retry_safe": False}
+            failures.append(failure)
+            results.append(failure)
+            continue
+        gh = str(entry.get("gh_cli") or data.get("gh_cli") or cfg.get("gh_cli") or "gh")
+        try:
+            issues = gh_json(["issue", "list", "--repo", repo, "--state", "open", "--limit", str(context["limit"]), "--json", "number,title,body,url,labels,assignees"], gh=gh)
+            if not isinstance(issues, list) or any(not isinstance(issue, dict) for issue in issues):
+                raise ValueError("malformed_gh_json")
         except CommandError as exc:
-            errors.append({"repo": repo, "error": str(exc), "stderr": exc.stderr[-500:], "failure_class": "retryable_read", "retry_safe": True, "mutated": False})
+            failure = {**context, "reason": "open_issue_read_failed", "failure_class": "retryable_read", "retry_safe": True, "error": str(exc), "stderr": exc.stderr[-500:]}
+            failures.append(failure)
+            results.append(failure)
             continue
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            errors.append({"repo": repo, "error": "malformed_gh_json", "detail": str(exc), "failure_class": "terminal", "retry_safe": False, "mutated": False})
+            failure = {**context, "reason": "open_issue_read_failed", "failure_class": "terminal", "retry_safe": False, "error": "malformed_gh_json", "detail": str(exc)}
+            failures.append(failure)
+            results.append(failure)
             continue
-        if not isinstance(issues, list) or any(not isinstance(issue, dict) for issue in issues):
-            errors.append({"repo": repo, "error": "malformed_gh_json", "failure_class": "terminal", "retry_safe": False, "mutated": False})
-            continue
-        for issue in issues:
-            ok_flag, reason = _issue_eligible(issue, ready_label=ready_label, assignee=assignee)
-            try:
-                row = {
-                    "repo": repo,
-                    "board": board,
-                    "clone_path": str(entry.get("clone_path") or ""),
-                    "priority": entry.get("priority", 0),
-                    "number": int(issue.get("number") or 0),
-                    "title": str(issue.get("title") or ""),
-                    "body": str(issue.get("body") or ""),
-                    "url": str(issue.get("url") or ""),
-                    "labels": sorted(str(x.get("name") or "") for x in (issue.get("labels") or []) if isinstance(x, dict)),
-                    "assignees": [str(x.get("login") or "") for x in (issue.get("assignees") or []) if isinstance(x, dict) and x.get("login")],
-                }
-            except (TypeError, ValueError, AttributeError) as exc:
-                errors.append({"repo": repo, "error": "malformed_issue", "detail": str(exc), "failure_class": "terminal", "retry_safe": False, "mutated": False})
-                continue
-            if ok_flag:
-                eligible.append(row)
-            else:
-                skipped.append({**row, "reason": reason})
+        rows = [{**issue, **context} for issue in issues]
+        aggregate.extend(rows)
+        results.append({**context, "status": "read", "issues": rows, "count": len(rows)})
+    if failures:
+        return fail("open_issue_read_failed", failure_class="terminal", retry_safe=False, failures=failures, repository_results=results, issues=[])
+    return ok(status="read", dry_run=dry_run_flag(request), issues=aggregate, count=len(aggregate), repositories=[_repo_context(entry, data, cfg) for entry in entries], repository_results=results)
 
-    selected = eligible[0] if eligible else None
-    # An empty configured repository set is a controlled no-op. If every
-    # configured repository was attempted and failed to read, surface the
-    # outage as retryable instead of masquerading it as an empty queue.
-    attempted = [entry for entry in repos if str(entry.get("repo") or "")]
-    if repos and errors and len(errors) == len(attempted):
-        malformed = any(error.get("failure_class") == "terminal" for error in errors)
-        return fail(
-            "poll_failed",
-            failure_class="terminal" if malformed else "retryable_read",
-            retry_safe=not malformed,
-            dry_run=dry_run,
-            error_count=len(errors),
-            eligible_count=0,
-            skipped_count=len(skipped),
-            eligible=[],
-            skipped=skipped[:50],
-            errors=errors,
-            selected=None,
-            config={"ready_label": ready_label, "assignee": assignee, "limit": limit},
-        )
-    return ok(
-        status="polled",
-        dry_run=dry_run,
-        eligible_count=len(eligible),
-        skipped_count=len(skipped),
-        error_count=len(errors),
-        eligible=eligible,
-        skipped=skipped[:50],
-        errors=errors,
-        selected=selected,
-        # keep nested config snapshot for downstream dry-run defaults
-        config={"ready_label": ready_label, "assignee": assignee, "limit": limit},
-    )
+
+def normalize_issue_rows(request: Request) -> Result:
+    """Purely normalize an aggregated open-issues response into routed rows."""
+    terminal = terminal_upstream(request, "normalize_issue_rows", "read_open_issues")
+    if terminal:
+        return terminal
+    data = input_of(request)
+    source = _poll_selected(request)
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else source.get("issues")
+    if not isinstance(issues, list) or any(not isinstance(issue, dict) for issue in issues):
+        return fail("malformed_issue_rows", failure_class="terminal", retry_safe=False, mutated=False)
+    rows = []
+    for issue in issues:
+        try:
+            rows.append({
+                "repo": str(issue.get("repo") or source.get("repo") or data.get("repo") or ""),
+                "board": str(issue.get("board") or source.get("board") or data.get("board") or ""),
+                "clone_path": str(issue.get("clone_path") or source.get("clone_path") or data.get("clone_path") or ""),
+                "priority": issue.get("priority", source.get("priority", data.get("priority", 0))),
+                "number": int(issue.get("number") or 0),
+                "title": str(issue.get("title") or ""),
+                "body": str(issue.get("body") or ""),
+                "url": str(issue.get("url") or ""),
+                "labels": sorted(str(x.get("name") or "") for x in (issue.get("labels") or []) if isinstance(x, dict)),
+                "assignees": [str(x.get("login") or "") for x in (issue.get("assignees") or []) if isinstance(x, dict) and x.get("login")],
+            })
+        except (TypeError, ValueError, AttributeError) as exc:
+            return fail("malformed_issue_rows", failure_class="terminal", retry_safe=False, detail=str(exc), mutated=False)
+    return ok(status="normalized", rows=rows, repositories=source.get("repositories") or [], dry_run=dry_run_flag(request))
+
+
+def filter_issue_eligibility(request: Request) -> Result:
+    """Purely apply ready/assignee eligibility policy to normalized rows."""
+    terminal = terminal_upstream(request, "filter_issue_eligibility", "normalize_issue_rows")
+    if terminal:
+        return terminal
+    cfg = cfg_of(request); data = input_of(request); source = cond_blob(request, "normalize_issue_rows")
+    rows = data.get("rows") if isinstance(data.get("rows"), list) else source.get("rows")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return fail("malformed_issue_rows", failure_class="terminal", retry_safe=False, mutated=False)
+    ready = str(data.get("ready_label") or cfg.get("ready_label") or source.get("config", {}).get("ready_label") or "ai:ready")
+    assignee = str(data.get("assignee") or cfg.get("assignee") or source.get("config", {}).get("assignee") or "mikolaj92")
+    eligible=[]; skipped=[]
+    for row in rows:
+        labels = set(str(x) for x in (row.get("labels") or [])); reason="ok"; allowed=True
+        if "ai:blocked" in labels: allowed=False; reason="ai:blocked"
+        elif "ai:in-progress" in labels: allowed=False; reason="ai:in-progress"
+        elif "ai:pr-opened" in labels: allowed=False; reason="ai:pr-opened"
+        elif ready not in labels: allowed=False; reason=f"missing:{ready}"
+        people=[str(x) for x in (row.get("assignees") or []) if str(x)]
+        if allowed and people and assignee not in people: allowed=False; reason=f"foreign_assignee:{','.join(people)}"
+        (eligible if allowed else skipped).append(row if allowed else {**row, "reason": reason})
+    return ok(status="filtered", eligible=eligible, skipped=skipped, eligible_count=len(eligible), skipped_count=len(skipped), repositories=source.get("repositories") or [], ready_label=ready, assignee=assignee, dry_run=dry_run_flag(request))
+
+
+def select_issue_candidate(request: Request) -> Result:
+    """Pure deterministic candidate selection across repositories."""
+    terminal = terminal_upstream(request, "select_issue_candidate", "filter_issue_eligibility")
+    if terminal:
+        return terminal
+    data = input_of(request); blob = cond_blob(request, "filter_issue_eligibility")
+    eligible = data.get("eligible") if isinstance(data.get("eligible"), list) else blob.get("eligible", [])
+    if not isinstance(eligible, list) or any(not isinstance(row, dict) for row in eligible):
+        return fail("malformed_candidates", failure_class="terminal", retry_safe=False, mutated=False)
+    try:
+        ordered = sorted(eligible, key=lambda row: (int(row.get("priority", 0)), str(row.get("repo") or ""), int(row.get("number") or 0)))
+    except (TypeError, ValueError, AttributeError) as exc:
+        return fail("malformed_candidates", failure_class="terminal", retry_safe=False, detail=str(exc), mutated=False)
+    selected = ordered[0] if ordered else None
+    return ok(status="selected", selected=selected, eligible=ordered, eligible_count=len(ordered), skipped=blob.get("skipped", []), skipped_count=len(blob.get("skipped", [])), repositories=blob.get("repositories") or [], dry_run=dry_run_flag(request))

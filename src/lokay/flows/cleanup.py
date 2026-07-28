@@ -19,13 +19,8 @@ from lokay.flows.runtime import run_package_path_async
 _PACKAGE_PATH = Path(__file__).resolve().parents[3] / "fala-package.toml"
 _PROCESS_FAILURES = {"failed", "cancelled", "timed_out"}
 _CLEANUP_EFFECTORS = (
-    "parse_issue_from_branch",
-    "check_issue_closed",
-    "check_no_open_pr",
-    "remove_worktree",
-    "delete_local_fix_branch",
-    "release_active_issue_claim",
-    "write_cleanup_receipt",
+    "resolve_cleanup_branch_source", "parse_cleanup_issue_number", "check_issue_closed", "check_no_open_pr_for_branch",
+    "remove_worktree", "delete_local_branch", "release_claim_file", "build_cleanup_receipt",
 )
 
 def _resolve_repo_context(
@@ -135,14 +130,14 @@ async def run_cleanup_reconcile_flow(
         package_path=_PACKAGE_PATH,
         path_id="cleanup_reconcile",
         run_id="cleanup-reconcile",
-        effector_inputs={"reconcile_no_target_cleanup": step_input},
-        effector_configs={"reconcile_no_target_cleanup": step_config},
+        effector_inputs={key: step_input for key in ("validate_reconcile_identity", "read_local_receipts", "read_claim_process_evidence", "read_github_terminal_state", "read_remote_provenance", "read_reconcile_worktree_state", "decide_no_target_reconciliation", "update_task_receipt", "publish_reconcile_receipt", "verify_no_target_reconciliation")},
+        effector_configs={key: step_config for key in ("validate_reconcile_identity", "read_local_receipts", "read_claim_process_evidence", "read_github_terminal_state", "read_remote_provenance", "read_reconcile_worktree_state", "decide_no_target_reconciliation", "update_task_receipt", "publish_reconcile_receipt", "verify_no_target_reconciliation")},
         max_ticks=max_ticks,
         worker_id=worker_id,
     )
     processes = [process_summary(process) for process in result.processes]
     by_step = {summary["step_id"]: summary for summary in processes if summary.get("step_id")}
-    output = process_values(by_step.get("reconcile_no_target_cleanup") or {})
+    output = process_values(by_step.get("verify_no_target_reconciliation") or {})
     failed = bool(result.failed)
     if output:
         failed = failed or output.get("ok") is not True
@@ -276,22 +271,14 @@ async def run_cleanup_flow(
     }
     common = {"dry_run": is_dry, "repo": resolved_repo, "board": resolved_board, "task_id": resolved_task, "issue": resolved_issue, "receipt_id": ownership_receipt, "receipt_path": resolved_receipt, "run_id": rid, "path_id": "cleanup"}
     effector_inputs: dict[str, dict[str, Any]] = {
-        "parse_issue_from_branch": {**common, "branch": resolved_branch},
+        "resolve_cleanup_branch_source": {**common, "branch": resolved_branch},
+        "parse_cleanup_issue_number": common.copy(),
         "check_issue_closed": common.copy(),
-        "check_no_open_pr": {**common, "branch": resolved_branch},
-        "remove_worktree": {
-            **common,
-            "clone_path": resolved_clone,
-            "worktree_path": resolved_worktree,
-            "require_safe": True,
-        },
-        "delete_local_fix_branch": {
-            **common,
-            "clone_path": resolved_clone,
-            "branch": resolved_branch,
-        },
-        "release_active_issue_claim": {**common, "claim_path": resolved_claim},
-        "write_cleanup_receipt": {**common, "branch": resolved_branch, "receipt_path": resolved_receipt},
+        "check_no_open_pr_for_branch": {**common, "branch": resolved_branch},
+        "remove_worktree": {**common, "clone_path": resolved_clone, "worktree_path": resolved_worktree, "require_safe": True},
+        "delete_local_branch": {**common, "clone_path": resolved_clone, "branch": resolved_branch},
+        "release_claim_file": {**common, "claim_path": resolved_claim},
+        "build_cleanup_receipt": {**common, "branch": resolved_branch, "receipt_path": resolved_receipt},
     }
     result = await run_package_path_async(
         db_path=db_path,
@@ -309,29 +296,19 @@ async def run_cleanup_flow(
     by_step = {summary["step_id"]: summary for summary in summaries if summary.get("step_id")}
     outputs = [process_values(summary) for summary in summaries]
     worked = any(bool(output.get("mutated")) for output in outputs)
-    parse_output = process_values(by_step.get("parse_issue_from_branch") or {})
+    parse_output = process_values(by_step.get("parse_cleanup_issue_number") or {})
     run_status = str(result.run_status)
     terminal_failures = [summary for summary in summaries if summary.get("status") in _PROCESS_FAILURES]
-    worked = any(bool(output.get("mutated")) for output in outputs)
-    idle = (
-        parse_output.get("status") == "noop"
-        and parse_output.get("reason") == "no_branch"
-        and not any(summary.get("status") in {"failed", "timed_out"} for summary in summaries)
-        and not worked
-    ) or (
-        not terminal_failures
-        and not worked
-        and any(output.get("status") in {"noop", "planned"} for output in outputs)
-    )
+    idle = (parse_output.get("status") == "noop" and parse_output.get("reason") == "no_branch" and not terminal_failures and not worked) or (not terminal_failures and not worked and any(output.get("status") in {"noop", "planned"} for output in outputs))
     status = "idle" if idle else run_status
     summary = {
         "repo": resolved_repo,
         "branch": resolved_branch,
         "closed": (by_step.get("check_issue_closed") or {}).get("output", {}).get("closed"),
-        "safe_to_cleanup": (by_step.get("check_no_open_pr") or {}).get("output", {}).get("safe_to_cleanup"),
+        "safe_to_cleanup": (by_step.get("check_no_open_pr_for_branch") or {}).get("output", {}).get("safe_to_cleanup"),
         "remove_status": (by_step.get("remove_worktree") or {}).get("output", {}).get("status"),
-        "delete_status": (by_step.get("delete_local_fix_branch") or {}).get("output", {}).get("status"),
-        "release_status": (by_step.get("release_active_issue_claim") or {}).get("output", {}).get("status"),
+        "delete_status": (by_step.get("delete_local_branch") or {}).get("output", {}).get("status"),
+        "release_status": (by_step.get("release_claim_file") or {}).get("output", {}).get("status"),
         "failed_steps": [failure["step_id"] for failure in terminal_failures],
         "worked": worked,
         "run_status": status,

@@ -14,6 +14,7 @@ import tarfile
 import tempfile
 from contextlib import contextmanager
 from argparse import ArgumentParser, Namespace
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -30,8 +31,10 @@ from .config import ConfigError, LokayConfig, default_config_path, load_config
 from .executor import CommandSpec, Runner, planned_command
 
 INTAKE_ASSIGNEE = "lokay-intake"
-FALA_PINNED_COMMIT = "69bc2ec9d4cdf61773114847c0c582fb2652296d"
-FALA_PINNED_VERSION = "0.7.9"
+FALA_PINNED_COMMIT = "b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
+FALA_PINNED_VERSION = "0.7.15"
+FALA_EMBER_JSON_COMMIT = "882acf141301db4ee797228016982ad6acc71a6f"
+FALA_SQLITE_FIRE_COMMIT = "3d482362c863e769d018443045b27ca5db645b3c"
 
 
 def setup_parser(parser: ArgumentParser) -> None:
@@ -813,6 +816,28 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
         raise ConfigError("pinned Fala checkout is dirty")
     fala_target = project / "Fala"
     _copy_git_tree(fala_root, FALA_PINNED_COMMIT, project / "Fala")
+    for relative, commit in (
+        ("vendor/EmberJson", FALA_EMBER_JSON_COMMIT),
+        ("vendor/sqlite.fire", FALA_SQLITE_FIRE_COMMIT),
+    ):
+        dependency = fala_root / relative
+        try:
+            dependency_head = subprocess.run(
+                ["git", "-C", str(dependency), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "-C", str(dependency), "diff", "--quiet", "HEAD"],
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise ConfigError(f"unable to verify pinned Fala dependency {relative}: {exc}") from exc
+        if dependency_head != commit:
+            raise ConfigError(f"Fala dependency {relative} HEAD does not match pinned commit")
+        _copy_git_tree(dependency, commit, fala_target / relative)
     for line in submodules.stdout.splitlines():
         if not line or line[0] != " ":
             raise ConfigError("pinned Fala submodules are not initialized at recorded commits")
@@ -1024,6 +1049,7 @@ def render_launchd(
             + list((fala_root / "mojo" / "fala").rglob("*.mojo"))
             + list((fala_root / "vendor" / "EmberJson").rglob("*.mojo"))
             + list((fala_root / "vendor" / "sqlite.fire").rglob("*.mojo"))
+            + list((fala_root / "mojo" / "fala").glob("native_process_host.[ch]"))
         )
         digest = hashlib.sha256()
         for path in mojo_sources:
@@ -1137,11 +1163,14 @@ def _launchctl_bootout(domain: str, label: str, *, ignore_failure: bool = False)
 
 
 def _verify_launchctl_unloaded(label: str, domain: str) -> None:
-    state = _launchctl_loaded_state(label, domain)
-    if state.get("available") is False:
-        return
-    if state.get("loaded"):
-        raise ConfigError(f"launchd service remains loaded: {domain}/{label}")
+    deadline = time.monotonic() + 5
+    while True:
+        state = _launchctl_loaded_state(label, domain)
+        if state.get("available") is False or not state.get("loaded"):
+            return
+        if time.monotonic() >= deadline:
+            raise ConfigError(f"launchd service remains loaded: {domain}/{label}")
+        time.sleep(0.1)
 
 def _launchctl_domain_states(label: str) -> dict[str, dict[str, Any]]:
     """Inspect a label in both supported per-user launchd domains."""

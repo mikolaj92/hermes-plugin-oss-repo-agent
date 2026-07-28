@@ -83,6 +83,22 @@ class RuntimeFacadeTests(unittest.TestCase):
         self.assertEqual(failed.error, {"reason": "semantic failure"})
         runner.assert_called_once()
 
+    def test_runtime_version_mismatch_fails_before_host_or_journal(self) -> None:
+        with (
+            patch("lokay.flows.runtime.metadata.version", return_value="0.7.9"),
+            patch("lokay.flows.runtime.host_run_package") as runner,
+            patch("lokay.flows.runtime.read_journal_processes") as journal,
+            self.assertRaisesRegex(RuntimeFacadeError, "expected 0.7.15, observed 0.7.9"),
+        ):
+            run_package_path(
+                db_path=Path("missing.sqlite"),
+                package_path=Path("package.toml"),
+                path_id="path",
+                run_id="run-1",
+            )
+        runner.assert_not_called()
+        journal.assert_not_called()
+
     def test_lokay_effectors_use_host_python_without_overriding_custom_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

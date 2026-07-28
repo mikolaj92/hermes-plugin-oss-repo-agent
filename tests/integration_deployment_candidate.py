@@ -57,7 +57,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 if checkout == fala_root and command[3:5] == ["cat-file", "-e"]:
                     return subprocess.CompletedProcess(command, 0, "", "")
                 if checkout == fala_root and command[3:5] == ["show", f"{self.commands.FALA_PINNED_COMMIT}:pyproject.toml"]:
-                    return subprocess.CompletedProcess(command, 0, '[project]\nversion = "0.7.9"\n', "")
+                    return subprocess.CompletedProcess(command, 0, '[project]\nversion = "0.7.15"\n', "")
             return real_run(argv, *args, **kwargs)
 
         return patch.object(self.commands.subprocess, "run", side_effect=fake_run)
@@ -81,9 +81,9 @@ class DeploymentCandidateTests(unittest.TestCase):
             candidates = root / "candidates"
             self.assertEqual(list(candidates.iterdir()) if candidates.exists() else [], [])
 
-    def _render(self, root: Path, *, mode: str = "dry-run", config_path: Path | None = None, db_path: Path | None = None, autonomous: bool = False, top_level_precedence: bool = False) -> Path:
+    def _render(self, root: Path, *, mode: str = "dry-run", config_path: Path | None = None, db_path: Path | None = None, autonomous: bool = True, top_level_precedence: bool = False) -> Path:
         config = config_path or root / "config.toml"
-        top_level = "automerge = false\n" if top_level_precedence else ""
+        top_level = "automerge = true\n" if top_level_precedence else ""
         config.write_text(
             f"mode = '{mode}'\n{top_level}[automation]\nautomerge = {str(autonomous or top_level_precedence).lower()}\nrequire_human_approval = {str(not autonomous).lower()}\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = {str(autonomous).lower()}\n",
             encoding="utf-8",
@@ -94,8 +94,8 @@ class DeploymentCandidateTests(unittest.TestCase):
             "schema": 1,
             "mode": mode,
             "plugin_commit": "plugin-commit",
-            "fala_tag": "0.7.9",
-            "fala_commit": "69bc2ec9d4cdf61773114847c0c582fb2652296d",
+            "fala_tag": "0.7.15",
+            "fala_commit": "b5f9a6d500a442a1c79060a862fe4b9da87bc98f",
             "lock_hash": hashlib.sha256(lock_data).hexdigest(),
             "config_path": str(config.absolute()),
             "config_hash": hashlib.sha256(config.read_bytes()).hexdigest(),
@@ -460,7 +460,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             with self._fala_git_clean(), patch.object(self.commands.subprocess, "run", side_effect=wrong_version), patch.object(
                 self.commands, "_read_git_revision", return_value="plugin-commit"
             ):
-                with self.assertRaisesRegex(self.commands.ConfigError, "version must be 0.7.9"):
+                with self.assertRaisesRegex(self.commands.ConfigError, "version must be 0.7.15"):
                     self.commands.render_launchd(
                         self.cfg, str(root / "candidates" / "candidate"), config_path=str(config), fala_db=str(root / "state.sqlite"), deployment_root=str(root)
                     )
@@ -862,6 +862,16 @@ class DeploymentCandidateTests(unittest.TestCase):
             ):
                 self.assertTrue(getattr(library, symbol))
             self.assertEqual(len(list((version / "source" / "project" / "Fala" / "python" / "fala" / "__mojocache__").glob("_native.hash-*.so"))), 1)
+            import importlib.util
+            deployed_build = version / "source" / "project" / "Fala" / "python" / "fala" / "_build.py"
+            spec = importlib.util.spec_from_file_location("deployed_fala_build", deployed_build)
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module._PACKAGE_DIR = deployed_build.parent
+            expected_native = deployed_build.parent / "__mojocache__" / f"_native.hash-{module._source_hash(version / 'source' / 'project' / 'Fala')}.so"
+            self.assertTrue(expected_native.is_file(), f"expected {expected_native.name}; built {[path.name for path in expected_native.parent.glob('_native.hash-*.so')]}")
             self.assertNotIn(str(root / "candidates"), " ".join(arguments))
             self.assertEqual(arguments[arguments.index("--project") + 1], str((version / "source" / "project").resolve()))
             self.assertEqual(arguments[arguments.index("--config") + 1], str((version / "source" / "config.toml").resolve()))
@@ -953,7 +963,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 with self.assertRaisesRegex(self.commands.ConfigError, "candidate parent fsync failed"):
                     self._render(root)
             self.assertFalse(any(candidate_parent.iterdir()) if candidate_parent.exists() else False)
-        
+
     def test_cutover_directory_fsync_failure_prevents_launchctl_mutation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1123,11 +1133,17 @@ class DeploymentCandidateTests(unittest.TestCase):
             import tools.deployment_parity as parity
             self.assertTrue(parity.validate_fala_candidate(candidate)["ok"])
 
-    def test_autonomous_policy_is_rejected_even_in_live_mode(self):
+    def test_autonomous_policy_is_accepted_in_live_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            candidate = self._render(root, mode="live", autonomous=True)
+            import tools.deployment_parity as parity
+            self.assertTrue(parity.validate_fala_candidate(candidate, deployment_root=root)["ok"])
+
+    def test_manual_policy_is_rejected_for_promotion(self):
+        with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(Exception) as raised:
-                self._render(root, mode="live", autonomous=True)
+                self._render(Path(directory), mode="live", autonomous=False)
             self.assertIn("Fala identity policy is unsafe for promotion", raised.exception.result["errors"])
 
     def test_live_only_render_has_correct_argv(self):
@@ -1143,7 +1159,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(manifest["runtime_identity"]["start_interval"], 600)
             self.assertFalse(manifest["runtime_identity"]["run_at_load"])
 
-    def test_candidate_policy_is_required_and_safe(self):
+    def test_candidate_policy_is_required_and_autonomous(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             candidate = self._render(root)
@@ -1155,11 +1171,11 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(
                 manifest["policy"],
                 {
-                    "automerge": False,
-                    "require_human_approval": True,
+                    "automerge": True,
+                    "require_human_approval": False,
                     "require_checks": True,
                     "require_test_evidence": True,
-                    "executor_enabled": False,
+                    "executor_enabled": True,
                 },
             )
 
@@ -1169,8 +1185,8 @@ class DeploymentCandidateTests(unittest.TestCase):
                     path.chmod(0o755)
                 elif path.is_file():
                     path.chmod(0o644)
-            manifest["policy"]["automerge"] = True
-            manifest["identity"]["policy"]["automerge"] = True
+            manifest["policy"]["require_human_approval"] = True
+            manifest["identity"]["policy"]["require_human_approval"] = True
             (candidate / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
             with self.assertRaises(parity.DeploymentParityError) as raised:
                 parity.validate_fala_candidate(candidate, deployment_root=root)
@@ -1372,7 +1388,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             ]
             fala_bootstraps = [
                 i for i, call in enumerate(calls)
-                if call[:2] == ["launchctl", "bootstrap"] and "lokay-fala-tick-all" in " ".join(call)
+                if call[:2] == ["launchctl", "bootstrap"] and "lokay.fala-tick-all" in " ".join(call)
             ]
             self.assertTrue(legacy_bootouts)
             self.assertTrue(fala_bootstraps)
@@ -1455,7 +1471,7 @@ class DeploymentCandidateTests(unittest.TestCase):
 
             self.assertFalse(
                 any(
-                    call[:2] == ["launchctl", "bootstrap"] and "lokay-fala-tick-all" in " ".join(call)
+                    call[:2] == ["launchctl", "bootstrap"] and "lokay.fala-tick-all" in " ".join(call)
                     for call in calls
                 )
             )
@@ -1507,7 +1523,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 1, "", "not loaded")
                 if argv[:2] == ["plutil", "-lint"]:
                     return subprocess.CompletedProcess(argv, 0, "OK\n", "")
-                if argv[:2] == ["launchctl", "bootstrap"] and "lokay-fala-tick-all" in " ".join(argv):
+                if argv[:2] == ["launchctl", "bootstrap"] and "lokay.fala-tick-all" in " ".join(argv):
                     raise subprocess.CalledProcessError(1, argv)
                 if argv[:2] == ["launchctl", "bootstrap"] and argv[-1] == str(legacy_plist):
                     restored = True

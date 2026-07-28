@@ -75,6 +75,48 @@ def conduction_of(request: Request) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+_TERMINAL_UPSTREAM_STATUSES = frozenset({"failed", "cancelled", "timed_out"})
+
+
+def terminal_upstream(
+    request: Request,
+    operation: str,
+    *effector_ids: str,
+) -> Result | None:
+    """Fail closed when a declared peer conducted a terminal result."""
+    for process_id, blob in _cond_entries(request, *effector_ids):
+        status = str(blob.get("status") or "")
+        if blob.get("ok") is False or status in _TERMINAL_UPSTREAM_STATUSES:
+            return fail(
+                "upstream_failed",
+                failure_class="terminal",
+                retry_safe=False,
+                mutated=False,
+                operation=operation,
+                upstream_effector=process_id,
+                upstream=blob,
+            )
+    return None
+
+
+def _cond_entries(request: Request, *effector_ids: str) -> tuple[tuple[str, dict[str, Any]], ...]:
+    cond = conduction_of(request)
+    matches: dict[str, tuple[int, dict[str, Any]]] = {}
+    for effector_id in effector_ids:
+        exact = cond.get(effector_id)
+        if isinstance(exact, Mapping) and exact:
+            matches[effector_id] = (len(effector_id), dict(exact))
+        suffix = f"_{effector_id}"
+        for name, blob in cond.items():
+            if name.endswith(suffix) and isinstance(blob, Mapping) and blob:
+                previous = matches.get(name)
+                if previous is None or len(effector_id) > previous[0]:
+                    matches[name] = (len(effector_id), dict(blob))
+    return tuple((name, match[1]) for name, match in matches.items())
+
+
+
+
 def dry_run_flag(request: Request, default: bool = True) -> bool:
     data = input_of(request)
     if "dry_run" in data:

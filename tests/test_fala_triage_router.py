@@ -58,7 +58,7 @@ class TriagePackageFlowTests(unittest.TestCase):
         )
     def test_second_repo_context_is_selected_and_propagated(self) -> None:
         cfg = AgentConfig(mode="dry-run", repos=(RepoEntry(repo="o/first", board="first-board", clone_path="/tmp/first", priority=1), RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida", priority=2)))
-        host = _host(processes=[_process("list_ai_fix_prs", output={"status": "noop", "reason": "no_open_prs"})])
+        host = _host(processes=[_process("read_open_prs", output={"status": "noop", "reason": "no_open_prs"})])
 
         async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
             runner = mock.AsyncMock(return_value=host)
@@ -68,29 +68,77 @@ class TriagePackageFlowTests(unittest.TestCase):
 
         result, runner = asyncio.run(scenario())
         self.assertEqual(result.summary["repo"], "o/temida")
-        inputs = runner.await_args.kwargs["effector_inputs"]["list_ai_fix_prs"]
+        inputs = runner.await_args.kwargs["effector_inputs"]["read_open_prs"]
         self.assertEqual(inputs["board"], "temida-board")
         self.assertEqual(inputs["clone_path"], "/tmp/temida")
 
-    def test_ambiguous_repo_context_fails_before_host(self) -> None:
+    def test_omitted_repo_scans_all_configured_repositories(self) -> None:
         cfg = AgentConfig(mode="dry-run", repos=(RepoEntry(repo="o/first", board="same", clone_path="/tmp/first"), RepoEntry(repo="o/second", board="same", clone_path="/tmp/second")))
+        host = _host(processes=[_process("read_open_prs", output={"status": "noop", "reason": "no_open_prs"})])
 
         async def scenario() -> tuple[PathRunResult, mock.AsyncMock]:
-            runner = mock.AsyncMock()
+            runner = mock.AsyncMock(return_value=host)
             with mock.patch("lokay.flows.triage.run_package_path_async", new=runner):
                 result = await run_pr_triage_decide(db_path=Path(tempfile.mktemp()), config=cfg, dry_run=True)
             return result, runner
 
         result, runner = asyncio.run(scenario())
-        runner.assert_not_awaited()
-        self.assertEqual(result.summary["reason"], "ambiguous_repository_context")
-        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.status, "idle")
+        repos = runner.await_args.kwargs["effector_inputs"]["read_open_prs"]["repos"]
+        self.assertEqual([entry["repo"] for entry in repos], ["o/first", "o/second"])
+    def test_repair_recovery_inputs_include_authoritative_context(self) -> None:
+        db_path = Path(tempfile.mktemp())
+        attempt_recovery = {"run_id": "old-run", "process_id": "old-process", "candidate": "old-candidate"}
+        repair_creation_recovery = {"run_id": "creation-run", "candidate": "creation-candidate"}
+        cfg = AgentConfig(
+            mode="dry-run",
+            repos=(RepoEntry(repo="o/r", board="board", clone_path="/tmp/o-r"),),
+            raw={
+                "candidate": "candidate-a",
+                "attempt_recovery": attempt_recovery,
+                "repair_creation_recovery": repair_creation_recovery,
+            },
+        )
+        host = _host(processes=[_process("read_open_prs", output={"status": "noop", "reason": "no_open_prs"})])
+
+        async def scenario() -> mock.AsyncMock:
+            runner = mock.AsyncMock(return_value=host)
+            with mock.patch("lokay.flows.triage.run_package_path_async", new=runner):
+                await run_pr_triage_decide(
+                    db_path=db_path,
+                    config=cfg,
+                    dry_run=True,
+                    run_id="triage-run",
+                    repo="o/r",
+                )
+            return runner
+
+        runner = asyncio.run(scenario())
+        inputs = runner.await_args.kwargs["effector_inputs"]
+        expected_ids = {
+            "read_repair_creation_evidence", "read_repair_attempt_baseline", "read_repair_completed_receipt", "read_repair_attempt_reconciliation",
+            "read_repair_attempt_recovery_evidence", "claim_repair_attempt_recovery", "verify_repair_attempt_recovery",
+            "read_repair_recovery_continuation_evidence", "claim_repair_recovery_continuation", "verify_repair_recovery_continuation",
+            "read_repair_base_head", "decide_legacy_repair_head_refresh", "update_legacy_repair_pr_branch", "verify_legacy_repair_pr_head",
+            "triage_read_repair_creation_evidence", "triage_read_repair_attempt_baseline", "triage_read_repair_completed_receipt", "triage_read_repair_attempt_reconciliation",
+            "triage_read_repair_attempt_recovery_evidence", "triage_claim_repair_attempt_recovery", "triage_verify_repair_attempt_recovery",
+            "triage_read_repair_recovery_continuation_evidence", "triage_claim_repair_recovery_continuation", "triage_verify_repair_recovery_continuation",
+            "triage_read_repair_base_head", "triage_decide_legacy_repair_head_refresh", "triage_update_legacy_repair_pr_branch", "triage_verify_legacy_repair_pr_head",
+        }
+        for step_id in expected_ids:
+            with self.subTest(step_id=step_id):
+                self.assertEqual(inputs[step_id]["db_path"], str(db_path))
+                self.assertEqual(inputs[step_id]["run_id"], "triage-run")
+                self.assertEqual(inputs[step_id]["path_id"], "pr_triage")
+                self.assertEqual(inputs[step_id]["candidate"], "candidate-a")
+                self.assertEqual(inputs[step_id]["attempt_recovery"], attempt_recovery)
+                self.assertEqual(inputs[step_id]["repair_creation_recovery"], repair_creation_recovery)
 
     def test_single_package_path_invocation(self) -> None:
         host = _host(
             processes=[
                 _process(
-                    "list_ai_fix_prs",
+                    "read_open_prs",
                     output={"status": "listed", "count": 0, "prs": [], "reason": "no_open_prs"},
                 ),
                 _process(
@@ -125,7 +173,7 @@ class TriagePackageFlowTests(unittest.TestCase):
             run_status="failed",
             processes=[
                 _process(
-                    "list_ai_fix_prs",
+                    "read_open_prs",
                     output={"status": "listed", "count": 1, "prs": [{"number": 9}]},
                 ),
                 _process(
@@ -135,7 +183,7 @@ class TriagePackageFlowTests(unittest.TestCase):
                     error={"reason": "invalid_pr"},
                 ),
                 _process(
-                    "claim_pr",
+                    "assign_pr",
                     status="cancelled",
                     output={"status": "noop", "reason": "not_selected", "worked": False},
                 ),
@@ -155,9 +203,9 @@ class TriagePackageFlowTests(unittest.TestCase):
 
         result = asyncio.run(scenario())
         self.assertEqual(result.status, "failed")
-        self.assertEqual([p["step_id"] for p in result.failed], ["decide_triage_action", "claim_pr"])
+        self.assertEqual([p["step_id"] for p in result.failed], ["decide_triage_action", "assign_pr"])
         self.assertIn("decide_triage_action", result.summary["failed_steps"])
-        self.assertIn("claim_pr", result.summary["failed_steps"])
+        self.assertIn("assign_pr", result.summary["failed_steps"])
 
     def test_timed_out_process_keeps_exact_status(self) -> None:
         host = _host(
@@ -266,25 +314,16 @@ class BranchDecisionGateTests(unittest.TestCase):
 
         request = {
             "input": {
-                "repo": "o/r",
-                "number": 3,
-                "dry_run": True,
+                "repo": "o/r", "number": 3, "head_oid": "abc", "dry_run": True,
                 "conduction": {
-                    "decide_triage_action": {
-                        "status": "decided",
-                        "action": "comment_block",
-                        "reason": "missing_test_evidence",
-                    }
+                    "decide_triage_action": {"status": "decided", "action": "comment_block", "reason": "missing_test_evidence"},
+                    "read_merge_preconditions": {"status": "merge_preconditions_read", "head_oid": "abc"},
+                    "verify_merge_provenance": {"status": "verified"},
                 },
             },
-            "config": {"assignee": "me"},
+            "config": {},
         }
-        for handler in (
-            triage.claim_pr_assignee,
-            triage.merge_pull_request,
-            triage.write_merge_receipt,
-            triage.close_linked_issue,
-        ):
+        for handler in (triage.merge_pr, triage.build_merge_receipt, triage.close_linked_issue):
             with self.subTest(handler=handler.__name__):
                 out = handler(request)
                 self.assertEqual(out["status"], "noop")
@@ -293,14 +332,11 @@ class BranchDecisionGateTests(unittest.TestCase):
 
     def test_failed_claim_blocks_merge_receipt_and_close(self) -> None:
         from lokay.steps import triage
-        request = {
-            "input": {"repo": "o/r", "number": 3, "issue": 3, "dry_run": False, "conduction": {
-                "decide_triage_action": {"status": "decided", "action": "merge"},
-                "claim_pr": {"status": "failed", "ok": False, "reason": "claim_failed"},
-            }},
-            "config": {},
-        }
-        for handler in (triage.merge_pull_request, triage.write_merge_receipt, triage.close_linked_issue):
+        request = {"input": {"repo": "o/r", "number": 3, "issue": 3, "dry_run": False, "conduction": {
+            "decide_triage_action": {"status": "decided", "action": "merge"},
+            "verify_pr_assignee": {"status": "failed", "ok": False, "reason": "claim_failed"},
+        }}, "config": {}}
+        for handler in (triage.merge_pr, triage.build_merge_receipt, triage.close_linked_issue):
             with self.subTest(handler=handler.__name__):
                 out = handler(request)
                 self.assertEqual(out["reason"], "upstream_failed")
@@ -318,81 +354,36 @@ class BranchDecisionGateTests(unittest.TestCase):
 
     def test_comment_handler_noop_when_merge_selected(self) -> None:
         from lokay.steps import triage
-
-        out = triage.comment_pr_once(
-            {
-                "input": {
-                    "repo": "o/r",
-                    "number": 3,
-                    "body": "blocked",
-                    "dry_run": True,
-                    "conduction": {
-                        "decide_triage_action": {
-                            "status": "decided",
-                            "action": "merge",
-                            "reason": "ready",
-                        }
-                    },
-                },
-                "config": {},
-            }
-        )
+        request = {"input": {"repo": "o/r", "number": 3, "body": "blocked", "dry_run": True,
+            "conduction": {"decide_triage_action": {"status": "decided", "action": "merge", "reason": "ready"},
+            "read_pr_comments": {"status": "comments_read", "comments": []}}}, "config": {}}
+        out = triage.post_pr_comment(request)
         self.assertEqual(out["status"], "noop")
         self.assertEqual(out["reason"], "not_selected")
-        self.assertFalse(out.get("worked"))
+        self.assertFalse(out.get("mutated"))
+
 
     def test_failed_decision_blocks_branch_mutation(self) -> None:
         from lokay.steps import triage
-
-        out = triage.claim_pr_assignee(
-            {
-                "input": {
-                    "repo": "o/r",
-                    "number": 3,
-                    "dry_run": False,
-                    "conduction": {
-                        "decide_triage_action": {
-                            "status": "failed",
-                            "ok": False,
-                            "reason": "invalid_pr",
-                        }
-                    },
-                },
-                "config": {"assignee": "me"},
-            }
-        )
+        out = triage.assign_pr({"input": {"repo": "o/r", "number": 3, "dry_run": False,
+            "conduction": {"decide_pr_assignee": {"status": "failed", "ok": False, "reason": "invalid_pr"}}},
+            "config": {"assignee": "me"}})
         self.assertEqual(out["status"], "failed")
         self.assertEqual(out["reason"], "upstream_failed")
         self.assertFalse(out.get("mutated"))
 
     def test_repair_handlers_noop_when_merge_selected(self) -> None:
         from lokay.steps import repair
-
-        request = {
-            "input": {
-                "repo": "o/r",
-                "number": 8,
-                "board": "b",
-                "dry_run": True,
-                "conduction": {
-                    "decide_triage_action": {
-                        "status": "decided",
-                        "action": "merge",
-                        "reason": "ready",
-                    },
-                    "load_pr_fields": {
-                        "pr": {"number": 8, "title": "x", "headRefName": "ai/fix/8"},
-                    },
-                },
-            },
-            "config": {},
-        }
-        for handler in (repair.build_repair_prompt, repair.create_review_fix_task):
+        request = {"input": {"repo": "o/r", "number": 8, "board": "b", "dry_run": True,
+            "conduction": {"decide_triage_action": {"status": "decided", "action": "merge", "reason": "ready"},
+            "load_pr_fields": {"pr": {"number": 8, "title": "x", "headRefName": "ai/fix/8"}}}}, "config": {}}
+        for handler in (repair.build_repair_prompt, repair.create_review_task):
             with self.subTest(handler=handler.__name__):
                 out = handler(request)
                 self.assertEqual(out["status"], "noop")
                 self.assertEqual(out["reason"], "not_selected")
                 self.assertFalse(out.get("worked"))
+
 
 
 if __name__ == "__main__":
@@ -469,11 +460,11 @@ class CleanupRepositoryRoutingTests(unittest.TestCase):
             replayed=False,
             ticks=3,
             processes=(
-                _process("parse_issue_from_branch", output={"ok": True, "status": "parsed", "mutated": False, "issue": 2}),
+                _process("parse_cleanup_issue_number", output={"ok": True, "status": "parsed", "mutated": False, "issue": 2}),
                 _process("check_issue_closed", output={"ok": True, "status": "checked", "mutated": False, "closed": True}),
-                _process("check_no_open_pr", output={"ok": True, "status": "checked", "mutated": False, "safe_to_cleanup": True}),
+                _process("check_no_open_pr_for_branch", output={"ok": True, "status": "checked", "mutated": False, "safe_to_cleanup": True}),
                 _process("remove_worktree", output={"ok": True, "status": "removed", "mutated": True}),
-                _process("delete_local_fix_branch", status="failed", output={"ok": False, "status": "failed", "mutated": False, "reason": "delete_failed"}),
+                _process("delete_local_branch", status="failed", output={"ok": False, "status": "failed", "mutated": False, "reason": "delete_failed"}),
             ),
         )
 
@@ -483,5 +474,5 @@ class CleanupRepositoryRoutingTests(unittest.TestCase):
 
         result = asyncio.run(scenario())
         self.assertEqual(result.summary["run_status"], "failed")
-        self.assertNotIn("write_cleanup_receipt", {process["step_id"] for process in result.processes})
+        self.assertNotIn("publish_cleanup_receipt", {process["step_id"] for process in result.processes})
         self.assertEqual(result.status, "failed")

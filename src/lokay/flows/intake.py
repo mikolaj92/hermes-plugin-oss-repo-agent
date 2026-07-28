@@ -63,32 +63,33 @@ async def run_intake_flow(
         }
         for entry in cfg.repos
     ]
-    dry_input = {"dry_run": is_dry}
+    dry_input = {"dry_run": is_dry, "repos": repos}
+    intake_steps = (
+        "read_open_issues", "normalize_issue_rows", "filter_issue_eligibility", "select_issue_candidate",
+        "decide_issue_action", "read_issue_comments", "decide_issue_comment", "post_issue_comment",
+        "verify_issue_comment", "reserve_claim_file", "read_issue_claim_state", "assign_issue",
+        "intake_add_issue_label", "verify_issue_claim", "build_issue_claim_result", "read_intake_tasks",
+        "find_intake_marker", "create_intake_task", "reconcile_intake_task",
+    )
     result = await run_package_path_async(
         db_path=db_path,
         package_path=Path(__file__).resolve().parents[3] / "fala-package.toml",
         path_id="issue_intake",
         run_id=rid,
         inputs={"repos": repos, "limit": limit, **dry_input},
-        effector_inputs={
-            "poll": {"repos": repos, "limit": limit, **dry_input},
-            "decide_issue_action": dry_input,
-            "comment_issue": dry_input,
-            "claim": dry_input,
-            "kanban": dry_input,
-        },
-        effector_configs={step: step_config for step in ("poll", "decide_issue_action", "comment_issue", "claim", "kanban")},
+        effector_inputs={step: ({"repos": repos, "limit": limit, **dry_input} if step == "read_open_issues" else ({"label": cfg.labels.in_progress, **dry_input} if step == "intake_add_issue_label" else dry_input)) for step in intake_steps},
+        effector_configs={step: step_config for step in intake_steps},
         max_ticks=max_ticks,
         worker_id=worker_id,
     )
 
     processes = [process_summary(process) for process in result.processes]
     by_step = {item["step_id"]: item for item in processes if item.get("step_id")}
-    poll_out = process_values(by_step.get("poll") or {})
+    poll_out = process_values(by_step.get("select_issue_candidate") or {})
     decide_out = process_values(by_step.get("decide_issue_action") or {})
-    comment_out = process_values(by_step.get("comment_issue") or {})
-    claim_out = process_values(by_step.get("claim") or {})
-    kanban_out = process_values(by_step.get("kanban") or {})
+    comment_out = process_values(by_step.get("decide_issue_comment") or {})
+    claim_out = process_values(by_step.get("build_issue_claim_result") or {})
+    kanban_out = process_values(by_step.get("reconcile_intake_task") or {})
     failed_steps = [
         item["step_id"]
         for item in processes

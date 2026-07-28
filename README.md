@@ -1,9 +1,9 @@
 # Lokay
 <!-- hermes-lokay: issue-5 closed-loop test 20260717 -->
 
-Safe dry-run-first OSS maintainer automation for Hermes.
+Safe-by-default OSS maintainer automation for Hermes. Starter/library defaults remain dry-run and manual; autonomous production is an explicit guarded profile.
 
-Use it to inspect open GitHub issues, draft guarded work, and keep agent work inside a no-merge/no-force-push policy before any human-approved execution.
+Production autonomy requires `mode=live`, `executor.enabled=true`, `automerge=true`, `require_human_approval=false`, `require_checks=true`, and `require_test_evidence=true`. A tick with idle intake still scans existing PRs across every configured repository; failed current-head checks can enter the existing-PR repair lane, while pending checks wait without another repair invocation.
 
 GitHub remains a source of truth for public issues, pull requests, discussion,
 labels, checks, and merge state. Hermes Kanban is the internal execution ledger:
@@ -43,9 +43,10 @@ hermes lokay --config ~/.hermes/lokay/config.toml render-launchd \
 ```
 
 Validate the candidate with parity and `plutil -lint` before separately
-controlled promotion. `lokay-tick-all` / `auto_worker` is the sole
-scheduled mutator. Individual Fala ticks are manual diagnostics only and must
-not be installed as separate scheduled jobs.
+controlled promotion. Production promotion accepts only the guarded-autonomous
+policy above. `lokay-tick-all` / `auto_worker` is the sole scheduled mutator.
+Individual Fala ticks are manual diagnostics only and must not be installed as
+separate scheduled jobs.
 
 ## 3-minute happy path
 
@@ -88,6 +89,8 @@ diagnostic runs while investigating one correlation path; they are not
 deployment or scheduling instructions. Legacy shell scripts, backfill,
 webhook, and cron entrypoints are removed and are not runnable paths.
 
+Operational health distinguishes mechanism from outcome: a completed idle run can prove a healthy scheduler but not successful issue resolution. The only end-to-end success is a real issue producing a code change whose guarded PR is merged to `main`, with the linked issue closed and immutable merge/cleanup receipts verified. Pending repair is active non-success; a terminal repair or merge failure is unhealthy and must name the failing run/process.
+
 Runtime defaults:
 
 - `HERMES_LOKAY_ASSIGNEE=mikolaj92`
@@ -126,9 +129,17 @@ Start from [`config.example.yaml`](config.example.yaml), or let `init` create a 
 ## Checks
 
 ```bash
-python3 -m unittest discover -s tests
-python3 tools/hygiene_check.py .
+uv run python -m unittest discover -s tests
+uv run python tools/hygiene_check.py .
 scripts/lokay_smoke.sh
+```
+
+The default suite excludes deployment integration fixtures and should finish
+within two minutes. Run those explicitly when changing deployment or health
+behavior:
+
+```bash
+uv run python -m unittest discover -s tests -p 'integration_*.py'
 ```
 
 <!-- hermes e2e closed-loop test 20260717 -->
