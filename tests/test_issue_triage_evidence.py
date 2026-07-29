@@ -47,6 +47,72 @@ class GitHubReadTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "canonical_repository_mismatch")
 
+    def test_canonical_issue_is_skipped_for_non_duplicate_classification(self):
+        result = evidence.read_triage_canonical_issue({
+            "input": {
+                "repo": "o/r",
+                "number": 4,
+                "conduction": {
+                    "classify_triage_issue": {
+                        "ok": True,
+                        "status": "classified",
+                        "classification": {
+                            "classification": "needs_feedback",
+                            "canonical_issue": 0,
+                        },
+                    },
+                },
+            },
+        })
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "noop")
+        self.assertEqual(result["reason"], "canonical_issue_not_required")
+
+    def test_canonical_issue_uses_nested_classifier_target(self):
+        payload = {"number": 9, "title": "x", "body": "x", "url": "https://github.com/o/r/issues/9", "state": "OPEN", "updatedAt": "2026-07-28T10:00:00Z", "labels": [], "repository": {"nameWithOwner": "o/r"}}
+        request = {
+            "input": {
+                "repo": "o/r",
+                "number": 4,
+                "conduction": {
+                    "classify_triage_issue": {
+                        "ok": True,
+                        "status": "classified",
+                        "classification": {
+                            "classification": "duplicate",
+                            "canonical_issue": 9,
+                        },
+                    },
+                },
+            },
+        }
+        with mock.patch.object(evidence, "run_cmd", return_value=proc(json.dumps(payload))) as run:
+            result = evidence.read_triage_canonical_issue(request)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["canonical_issue"], 9)
+        self.assertIn("9", run.call_args.args[0])
+
+    def test_duplicate_without_canonical_target_fails_closed(self):
+        result = evidence.read_triage_canonical_issue({
+            "input": {
+                "repo": "o/r",
+                "number": 4,
+                "conduction": {
+                    "classify_triage_issue": {
+                        "ok": True,
+                        "status": "classified",
+                        "classification": {
+                            "classification": "duplicate",
+                            "canonical_issue": 0,
+                        },
+                    },
+                },
+            },
+        })
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "invalid_canonical_issue")
+
+
 
 class PinnedContextTests(unittest.TestCase):
     def setUp(self):

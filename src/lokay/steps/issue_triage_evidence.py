@@ -157,13 +157,21 @@ def read_triage_comments(request: Request) -> Result:
 
 def read_triage_canonical_issue(request: Request) -> Result:
     """Read and validate a duplicate target in the same repository."""
-    gate = _gate(request, "read_triage_canonical_issue", "classify_triage_issue", "select_triage_candidate")
+    gate = _gate(request, "read_triage_canonical_issue", "select_triage_candidate")
     if gate:
         return gate
     data, cfg = input_of(request), cfg_of(request)
     ident = _identity(request, "select_triage_candidate")
     repo, source_number = ident["repo"], ident["number"]
-    value = data.get("canonical_issue", data.get("canonical_number"))
+    classified = cond_get(request, "classification", "classify_triage_issue", default=data.get("classification"))
+    if isinstance(classified, Mapping):
+        value = classified.get("canonical_issue")
+        classification_name = classified.get("classification")
+    else:
+        value = data.get("canonical_issue", data.get("canonical_number"))
+        classification_name = classified or ("duplicate" if value not in (None, "", 0) else "")
+    if str(classification_name or "").strip().casefold() != "duplicate":
+        return ok(status="noop", reason="canonical_issue_not_required", canonical=None, canonical_issue=0, **ident)
     try:
         target = 0 if isinstance(value, bool) else int(value)
     except (TypeError, ValueError):

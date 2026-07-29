@@ -106,6 +106,15 @@ class PackageStructureTests(unittest.TestCase):
                 }
                 for effector_id, conduction in expected.items():
                     self.assertEqual(by_id[effector_id]["conduction"], conduction, effector_id)
+                auto_path = next(item for item in package["correlation_paths"] if item["id"] == "auto_worker")
+                auto_by_id = {effector["id"]: effector for effector in auto_path["effectors"]}
+                for effector_id, conduction in expected.items():
+                    prefixed_id = f"intake_{effector_id}"
+                    self.assertEqual(
+                        auto_by_id[prefixed_id]["conduction"],
+                        [f"intake_{upstream}" for upstream in conduction],
+                        prefixed_id,
+                    )
                 self.assertLess(positions["normalize_issue_rows"], positions["read_triage_receipt_index"])
 
                 self.assertIn("decide_issue_priority", by_id)
