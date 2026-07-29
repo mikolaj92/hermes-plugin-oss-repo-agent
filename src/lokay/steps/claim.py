@@ -213,7 +213,7 @@ def assign_issue(request: Request) -> Result:
     if idle:
         return noop(str(idle.get("reason") or "no_selected_issue"), operation="assign_issue")
     data=input_of(request); cfg=cfg_of(request); state=cond_blob(request,"read_issue_claim_state"); selected=data.get("selected") or state.get("selected") or {}; repo=str(data.get("repo") or state.get("repo") or ""); number=data.get("number") or state.get("number") or 0; assignee=str(data.get("assignee") or cfg.get("assignee") or "mikolaj92"); current=set(state.get("assignees") or [])
-    if assignee in current: return noop("already_assigned",repo=repo,number=number,assignee=assignee,dry_run=dry_run_flag(request))
+    if assignee in current: return ok(status="issue_assigned",mutated=False,reused=True,repo=repo,number=number,assignee=assignee,dry_run=dry_run_flag(request))
     if dry_run_flag(request): return planned(repo=repo,number=number,assignee=assignee)
     try: run_cmd([str(cfg.get("gh_cli") or "gh"),"issue","edit",str(number),"--repo",repo,"--add-assignee",assignee],timeout=60)
     except (CommandError,subprocess.TimeoutExpired) as exc: return fail("assign_issue_failed",failure_class="reconcile_then_retry",retry_safe=False,error=str(exc),mutated=True,repo=repo,number=number,assignee=assignee)
@@ -230,7 +230,7 @@ def add_issue_label(request: Request) -> Result:
         return noop(str(idle.get("reason") or "no_selected_issue"), operation="add_issue_label")
     data=input_of(request); cfg=cfg_of(request); state=cond_blob(request,"read_issue_claim_state"); repo=str(data.get("repo") or state.get("repo") or ""); number=data.get("number") or state.get("number") or 0; label=str(data.get("label") or cfg.get("label") or ""); labels=set(state.get("labels") or [])
     if not label: return fail("missing_label",failure_class="terminal",retry_safe=False,repo=repo,number=number)
-    if label in labels: return noop("already_labeled",repo=repo,number=number,label=label,dry_run=dry_run_flag(request))
+    if label in labels: return ok(status="issue_label_added",mutated=False,reused=True,repo=repo,number=number,label=label,dry_run=dry_run_flag(request))
     if dry_run_flag(request): return planned(repo=repo,number=number,label=label)
     try: run_cmd([str(cfg.get("gh_cli") or "gh"),"issue","edit",str(number),"--repo",repo,"--add-label",label],timeout=60)
     except (CommandError,subprocess.TimeoutExpired) as exc: return fail("add_issue_label_failed",failure_class="reconcile_then_retry",retry_safe=False,error=str(exc),mutated=True,repo=repo,number=number,label=label)
@@ -245,10 +245,26 @@ def verify_issue_claim(request: Request) -> Result:
     idle = upstream_noop(request, "read_issue_claim_state", "reserve_claim_file", "assign_issue", "intake_add_issue_label")
     if idle:
         return noop(str(idle.get("reason") or "no_selected_issue"), operation="verify_issue_claim")
-    data=input_of(request); state=cond_blob(request,"read_issue_claim_state"); assign=cond_blob(request,"assign_issue"); labels=cond_blob(request,"intake_add_issue_label"); assignee=str(data.get("assignee") or assign.get("assignee") or "mikolaj92"); required=set(data.get("required_labels") or labels.get("required_labels") or ([labels.get("label")] if labels.get("label") else [])); actual_a=set(state.get("assignees") or []); actual_l=set(state.get("labels") or []); mutated=bool(assign.get("mutated") or labels.get("mutated"))
-    if dry_run_flag(request): return ok(status="claim_verified",verified=False,mutated=False,dry_run=True,assignee=assignee,required_labels=sorted(required))
-    if assignee not in actual_a or not required.issubset(actual_l): return fail("claim_readback_mismatch",failure_class="reconcile_then_retry" if mutated else "terminal",retry_safe=False,mutated=mutated,assignee=assignee,assignees=sorted(actual_a),required_labels=sorted(required),labels=sorted(actual_l))
-    return ok(status="claim_verified",verified=True,mutated=mutated,assignee=assignee,required_labels=sorted(required),assignees=sorted(actual_a),labels=sorted(actual_l))
+    data=input_of(request); cfg=cfg_of(request); state=cond_blob(request,"read_issue_claim_state"); assign=cond_blob(request,"assign_issue"); labels=cond_blob(request,"intake_add_issue_label"); selected=data.get("selected") or state.get("selected") or {}; repo=str(data.get("repo") or state.get("repo") or selected.get("repo") or ""); number=data.get("number") or state.get("number") or selected.get("number") or selected.get("issue") or 0; assignee=str(data.get("assignee") or assign.get("assignee") or cfg.get("assignee") or "mikolaj92"); required=set(data.get("required_labels") or labels.get("required_labels") or ([labels.get("label")] if labels.get("label") else [])); mutated=bool(assign.get("mutated") or labels.get("mutated"))
+    if dry_run_flag(request): return ok(status="claim_verified",verified=False,mutated=False,dry_run=True,assignee=assignee,required_labels=sorted(required),repo=repo,number=number)
+    if not repo or isinstance(number,bool) or not isinstance(number,int) or number<=0:
+        return fail("invalid_selected_issue",failure_class="terminal",retry_safe=False,selected=selected)
+    try:
+        proc=run_cmd([str(cfg.get("gh_cli") or "gh"),"issue","view",str(number),"--repo",repo,"--json","assignees,labels"],timeout=60)
+        current=json.loads((proc.stdout or "").strip())
+    except CommandError as exc:
+        return fail("claim_read_failed",failure_class="retryable_read",retry_safe=True,error=str(exc),mutated=mutated,repo=repo,number=number)
+    except (subprocess.TimeoutExpired,json.JSONDecodeError,TypeError,ValueError) as exc:
+        return fail("claim_read_failed",failure_class="terminal",retry_safe=False,error=str(exc),mutated=mutated,repo=repo,number=number)
+    if not isinstance(current,dict) or not isinstance(current.get("assignees"),list) or not isinstance(current.get("labels"),list):
+        return fail("claim_read_failed",failure_class="terminal",retry_safe=False,error="invalid claim read-back shape",mutated=mutated,repo=repo,number=number)
+    actual_a={str(x.get("login") or "").strip() if isinstance(x,dict) else str(x).strip() for x in current["assignees"]}
+    actual_l={str(x.get("name") or "").strip() if isinstance(x,dict) else str(x).strip() for x in current["labels"]}
+    if "" in actual_a or "" in actual_l:
+        return fail("claim_read_failed",failure_class="terminal",retry_safe=False,error="blank claim read-back item",mutated=mutated,repo=repo,number=number)
+    if assignee not in actual_a or not required.issubset(actual_l):
+        return fail("claim_readback_mismatch",failure_class="reconcile_then_retry" if mutated else "terminal",retry_safe=False,mutated=mutated,assignee=assignee,assignees=sorted(actual_a),required_labels=sorted(required),labels=sorted(actual_l),repo=repo,number=number)
+    return ok(status="claim_verified",verified=True,mutated=mutated,assignee=assignee,required_labels=sorted(required),assignees=sorted(actual_a),labels=sorted(actual_l),repo=repo,number=number)
 
 
 def build_issue_claim_result(request: Request) -> Result:

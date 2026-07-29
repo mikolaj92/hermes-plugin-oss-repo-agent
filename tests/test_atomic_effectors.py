@@ -243,6 +243,126 @@ class IntakeAlignedTests(unittest.TestCase):
         self.assertEqual(failed["failure_class"], "reconcile_then_retry")
         self.assertTrue(failed["mutated"])
 
+    def test_reused_assignee_still_applies_label_and_claims(self) -> None:
+        selected = self._selected(3590)
+        reserve = {
+            "status": "claim_reserved",
+            "ok": True,
+            "mutated": False,
+            "reused": True,
+            "selected": selected,
+            "claim_path": "/tmp/claim.json",
+            "claim": {"repo": "o/r", "issue": 3590, "board": "b", "assignee": "mikolaj92"},
+        }
+        state = {
+            "status": "claim_state_read",
+            "ok": True,
+            "repo": "o/r",
+            "number": 3590,
+            "assignees": ["mikolaj92"],
+            "labels": ["ai:ready"],
+            "selected": selected,
+        }
+        assign = claim.assign_issue(
+            req(
+                {
+                    "dry_run": False,
+                    "selected": selected,
+                    "conduction": {
+                        "reserve_claim_file": reserve,
+                        "read_issue_claim_state": state,
+                    },
+                },
+                {"assignee": "mikolaj92"},
+            )
+        )
+        self.assertEqual(assign["status"], "issue_assigned")
+        self.assertTrue(assign.get("reused"))
+        self.assertFalse(assign["mutated"])
+        with mock.patch("lokay.steps.claim.run_cmd") as run_cmd:
+            run_cmd.side_effect = [
+                mock.Mock(stdout="", returncode=0),
+                mock.Mock(
+                    stdout=json.dumps(
+                        {
+                            "assignees": [{"login": "mikolaj92"}],
+                            "labels": [{"name": "ai:ready"}, {"name": "ai:in-progress"}],
+                        }
+                    ),
+                    returncode=0,
+                ),
+            ]
+            labeled = claim.add_issue_label(
+                req(
+                    {
+                        "dry_run": False,
+                        "selected": selected,
+                        "label": "ai:in-progress",
+                        "conduction": {
+                            "reserve_claim_file": reserve,
+                            "read_issue_claim_state": state,
+                            "assign_issue": assign,
+                        },
+                    }
+                )
+            )
+            self.assertEqual(labeled["status"], "issue_label_added")
+            self.assertTrue(labeled["mutated"])
+            verified = claim.verify_issue_claim(
+                req(
+                    {
+                        "dry_run": False,
+                        "selected": selected,
+                        "assignee": "mikolaj92",
+                        "label": "ai:in-progress",
+                        "conduction": {
+                            "reserve_claim_file": reserve,
+                            "read_issue_claim_state": state,
+                            "assign_issue": assign,
+                            "intake_add_issue_label": labeled,
+                        },
+                    }
+                )
+            )
+        self.assertEqual(run_cmd.call_count, 2)
+        self.assertEqual(
+            run_cmd.call_args_list[0].args[0][:5],
+            ["gh", "issue", "edit", "3590", "--repo"],
+        )
+        self.assertIn("--add-label", run_cmd.call_args_list[0].args[0])
+        self.assertEqual(
+            run_cmd.call_args_list[1].args[0][:5],
+            ["gh", "issue", "view", "3590", "--repo"],
+        )
+        self.assertEqual(verified["status"], "claim_verified")
+        self.assertTrue(verified["verified"])
+        self.assertIn("ai:in-progress", verified["labels"])
+        built = claim.build_issue_claim_result(
+            req(
+                {
+                    "dry_run": False,
+                    "selected": selected,
+                    "conduction": {
+                        "reserve_claim_file": reserve,
+                        "verify_issue_claim": verified,
+                    },
+                }
+            )
+        )
+        self.assertEqual(built["status"], "claimed")
+        self.assertTrue(built["ok"])
+        with mock.patch("lokay.steps.kanban_intake.hermes_kanban_json", return_value=[]):
+            tasks = kanban_intake.read_intake_tasks(
+                req(
+                    {
+                        "dry_run": True,
+                        "selected": selected,
+                        "conduction": {"build_issue_claim_result": built},
+                    }
+                )
+            )
+        self.assertEqual(tasks["status"], "intake_tasks_read")
+
     def test_kanban_dry_run_chain(self) -> None:
         selected = self._selected(1)
         claim_result = {"status": "claimed", "ok": True, "selected": selected}
