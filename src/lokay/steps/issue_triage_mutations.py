@@ -218,14 +218,21 @@ def read_triage_labels(request: Mapping[str, Any]) -> dict[str, Any]:
         return fail("triage_labels_read_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False, **_identity(request))
     return ok(status="triage_labels_read", **state, **_identity(request), selected=_selected(request) or data.get("selected"), dry_run=dry_run_flag(request))
 
-
 def _configured_label(data: Mapping[str, Any], cfg: Mapping[str, Any], action: str = "") -> str:
+    action = str(action or "").strip().casefold()
     label = data.get("label") or data.get("triage_label")
     if not label:
         labels = data.get("labels") or cfg.get("labels")
         if isinstance(labels, Mapping):
-            label = labels.get(action) or labels.get("ready" if action == "add_ready" else action)
-    return str(label or cfg.get(f"{action}_label") or "").strip()
+            if action in {"add_ready", "remove_ready", "ready"}:
+                label = labels.get("ready") or labels.get(action)
+            else:
+                label = labels.get(action)
+    if not label and action in {"add_ready", "remove_ready", "ready"}:
+        label = data.get("ready_label") or cfg.get("ready_label")
+    if not label and action:
+        label = data.get(f"{action}_label") or cfg.get(f"{action}_label")
+    return str(label or "").strip()
 
 
 def decide_triage_mutation(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -248,9 +255,21 @@ def decide_triage_mutation(request: Mapping[str, Any]) -> dict[str, Any]:
     if decision_value is None:
         decision_value = conducted.get("classification")
     classification = str(data.get("classification") or (decision_value.get("classification") if isinstance(decision_value, Mapping) else "")).strip()
+    digest = _digest(request)
+    if not digest and isinstance(decision_value, Mapping):
+        digest = str(decision_value.get("decision_digest") or conducted.get("decision_digest") or "")
+    if not digest:
+        digest = str(conducted.get("decision_digest") or "")
     if frozen in folded:
         if ready in folded:
-            return ok(status="mutation_decided", action="remove_ready", label=next(x for x in labels if x.casefold() == ready), reason="frozen_ready_reconciliation", **_identity(request))
+            return ok(
+                status="mutation_decided",
+                action="remove_ready",
+                label=next(x for x in labels if x.casefold() == ready),
+                reason="frozen_ready_reconciliation",
+                decision_digest=digest or None,
+                **_identity(request),
+            )
         return noop("frozen", **_identity(request))
     if data.get("action"):
         action = str(data["action"])
@@ -262,8 +281,13 @@ def decide_triage_mutation(request: Mapping[str, Any]) -> dict[str, Any]:
         action = "close"
     else:
         return fail("unknown_triage_action", failure_class="terminal", retry_safe=False, **_identity(request))
-    return ok(status="mutation_decided", action=action, classification=classification, **_identity(request))
-
+    return ok(
+        status="mutation_decided",
+        action=action,
+        classification=classification,
+        decision_digest=digest or None,
+        **_identity(request),
+    )
 
 def _repo_labels(gh: str, repo: str) -> list[dict[str, Any]]:
     proc = run_cmd([gh, "label", "list", "--repo", repo, "--limit", "1000", "--json", "name,color,description"], timeout=60)
@@ -279,12 +303,15 @@ def ensure_triage_label(request: Mapping[str, Any]) -> dict[str, Any]:
     bad = _invalid(repo, number)
     if _frozen_state(request):
         return noop("frozen", **_identity(request))
-    label = _configured_label(data, cfg, str(data.get("label_kind") or data.get("action") or ""))
     gate = _gate(request, "add_ready", "remove_ready", "label")
     if gate is not None:
         return gate
     if bad:
         return bad
+    action = _action(request) or str(data.get("label_kind") or data.get("action") or "")
+    label = _configured_label(data, cfg, action)
+    if not label and action in {"add_ready", "remove_ready", "ready"}:
+        label = str(data.get("ready_label") or cfg.get("ready_label") or "ai:ready")
     if not label:
         return fail("missing_label", failure_class="terminal", retry_safe=False, **_identity(request))
     try:

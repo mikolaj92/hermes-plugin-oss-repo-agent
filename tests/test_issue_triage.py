@@ -428,6 +428,35 @@ class MutationAtomTests(unittest.TestCase):
             self.assertTrue(summary["triage_verified"])
             self.assertEqual(summary["feedback_watermark"], "2026-07-29T10:27:00Z")
             self.assertEqual(summary["decision_watermark"], "2026-07-29T10:27:00Z")
+    def test_ensure_uses_configured_ready_label(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 4,
+                "ready_label": "ai:ready",
+                "dry_run": True,
+                "conduction": {
+                    "read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": [], "repo": "owner/repo", "number": 4},
+                    "decide_triage_mutation": {
+                        "ok": True,
+                        "status": "mutation_decided",
+                        "action": "add_ready",
+                        "classification": "ready",
+                        "repo": "owner/repo",
+                        "number": 4,
+                    },
+                },
+            },
+            "config": {},
+        }
+        with unittest.mock.patch("lokay.steps.issue_triage_mutations.run_cmd") as run_cmd:
+            run_cmd.return_value = unittest.mock.Mock(stdout=json.dumps([{"name": "ai:ready", "color": "B60205", "description": ""}]))
+            result = m.ensure_triage_label(request)
+        self.assertEqual(result["status"], "label_resolved", result)
+        self.assertEqual(result["label"], "ai:ready")
+
 
     def test_mutation_atoms_use_conducted_repo_number_identity(self):
         from lokay.steps import issue_triage_mutations as m

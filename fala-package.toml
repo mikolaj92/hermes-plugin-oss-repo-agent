@@ -147,14 +147,14 @@ config = { handler = "lokay.steps.issue_triage_mutations.post_triage_feedback" }
 [[correlation_paths.effectors]]
 id = "verify_triage_feedback"
 capability = "lokay_step"
-conduction = ["post_triage_feedback", "mutate_triage_issue_labels", "read_triage_labels"]
+conduction = ["post_triage_feedback", "mutate_triage_issue_labels", "read_triage_labels", "decide_triage_mutation"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_triage_mutations.verify_triage_feedback" }
 
 [[correlation_paths.effectors]]
 id = "observe_triage_feedback"
 capability = "lokay_step"
-conduction = ["verify_triage_feedback", "read_triage_labels"]
+conduction = ["verify_triage_feedback", "read_triage_labels", "decide_triage_mutation"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_triage_mutations.observe_triage_feedback" }
 
@@ -1644,14 +1644,14 @@ config = { handler = "lokay.steps.issue_triage_mutations.post_triage_feedback" }
 [[correlation_paths.effectors]]
 id = "intake_verify_triage_feedback"
 capability = "lokay_step"
-conduction = ["intake_post_triage_feedback", "intake_mutate_triage_issue_labels", "intake_read_triage_labels"]
+conduction = ["intake_post_triage_feedback", "intake_mutate_triage_issue_labels", "intake_read_triage_labels", "intake_decide_triage_mutation"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_triage_mutations.verify_triage_feedback" }
 
 [[correlation_paths.effectors]]
 id = "intake_observe_triage_feedback"
 capability = "lokay_step"
-conduction = ["intake_verify_triage_feedback", "intake_read_triage_labels"]
+conduction = ["intake_verify_triage_feedback", "intake_read_triage_labels", "intake_decide_triage_mutation"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_triage_mutations.observe_triage_feedback" }
 
