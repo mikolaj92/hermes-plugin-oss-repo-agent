@@ -43,6 +43,8 @@ class ClassifierSandboxTests(unittest.TestCase):
             self.assertNotEqual(Path(kwargs["cwd"]), Path(tmp))
             self.assertFalse(Path(kwargs["cwd"]).exists())
             self.assertIn("UNTRUSTED_GITHUB_CONTENT", kwargs["prompt"])
+            self.assertIn('"schema_version":1', kwargs["prompt"])
+            self.assertIn("integer 1", kwargs["prompt"])
             self.assertEqual(out["stdout_sha256"], __import__("hashlib").sha256(json.dumps(value).encode()).hexdigest())
 
     @mock.patch("lokay.steps.issue_triage_classifier.run_omp")
