@@ -961,7 +961,16 @@ def read_branch_provenance(request: Request) -> Result:
             **error,
         )
     if branch_exists(clone, branch) and not _provenance_matches(expected, provenance):
-        return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, operation="read_branch_provenance", provenance=provenance, expected=expected, mutated=False)
+        stable_expected = {**expected, "receipt": provenance.get("receipt", "")}
+        if not _provenance_matches(stable_expected, provenance):
+            return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, operation="read_branch_provenance", provenance=provenance, expected=expected, mutated=False)
+        if dry_run_flag(request):
+            return planned(operation="read_branch_provenance", provenance=provenance, expected=expected, clone_path=clone, branch=branch, repo=expected.get("repo") or repo, issue=expected.get("issue") or issue, board=board, task_id=expected.get("task_id"), receipt=expected.get("receipt"), worktree_path=_dispatch_worktree_path(request, branch=branch) or None, worktrees=inventory.get("worktrees") if isinstance(inventory.get("worktrees"), list) else [])
+        try:
+            _update_receipt_if_needed(clone, branch, expected.get("receipt", ""), provenance.get("receipt", ""))
+        except CommandError as exc:
+            return fail("branch_provenance_write_failed", failure_class="retryable", retry_safe=True, operation="read_branch_provenance", error=str(exc), provenance=provenance, expected=expected, mutated=False)
+        provenance = {**provenance, "receipt": expected.get("receipt", "")}
     worktree_path = _dispatch_worktree_path(request, branch=branch)
     return ok(
         status="read",

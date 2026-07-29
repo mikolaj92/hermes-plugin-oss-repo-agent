@@ -18,7 +18,7 @@ mikolaj92/my-usermanager|mikolaj92-my-usermanager|/Users/mini-m4-main/Developer/
 mikolaj92/Posejdon|mikolaj92-posejdon|/Users/mini-m4-main/Developer/hermes-repos/Posejdon|25
 mikolaj92/jaskiniowiec|mikolaj92-jaskiniowiec|/Users/mini-m4-main/Developer/hermes-repos/jaskiniowiec|25
 mikolaj92/lokay|mikolaj92-lokay|/Users/mini-m4-main/Developer/hermes-repos/lokay|20
-mikolaj92/hermes-plugin-build-in-public|mikolaj92-hermes-plugin-build-in-public|/Users/mini-m4-main/Developer/hermes-repos/hermes-plugin-build-in-public|20
+mikolaj92/influenzer|mikolaj92-influenzer|/Users/mini-m4-main/Developer/hermes-repos/influenzer|20
 mikolaj92/VibeFront|mikolaj92-vibe-front|/Users/mini-m4-main/Developer/hermes-repos/VibeFront|20
 mikolaj92/hermetic-alchemy|mikolaj92-hermetic-alchemy|/Users/mini-m4-main/Developer/hermes-repos/hermetic-alchemy|20
 mikolaj92/Temida|mikolaj92-temida|/Users/mini-m4-main/Developer/hermes-repos/Temida|15

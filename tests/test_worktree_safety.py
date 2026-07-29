@@ -170,6 +170,15 @@ class TempGitSafetyTests(unittest.TestCase):
         second = prepare_chain(path_input)
         self.assertEqual(second["status"], "verified", second)
 
+    def test_owned_worktree_reconciles_new_run_receipt(self) -> None:
+        first = self.prepare()
+        self.assertEqual(first["status"], "verified", first)
+        next_receipt = str(Path(self.tmp.name) / "next-run-receipt.json")
+        second = self.prepare(receipt_path=next_receipt)
+        self.assertEqual(second["status"], "verified", second)
+        from lokay.adapters_git import branch_config_get
+        self.assertEqual(branch_config_get(self.clone, self.branch, "lokay-receipt"), next_receipt)
+
     def test_repair_provenance_missing_or_mismatched_fails_closed(self) -> None:
         base = {"clone_path": str(self.clone), "worktree_root": str(self.worktrees), "base_branch": "main", "dry_run": False, "conduction": {"build_repair_prompt": {"issue": "7", "receipt_id": str(Path(self.tmp.name) / "repair-receipt.json"), "repo": "owner/repo", "branch": self.branch}}}
         missing = prepare_chain(base)
