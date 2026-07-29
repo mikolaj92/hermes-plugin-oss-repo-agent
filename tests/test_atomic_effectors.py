@@ -492,6 +492,97 @@ class IntakeAlignedTests(unittest.TestCase):
         self.assertEqual(out["status"], "planned")
         self.assertEqual(out["idempotency_key"], "github-issue:o/r:1")
 
+    def test_existing_intake_task_continues_to_dispatch_board(self) -> None:
+        selected = self._selected(3590)
+        found = {
+            "status": "intake_marker_found",
+            "ok": True,
+            "found": True,
+            "task_id": "t_14722de2",
+            "task": {"id": "t_14722de2", "title": "[issue] o/r#3590", "status": "ready"},
+            "marker": "github-issue:o/r:3590",
+            "board": "mikolaj92-temida",
+            "selected": selected,
+            "already_completed": False,
+        }
+        created = kanban_intake.create_intake_task(
+            req(
+                {
+                    "dry_run": False,
+                    "selected": selected,
+                    "conduction": {"find_intake_marker": found},
+                }
+            )
+        )
+        self.assertEqual(created["status"], "intake_task_exists")
+        self.assertFalse(created["mutated"])
+        reconciled = kanban_intake.reconcile_intake_task(
+            req(
+                {
+                    "dry_run": False,
+                    "conduction": {
+                        "create_intake_task": created,
+                        "find_intake_marker": found,
+                    },
+                }
+            )
+        )
+        self.assertEqual(reconciled["status"], "intake_reconciled")
+        self.assertTrue(reconciled["verified"])
+        self.assertNotEqual(reconciled.get("status"), "noop")
+        with mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json", return_value=[found["task"]]) as listed:
+            read = issue_to_pr.read_dispatch_tasks(
+                req(
+                    {
+                        "dry_run": False,
+                        "conduction": {
+                            "intake_reconcile_intake_task": reconciled,
+                            "intake_create_intake_task": created,
+                            "intake_build_issue_claim_result": {
+                                "status": "claimed",
+                                "ok": True,
+                                "selected": selected,
+                            },
+                        },
+                    }
+                )
+            )
+        self.assertEqual(read["status"], "read")
+        self.assertEqual(read["board"], "mikolaj92-temida")
+        listed.assert_called()
+
+    def test_completed_intake_task_does_not_continue(self) -> None:
+        selected = self._selected(3590)
+        found = {
+            "status": "intake_marker_found",
+            "ok": True,
+            "found": True,
+            "task_id": "t_done",
+            "task": {"id": "t_done", "title": "[issue] o/r#3590", "status": "done"},
+            "marker": "github-issue:o/r:3590",
+            "board": "mikolaj92-temida",
+            "selected": selected,
+            "already_completed": True,
+        }
+        created = kanban_intake.create_intake_task(
+            req({"dry_run": False, "selected": selected, "conduction": {"find_intake_marker": found}})
+        )
+        self.assertEqual(created["status"], "intake_task_exists")
+        self.assertTrue(created.get("already_completed"))
+        reconciled = kanban_intake.reconcile_intake_task(
+            req(
+                {
+                    "dry_run": False,
+                    "conduction": {
+                        "create_intake_task": created,
+                        "find_intake_marker": found,
+                    },
+                }
+            )
+        )
+        self.assertEqual(reconciled["status"], "noop")
+        self.assertEqual(reconciled["reason"], "intake_task_already_completed")
+
 
 class IssueToPrTests(unittest.TestCase):
     def test_parse_issue_ref_from_task(self) -> None:

@@ -112,7 +112,7 @@ def create_intake_task(request: Request) -> Result:
     assignee = str(cfg.get("kanban_intake_assignee") or "lokay-intake")
     dry = dry_run_flag(request)
     if found.get("found"):
-        return noop("already_exists", task_id=found.get("task_id"), marker=marker, dry_run=dry)
+        return ok(status="intake_task_exists", found=True, task_id=found.get("task_id"), task=found.get("task"), marker=marker, already_completed=bool(found.get("already_completed")), mutated=False, dry_run=dry, selected=selected, board=board)
     if dry:
         return planned(board=board, title=f"[issue] {repo}#{number}: {title}", idempotency_key=marker, assignee=assignee)
     if not board:
@@ -133,13 +133,35 @@ def reconcile_intake_task(request: Request) -> Result:
         return terminal
     data = input_of(request)
     created = cond_blob(request, "create_intake_task")
-    board = str(data.get("board") or created.get("board") or "")
-    marker = str(data.get("idempotency_key") or created.get("marker") or "")
+    found = cond_blob(request, "find_intake_marker")
+    board = str(data.get("board") or created.get("board") or found.get("board") or "")
+    marker = str(data.get("idempotency_key") or created.get("marker") or found.get("marker") or "")
     if created.get("status") == "noop":
         return noop(str(created.get("reason") or "no_selected_issue"), dry_run=dry_run_flag(request), marker=created.get("marker"))
     dry = dry_run_flag(request)
-    if dry or created.get("status") == "noop":
-        return ok(status="intake_reconciled", verified=False, mutated=False, dry_run=dry, marker=marker)
+    if dry:
+        return ok(status="intake_reconciled", verified=False, mutated=False, dry_run=dry, marker=marker, board=board)
+    # Reused existing intake task is already verified by find_intake_marker.
+    if created.get("status") == "intake_task_exists" and created.get("task_id") not in (None, ""):
+        if created.get("already_completed"):
+            return noop(
+                "intake_task_already_completed",
+                task_id=created.get("task_id"),
+                task=created.get("task"),
+                board=board,
+                marker=marker,
+                already_completed=True,
+            )
+        return ok(
+            status="intake_reconciled",
+            verified=True,
+            mutated=False,
+            reused=True,
+            task_id=created.get("task_id"),
+            task=created.get("task"),
+            board=board,
+            marker=marker,
+        )
     try:
         tasks = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
     except CommandError as exc:
@@ -151,4 +173,4 @@ def reconcile_intake_task(request: Request) -> Result:
     task_id = _task_id(task)
     if task_id is None or not str(task_id).strip():
         return fail("invalid_kanban_task_id", failure_class="terminal", retry_safe=False, mutated=True, board=board, marker=marker)
-    return ok(status="intake_reconciled", verified=True, mutated=True, task_id=task_id, task_title=task.get("title"), board=board, marker=marker)
+    return ok(status="intake_reconciled", verified=True, mutated=bool(created.get("mutated")), task_id=task_id, task_title=task.get("title"), board=board, marker=marker)
