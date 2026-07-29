@@ -874,6 +874,18 @@ class IssueToPrTests(unittest.TestCase):
         pr_decision = {"status": "create", "ok": True, "should_create": True}
         pr = issue_to_pr.create_pull_request(req({"repo": "o/r", "branch": "ai/fix/1", "dry_run": True, "conduction": {"decide_existing_pr": pr_decision}}))
         self.assertEqual(pr["status"], "planned")
+        created = {"status": "created", "ok": True, "repo": "o/r", "issue": 1, "branch": "ai/fix/1", "base": "main"}
+        with mock.patch("lokay.steps.issue_to_pr.run_cmd", return_value=SimpleNamespace(stdout=json.dumps([{"number": 2, "url": "https://example.test/pr/2", "baseRefName": "main", "headRefName": "ai/fix/1"}]))):
+            reconciled = issue_to_pr.reconcile_pull_request(req({"conduction": {"create_pull_request": created}}))
+        self.assertEqual(reconciled["status"], "reconciled")
+        self.assertEqual(reconciled["repo"], "o/r")
+        self.assertEqual(reconciled["branch"], "ai/fix/1")
+        self.assertEqual(reconciled["prs"][0]["number"], 2)
+        with mock.patch("lokay.steps.issue_to_pr.run_cmd", side_effect=CommandError(["gh"], 1, "", "offline")):
+            failed_reconcile = issue_to_pr.reconcile_pull_request(req({"conduction": {"dispatch_create_pull_request": created}}))
+        self.assertEqual(failed_reconcile["status"], "failed")
+        self.assertEqual(failed_reconcile["reason"], "pr_list_failed")
+        self.assertTrue(failed_reconcile["retry_safe"])
         built = issue_to_pr.build_dispatch_receipt(req({"payload": {"phase": "CLAIMED"}}))
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "receipt.json")

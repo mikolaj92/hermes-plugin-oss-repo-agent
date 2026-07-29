@@ -1283,19 +1283,31 @@ def verify_push_oid(request: Request) -> Result:
     return ok(status="verified", operation="verify_push_oid", local_oid=local, remote_oid=remote, repo=pushed.get("repo") or read.get("repo"), issue=pushed.get("issue") or read.get("issue"), board=pushed.get("board") or read.get("board"), task_id=pushed.get("task_id") or read.get("task_id"), branch=pushed.get("branch") or read.get("branch"))
 
 
+def _read_open_prs(repo: str, branch: str, base: str, gh: str, *, operation: str, identity: dict[str, Any]) -> Result:
+    if not repo or not branch:
+        return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False, operation=operation)
+    try:
+        proc = run_cmd([gh, "pr", "list", "--repo", repo, "--head", branch, "--base", base, "--state", "open", "--json", "number,url,baseRefName,headRefName"])
+        rows = json.loads(proc.stdout or "[]")
+    except (CommandError, json.JSONDecodeError) as exc:
+        return fail("pr_list_failed", failure_class="retryable_read", retry_safe=True, operation=operation, error=str(exc))
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return fail("invalid_pr_list", failure_class="terminal", retry_safe=False, operation=operation)
+    return ok(status="read", operation=operation, prs=rows, repo=repo, branch=branch, base=base, **identity)
+
+
 def read_open_pr_for_branch(request: Request) -> Result:
     terminal = _atomic_terminal(request, "read_open_pr_for_branch", "verify_push_oid")
     if terminal: return terminal
     idle = upstream_noop(request, "verify_push_oid")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_open_pr_for_branch")
-    import json
-    data, cfg = input_of(request), cfg_of(request); verified = cond_blob(request, "verify_push_oid"); repo, branch, base = str(data.get("repo") or verified.get("repo") or ""), str(data.get("branch") or verified.get("branch") or ""), str(data.get("base_branch") or cfg.get("base_branch") or "main"); gh = str(cfg.get("gh_cli") or "gh")
-    if not repo or not branch: return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False, operation="read_open_pr_for_branch")
-    try: proc = run_cmd([gh, "pr", "list", "--repo", repo, "--head", branch, "--base", base, "--state", "open", "--json", "number,url,baseRefName,headRefName"]); rows = json.loads(proc.stdout or "[]")
-    except (CommandError, json.JSONDecodeError) as exc: return fail("pr_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_open_pr_for_branch", error=str(exc))
-    if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows): return fail("invalid_pr_list", failure_class="terminal", retry_safe=False, operation="read_open_pr_for_branch")
-    return ok(status="read", operation="read_open_pr_for_branch", prs=rows, repo=repo, issue=verified.get("issue"), board=verified.get("board"), task_id=verified.get("task_id"), branch=branch, base=base)
+    data, cfg = input_of(request), cfg_of(request)
+    verified = cond_blob(request, "verify_push_oid")
+    repo = str(data.get("repo") or verified.get("repo") or "")
+    branch = str(data.get("branch") or verified.get("branch") or "")
+    base = str(data.get("base_branch") or cfg.get("base_branch") or "main")
+    return _read_open_prs(repo, branch, base, str(cfg.get("gh_cli") or "gh"), operation="read_open_pr_for_branch", identity={"issue": verified.get("issue"), "board": verified.get("board"), "task_id": verified.get("task_id")})
 
 
 def decide_existing_pr(request: Request) -> Result:
@@ -1332,7 +1344,13 @@ def reconcile_pull_request(request: Request) -> Result:
     idle = upstream_noop(request, "create_pull_request")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="reconcile_pull_request")
-    return read_open_pr_for_branch(request) | {"status": "reconciled", "operation": "reconcile_pull_request"}
+    created = cond_blob(request, "create_pull_request")
+    data = input_of(request)
+    repo = str(data.get("repo") or created.get("repo") or "")
+    branch = str(data.get("branch") or created.get("branch") or "")
+    base = str(data.get("base_branch") or created.get("base") or cfg_of(request).get("base_branch") or "main")
+    read = _read_open_prs(repo, branch, base, str(cfg_of(request).get("gh_cli") or "gh"), operation="reconcile_pull_request", identity={"issue": created.get("issue"), "board": created.get("board"), "task_id": created.get("task_id")})
+    return read if read.get("ok") is not True else read | {"status": "reconciled"}
 
 
 def normalize_pr_labels(request: Request) -> Result:
