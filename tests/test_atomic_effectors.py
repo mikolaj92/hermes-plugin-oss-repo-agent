@@ -852,6 +852,7 @@ class IssueToPrTests(unittest.TestCase):
         omp_pre = {"status": "ready", "ok": True, "worktree_path": "/wt", "branch": "ai/fix/1", "pre_head": "abc"}
         omp = issue_to_pr.invoke_omp(req({"worktree_path": "/wt", "prompt": "fix", "dry_run": True, "conduction": {"read_omp_preconditions": omp_pre}}))
         self.assertEqual(omp["status"], "planned")
+        self.assertFalse(omp["mutated"])
 
     def test_omp_postcondition_read_chain_propagates_noop(self) -> None:
         no_selection = {"status": "noop", "ok": True, "mutated": False, "reason": "no_selected_issue"}

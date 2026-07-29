@@ -1109,18 +1109,30 @@ def verify_worktree_head(request: Request) -> Result:
     idle = upstream_noop(request, "add_worktree")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_worktree_head")
-    data = input_of(request); path = str(data.get("worktree_path") or ""); expected = str(data.get("base_head") or cond_get(request, "base_head", "read_base_ref") or "")
+    data = input_of(request)
+    added = cond_blob(request, "add_worktree")
+    path = str(data.get("worktree_path") or added.get("worktree_path") or "")
+    branch = str(data.get("branch") or added.get("branch") or "")
+    expected = str(data.get("base_head") or cond_get(request, "base_head", "read_base_ref") or "")
+    if not path or not branch:
+        return fail("missing_worktree_or_branch", failure_class="terminal", retry_safe=False, operation="verify_worktree_head")
     try: head = rev_parse(path)
     except CommandError as exc: return fail("worktree_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="verify_worktree_head", error=str(exc))
     if expected and head != expected: return fail("worktree_base_mismatch", failure_class="terminal", retry_safe=False, operation="verify_worktree_head", head=head, base_head=expected)
-    return ok(status="verified", operation="verify_worktree_head", head=head)
+    repo, issue, board, context = _fix_identity(request)
+    return ok(status="verified", operation="verify_worktree_head", head=head, base_head=expected or head, worktree_path=path, branch=branch, repo=repo, issue=issue, board=board, task_id=added.get("task_id") or context.get("task_id"))
 
 
 def read_omp_preconditions(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_omp_preconditions", "verify_worktree_head")
+    if terminal: return terminal
     idle = upstream_noop(request, "verify_worktree_head")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_omp_preconditions")
-    data = input_of(request); path, branch = str(data.get("worktree_path") or ""), str(data.get("branch") or "")
+    data = input_of(request)
+    verified = cond_blob(request, "verify_worktree_head")
+    path = str(data.get("worktree_path") or verified.get("worktree_path") or "")
+    branch = str(data.get("branch") or verified.get("branch") or "")
     if not path or not branch: return fail("missing_worktree_or_branch", failure_class="terminal", retry_safe=False, operation="read_omp_preconditions")
     try: top, actual = git(["rev-parse", "--show-toplevel"], cwd=path), git(["branch", "--show-current"], cwd=path)
     except CommandError as exc: return fail("omp_precondition_failed", failure_class="terminal", retry_safe=False, operation="read_omp_preconditions", error=str(exc))
@@ -1128,7 +1140,8 @@ def read_omp_preconditions(request: Request) -> Result:
     if actual != branch: return fail("omp_branch_mismatch", failure_class="terminal", retry_safe=False, operation="read_omp_preconditions", expected_branch=branch, actual_branch=actual)
     try: head = rev_parse(path)
     except CommandError as exc: return fail("omp_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_omp_preconditions", error=str(exc))
-    return ok(status="ready", operation="read_omp_preconditions", pre_head=head, branch=actual, worktree_path=path)
+    repo, issue, board, context = _fix_identity(request)
+    return ok(status="ready", operation="read_omp_preconditions", pre_head=head, base_head=verified.get("base_head"), branch=actual, worktree_path=path, repo=repo, issue=issue, board=board, task_id=verified.get("task_id") or context.get("task_id"))
 
 
 def invoke_omp(request: Request) -> Result:
@@ -1137,11 +1150,21 @@ def invoke_omp(request: Request) -> Result:
     idle = upstream_noop(request, "read_omp_preconditions", "add_worktree")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="invoke_omp")
-    data, cfg = input_of(request), cfg_of(request); path, prompt = str(data.get("worktree_path") or ""), str(data.get("prompt") or "")
+    data, cfg = input_of(request), cfg_of(request)
+    pre = cond_blob(request, "read_omp_preconditions")
+    path = str(data.get("worktree_path") or pre.get("worktree_path") or "")
+    repo, issue, board, context = _fix_identity(request)
+    prompt = str(data.get("prompt") or (
+        f"Fix GitHub issue {repo}#{issue}. Work only in the current isolated worktree on branch {pre.get('branch')}. "
+        "Use gh to inspect the issue and repository context. Reproduce the problem, make the smallest safe fix, "
+        "run relevant tests, and commit the result. Do not push, open or merge a pull request, or modify other worktrees."
+        if repo and issue not in (None, "") and pre.get("branch") else ""
+    ))
     if not path or not prompt: return fail("missing_worktree_or_prompt", failure_class="terminal", retry_safe=False, operation="invoke_omp")
     try: out = run_omp(prompt=prompt, cwd=path, command=str(data.get("command") or cfg.get("executor_command") or "omp"), model=str(data.get("model") or cfg.get("model") or "omniroute/omp/default"), thinking=str(data.get("thinking") or cfg.get("thinking") or "medium"), timeout=float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800), dry_run=dry_run_flag(request))
     except CommandError as exc: return fail("omp_failed", failure_class="terminal", retry_safe=False, operation="invoke_omp", error=str(exc), mutated=True)
-    return planned(operation="invoke_omp", omp=out) if dry_run_flag(request) else ok(status="invoked", operation="invoke_omp", omp=out, mutated=True)
+    values = dict(operation="invoke_omp", omp=out, worktree_path=path, branch=pre.get("branch"), pre_head=pre.get("pre_head"), base_head=pre.get("base_head"), repo=repo, issue=issue, board=board, task_id=pre.get("task_id") or context.get("task_id"))
+    return planned(**values) if dry_run_flag(request) else ok(status="invoked", mutated=True, **values)
 
 
 def verify_omp_postconditions(request: Request) -> Result:
@@ -1150,12 +1173,16 @@ def verify_omp_postconditions(request: Request) -> Result:
     idle = upstream_noop(request, "invoke_omp", "read_omp_preconditions")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_omp_postconditions")
-    data = input_of(request); path = str(data.get("worktree_path") or ""); before = str(data.get("pre_head") or cond_get(request, "pre_head", "read_omp_preconditions") or "")
+    data = input_of(request)
+    invoked = cond_blob(request, "invoke_omp")
+    pre = cond_blob(request, "read_omp_preconditions")
+    path = str(data.get("worktree_path") or invoked.get("worktree_path") or pre.get("worktree_path") or "")
+    before = str(data.get("pre_head") or invoked.get("pre_head") or pre.get("pre_head") or "")
     try: head = rev_parse(path); paths = _escaped_omp_paths(path, _omp_diff_paths(path))
     except (CommandError, OSError, ValueError) as exc: return fail("omp_postcondition_failed", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", error=str(exc))
     if paths: return fail("omp_diff_path_escape", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", paths=paths)
     if before and head == before: return fail("omp_head_unchanged", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", head=head, pre_head=before)
-    return ok(status="verified", operation="verify_omp_postconditions", head=head)
+    return ok(status="verified", operation="verify_omp_postconditions", head=head, base_head=invoked.get("base_head") or pre.get("base_head"), worktree_path=path, branch=invoked.get("branch") or pre.get("branch"), repo=invoked.get("repo") or pre.get("repo"), issue=invoked.get("issue") or pre.get("issue"), board=invoked.get("board") or pre.get("board"), task_id=invoked.get("task_id") or pre.get("task_id"))
 
 
 def read_worktree_head(request: Request) -> Result:
@@ -1164,10 +1191,12 @@ def read_worktree_head(request: Request) -> Result:
     idle = upstream_noop(request, "verify_omp_postconditions")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_worktree_head")
-    path = str(input_of(request).get("worktree_path") or "")
+    data = input_of(request)
+    verified = cond_blob(request, "verify_omp_postconditions")
+    path = str(data.get("worktree_path") or verified.get("worktree_path") or "")
     try: head = rev_parse(path)
     except CommandError as exc: return fail("worktree_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_worktree_head", error=str(exc))
-    return ok(status="read", operation="read_worktree_head", head=head)
+    return ok(status="read", operation="read_worktree_head", head=head, base_head=verified.get("base_head"), worktree_path=path, branch=verified.get("branch"), repo=verified.get("repo"), issue=verified.get("issue"), board=verified.get("board"), task_id=verified.get("task_id"))
 
 
 def read_base_head(request: Request) -> Result:
@@ -1176,7 +1205,10 @@ def read_base_head(request: Request) -> Result:
     idle = upstream_noop(request, "read_worktree_head")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_base_head")
-    return read_base_ref(request)
+    read = cond_blob(request, "read_worktree_head")
+    base = str(input_of(request).get("base_head") or read.get("base_head") or "")
+    if not base: return fail("missing_base_head", failure_class="terminal", retry_safe=False, operation="read_base_head")
+    return ok(status="read", operation="read_base_head", base_head=base, worktree_path=read.get("worktree_path"), branch=read.get("branch"), repo=read.get("repo"), issue=read.get("issue"), board=read.get("board"), task_id=read.get("task_id"))
 
 
 def decide_branch_has_commits(request: Request) -> Result:
@@ -1192,15 +1224,16 @@ def decide_branch_has_commits(request: Request) -> Result:
 
 
 def read_push_head(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "read_push_head", "decide_branch_has_commits", "verify_omp_postconditions", "read_worktree_inventory", "read_branch_provenance")
+    terminal = _atomic_terminal(request, "read_push_head", "decide_branch_has_commits", "verify_omp_postconditions")
     if terminal: return terminal
-    idle = upstream_noop(request, "decide_branch_has_commits", "verify_omp_postconditions", "read_worktree_inventory", "read_branch_provenance")
+    idle = upstream_noop(request, "decide_branch_has_commits", "verify_omp_postconditions")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_push_head")
-    data = input_of(request); path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "read_worktree_inventory") or ""); branch = str(data.get("branch") or cond_get(request, "branch", "read_branch_provenance") or "")
+    data = input_of(request); verified = cond_blob(request, "verify_omp_postconditions"); path = str(data.get("worktree_path") or verified.get("worktree_path") or ""); branch = str(data.get("branch") or verified.get("branch") or "")
+    if not path or not branch: return fail("missing_worktree_or_branch", failure_class="terminal", retry_safe=False, operation="read_push_head")
     try: head = rev_parse(path)
     except CommandError as exc: return fail("push_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_push_head", error=str(exc))
-    return ok(status="read", operation="read_push_head", worktree_path=path, branch=branch, local_oid=head)
+    return ok(status="read", operation="read_push_head", worktree_path=path, branch=branch, local_oid=head, repo=verified.get("repo"), issue=verified.get("issue"), board=verified.get("board"), task_id=verified.get("task_id"))
 
 
 def push_branch(request: Request) -> Result:
@@ -1209,12 +1242,12 @@ def push_branch(request: Request) -> Result:
     idle = upstream_noop(request, "read_push_head")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="push_branch")
-    data = input_of(request); path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "read_push_head") or ""); branch = str(data.get("branch") or cond_get(request, "branch", "read_push_head") or "")
+    data = input_of(request); read = cond_blob(request, "read_push_head"); path = str(data.get("worktree_path") or read.get("worktree_path") or ""); branch = str(data.get("branch") or read.get("branch") or "")
     if not path or not branch: return fail("missing_worktree_or_branch", failure_class="terminal", retry_safe=False, operation="push_branch")
-    if dry_run_flag(request): return planned(operation="push_branch", branch=branch, remote="origin")
+    if dry_run_flag(request): return planned(operation="push_branch", branch=branch, remote="origin", worktree_path=path, repo=read.get("repo"), issue=read.get("issue"))
     try: out = git_push_branch(path, branch, set_upstream=True)
     except CommandError as exc: return fail("push_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="push_branch", error=str(exc), mutated=True)
-    return ok(status="pushed", operation="push_branch", branch=branch, stdout_tail=(out or "")[-400:], mutated=True)
+    return ok(status="pushed", operation="push_branch", branch=branch, worktree_path=path, local_oid=read.get("local_oid"), repo=read.get("repo"), issue=read.get("issue"), board=read.get("board"), task_id=read.get("task_id"), stdout_tail=(out or "")[-400:], mutated=True)
 
 
 def read_pushed_ref(request: Request) -> Result:
@@ -1223,10 +1256,10 @@ def read_pushed_ref(request: Request) -> Result:
     idle = upstream_noop(request, "push_branch", "read_push_head")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_pushed_ref")
-    data = input_of(request); path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "read_push_head") or ""); branch = str(data.get("branch") or cond_get(request, "branch", "read_push_head") or "")
+    data = input_of(request); pushed = cond_blob(request, "push_branch"); read = cond_blob(request, "read_push_head"); path = str(data.get("worktree_path") or pushed.get("worktree_path") or read.get("worktree_path") or ""); branch = str(data.get("branch") or pushed.get("branch") or read.get("branch") or "")
     try: line = git(["ls-remote", "origin", f"refs/heads/{branch}"], cwd=path); oid = line.split()[0] if line.split() else ""
     except CommandError as exc: return fail("push_readback_failed", failure_class="retryable_read", retry_safe=True, operation="read_pushed_ref", error=str(exc))
-    return ok(status="read", operation="read_pushed_ref", remote_oid=oid, branch=branch)
+    return ok(status="read", operation="read_pushed_ref", remote_oid=oid, local_oid=read.get("local_oid"), branch=branch, repo=read.get("repo"), issue=read.get("issue"), board=read.get("board"), task_id=read.get("task_id"))
 
 
 def verify_push_oid(request: Request) -> Result:
@@ -1235,10 +1268,10 @@ def verify_push_oid(request: Request) -> Result:
     idle = upstream_noop(request, "read_pushed_ref", "read_push_head", "push_branch", "decide_branch_has_commits", "verify_omp_postconditions", "read_worktree_head", "read_base_head", "read_base_ref", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "select_dispatch_task", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_push_oid")
-    local = cond_get(request, "local_oid", "read_push_head") or input_of(request).get("local_oid"); remote = cond_get(request, "remote_oid", "read_pushed_ref") or input_of(request).get("remote_oid")
+    pushed = cond_blob(request, "read_pushed_ref"); read = cond_blob(request, "read_push_head"); local = pushed.get("local_oid") or read.get("local_oid") or input_of(request).get("local_oid"); remote = pushed.get("remote_oid") or input_of(request).get("remote_oid")
     if not local or not remote: return fail("missing_push_oids", failure_class="terminal", retry_safe=False, operation="verify_push_oid")
     if local != remote: return fail("push_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_push_oid", local_oid=local, remote_oid=remote, mutated=True)
-    return ok(status="verified", operation="verify_push_oid", local_oid=local, remote_oid=remote)
+    return ok(status="verified", operation="verify_push_oid", local_oid=local, remote_oid=remote, repo=pushed.get("repo") or read.get("repo"), issue=pushed.get("issue") or read.get("issue"), board=pushed.get("board") or read.get("board"), task_id=pushed.get("task_id") or read.get("task_id"), branch=pushed.get("branch") or read.get("branch"))
 
 
 def read_open_pr_for_branch(request: Request) -> Result:
@@ -1248,11 +1281,12 @@ def read_open_pr_for_branch(request: Request) -> Result:
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_open_pr_for_branch")
     import json
-    data, cfg = input_of(request), cfg_of(request); repo, branch, base = str(data.get("repo") or ""), str(data.get("branch") or ""), str(data.get("base_branch") or cfg.get("base_branch") or "main"); gh = str(cfg.get("gh_cli") or "gh")
+    data, cfg = input_of(request), cfg_of(request); verified = cond_blob(request, "verify_push_oid"); repo, branch, base = str(data.get("repo") or verified.get("repo") or ""), str(data.get("branch") or verified.get("branch") or ""), str(data.get("base_branch") or cfg.get("base_branch") or "main"); gh = str(cfg.get("gh_cli") or "gh")
+    if not repo or not branch: return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False, operation="read_open_pr_for_branch")
     try: proc = run_cmd([gh, "pr", "list", "--repo", repo, "--head", branch, "--base", base, "--state", "open", "--json", "number,url,baseRefName,headRefName"]); rows = json.loads(proc.stdout or "[]")
     except (CommandError, json.JSONDecodeError) as exc: return fail("pr_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_open_pr_for_branch", error=str(exc))
     if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows): return fail("invalid_pr_list", failure_class="terminal", retry_safe=False, operation="read_open_pr_for_branch")
-    return ok(status="read", operation="read_open_pr_for_branch", prs=rows, repo=repo, branch=branch, base=base)
+    return ok(status="read", operation="read_open_pr_for_branch", prs=rows, repo=repo, issue=verified.get("issue"), board=verified.get("board"), task_id=verified.get("task_id"), branch=branch, base=base)
 
 
 def decide_existing_pr(request: Request) -> Result:
@@ -1261,9 +1295,9 @@ def decide_existing_pr(request: Request) -> Result:
     idle = upstream_noop(request, "read_open_pr_for_branch")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="decide_existing_pr")
-    rows = cond_get(request, "prs", "read_open_pr_for_branch") or []
+    read = cond_blob(request, "read_open_pr_for_branch"); rows = read.get("prs") or []
     if len(rows) > 1: return fail("ambiguous_existing_prs", failure_class="terminal", retry_safe=False, operation="decide_existing_pr", prs=rows)
-    return ok(status="exists" if rows else "create", operation="decide_existing_pr", existing=rows[0] if rows else None, should_create=not bool(rows))
+    return ok(status="exists" if rows else "create", operation="decide_existing_pr", existing=rows[0] if rows else None, should_create=not bool(rows), repo=read.get("repo"), issue=read.get("issue"), board=read.get("board"), task_id=read.get("task_id"), branch=read.get("branch"), base=read.get("base"))
 
 
 def create_pull_request(request: Request) -> Result:
@@ -1272,13 +1306,14 @@ def create_pull_request(request: Request) -> Result:
     idle = upstream_noop(request, "decide_existing_pr")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="create_pull_request")
-    data, cfg = input_of(request), cfg_of(request); decision = cond_blob(request, "decide_existing_pr"); repo, branch, base = str(data.get("repo") or ""), str(data.get("branch") or ""), str(data.get("base_branch") or cfg.get("base_branch") or "main")
-    if not decision.get("should_create", True): return ok(status="exists", operation="create_pull_request", **(decision.get("existing") or {}), mutated=False)
-    if dry_run_flag(request): return planned(operation="create_pull_request", repo=repo, branch=branch, base=base)
-    gh = str(cfg.get("gh_cli") or "gh"); title = str(data.get("title") or f"fix: {repo}#{data.get('issue', '')}"); body = str(data.get("body") or "Automated fix via lokay.")
+    data, cfg = input_of(request), cfg_of(request); decision = cond_blob(request, "decide_existing_pr"); repo, branch, base = str(data.get("repo") or decision.get("repo") or ""), str(data.get("branch") or decision.get("branch") or ""), str(data.get("base_branch") or decision.get("base") or cfg.get("base_branch") or "main"); issue = data.get("issue") or decision.get("issue")
+    if not repo or not branch: return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False, operation="create_pull_request")
+    if not decision.get("should_create", True): return ok(status="exists", operation="create_pull_request", repo=repo, issue=issue, branch=branch, base=base, **(decision.get("existing") or {}), mutated=False)
+    if dry_run_flag(request): return planned(operation="create_pull_request", repo=repo, issue=issue, branch=branch, base=base)
+    gh = str(cfg.get("gh_cli") or "gh"); title = str(data.get("title") or f"fix: {repo}#{issue}"); body = str(data.get("body") or f"Closes #{issue}.\n\nAutomated fix via lokay.")
     try: proc = run_cmd([gh, "pr", "create", "--repo", repo, "--base", base, "--head", branch, "--title", title, "--body", body], timeout=120)
     except CommandError as exc: return fail("pr_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_pull_request", error=str(exc), mutated=True)
-    return ok(status="created", operation="create_pull_request", repo=repo, branch=branch, base=base, stdout=(proc.stdout or "")[-400:], mutated=True)
+    return ok(status="created", operation="create_pull_request", repo=repo, issue=issue, board=decision.get("board"), task_id=decision.get("task_id"), branch=branch, base=base, stdout=(proc.stdout or "")[-400:], mutated=True)
 
 
 def reconcile_pull_request(request: Request) -> Result:
