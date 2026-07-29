@@ -169,6 +169,37 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(out["reason"], "action_not_selected")
         self.assertFalse(list(self.root.rglob("close-authorized-*.json")))
 
+    def test_mutation_verification_noops_for_feedback_without_decide(self):
+        request = {
+            "input": {
+                "triage_receipts": str(self.root),
+                "dry_run": False,
+                "conduction": {
+                    "intake_mutate_triage_issue_labels": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "action_not_selected",
+                        "repo": "owner/repo",
+                        "number": 42,
+                    },
+                    "intake_verify_triage_feedback": {
+                        "ok": True,
+                        "status": "feedback_verified",
+                        "repo": "owner/repo",
+                        "number": 42,
+                        "comment_id": 5116451350,
+                        "decision_digest": "f" * 64,
+                        "verified_readback_state": "verified",
+                    },
+                },
+            },
+            "config": {},
+        }
+        out = receipts.publish_triage_mutation_verification(request)
+        self.assertEqual(out["status"], "noop", out)
+        self.assertEqual(out["reason"], "action_not_selected")
+        self.assertFalse(list(self.root.rglob("mutation-verified-*.json")))
+
     def test_disabled_and_no_candidate_no_write_and_terminal_failure_propagates(self):
         disabled = receipts.publish_triage_decision_receipt(self.req(triage_enabled=False, payload=self.payload))
         self.assertEqual(disabled["status"], "noop")

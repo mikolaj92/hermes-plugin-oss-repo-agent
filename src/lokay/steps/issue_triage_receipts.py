@@ -328,8 +328,23 @@ def _stage_request(request: Request, stage: str) -> Result:
     action = _stage_action(request)
     if stage in {"close-authorized", "close-verified"} and action and action != "close":
         return noop("action_not_selected", action=action, operation=operation)
-    if stage in {"mutation-authorized", "mutation-verified"} and action and action not in {"add_ready", "remove_ready", "label", "close"}:
+    if stage == "mutation-authorized" and action and action not in {"add_ready", "remove_ready", "label", "close"}:
         return noop("action_not_selected", action=action, operation=operation)
+    if stage == "mutation-verified":
+        # Graph wires labels+feedback verify, not decide. Treat non-label/close
+        # actions (including absent action with feedback-only verification) as idle.
+        if action and action not in {"add_ready", "remove_ready", "label", "close"}:
+            return noop("action_not_selected", action=action, operation=operation)
+        if not action:
+            labels = cond_blob(request, "mutate_triage_issue_labels")
+            feedback = cond_blob(request, "verify_triage_feedback")
+            label_idle = labels.get("ok") is True and (
+                labels.get("status") in {"labels_verified", "planned"}
+                or (labels.get("status") == "noop" and labels.get("reason") in {"action_not_selected", "already_labeled", "ready_absent", "frozen"})
+            )
+            feedback_done = feedback.get("ok") is True and feedback.get("status") in {"feedback_verified", "planned"}
+            if feedback_done and (not labels or label_idle):
+                return noop("action_not_selected", action=action or "feedback", operation=operation)
     if stage == "feedback-verified" and action and action != "feedback":
         verified = cond_blob(request, "verify_triage_feedback")
         if not (verified.get("ok") is True and verified.get("status") in {"feedback_verified", "planned"}):
