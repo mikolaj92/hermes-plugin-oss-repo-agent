@@ -218,7 +218,10 @@ def decide_triage_mutation(request: Mapping[str, Any]) -> dict[str, Any]:
     folded = {str(x).casefold() for x in labels}
     frozen = str(data.get("frozen_label") or cfg.get("frozen_label") or (cfg.get("labels") or {}).get("frozen") or "frozen").casefold()
     ready = str(data.get("ready_label") or cfg.get("ready_label") or (cfg.get("labels") or {}).get("ready") or "ai:ready").casefold()
+    conducted = cond_blob(request, "classify_triage_issue")
     decision_value = data.get("decision")
+    if decision_value is None:
+        decision_value = conducted.get("classification")
     classification = str(data.get("classification") or (decision_value.get("classification") if isinstance(decision_value, Mapping) else "")).strip()
     if frozen in folded:
         if ready in folded:

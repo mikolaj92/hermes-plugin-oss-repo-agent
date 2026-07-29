@@ -51,6 +51,8 @@ class ClassificationContractTests(unittest.TestCase):
             issue_triage.parse_classification_output(json.dumps(duplicate), sources=SOURCES)["canonical_issue"],
             12,
         )
+        spaced = json.dumps(payload()) + "\n  \t"
+        self.assertEqual(issue_triage.parse_classification_output(spaced, sources=SOURCES)["classification"], "ready")
 
     def test_requires_exactly_one_closed_json_object(self) -> None:
         good = json.dumps(payload())
@@ -58,6 +60,7 @@ class ClassificationContractTests(unittest.TestCase):
             f"```json\n{good}\n```",
             f"result: {good}",
             f"{good}\ntrailing",
+            f"{good}\nprose",
             good[:-1],
             good.replace('"reason":', '"extra": 1, "reason":', 1),
             good.replace('"reason":', '"reason": "first", "reason":', 1),
@@ -233,6 +236,16 @@ class MutationAtomTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "upstream_failed")
         self.assertEqual(result["failure_class"], "terminal")
+
+    def test_mutation_decision_uses_conducted_classifier_output(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        classification = payload("ready")
+        request = {"input": {"repo": "owner/repo", "number": 4, "conduction": {"read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": []}, "classify_triage_issue": {"ok": True, "status": "classified", "classification": classification, "action": "ready"}}}}
+        result = m.decide_triage_mutation(request)
+        self.assertEqual(result["status"], "mutation_decided", result)
+        self.assertEqual(result["action"], "add_ready")
+        self.assertEqual(result["classification"], "ready")
 
 if __name__ == "__main__":
     unittest.main()

@@ -95,7 +95,7 @@ def parse_classification_output(
         value, end = decoder.raw_decode(stdout)
     except (json.JSONDecodeError, ValueError) as exc:
         raise ValueError("invalid_classifier_json") from exc
-    if end != len(stdout):
+    if stdout[end:].strip():
         raise ValueError("classifier_trailing_data")
     return validate_classification(value, sources=sources, issue_number=issue_number)
 
