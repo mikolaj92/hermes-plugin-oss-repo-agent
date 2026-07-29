@@ -62,7 +62,22 @@ def _step_config(cfg: Any, *, dry_run: bool, **extra: Any) -> dict[str, Any]:
         "blocked_label": cfg.labels.blocked,
         "pr_opened_label": cfg.labels.pr_opened,
         "generated_label": cfg.labels.generated,
+        "needs_feedback_label": cfg.labels.needs_feedback,
+        "duplicate_label": cfg.labels.duplicate,
+        "out_of_scope_label": cfg.labels.out_of_scope,
+        "frozen_label": cfg.labels.frozen,
         "gh_cli": cfg.gh_cli,
+        "triage_enabled": bool(cfg.triage.enabled),
+        "triage_receipts": str(cfg.paths.triage_receipts),
+        "triage_context_paths": list(cfg.triage.context_paths),
+        "triage_context_max_bytes": cfg.triage.context_max_bytes,
+        "auto_close_duplicates": cfg.triage.auto_close_duplicates,
+        "auto_close_out_of_scope": cfg.triage.auto_close_out_of_scope,
+        "repo_goal": cfg.direction.repo_goal,
+        "direction_require_keywords": list(cfg.direction.require_keywords),
+        "direction_deny_keywords": list(cfg.direction.deny_keywords),
+        "direction_reject_labels": list(cfg.direction.reject_labels),
+        "direction_min_goal_overlap": cfg.direction.min_goal_overlap,
         "base_branch": cfg.base_branch,
         "branch_prefix": cfg.branch_prefix,
         "automerge": cfg.automation.automerge,
@@ -97,6 +112,7 @@ def _step_config(cfg: Any, *, dry_run: bool, **extra: Any) -> dict[str, Any]:
             "dispatch_receipts": dispatch_receipts,
             "merge_receipts": merge_receipts,
             "task_receipts": task_receipts,
+            "triage_receipts": str(getattr(paths, "triage_receipts", "") or ""),
         },
         "max_active_issues": getattr(cfg.automation, "max_active_issues", 1),
         "repos": [
@@ -117,6 +133,7 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
     receipt = str(Path(cfg.paths.dispatch_receipts) / f"auto-worker-dispatch-{suffix}.json")
     merge_receipt = str(Path(cfg.paths.merge_receipts) / f"auto-worker-merge-{suffix}.json")
     task_root = str(getattr(cfg.paths, "task_receipts", "") or "")
+    triage_receipt_root = str(cfg.paths.triage_receipts)
     repair_receipt = str(Path(task_root) / f"auto-worker-repair-{suffix}.json")
     lifecycle_receipt = str(Path(task_root) / f"auto-worker-lifecycle-{suffix}.json")
     cleanup_receipt = str(Path(task_root) / f"auto-worker-cleanup-{suffix}.json")
@@ -126,7 +143,17 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
     inputs: dict[str, dict[str, Any]] = {
         "intake_read_open_issues": {"repos": repos, "limit": limit},
         "intake_normalize_issue_rows": {}, "intake_filter_issue_eligibility": {}, "intake_select_issue_candidate": {},
-        "intake_decide_issue_action": {}, "intake_read_issue_comments": {}, "intake_decide_issue_comment": {},
+        "intake_read_triage_receipt_index": {}, "intake_select_triage_candidate": {}, "intake_reserve_triage_run_budget": {},
+        "intake_read_triage_issue_state": {}, "intake_read_triage_comments": {}, "intake_read_triage_repository_state": {},
+        "intake_read_triage_canonical_issue": {},
+        "intake_build_triage_context": {}, "intake_classify_triage_issue": {}, "intake_verify_triage_repository_unchanged": {},
+        "intake_publish_triage_decision_receipt": {}, "intake_read_triage_labels": {}, "intake_decide_triage_mutation": {},
+        "intake_ensure_triage_label": {}, "intake_publish_triage_mutation_authorization": {}, "intake_mutate_triage_issue_labels": {},
+        "intake_post_triage_feedback": {}, "intake_verify_triage_feedback": {}, "intake_observe_triage_feedback": {},
+        "intake_publish_triage_feedback_receipt": {}, "intake_publish_triage_mutation_verification": {},
+        "intake_publish_triage_close_authorization": {}, "intake_close_triage_issue": {}, "intake_verify_triage_issue_closed": {},
+        "intake_publish_triage_close_verification": {}, "intake_verify_triage_receipt": {}, "intake_build_triage_terminal": {},
+        "intake_decide_issue_priority": {}, "intake_decide_issue_action": {}, "intake_read_issue_comments": {}, "intake_decide_issue_comment": {},
         "intake_post_issue_comment": {}, "intake_verify_issue_comment": {},
         "intake_reserve_claim_file": {"active_issue_path": cfg.paths.active_issue}, "intake_read_issue_claim_state": {},
         "intake_assign_issue": {}, "intake_add_issue_label": {}, "intake_verify_issue_claim": {}, "intake_build_issue_claim_result": {},
@@ -175,7 +202,6 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
         "triage_read_existing_repair_pr": {}, "triage_verify_existing_repair_pr": {},
         "triage_build_repair_receipt": {"receipt_path": repair_receipt},
         "triage_publish_repair_receipt": {"receipt_path": repair_receipt}, "triage_verify_repair_receipt": {"receipt_path": repair_receipt},
-        # Lifecycle reconciliation reads join only at the pure decision.
         "lifecycle_read_lifecycle_github_state": {}, "lifecycle_read_lifecycle_local_evidence": {},
         "lifecycle_decide_lifecycle_transition": {}, "lifecycle_release_orphan_claim": {"claim_path": cfg.paths.active_issue},
         "lifecycle_verify_orphan_claim_release": {"claim_path": cfg.paths.active_issue},
@@ -194,7 +220,7 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
     }
     config = _step_config(cfg, dry_run=dry_run, receipt_path=receipt, cleanup_receipt_path=cleanup_receipt,
         merge_receipt_path=merge_receipt, repair_receipt_path=repair_receipt, lifecycle_receipt_path=lifecycle_receipt,
-        run_id=run_id, path_id="auto_worker", candidate=candidate, candidate_id=candidate, candidate_sha=candidate,
+        triage_receipts=triage_receipt_root, run_id=run_id, path_id="auto_worker", candidate=candidate, candidate_id=candidate, candidate_sha=candidate,
         executor_policy=executor_policy, db_path=db_path)
     base = {"dry_run": dry_run, "live": not dry_run, "repos": repos, "limit": limit, "run_id": run_id, "path_id": "auto_worker",
         "candidate": candidate, "candidate_id": candidate, "candidate_sha": candidate, "db_path": db_path}
@@ -211,7 +237,7 @@ async def run_all(*, db_path: Path, config: Any, dry_run: bool, limit: int = 10)
         inputs=inputs,
         effector_inputs=effector_inputs,
         run_metadata={"mode": "dry-run" if dry_run else "live"},
-        max_ticks=180,
+        max_ticks=256,
         worker_id="lokay:tick-all",
     )
     processes = [process_summary(process) for process in host.processes]

@@ -100,7 +100,7 @@ class TickAllHostPathTests(unittest.TestCase):
 
         runner.assert_awaited_once()
         self.assertEqual(runner.await_args.kwargs["path_id"], "auto_worker")
-        self.assertEqual(runner.await_args.kwargs["max_ticks"], 180)
+        self.assertEqual(runner.await_args.kwargs["max_ticks"], 256)
         effector_inputs = runner.await_args.kwargs["effector_inputs"]
         self.assertEqual(effector_inputs["triage_read_open_prs"]["limit"], 7)
         self.assertTrue(effector_inputs["triage_decide_triage_action"]["require_human_approval"])
@@ -189,14 +189,14 @@ class IntakeFlowE2ETests(unittest.TestCase):
                 "number": 9,
                 "title": "ship it",
                 "url": "https://example/9",
+                "updatedAt": "2026-07-28T10:00:00Z",
                 "labels": [{"name": "ai:ready"}],
-                "assignees": [],
             }
         ]
         with tempfile.TemporaryDirectory() as tmp:
             gh = Path(tmp) / "gh"
             gh.write_text(
-                "#!/bin/sh\ncase \"$*\" in\n  *\"--json comments\"*) printf '%s\\n' '{\"comments\":[]}' ;;\n  *\"--json assignees,labels\"*) printf '%s\\n' '{\"assignees\":[],\"labels\":[{\"name\":\"ai:ready\"}]}' ;;\n  *) printf '%s\\n' '[{\"number\":9,\"title\":\"ship it\",\"url\":\"https://example/9\",\"labels\":[{\"name\":\"ai:ready\"}],\"assignees\":[]}]' ;;\nesac\n",
+                "#!/bin/sh\ncase \"$*\" in\n  *\"--json comments\"*) printf '%s\\n' '{\"comments\":[]}' ;;\n  *\"--json assignees,labels\"*) printf '%s\\n' '{\"assignees\":[],\"labels\":[{\"name\":\"ai:ready\"}]}' ;;\n  *) printf '%s\\n' '[{\"number\":9,\"title\":\"ship it\",\"url\":\"https://example/9\",\"updatedAt\":\"2026-07-28T10:00:00Z\",\"labels\":[{\"name\":\"ai:ready\"}],\"assignees\":[]}]' ;;\nesac\n",
                 encoding="utf-8",
             )
             gh.chmod(0o755)
@@ -228,6 +228,7 @@ class IntakeFlowE2ETests(unittest.TestCase):
                         dry_run=True,
                         limit=5,
                         run_id="test-intake-1",
+                        max_ticks=47,
                     )
                 )
 

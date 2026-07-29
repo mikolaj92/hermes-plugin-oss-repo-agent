@@ -16,6 +16,7 @@ def run_omp(
     thinking: str,
     timeout: float,
     dry_run: bool,
+    classification: bool = False,
 ) -> dict:
     worktree = Path(cwd).resolve()
     args = [
@@ -26,12 +27,21 @@ def run_omp(
         model,
         "--thinking",
         thinking,
-        "--approval-mode",
-        "yolo",
-        "--no-session",
-        "-p",
-        prompt,
     ]
+    if classification:
+        args.extend([
+            "--no-tools",
+            "--no-extensions",
+            "--no-skills",
+            "--no-rules",
+            "--no-lsp",
+            "--no-pty",
+            "--approval-mode",
+            "always-ask",
+        ])
+    else:
+        args.extend(["--approval-mode", "yolo"])
+    args.extend(["--no-session", "-p", prompt])
     if dry_run:
         return {
             "status": "planned",
@@ -48,6 +58,7 @@ def run_omp(
     return {
         "status": "completed",
         "returncode": proc.returncode,
+        **({"stdout": proc.stdout} if classification else {}),
         "stdout_tail": proc.stdout[-2000:],
         "stderr_tail": proc.stderr[-1000:],
     }

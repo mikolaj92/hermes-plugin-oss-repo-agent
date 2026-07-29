@@ -21,6 +21,115 @@ def req(input_data=None, config=None):
     }
 
 
+class IssuePriorityDecisionTests(unittest.TestCase):
+    def _request(self, decision=None, *, conduction=None, selected=None):
+        payload = {"selected": selected or {"repo": "owner/repo", "number": 17, "title": "Issue"}}
+        if decision is not None:
+            payload["pr_priority_decision"] = decision
+        if conduction is not None:
+            payload["conduction"] = conduction
+        return req(payload)
+
+    def test_absent_standalone_allows_and_retains_identity(self):
+        selected = {"repo": "owner/repo", "number": 17, "title": "Issue"}
+        out = issue_direction.decide_issue_priority(self._request(selected=selected))
+        self.assertEqual((out["status"], out["action"]), ("decided", "allow"))
+        self.assertEqual(out["selected"], selected)
+        conducted = issue_direction.decide_issue_priority(req({
+            "conduction": {"intake_select_issue_candidate": {"status": "selected", "selected": selected}},
+        }))
+        self.assertEqual(conducted["selected"], selected)
+
+    def test_allowed_actions_return_authoritative_allow(self):
+        for action in ("merge", "comment_block", "skip"):
+            with self.subTest(action=action):
+                out = issue_direction.decide_issue_priority(
+                    self._request({"ok": True, "status": "decided", "action": action})
+                )
+                self.assertEqual((out["status"], out["action"], out["priority_action"]), ("decided", "allow", action))
+                self.assertEqual(out["selected"]["number"], 17)
+
+    def test_repair_is_controlled_nonmutating_block(self):
+        out = issue_direction.decide_issue_priority(
+            self._request({"ok": True, "status": "decided", "action": "repair"})
+        )
+        self.assertEqual((out["status"], out["action"]), ("noop", "repair"))
+        self.assertTrue(out["blocked"])
+        self.assertFalse(out["mutated"])
+
+    def test_prefix_alias_and_noop_status_are_accepted(self):
+        out = issue_direction.decide_issue_priority(
+            self._request(
+                conduction={
+                    "auto_worker_triage_decide_triage_action": {
+                        "ok": True,
+                        "status": "noop",
+                        "action": "skip",
+                    }
+                }
+            )
+        )
+        self.assertEqual((out["status"], out["action"]), ("decided", "allow"))
+        self.assertEqual(out["priority_action"], "skip")
+        no_pr = issue_direction.decide_issue_priority(
+            self._request(conduction={
+                "auto_worker_triage_decide_triage_action": {
+                    "ok": True, "status": "noop", "reason": "no_open_prs", "mutated": False,
+                },
+            })
+        )
+        self.assertEqual((no_pr["status"], no_pr["action"], no_pr["priority_action"]), ("decided", "allow", "skip"))
+
+    def test_malformed_unknown_and_contradictory_fail_closed(self):
+        malformed = issue_direction.decide_issue_priority(self._request({"ok": True, "status": "decided"}))
+        self.assertEqual(malformed["reason"], "invalid_pr_priority_decision")
+        unknown = issue_direction.decide_issue_priority(
+            self._request({"ok": True, "status": "decided", "action": "accept"})
+        )
+        self.assertEqual(unknown["reason"], "invalid_pr_priority_decision")
+        contradiction = issue_direction.decide_issue_priority(
+            self._request(
+                {"ok": True, "status": "decided", "action": "merge"},
+                conduction={"triage_decide_triage_action": {"ok": True, "status": "decided", "action": "repair"}},
+            )
+        )
+        self.assertEqual(contradiction["reason"], "invalid_pr_priority_decision")
+        self.assertEqual(contradiction["failure_class"], "terminal")
+
+    def test_terminal_conducted_failure_propagates(self):
+        out = issue_direction.decide_issue_priority(
+            self._request(conduction={"triage_decide_triage_action": {"ok": False, "status": "failed", "reason": "bad"}})
+        )
+        self.assertEqual((out["status"], out["reason"], out["failure_class"]), ("failed", "upstream_failed", "terminal"))
+
+
+    def test_issue_action_propagates_priority_block_and_failure(self):
+        selected = {"repo": "owner/repo", "number": 17, "title": "Issue"}
+        blocked = issue_direction.decide_issue_action(req({
+            "conduction": {
+                "select_issue_candidate": {"status": "selected", "selected": selected},
+                "decide_issue_priority": {"status": "noop", "ok": True, "reason": "pr_priority_repair_required", "action": "repair", "selected": selected},
+            },
+        }))
+        self.assertEqual((blocked["status"], blocked["reason"]), ("noop", "pr_priority_repair_required"))
+        failed = issue_direction.decide_issue_action(req({
+            "conduction": {
+                "select_issue_candidate": {"status": "selected", "selected": selected},
+                "decide_issue_priority": {"status": "failed", "ok": False, "reason": "invalid_pr_priority_decision"},
+            },
+        }))
+        self.assertEqual((failed["status"], failed["reason"]), ("failed", "upstream_failed"))
+        with mock.patch("lokay.steps.claim._reserve_claim") as reserve:
+            claim_blocked = claim.reserve_claim_file(req({
+                "dry_run": False,
+                "conduction": {
+                    "select_issue_candidate": {"status": "selected", "selected": {**selected, "board": "b"}},
+                    "decide_issue_priority": {"status": "noop", "ok": True, "reason": "pr_priority_repair_required", "action": "repair", "selected": selected},
+                },
+            }, {"active_issue_path": "/tmp/never-created"}))
+        self.assertEqual((claim_blocked["status"], claim_blocked["reason"]), ("noop", "pr_priority_repair_required"))
+        reserve.assert_not_called()
+
 class IssueDirectionIntakeTests(unittest.TestCase):
     def _poll(self, **issue_overrides):
         selected = {

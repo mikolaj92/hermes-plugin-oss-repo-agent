@@ -129,9 +129,18 @@ def _reserve_claim(path: Path, *, repo: str, issue: int, board: str, assignee: s
 def reserve_claim_file(request: Request) -> Result:
     """Reserve the local claim file without touching GitHub."""
     from lokay.envelope import terminal_upstream
-    terminal = terminal_upstream(request, "reserve_claim_file", "select_issue_candidate", "decide_issue_action")
+    terminal = terminal_upstream(request, "reserve_claim_file", "select_issue_candidate", "decide_issue_priority", "decide_issue_action")
     if terminal:
         return terminal
+    priority = upstream_noop(request, "decide_issue_priority", "decide_issue_action")
+    if priority:
+        return noop(
+            str(priority.get("reason") or "pr_priority_repair_required"),
+            dry_run=dry_run_flag(request),
+            selected=priority.get("selected"),
+            action="skip",
+            priority_action=priority.get("priority_action") or priority.get("action"),
+        )
     data, cfg = input_of(request), cfg_of(request)
     decision = cond_blob(request, "decide_issue_action")
     if str(decision.get("action") or "") == "reject_comment":

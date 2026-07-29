@@ -13,6 +13,10 @@ in_progress = "ai:in-progress"
 blocked = "ai:blocked"
 pr_opened = "ai:pr-opened"
 generated = "ai:generated"
+needs_feedback = "ai:needs-feedback"
+duplicate = "duplicate"
+out_of_scope = "ai:out-of-scope"
+frozen = "frozen"
 
 [automation]
 max_active_issues = 1
@@ -31,6 +35,13 @@ deny_keywords = []
 reject_labels = ["ai:out-of-scope", "wontfix", "invalid"]
 min_goal_overlap = 1
 
+[triage]
+enabled = true
+context_paths = ["README.md"]
+context_max_bytes = 131072
+auto_close_duplicates = false
+auto_close_out_of_scope = false
+
 [executor]
 enabled = true
 command = "omp"
@@ -45,8 +56,13 @@ task_receipts = "~/.hermes/state/lokay-receipts"
 merge_receipts = "~/.hermes/state/lokay-merge"
 active_issue = "~/.hermes/state/lokay-active"
 
+triage_receipts = "~/.hermes/state/lokay-triage"
 [[repos]]
 repo = "owner/example-repo"
 board = "owner-example-repo"
 clone_path = "~/.hermes/repos/example-repo"
 priority = 100
+# triage_goal = ""
+# triage_context_paths = ["README.md"]
+# auto_close_duplicates = false
+# auto_close_out_of_scope = false

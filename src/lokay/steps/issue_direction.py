@@ -2,20 +2,25 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from lokay.envelope import Request, Result
 
 from lokay.adapters_cli import CommandError, run_cmd
+from lokay.steps.issue_triage import triage_precedence_action
 from lokay.envelope import (
     cfg_of,
     cond_blob,
+    cond_get,
+    conduction_of,
     dry_run_flag,
     fail,
     input_of,
     noop,
     ok,
     planned,
+    terminal_upstream,
     upstream_noop,
 )
 
@@ -75,6 +80,126 @@ def _issue_text(issue: dict[str, Any]) -> str:
 
 
 
+_PR_PRIORITY_ACTIONS = frozenset({"merge", "comment_block", "repair", "skip"})
+_PR_PRIORITY_CONDUCTED = ("triage_decide_triage_action", "decide_triage_action")
+
+
+def _priority_decisions(request: Request) -> list[tuple[str, Any]]:
+    """Collect explicit and suffix-matched conducted priority decisions."""
+    data = input_of(request)
+    decisions: list[tuple[str, Any]] = []
+    if "pr_priority_decision" in data:
+        decisions.append(("pr_priority_decision", data["pr_priority_decision"]))
+    conduction = conduction_of(request)
+    for name, value in conduction.items():
+        if name in _PR_PRIORITY_CONDUCTED or any(
+            name.endswith(f"_{alias}") for alias in _PR_PRIORITY_CONDUCTED
+        ):
+            decisions.append((name, value))
+    return decisions
+
+
+def decide_issue_priority(request: Request) -> Result:
+    """Purely gate issue intake on authoritative PR triage priority."""
+    terminal = terminal_upstream(
+        request,
+        "decide_issue_priority",
+        *_PR_PRIORITY_CONDUCTED,
+    )
+    if terminal is not None:
+        return terminal
+
+    data = input_of(request)
+    decisions = _priority_decisions(request)
+    selected: Any = data.get("selected")
+    if selected is None:
+        selected = cond_get(request, "selected", "select_issue_candidate", default=None)
+    if selected is None:
+        for _, candidate in decisions:
+            if isinstance(candidate, Mapping) and candidate.get("selected") is not None:
+                selected = candidate.get("selected")
+                break
+    identity = {}
+    if isinstance(selected, Mapping):
+        identity = {
+            key: selected[key]
+            for key in ("repo", "number", "issue")
+            if key in selected
+        }
+    if not decisions:
+        return ok(status="decided", action="allow", reason="no_pr_priority_decision", selected=selected, **identity)
+
+    actions: list[str] = []
+    normalized: list[dict[str, Any]] = []
+    for source, decision in decisions:
+        if not isinstance(decision, Mapping):
+            return fail(
+                "invalid_pr_priority_decision",
+                failure_class="terminal",
+                retry_safe=False,
+                source=source,
+                selected=selected,
+                **identity,
+            )
+        blob = dict(decision)
+        if (
+            blob.get("ok") is True
+            and blob.get("status") == "noop"
+            and blob.get("reason") in {"no_open_prs", "no_selected_pr", "not_selected"}
+            and blob.get("action") in (None, "", "skip")
+        ):
+            actions.append("skip")
+            normalized.append({**blob, "action": "skip"})
+            continue
+        action = blob.get("action")
+        if (
+            blob.get("ok") is not True
+            or blob.get("status") not in {"decided", "noop"}
+            or not isinstance(action, str)
+            or action not in _PR_PRIORITY_ACTIONS
+        ):
+            return fail(
+                "invalid_pr_priority_decision",
+                failure_class="terminal",
+                retry_safe=False,
+                source=source,
+                decision=blob,
+                selected=selected,
+                **identity,
+            )
+        actions.append(action)
+        normalized.append(blob)
+    if len(set(actions)) > 1:
+        return fail(
+            "invalid_pr_priority_decision",
+            failure_class="terminal",
+            retry_safe=False,
+            reason_detail="contradictory_actions",
+            actions=actions,
+            selected=selected,
+            **identity,
+        )
+
+    action = actions[0]
+    if action == "repair":
+        return noop(
+            "pr_priority_repair_required",
+            action="repair",
+            priority_action="repair",
+            blocked=True,
+            selected=selected,
+            **identity,
+        )
+    return ok(
+        status="decided",
+        action="allow",
+        priority_action=action,
+        decision=normalized[-1],
+        selected=selected,
+        **identity,
+    )
+
+
 def decide_issue_action(request: Request) -> Result:
     """Pure router: accept | reject_comment | skip for one selected issue.
 
@@ -86,6 +211,18 @@ def decide_issue_action(request: Request) -> Result:
     - empty title → reject_comment
     - otherwise accept (including when no direction policy is configured)
     """
+    priority_failure = terminal_upstream(request, "decide_issue_action", "decide_issue_priority")
+    if priority_failure is not None:
+        return priority_failure
+    priority_block = upstream_noop(request, "decide_issue_priority")
+    if priority_block:
+        return noop(
+            str(priority_block.get("reason") or "pr_priority_repair_required"),
+            action="skip",
+            priority_action=priority_block.get("priority_action") or priority_block.get("action"),
+            blocked=True,
+            selected=priority_block.get("selected"),
+        )
     data = input_of(request)
     cfg = cfg_of(request)
     upstream = upstream_noop(request, "select_issue_candidate")
@@ -100,6 +237,16 @@ def decide_issue_action(request: Request) -> Result:
             failure_class="terminal",
             retry_safe=False,
             selected=selected,
+        )
+    triage_action = triage_precedence_action(selected)
+    if triage_action is not None:
+        return ok(
+            status="decided",
+            action=triage_action["action"],
+            reason=triage_action["reason"],
+            selected=selected,
+            repo=selected.get("repo"),
+            number=selected.get("number"),
         )
 
     title = str(selected.get("title") or "").strip()

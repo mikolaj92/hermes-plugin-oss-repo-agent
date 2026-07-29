@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+from lokay.steps import issue_triage_evidence as evidence
+
+
+OID = "a" * 40
+
+
+def proc(stdout: str = "", returncode: int = 0):
+    return SimpleNamespace(stdout=stdout, stderr="", returncode=returncode)
+
+
+class GitHubReadTests(unittest.TestCase):
+    def test_issue_state_rejects_malformed_payload(self):
+        with mock.patch.object(evidence, "run_cmd", return_value=proc("{\"number\": 4}")):
+            result = evidence.read_triage_issue_state({"input": {"repo": "o/r", "number": 4}})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "malformed_issue_payload")
+
+    def test_comments_read_failure_is_retryable(self):
+        with mock.patch.object(evidence, "run_cmd", side_effect=evidence.CommandError(["gh"], 1, "", "offline")):
+            result = evidence.read_triage_comments({"input": {"repo": "o/r", "number": 4}})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["failure_class"], "retryable_read")
+        self.assertFalse(result["mutated"])
+
+    def test_repository_state_pins_exact_oid(self):
+        repository = {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}}
+        with mock.patch.object(evidence, "run_cmd", side_effect=[proc(json.dumps(repository)), proc(OID + "\n")]) as run:
+            result = evidence.read_triage_repository_state({"input": {"repo": "o/r"}})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["default_branch_oid"], OID)
+        self.assertEqual(run.call_args_list[1].args[0], ["gh", "api", "repos/o/r/git/ref/heads/main", "--jq", ".object.sha"])
+
+    def test_canonical_issue_rejects_other_repository(self):
+        payload = {"number": 9, "title": "x", "body": "x", "url": "https://github.com/other/r/issues/9", "state": "OPEN", "updatedAt": "2026-07-28T10:00:00Z", "labels": [], "repository": {"nameWithOwner": "other/r"}}
+        with mock.patch.object(evidence, "run_cmd", return_value=proc(json.dumps(payload))):
+            result = evidence.read_triage_canonical_issue({"input": {"repo": "o/r", "number": 4, "canonical_issue": 9}})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "canonical_repository_mismatch")
+
+
+class PinnedContextTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.repo = self.root / "repo"
+        self.remote = self.root / "remote.git"
+        self.repo.mkdir()
+        self._git("init", "--bare", str(self.remote), cwd=self.root)
+        self._git("init", cwd=self.repo)
+        self._git("config", "user.email", "test@example.com", cwd=self.repo)
+        self._git("config", "user.name", "Test", cwd=self.repo)
+        (self.repo / "README.md").write_text("committed\n")
+        self._git("add", "README.md", cwd=self.repo)
+        self._git("commit", "-m", "initial", cwd=self.repo)
+        self._git("branch", "-M", "main", cwd=self.repo)
+        self._git("remote", "add", "origin", str(self.remote), cwd=self.repo)
+        self._git("push", "-u", "origin", "main", cwd=self.repo)
+        self.head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    @staticmethod
+    def _git(*args, cwd):
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+    def request(self, **extra):
+        return {"input": {"repo": "o/r", "clone_path": str(self.repo), "context_paths": ["README.md"], "head_oid": self.head, **extra}}
+
+    def remote_state(self):
+        return {"ok": True, "status": "repository_read", "repo": "o/r", "default_branch_oid": self.head, "default_branch": "main"}
+
+    def test_build_uses_committed_git_show_and_excludes_dirty_bytes(self):
+        (self.repo / "README.md").write_text("DIRTY SECRET\n")
+        with mock.patch.object(evidence, "read_triage_repository_state", return_value=self.remote_state()):
+            result = evidence.build_triage_context(self.request())
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["packet"]["context"][0]["content"], "committed\n")
+        self.assertNotIn("DIRTY SECRET", json.dumps(result))
+
+    def test_invalid_path_traversal_and_cap_fail_closed(self):
+        with mock.patch.object(evidence, "read_triage_repository_state", return_value=self.remote_state()):
+            traversal = evidence.build_triage_context(self.request(context_paths=["../README.md"]))
+            oversized = evidence.build_triage_context(self.request(context_max_bytes=2))
+        self.assertFalse(traversal["ok"])
+        self.assertEqual(traversal["reason"], "invalid_context_path")
+        self.assertFalse(oversized["ok"])
+        self.assertEqual(oversized["reason"], "context_oversized")
+
+    def test_hash_manifest_and_exact_snapshot_mismatch(self):
+        with mock.patch.object(evidence, "read_triage_repository_state", return_value=self.remote_state()):
+            result = evidence.build_triage_context(self.request())
+        self.assertTrue(result["ok"], result)
+        item = result["packet"]["context"][0]
+        self.assertEqual(item["sha256"], __import__("hashlib").sha256(b"committed\n").hexdigest())
+        (self.repo / "untracked.txt").write_text("change")
+        changed = evidence.verify_triage_repository_unchanged({"input": {"clone_path": str(self.repo), "pre_snapshot": result["pre_snapshot"]}})
+        self.assertFalse(changed["ok"])
+        self.assertEqual(changed["reason"], "repository_changed")
+
+    def test_missing_upstream_is_fail_closed(self):
+        self._git("config", "--unset", "branch.main.remote", cwd=self.repo)
+        result = evidence.verify_triage_repository_unchanged({"input": {"clone_path": str(self.repo), "pre_snapshot": {}}})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "missing_pre_snapshot")
+
+
+if __name__ == "__main__":
+    unittest.main()

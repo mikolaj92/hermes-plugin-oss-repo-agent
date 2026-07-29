@@ -71,6 +71,67 @@ class PackageStructureTests(unittest.TestCase):
                 f"{path['id']} has an operation outside its declared selector lanes",
             )
 
+            if path["id"] == "issue_intake":
+                by_id = {effector["id"]: effector for effector in effectors}
+                expected = {
+                    "read_triage_receipt_index": ["normalize_issue_rows"],
+                    "select_triage_candidate": ["normalize_issue_rows", "read_triage_receipt_index"],
+                    "reserve_triage_run_budget": ["select_triage_candidate"],
+                    "read_triage_issue_state": ["reserve_triage_run_budget", "select_triage_candidate"],
+                    "read_triage_comments": ["reserve_triage_run_budget", "select_triage_candidate"],
+                    "read_triage_repository_state": ["reserve_triage_run_budget", "select_triage_candidate"],
+                    "build_triage_context": ["read_triage_repository_state", "reserve_triage_run_budget", "select_triage_candidate"],
+                    "classify_triage_issue": ["read_triage_issue_state", "read_triage_comments", "build_triage_context", "reserve_triage_run_budget", "select_triage_candidate"],
+                    "verify_triage_repository_unchanged": ["classify_triage_issue", "build_triage_context"],
+                    "publish_triage_decision_receipt": ["verify_triage_repository_unchanged", "classify_triage_issue"],
+                    "read_triage_canonical_issue": ["classify_triage_issue", "reserve_triage_run_budget", "select_triage_candidate"],
+                    "read_triage_labels": ["publish_triage_decision_receipt", "reserve_triage_run_budget", "select_triage_candidate"],
+                    "decide_triage_mutation": ["read_triage_labels", "classify_triage_issue", "read_triage_issue_state", "read_triage_comments", "read_triage_canonical_issue", "reserve_triage_run_budget", "select_triage_candidate"],
+                    "ensure_triage_label": ["decide_triage_mutation", "read_triage_labels"],
+                    "publish_triage_mutation_authorization": ["decide_triage_mutation", "ensure_triage_label"],
+                    "mutate_triage_issue_labels": ["publish_triage_mutation_authorization", "ensure_triage_label", "decide_triage_mutation", "read_triage_labels"],
+                    "post_triage_feedback": ["publish_triage_mutation_authorization", "mutate_triage_issue_labels", "decide_triage_mutation", "read_triage_labels", "classify_triage_issue"],
+                    "verify_triage_feedback": ["post_triage_feedback", "mutate_triage_issue_labels", "read_triage_labels"],
+                    "observe_triage_feedback": ["verify_triage_feedback", "read_triage_labels"],
+                    "publish_triage_feedback_receipt": ["observe_triage_feedback", "verify_triage_feedback"],
+                    "publish_triage_mutation_verification": ["mutate_triage_issue_labels", "verify_triage_feedback"],
+                    "publish_triage_close_authorization": ["decide_triage_mutation", "read_triage_issue_state", "read_triage_comments", "read_triage_canonical_issue", "read_triage_labels", "classify_triage_issue", "publish_triage_mutation_verification", "publish_triage_feedback_receipt"],
+                    "close_triage_issue": ["publish_triage_close_authorization", "read_triage_labels", "decide_triage_mutation"],
+                    "verify_triage_issue_closed": ["close_triage_issue", "read_triage_labels", "decide_triage_mutation"],
+                    "publish_triage_close_verification": ["verify_triage_issue_closed"],
+                    "verify_triage_receipt": ["publish_triage_close_verification", "publish_triage_close_authorization", "publish_triage_mutation_verification", "publish_triage_feedback_receipt", "publish_triage_decision_receipt"],
+                    "build_triage_terminal": ["normalize_issue_rows", "select_triage_candidate", "reserve_triage_run_budget", "verify_triage_receipt", "decide_triage_mutation", "mutate_triage_issue_labels", "verify_triage_feedback", "verify_triage_issue_closed"],
+                    "filter_issue_eligibility": ["build_triage_terminal"],
+                    "select_issue_candidate": ["filter_issue_eligibility"],
+                }
+                for effector_id, conduction in expected.items():
+                    self.assertEqual(by_id[effector_id]["conduction"], conduction, effector_id)
+                self.assertLess(positions["normalize_issue_rows"], positions["read_triage_receipt_index"])
+
+                self.assertIn("decide_issue_priority", by_id)
+                self.assertLess(positions["select_issue_candidate"], positions["decide_issue_priority"])
+                self.assertLess(positions["decide_issue_priority"], positions["decide_issue_action"])
+                self.assertLess(positions["read_triage_receipt_index"], positions["select_triage_candidate"])
+                self.assertLess(positions["select_triage_candidate"], positions["reserve_triage_run_budget"])
+                self.assertLess(positions["reserve_triage_run_budget"], positions["classify_triage_issue"])
+                self.assertLess(positions["classify_triage_issue"], positions["publish_triage_mutation_authorization"])
+                self.assertLess(positions["publish_triage_mutation_authorization"], positions["mutate_triage_issue_labels"])
+                self.assertLess(positions["publish_triage_mutation_verification"], positions["publish_triage_close_authorization"])
+                self.assertLess(positions["publish_triage_close_authorization"], positions["close_triage_issue"])
+                self.assertLess(positions["close_triage_issue"], positions["verify_triage_issue_closed"])
+                self.assertLess(positions["verify_triage_issue_closed"], positions["publish_triage_close_verification"])
+                self.assertLess(positions["publish_triage_close_verification"], positions["verify_triage_receipt"])
+                self.assertLess(positions["verify_triage_receipt"], positions["build_triage_terminal"])
+                self.assertLess(positions["build_triage_terminal"], positions["filter_issue_eligibility"])
+                self.assertLess(positions["filter_issue_eligibility"], positions["select_issue_candidate"])
+                for triage_id in expected:
+                    if triage_id in {"filter_issue_eligibility", "select_issue_candidate"}:
+                        continue
+                    for legacy in ("select_issue_candidate", "decide_issue_action", "reserve_claim_file", "read_intake_tasks", "create_intake_task", "reconcile_intake_task"):
+                        self.assertNotIn(triage_id, by_id[legacy].get("conduction", []))
+                self.assertNotIn("select_triage_candidate", by_id["filter_issue_eligibility"]["conduction"])
+                self.assertNotIn("normalize_issue_rows", by_id["filter_issue_eligibility"]["conduction"])
+
             if path["id"] in {"pr_triage", "auto_worker"}:
                 prefix = "triage_" if path["id"] == "auto_worker" else ""
                 by_id = {effector["id"]: effector for effector in effectors}
@@ -162,6 +223,13 @@ class PackageStructureTests(unittest.TestCase):
                 self.assertIn(f"{prefix}verify_legacy_repair_pr_head", by_id[f"{prefix}decide_repair_worktree_ownership"]["conduction"])
 
             if path["id"] == "auto_worker":
+                self.assertLess(positions["triage_decide_triage_action"], positions["intake_decide_issue_priority"])
+                self.assertLess(positions["intake_select_issue_candidate"], positions["intake_decide_issue_priority"])
+                self.assertLess(positions["intake_decide_issue_priority"], positions["intake_decide_issue_action"])
+                self.assertEqual(
+                    by_id["intake_decide_issue_priority"]["conduction"],
+                    ["intake_select_issue_candidate", "triage_decide_triage_action"],
+                )
                 self.assertTrue(
                     all(
                         effector["id"].startswith(

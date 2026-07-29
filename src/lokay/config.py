@@ -24,12 +24,82 @@ class RepoEntry:
     board: str
     clone_path: str
     priority: int = 50
+    triage_goal: str = ""
+    triage_context_paths: tuple[str, ...] = ()
+    auto_close_duplicates: bool | None = None
+    auto_close_out_of_scope: bool | None = None
 
     def __post_init__(self) -> None:
         for name in ("repo", "board", "clone_path"):
             if not str(getattr(self, name)).strip():
                 raise ConfigError(f"repos.{name} must not be empty")
+        if not isinstance(self.triage_goal, str):
+            raise ConfigError("repos.triage_goal must be a string")
+        object.__setattr__(self, "triage_goal", self.triage_goal.strip())
+        object.__setattr__(self, "triage_context_paths", _context_paths(self.triage_context_paths, "repos.triage_context_paths"))
+        for name in ("auto_close_duplicates", "auto_close_out_of_scope"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, bool):
+                raise ConfigError(f"repos.{name} must be a boolean")
         object.__setattr__(self, "clone_path", _absolute_path(self.clone_path))
+
+def _validate_context_path(path: str, name: str = "triage.context_paths") -> str:
+    value = str(path)
+    if not value or value.strip() != value or Path(value).is_absolute():
+        raise ConfigError(f"{name} contains an invalid path: {value!r}")
+    parts = value.split("/")
+    if any(not part or part == ".." for part in parts):
+        raise ConfigError(f"{name} contains an invalid path: {value!r}")
+    return value
+
+
+def _context_paths(value: Any, name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = (value,)
+    if value is None:
+        value = default
+    if not isinstance(value, (list, tuple)):
+        raise ConfigError(f"{name} must be an array of paths")
+    paths = tuple(_validate_context_path(path, name) for path in value)
+    if len(set(paths)) != len(paths):
+        raise ConfigError(f"{name} must not contain duplicate paths")
+    return paths
+
+
+@dataclass(frozen=True)
+class TriageConfig:
+    enabled: bool = True
+    context_paths: tuple[str, ...] = ("README.md",)
+    context_max_bytes: int = 131_072
+    auto_close_duplicates: bool = False
+    auto_close_out_of_scope: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("enabled", "auto_close_duplicates", "auto_close_out_of_scope"):
+            if not isinstance(getattr(self, name), bool):
+                raise ConfigError(f"triage.{name} must be a boolean")
+        if isinstance(self.context_max_bytes, bool) or not isinstance(self.context_max_bytes, int):
+            raise ConfigError("triage.context_max_bytes must be an integer")
+        if self.context_max_bytes < 1:
+            raise ConfigError("triage.context_max_bytes must be at least 1")
+        object.__setattr__(self, "context_paths", _context_paths(self.context_paths, "triage.context_paths", ("README.md",)))
+
+
+def validate_context_paths(paths: tuple[str, ...] | list[str], root: Path | str, max_bytes: int) -> tuple[str, ...]:
+    """Validate configured repository-relative files and their aggregate size."""
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+        raise ConfigError("triage.context_max_bytes must be at least 1")
+    normalized = _context_paths(paths, "triage.context_paths")
+    total = 0
+    base = Path(root)
+    for path in normalized:
+        candidate = base / path
+        if not candidate.is_file():
+            raise ConfigError(f"triage context path is not a file: {path}")
+        total += candidate.stat().st_size
+    if total > max_bytes:
+        raise ConfigError(f"triage context exceeds context_max_bytes ({total} > {max_bytes})")
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -39,9 +109,13 @@ class LabelConfig:
     blocked: str = "ai:blocked"
     pr_opened: str = "ai:pr-opened"
     generated: str = "ai:generated"
+    needs_feedback: str = "ai:needs-feedback"
+    duplicate: str = "duplicate"
+    out_of_scope: str = "ai:out-of-scope"
+    frozen: str = "frozen"
 
     def __post_init__(self) -> None:
-        for name in ("ready", "in_progress", "blocked", "pr_opened", "generated"):
+        for name in ("ready", "in_progress", "blocked", "pr_opened", "generated", "needs_feedback", "duplicate", "out_of_scope", "frozen"):
             if not str(getattr(self, name)).strip():
                 raise ConfigError(f"labels.{name} must not be empty")
 
@@ -122,9 +196,10 @@ class PathConfig:
     task_receipts: str = "~/.hermes/state/lokay-receipts"
     merge_receipts: str = "~/.hermes/state/lokay-merge"
     active_issue: str = "~/.hermes/state/lokay-active"
+    triage_receipts: str = "~/.hermes/state/lokay-triage"
 
     def __post_init__(self) -> None:
-        for name in ("worktree_root", "dispatch_receipts", "task_receipts", "merge_receipts", "active_issue"):
+        for name in ("worktree_root", "dispatch_receipts", "task_receipts", "merge_receipts", "active_issue", "triage_receipts"):
             value = str(getattr(self, name)).strip()
             if not value:
                 raise ConfigError(f"paths.{name} must not be empty")
@@ -142,6 +217,7 @@ class AgentConfig:
     labels: LabelConfig = field(default_factory=LabelConfig)
     automation: AutomationConfig = field(default_factory=AutomationConfig)
     direction: DirectionConfig = field(default_factory=DirectionConfig)
+    triage: TriageConfig = field(default_factory=TriageConfig)
     executor: ExecutorConfig = field(default_factory=ExecutorConfig)
     paths: PathConfig = field(default_factory=PathConfig)
     repos: tuple[RepoEntry, ...] = field(default_factory=tuple)
@@ -164,6 +240,17 @@ class AgentConfig:
     def ready_label(self) -> str:
         return self.labels.ready
 
+    def effective_triage_goal(self, repo: RepoEntry | None = None) -> str:
+        return (repo.triage_goal if repo and repo.triage_goal else self.direction.repo_goal).strip()
+
+    def effective_triage_context_paths(self, repo: RepoEntry | None = None) -> tuple[str, ...]:
+        return repo.triage_context_paths if repo and repo.triage_context_paths else self.triage.context_paths
+
+    def effective_auto_close_duplicates(self, repo: RepoEntry | None = None) -> bool:
+        return repo.auto_close_duplicates if repo and repo.auto_close_duplicates is not None else self.triage.auto_close_duplicates
+
+    def effective_auto_close_out_of_scope(self, repo: RepoEntry | None = None) -> bool:
+        return repo.auto_close_out_of_scope if repo and repo.auto_close_out_of_scope is not None else self.triage.auto_close_out_of_scope
     @property
     def in_progress_label(self) -> str:
         return self.labels.in_progress
@@ -239,6 +326,7 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
     executor_data = _as_dict(data.get("executor"))
     paths_data = _as_dict(data.get("paths"))
 
+    triage_data = _as_dict(data.get("triage"))
     repos: list[RepoEntry] = []
     for index, item in enumerate(data.get("repos") or []):
         if not isinstance(item, Mapping):
@@ -252,7 +340,7 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
             priority = int(item.get("priority", 50))
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"repos[{index}].priority must be an integer") from exc
-        repos.append(RepoEntry(repo, board, clone_path, priority))
+        repos.append(RepoEntry(repo, board, clone_path, priority, str(item.get("triage_goal", "")), _context_paths(item.get("triage_context_paths"), f"repos[{index}].triage_context_paths"), item.get("auto_close_duplicates"), item.get("auto_close_out_of_scope")))
 
     repos_file = env.get("HERMES_LOKAY_REPOS_FILE")
     if repos_file and Path(repos_file).is_file():
@@ -278,6 +366,10 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
         blocked=str(_env_or(labels_data, "blocked", env, "HERMES_LOKAY_LABEL_BLOCKED", label_defaults.blocked)),
         pr_opened=str(_env_or(labels_data, "pr_opened", env, "HERMES_LOKAY_LABEL_PR_OPENED", label_defaults.pr_opened)),
         generated=str(_env_or(labels_data, "generated", env, "HERMES_LOKAY_LABEL_GENERATED", label_defaults.generated)),
+        needs_feedback=str(labels_data.get("needs_feedback", label_defaults.needs_feedback)),
+        duplicate=str(labels_data.get("duplicate", label_defaults.duplicate)),
+        out_of_scope=str(labels_data.get("out_of_scope", label_defaults.out_of_scope)),
+        frozen=str(labels_data.get("frozen", label_defaults.frozen)),
     )
     automation = AutomationConfig(
         max_active_issues=int(automation_data.get("max_active_issues", 1)),
@@ -327,6 +419,14 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
         task_receipts=str(_env_or(paths_data, "task_receipts", env, "HERMES_LOKAY_TASK_RECEIPT_DIR", "~/.hermes/state/lokay-receipts")),
         merge_receipts=str(_env_or(paths_data, "merge_receipts", env, "HERMES_LOKAY_MERGE_RECEIPT_DIR", "~/.hermes/state/lokay-merge")),
         active_issue=str(_env_or(paths_data, "active_issue", env, "HERMES_LOKAY_ACTIVE_ISSUE_DIR", "~/.hermes/state/lokay-active")),
+        triage_receipts=str(paths_data.get("triage_receipts", "~/.hermes/state/lokay-triage")),
+    )
+    triage = TriageConfig(
+        enabled=_bool(triage_data.get("enabled", True), "triage.enabled"),
+        context_paths=_context_paths(triage_data.get("context_paths"), "triage.context_paths", ("README.md",)),
+        context_max_bytes=triage_data.get("context_max_bytes", 131_072),
+        auto_close_duplicates=_bool(triage_data.get("auto_close_duplicates", False), "triage.auto_close_duplicates"),
+        auto_close_out_of_scope=_bool(triage_data.get("auto_close_out_of_scope", False), "triage.auto_close_out_of_scope"),
     )
     return AgentConfig(
         mode=mode,
@@ -339,6 +439,7 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
         automation=automation,
         direction=direction,
         executor=executor,
+        triage=triage,
         paths=paths,
         repos=tuple(repos),
         raw=dict(data),

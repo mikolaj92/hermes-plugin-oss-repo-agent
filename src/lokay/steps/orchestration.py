@@ -20,6 +20,82 @@ _LANE_TAILS: dict[str, tuple[str, ...]] = {
     "triage": ("verify_task_blocked", "verify_merge_receipt", "decide_triage_action", "select_fix_pr"),
     "lifecycle": ("decide_lifecycle_transition", "read_lifecycle_local_evidence", "read_lifecycle_github_state"),
 }
+_ISSUE_TRIAGE_ATOM_MARKERS = (
+    "normalize_triage",
+    "filter_triage",
+    "select_triage",
+    "triage_receipt_index",
+    "triage_run_budget",
+    "read_triage",
+    "build_triage",
+    "classify_triage",
+    "publish_triage",
+    "decide_triage_mutation",
+    "ensure_triage_label",
+    "mutate_triage",
+    "post_triage_feedback",
+    "verify_triage_feedback",
+    "observe_triage_feedback",
+    "close_triage_issue",
+    "verify_triage_issue_closed",
+    "triage_terminal",
+)
+_TRIAGE_WORK_STATUSES = frozenset({
+    "labels_verified",
+    "feedback_verified",
+    "triage_issue_closed_verified",
+})
+_EXPECTED_NOOP_REASONS = frozenset({
+    "not_selected",
+    "no_candidate",
+    "no-candidate",
+    "no_triage_selection",
+    "no_selected_issue",
+    "no_selected_pr",
+    "claim_busy",
+})
+
+
+def _is_issue_triage_atom(name: str) -> bool:
+    """Recognize standalone and intake-prefixed issue-triage atoms."""
+    atom = name.removeprefix("intake_")
+    return any(marker in atom for marker in _ISSUE_TRIAGE_ATOM_MARKERS)
+
+
+def _triage_receipts(request: Request) -> tuple[tuple[str, dict[str, Any]], ...]:
+    conduction = conduction_of(request)
+    receipts: list[tuple[str, dict[str, Any]]] = []
+    for name, value in conduction.items():
+        blob = _blob(value)
+        if blob is not None and _is_issue_triage_atom(str(name)):
+            receipts.append((str(name), blob))
+    supplied = input_of(request).get("lanes")
+    if isinstance(supplied, Mapping):
+        triage = _blob(supplied.get("triage"))
+        if triage is not None:
+            receipts.append(("triage", triage))
+    return tuple(receipts)
+
+
+def _expected_noop(receipt: Mapping[str, Any]) -> bool:
+    if receipt.get("code"):
+        return False
+    reason = str(receipt.get("reason") or receipt.get("status") or "").strip().casefold()
+    return reason in _EXPECTED_NOOP_REASONS
+
+
+def _triage_worked(receipts: tuple[tuple[str, dict[str, Any]], ...]) -> bool:
+    for name, receipt in receipts:
+        status = str(receipt.get("status") or "")
+        operation = str(receipt.get("operation") or "")
+        if status in _TRIAGE_WORK_STATUSES and (receipt.get("verified") is True or receipt.get("mutated") is True):
+            return True
+        if receipt.get("verified") is True and any(
+            marker in f"{name}:{operation}"
+            for marker in ("mutate_triage_issue_labels", "post_triage_feedback", "verify_triage_feedback", "close_triage_issue", "verify_triage_issue_closed")
+        ):
+            return True
+    return False
 
 
 def _blob(value: Any) -> dict[str, Any] | None:
@@ -58,6 +134,8 @@ def _lane_result(request: Request, lane: str) -> dict[str, Any]:
 
 
 def _terminal_failure(lane: str, receipt: Mapping[str, Any]) -> dict[str, Any] | None:
+    if _expected_noop(receipt):
+        return None
     status = str(receipt.get("status") or "")
     code = str(receipt.get("code") or "")
     if receipt.get("ok") is False or status in _TERMINAL or code:
@@ -225,14 +303,48 @@ def _verified_cleanup_identity(request: Request, lanes: Mapping[str, dict[str, A
 
     return identity
 
+def _legacy_lane_worked(lanes: Mapping[str, Mapping[str, Any]]) -> bool:
+    """Count ordinary intake/dispatch selection or any verified lane mutation."""
+    return any(receipt.get("mutated") is True for receipt in lanes.values()) or any(
+        lanes[lane].get("selected") not in (None, False, "", {}, [])
+        for lane in ("intake", "dispatch")
+    )
+
+
+def _pending_lane_work(lanes: Mapping[str, Mapping[str, Any]]) -> bool:
+    """Recognize genuine lifecycle waiting without misreporting completed work."""
+    lifecycle = lanes.get("lifecycle", {})
+    return (
+        str(lifecycle.get("outcome") or "").startswith("wait_")
+        or str(lifecycle.get("status") or "") in {"pending", "waiting"}
+    )
+
+
 def aggregate_lane_results(request: Request) -> Result:
     """Join terminal intake, dispatch, triage, and lifecycle lane receipts."""
     lanes = {lane: _lane_result(request, lane) for lane in _LANE_TAILS}
+    triage_receipts = _triage_receipts(request)
+    triage_failures = [
+        {
+            "lane": "triage",
+            "reason": str(receipt.get("reason") or receipt.get("code") or receipt.get("status") or "lane_failed"),
+            "failure_class": str(receipt.get("failure_class") or "terminal"),
+            "atom": name,
+        }
+        for name, receipt in triage_receipts
+        if not _expected_noop(receipt) and _terminal_failure("triage", receipt) is not None
+    ]
     failures = [failure for lane, receipt in lanes.items() if (failure := _terminal_failure(lane, receipt)) is not None]
+    failures.extend(triage_failures)
+    triage_worked = _triage_worked(triage_receipts)
+    worked = triage_worked or _legacy_lane_worked(lanes)
+    pending = _pending_lane_work(lanes)
     result: Result = {
         "status": "failed" if failures else "aggregated",
         "ok": not failures,
         "mutated": False,
+        "worked": worked,
+        "idle": not failures and not worked and not pending,
         "lanes": lanes,
         "terminal_failures": failures,
         "cleanup_authorized": False,
