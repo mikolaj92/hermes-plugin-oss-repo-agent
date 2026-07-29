@@ -418,13 +418,14 @@ def post_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
         return fail("invalid_comments", failure_class="terminal", retry_safe=False, **_identity(request))
     prefix = _marker_prefix(repo, number)
     existing = [x for x in comments if isinstance(x, Mapping) and _comment_has_marker_prefix(x, prefix)]
-    if len(existing) > 1:
-        return fail("feedback_marker_conflict", failure_class="terminal", retry_safe=False, matches=len(existing), **_identity(request))
     if existing:
+        existing.sort(key=lambda item: str(item.get("createdAt") or ""))
+        chosen = existing[-1]
         return noop(
             "feedback_already_posted",
-            marker=str(existing[0].get("body") or marker),
-            comment_id=_comment_id(existing[0]),
+            marker=str(chosen.get("body") or marker),
+            comment_id=_comment_id(chosen),
+            matches=len(existing),
             **_identity(request),
         )
     body = f"{question}\n\n{marker}"
