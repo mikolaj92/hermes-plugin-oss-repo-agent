@@ -1,0 +1,216 @@
+from pathlib import Path
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class RuntimeScriptTests(unittest.TestCase):
+    def read(self, relative: str) -> str:
+        return (ROOT / relative).read_text()
+
+    def test_dispatch_handles_review_fix_tasks_and_stale_closed_prs(self):
+        dispatch = self.read("scripts/repo_issue_to_pr_dispatch.sh")
+        self.assertIn("[fix-pr-review]", dispatch)
+        self.assertIn("complete-stale-review", dispatch)
+        self.assertIn("pr_state", dispatch)
+        self.assertIn('status == "blocked"', dispatch)
+
+    def test_dispatch_serializes_workers_and_times_out_omp_with_legacy_knobs(self):
+        dispatch = self.read("scripts/repo_issue_to_pr_dispatch.sh")
+        self.assertIn("HERMES_CLAUDE_TIMEOUT_SECONDS", dispatch)
+        self.assertIn("HERMES_CLAUDE_TIMEOUT_SECONDS:-1800", dispatch)
+        self.assertIn("HERMES_REPO_AGENT_SOURCE:-github", dispatch)
+        self.assertIn("github_issue_rows", dispatch)
+        self.assertIn("github_agent_pr_rows", dispatch)
+        self.assertIn("GITHUB_PR_OPEN", dispatch)
+        self.assertIn('then "NONE"', dispatch)
+        self.assertIn("source=github", dispatch)
+        self.assertIn("ai:in-progress", dispatch)
+        self.assertIn("ai:pr-opened", dispatch)
+        self.assertIn('startswith("mikolaj92/fix/")', dispatch)
+        self.assertIn('startswith("ai/fix/")', dispatch)
+        self.assertIn('branch="mikolaj92/fix/${issue}-${slug}"', dispatch)
+        self.assertIn("MAX_CLAUDE_AGENTS", dispatch)
+        self.assertIn("ALLOW_UNSAFE_CLAUDE", dispatch)
+        self.assertIn("HERMES_REPO_AGENT_MAX_TASK_ATTEMPTS", dispatch)
+        self.assertIn("HERMES_REPO_AGENT_RETRY_BACKOFF_SECONDS", dispatch)
+        self.assertIn("CLAUDE_TIMEOUT", dispatch)
+        self.assertIn("require_cmd omp", dispatch)
+        self.assertIn("omp_args", dispatch)
+        self.assertIn('--cwd "$worktree" --approval-mode yolo -p "$prompt"', dispatch)
+        self.assertIn('omp "${omp_args[@]}"', dispatch)
+        self.assertNotIn('--permission-mode "$CLAUDE_PERMISSION_MODE"', dispatch)
+        self.assertNotIn('--allowedTools "$CLAUDE_ALLOWED_TOOLS"', dispatch)
+        self.assertIn("board_agent_active", dispatch)
+        self.assertIn("board_repo_busy", dispatch)
+        self.assertIn("BOARD_BUSY", dispatch)
+        self.assertIn("skip-dispatch", dispatch)
+        self.assertIn("board_spawned=1", dispatch)
+        self.assertIn(".agent.lock", dispatch)
+        self.assertIn('"$WORKTREE_ROOT"/*/.agent.lock/pid', dispatch)
+        self.assertNotIn('pgrep -c -f "claude.*Hermes task"', dispatch)
+        self.assertIn("Hermes task", dispatch)
+        self.assertIn("STALE_BOARD_LOCK", dispatch)
+
+    def test_dispatch_cleans_stale_issue_tasks(self):
+        dispatch = self.read("scripts/repo_issue_to_pr_dispatch.sh")
+        self.assertIn("issue_state", dispatch)
+        self.assertIn("complete-stale-issue", dispatch)
+        self.assertIn("complete-stale-fix", dispatch)
+
+    def test_dispatch_finalizes_workers_and_recovers_stale_blocks(self):
+        dispatch = self.read("scripts/repo_issue_to_pr_dispatch.sh")
+        self.assertIn("blocked_task_retriable", dispatch)
+        self.assertIn("retry_gate", dispatch)
+        self.assertIn("retry_failure_note", dispatch)
+        self.assertIn("recover-blocked-fix-task", dispatch)
+        self.assertIn("reassign", dispatch)
+        self.assertIn("diff --quiet", dispatch)
+        self.assertIn("existing_worktree", dispatch)
+        self.assertIn("refresh_clone_base", dispatch)
+        self.assertIn("origin/main", dispatch)
+        self.assertIn('base_ref="origin/main"', dispatch)
+        self.assertIn('refs/remotes/origin/$branch', dispatch)
+        self.assertIn('worktree add "$worktree" "$branch"', dispatch)
+        self.assertIn("repo-agent selected this task now", dispatch)
+        self.assertIn("selection_reason", dispatch)
+        self.assertIn("repo-agent worker finished without an open PR", dispatch)
+        self.assertIn("repo-agent OMP worker exited with rc=", dispatch)
+        self.assertIn("Hermes repo-agent started OMP worker", dispatch)
+        self.assertIn("OMP_START", dispatch)
+        self.assertIn("OMP_TIMEOUT", dispatch)
+        self.assertIn("OMP_EXIT", dispatch)
+        self.assertIn("OMP_FINALIZED", dispatch)
+        self.assertIn("OMP_RUNNING", dispatch)
+        self.assertIn("OMP_FINISHED", dispatch)
+        self.assertNotIn('return 1\n  fi\n  grep -Eq "Hermes repo-agent started Claude worker', dispatch)
+        self.assertNotIn('>>"$log_file" 2>&1 &', dispatch)
+        self.assertIn("complete-blocked-with-existing-pr", dispatch)
+        self.assertIn("repo-agent-fixer", dispatch)
+        self.assertNotIn('kanban --board "$board" block "$task_id" "Hermes repo-agent started Claude worker', dispatch)
+
+    def test_triage_uses_checks_comments_and_fix_tasks(self):
+        triage = self.read("scripts/repo_pr_triage.sh")
+        self.assertIn('checks_pass "$repo" "$number"', triage)
+        self.assertIn("--add-assignee", triage)
+        self.assertIn("comment_pr_once", triage)
+        self.assertIn("pr_repair_context", triage)
+        self.assertIn("Repair context:", triage)
+        self.assertIn("review-not-approved", triage)
+        self.assertIn("checks-not-passing", triage)
+        self.assertIn("test-evidence-missing", triage)
+        self.assertIn("pr_has_test_evidence", triage)
+        self.assertIn("FIX_TASK_CREATED", triage)
+        self.assertIn("HERMES_REPO_AGENT_SOURCE:-github", triage)
+        self.assertIn("ai:needs-fix", triage)
+        self.assertIn("board_repo_busy", triage)
+        self.assertIn("BOARD_BUSY", triage)
+        self.assertIn("skip-pr-triage", triage)
+        self.assertIn("release_clean_worktree_for_branch", triage)
+        self.assertIn("WORKTREE_ROOT", triage)
+        self.assertIn('"$path" == "$WORKTREE_ROOT/"*', triage)
+        self.assertIn("refresh_clone_base", triage)
+        self.assertIn("sync_local_branch_from_origin", triage)
+        self.assertIn('branch -f "$branch" "origin/$branch"', triage)
+        self.assertIn('worktree remove "$path"', triage)
+
+    def test_health_and_launchd_templates_exist(self):
+        health = self.read("scripts/repo_agent_health.sh")
+        self.assertIn("gh auth status", health)
+        self.assertIn("launchctl bootstrap", health)
+        self.assertIn("stale-lock", health)
+        self.assertIn("active-worker-lock", health)
+        self.assertIn("dead-worker-lock", health)
+        self.assertNotIn("claude.*Hermes task", health)
+        self.assertIn("launchd-last-exit-nonzero", health)
+        self.assertIn("duplicate-hermes-cron", health)
+        self.assertIn("hermes-update-available", health)
+        self.assertIn("repo-agent-cleanup", health)
+        self.assertIn("repo-agent-hermes-update", health)
+        for name in [
+            "oss-repo-agent-intake.plist.template",
+            "oss-repo-agent-dispatch.plist.template",
+            "oss-repo-agent-pr-triage.plist.template",
+            "oss-repo-agent-cleanup.plist.template",
+            "oss-repo-agent-hermes-update.plist.template",
+            "oss-repo-agent-health.plist.template",
+        ]:
+            template = self.read(f"templates/launchd/{name}")
+            self.assertIn("LimitLoadToSessionType", template)
+            self.assertIn("Background", template)
+
+    def test_cleanup_and_status_scripts_cover_autonomy_gaps(self):
+        cleanup = self.read("scripts/repo_agent_cleanup.sh")
+        status = self.read("scripts/repo_agent_status.sh")
+        updater = self.read("scripts/repo_agent_hermes_update.sh")
+        self.assertIn("WORKTREE_REMOVED", cleanup)
+        self.assertIn("LOCAL_BRANCH_REMOVED", cleanup)
+        self.assertIn("[maintenance] dirty worktree", cleanup)
+        self.assertIn("MAINTENANCE_TASK_ENSURED", cleanup)
+        self.assertIn("open_pr_for_branch", cleanup)
+        self.assertIn("Recent Decisions", status)
+        self.assertIn("repo-agent status", status)
+        self.assertIn("repo-agent-cleanup", status)
+        self.assertIn("repo-agent-hermes-update", status)
+        self.assertIn("hermes update --backup --yes", updater)
+        self.assertIn("active-worker-locks", updater)
+
+    def test_repo_registry_is_shared_by_runtime_scripts(self):
+        registry = self.read("scripts/repo_agent_repos.sh")
+        for repo in [
+            "mikolaj92/Fala",
+            "mikolaj92/datasource-kit",
+            "mikolaj92/reviewkit",
+            "mikolaj92/anonimizator3000",
+            "mikolaj92/splot",
+            "mikolaj92/my-auth",
+            "mikolaj92/my-usermanager",
+            "mikolaj92/msds-portal",
+            "mikolaj92/swift-openapi-dynamic",
+            "mikolaj92/OpenAPITransportKit",
+        ]:
+            self.assertIn(repo, registry)
+
+        for relative in [
+            "scripts/repo_issue_intake.sh",
+            "scripts/repo_issue_to_pr_dispatch.sh",
+            "scripts/repo_pr_triage.sh",
+            "scripts/repo_agent_health.sh",
+            "scripts/repo_agent_cleanup.sh",
+            "scripts/repo_agent_status.sh",
+        ]:
+            text = self.read(relative)
+            self.assertIn('source "$SCRIPT_DIR/repo_agent_repos.sh"', text)
+
+    def test_backfill_and_webhook_are_thin_reconciliation_wrappers(self):
+        backfill = self.read("scripts/repo_agent_backfill.sh")
+        webhook = self.read("scripts/repo_agent_webhook.sh")
+        self.assertIn("repo_issue_intake.sh", backfill)
+        self.assertIn("repo_issue_to_pr_dispatch.sh", backfill)
+        self.assertIn("repo_pr_triage.sh", backfill)
+        self.assertIn("repo_agent_cleanup.sh", backfill)
+        self.assertIn("HERMES_ISSUE_TO_PR_RUN_OPENCODE=0", backfill)
+        self.assertIn("not an HTTP listener", webhook)
+        self.assertIn("issues|issue_comment", webhook)
+        self.assertIn("pull_request|pull_request_review", webhook)
+        self.assertIn("repo_pr_triage.sh", webhook)
+
+    def test_intake_claims_github_issue_before_kanban_task(self):
+        intake = self.read("scripts/repo_issue_intake.sh")
+        self.assertIn("HERMES_REPO_AGENT_ASSIGNEE", intake)
+        self.assertIn("HERMES_REPO_AGENT_SOURCE:-github", intake)
+        self.assertIn("HERMES_KANBAN_INTAKE_ASSIGNEE", intake)
+        self.assertIn("repo-agent-intake", intake)
+        self.assertIn("existing_issue_task", intake)
+        self.assertIn('if [ "$QUEUE_SOURCE" = "kanban" ]', intake)
+        self.assertIn("GITHUB_ISSUE_READY", intake)
+        self.assertIn("KANBAN_TASK_EXISTS", intake)
+        self.assertIn("--add-assignee", intake)
+        self.assertIn("ready_label_missing", intake)
+        self.assertIn("claim-and-kanban-without-label", intake)
+        self.assertLess(intake.index("--add-assignee"), intake.index("create \"$task_title\""))
+
+
+if __name__ == "__main__":
+    unittest.main()
