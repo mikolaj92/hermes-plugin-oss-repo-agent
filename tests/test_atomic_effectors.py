@@ -739,6 +739,77 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(out["status"], "noop")
         self.assertEqual(out["reason"], "held_claim_task_unavailable")
 
+    def test_absent_fix_marker_does_not_inherit_dispatch_task_id(self) -> None:
+        found = issue_to_pr.find_fix_task_marker(req({
+            "repos": [{"repo": "mikolaj92/Temida", "board": "mikolaj92-temida", "clone_path": "/clones/Temida"}],
+            "conduction": {
+                "read_fix_tasks": {
+                    "status": "read",
+                    "ok": True,
+                    "repo": "mikolaj92/Temida",
+                    "issue": 3590,
+                    "board": "mikolaj92-temida",
+                    "branch": "ai/fix/3590-x",
+                    "task_id": "t_14722de2",
+                    "clone_path": "/clones/Temida",
+                    "tasks": [],
+                }
+            },
+        }))
+        self.assertEqual(found["status"], "absent")
+        self.assertEqual(found["marker"], "fix-pr:mikolaj92/Temida:3590")
+        self.assertIsNone(found.get("task_id"))
+        self.assertEqual(found.get("source_task_id"), "t_14722de2")
+        created = issue_to_pr.create_fix_task(req({
+            "repos": [{"repo": "mikolaj92/Temida", "board": "mikolaj92-temida", "clone_path": "/clones/Temida"}],
+            "dry_run": True,
+            "conduction": {"find_fix_task_marker": found},
+        }))
+        self.assertEqual(created["status"], "planned")
+        self.assertNotEqual(created.get("status"), "fix_task_exists")
+
+    def test_branch_chain_resolves_from_inventory_identity(self) -> None:
+        repos = [{"repo": "mikolaj92/Temida", "board": "mikolaj92-temida", "clone_path": "/clones/Temida"}]
+        inventory = {
+            "status": "read",
+            "ok": True,
+            "clone_path": "/clones/Temida",
+            "repo": "mikolaj92/Temida",
+            "issue": 3590,
+            "board": "mikolaj92-temida",
+            "branch": "ai/fix/3590-issue-mikolaj92-temida-3590-temida_llm",
+            "task_id": "t_14722de2",
+            "worktrees": [{"branch": "main", "head": "abc", "path": "/clones/Temida"}],
+        }
+        with mock.patch("lokay.steps.issue_to_pr.branch_exists", return_value=False):
+            proven = issue_to_pr.read_branch_provenance(req({
+                "repos": repos,
+                "worktree_root": "/tmp/worktrees",
+                "receipt_path": "/tmp/receipt.json",
+                "conduction": {"read_worktree_inventory": inventory},
+            }))
+        self.assertEqual(proven["status"], "read")
+        self.assertEqual(proven["branch"], "ai/fix/3590-issue-mikolaj92-temida-3590-temida_llm")
+        self.assertEqual(proven["clone_path"], "/clones/Temida")
+        self.assertEqual(proven["task_id"], "t_14722de2")
+        self.assertEqual(proven["receipt"], "/tmp/receipt.json")
+        self.assertTrue(str(proven.get("worktree_path") or "").endswith("ai/fix/3590-issue-mikolaj92-temida-3590-temida_llm"))
+        with mock.patch("lokay.steps.issue_to_pr.branch_exists", return_value=False), mock.patch("lokay.steps.issue_to_pr.git") as git_mock:
+            created = issue_to_pr.create_local_branch(req({
+                "repos": repos,
+                "worktree_root": "/tmp/worktrees",
+                "receipt_path": "/tmp/receipt.json",
+                "dry_run": True,
+                "conduction": {
+                    "read_branch_provenance": proven,
+                    "read_base_ref": {"status": "read", "ok": True, "clone_path": "/clones/Temida", "base_head": "baseoid", "branch": proven["branch"], "repo": "mikolaj92/Temida", "issue": 3590, "task_id": "t_14722de2"},
+                },
+            }))
+        self.assertEqual(created["status"], "planned")
+        self.assertEqual(created["branch"], proven["branch"])
+        self.assertEqual(Path(created["worktree_path"]).resolve(), Path(proven["worktree_path"]).resolve())
+        git_mock.assert_not_called()
+
     def test_fix_chain_resolves_identity_and_clone_from_configured_repos(self) -> None:
         repos = [{"repo": "mikolaj92/Temida", "board": "mikolaj92-temida", "clone_path": "/clones/Temida"}]
         parsed = {"status": "parsed", "ok": True, "repo": "mikolaj92/Temida", "issue": 3590, "board": "mikolaj92-temida", "clone_path": "/clones/Temida"}

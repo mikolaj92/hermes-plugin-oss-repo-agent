@@ -409,14 +409,14 @@ config = { handler = "lokay.steps.issue_to_pr.fetch_clone_origin" }
 [[correlation_paths.effectors]]
 id = "read_base_ref"
 capability = "lokay_step"
-conduction = ["fetch_clone_origin", "read_clone_preconditions"]
+conduction = ["fetch_clone_origin", "read_clone_preconditions", "parse_issue_ref_from_task"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_base_ref" }
 
 [[correlation_paths.effectors]]
 id = "read_worktree_inventory"
 capability = "lokay_step"
-conduction = ["read_base_ref", "fetch_clone_origin", "read_clone_preconditions"]
+conduction = ["read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "parse_issue_ref_from_task"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_worktree_inventory" }
 
@@ -1951,14 +1951,14 @@ config = { handler = "lokay.steps.issue_to_pr.fetch_clone_origin" }
 [[correlation_paths.effectors]]
 id = "dispatch_read_base_ref"
 capability = "lokay_step"
-conduction = ["dispatch_fetch_clone_origin", "dispatch_read_clone_preconditions"]
+conduction = ["dispatch_fetch_clone_origin", "dispatch_read_clone_preconditions", "dispatch_parse_issue_ref_from_task"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_base_ref" }
 
 [[correlation_paths.effectors]]
 id = "dispatch_read_worktree_inventory"
 capability = "lokay_step"
-conduction = ["dispatch_read_base_ref", "dispatch_fetch_clone_origin", "dispatch_read_clone_preconditions"]
+conduction = ["dispatch_read_base_ref", "dispatch_fetch_clone_origin", "dispatch_read_clone_preconditions", "dispatch_parse_issue_ref_from_task"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_worktree_inventory" }
 

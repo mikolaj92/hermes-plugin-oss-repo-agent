@@ -573,12 +573,53 @@ def _fix_identity(request: Request) -> tuple[str, int | str, str, dict[str, Any]
         cond_blob(request, "find_fix_task_marker"),
         cond_blob(request, "read_fix_tasks"),
         cond_blob(request, "parse_issue_ref_from_task"),
+        cond_blob(request, "select_dispatch_task"),
+        cond_blob(request, "read_worktree_inventory"),
+        cond_blob(request, "read_branch_provenance"),
+        cond_blob(request, "create_local_branch"),
+        cond_blob(request, "write_branch_provenance"),
+        cond_blob(request, "read_clone_preconditions"),
+        cond_blob(request, "fetch_clone_origin"),
+        cond_blob(request, "read_base_ref"),
     )
     repo = str(next((source.get("repo") for source in sources if source.get("repo") not in (None, "")), "")).strip()
     issue = next((source.get("issue") or source.get("number") for source in sources if source.get("issue") not in (None, "") or source.get("number") not in (None, "")), "")
     board = str(next((source.get("board") for source in sources if source.get("board") not in (None, "")), "")).strip()
+    branch = str(next((source.get("branch") for source in sources if source.get("branch") not in (None, "")), "")).strip()
+    task_id = ""
+    for source in sources:
+        if source.get("task_id") not in (None, ""):
+            task_id = str(source.get("task_id")).strip()
+            break
+        task = source.get("task")
+        if isinstance(task, Mapping) and task.get("id") not in (None, ""):
+            task_id = str(task.get("id")).strip()
+            break
+        if not isinstance(task, Mapping) and task not in (None, ""):
+            task_id = str(task).strip()
+            break
     context = _repo_context_for_repo(request, repo) if repo else {}
+    if branch:
+        context = {**context, "branch": branch}
+    if task_id:
+        context = {**context, "task_id": task_id}
+    if not context.get("clone_path"):
+        clone = str(next((source.get("clone_path") for source in sources if source.get("clone_path") not in (None, "")), "")).strip()
+        if clone:
+            context = {**context, "clone_path": clone}
     return repo, issue, board or str(context.get("board") or "").strip(), context
+
+
+def _dispatch_worktree_path(request: Request, *, branch: str) -> str:
+    data, cfg = input_of(request), cfg_of(request)
+    explicit = str(data.get("worktree_path") or cfg.get("worktree_path") or "").strip()
+    if explicit:
+        return str(Path(explicit).expanduser())
+    root = str(data.get("worktree_root") or cfg.get("worktree_root") or "").strip()
+    if not root or not branch:
+        return ""
+    safe = re.sub(r"[^a-zA-Z0-9._/-]+", "-", branch).strip("-")
+    return str((Path(root).expanduser() / safe)) if safe else ""
 
 
 def _task_matches_issue(row: Mapping[str, Any], *, repo: str, issue: int | str) -> bool:
@@ -649,7 +690,7 @@ def read_fix_tasks(request: Request) -> Result:
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="read_fix_tasks", board=board)
     repo, issue, board, context = _fix_identity(request)
-    return ok(status="read", operation="read_fix_tasks", board=board, repo=repo, issue=issue, clone_path=context.get("clone_path"), tasks=rows)
+    return ok(status="read", operation="read_fix_tasks", board=board, repo=repo, issue=issue, branch=context.get("branch"), task_id=context.get("task_id"), clone_path=context.get("clone_path"), tasks=rows)
 
 
 def find_fix_task_marker(request: Request) -> Result:
@@ -658,7 +699,7 @@ def find_fix_task_marker(request: Request) -> Result:
         return terminal
     data = input_of(request)
     rows = data.get("tasks") if isinstance(data.get("tasks"), list) else _atomic_rows(request, "read_fix_tasks")
-    repo, issue, board, _ = _fix_identity(request)
+    repo, issue, board, context = _fix_identity(request)
     marker = str(data.get("idempotency_key") or f"fix-pr:{repo}:{issue}")
     idle = upstream_noop(request, "read_fix_tasks", "select_dispatch_task")
     if idle:
@@ -670,7 +711,18 @@ def find_fix_task_marker(request: Request) -> Result:
     matches = [r for r in rows if marker in str(r.get("body") or r.get("description") or "")]
     if len(matches) > 1:
         return fail("ambiguous_fix_task", failure_class="terminal", retry_safe=False, operation="find_fix_task_marker", idempotency_key=marker, matches=matches)
-    return ok(status="found" if matches else "absent", operation="find_fix_task_marker", marker=marker, repo=repo, issue=issue, board=board, task=matches[0] if matches else None, task_id=(matches[0].get("id") or matches[0].get("task_id")) if matches else None)
+    return ok(
+        status="found" if matches else "absent",
+        operation="find_fix_task_marker",
+        marker=marker,
+        repo=repo,
+        issue=issue,
+        board=board,
+        branch=context.get("branch"),
+        task=matches[0] if matches else None,
+        task_id=(matches[0].get("id") or matches[0].get("task_id")) if matches else None,
+        source_task_id=context.get("task_id"),
+    )
 
 
 def create_fix_task(request: Request) -> Result:
@@ -688,15 +740,15 @@ def create_fix_task(request: Request) -> Result:
     if not board or not repo or issue in (None, ""):
         return fail("missing_board_repo_issue", failure_class="terminal", retry_safe=False, operation="create_fix_task", idempotency_key=marker)
     if found.get("task_id") not in (None, ""):
-        return ok(status="fix_task_exists", operation="create_fix_task", board=board, repo=repo, issue=issue, clone_path=context.get("clone_path"), task_id=found.get("task_id"), task=found.get("task"), idempotency_key=marker, mutated=False, reused=True)
+        return ok(status="fix_task_exists", operation="create_fix_task", board=board, repo=repo, issue=issue, branch=context.get("branch"), clone_path=context.get("clone_path"), task_id=found.get("task_id"), task=found.get("task"), idempotency_key=marker, mutated=False, reused=True)
     body = str(data.get("body") or f"Repository: {repo}\nIssue: #{issue}\nIdempotency-Key: {marker}\n")
     if dry_run_flag(request):
-        return planned(operation="create_fix_task", board=board, title=title, body=body, idempotency_key=marker, repo=repo, issue=issue, clone_path=context.get("clone_path"))
+        return planned(operation="create_fix_task", board=board, title=title, body=body, idempotency_key=marker, repo=repo, issue=issue, branch=context.get("branch"), clone_path=context.get("clone_path"), task_id=context.get("task_id"))
     try:
         proc = run_cmd(["hermes", "kanban", "--board", board, "create", "--body", body, "--assignee", str(cfg.get("fixer_assignee") or "lokay-fixer"), "--idempotency-key", marker, title], timeout=90)
     except CommandError as exc:
         return fail("kanban_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_fix_task", board=board, idempotency_key=marker, error=str(exc), mutated=True)
-    return ok(status="created", operation="create_fix_task", board=board, title=title, idempotency_key=marker, repo=repo, issue=issue, clone_path=context.get("clone_path"), stdout=(proc.stdout or "")[-400:], mutated=True)
+    return ok(status="created", operation="create_fix_task", board=board, title=title, idempotency_key=marker, repo=repo, issue=issue, branch=context.get("branch"), clone_path=context.get("clone_path"), task_id=context.get("task_id"), stdout=(proc.stdout or "")[-400:], mutated=True)
 
 
 def reconcile_fix_task(request: Request) -> Result:
@@ -721,7 +773,7 @@ def _reconcile_kanban_marker(request: Request, operation: str, peer: str, prefix
     if len(matches) != 1: return fail("reconcile_conflict" if len(matches) > 1 else "created_task_unresolved", failure_class="terminal", retry_safe=False, operation=operation, matches=matches, mutated=False)
     row = matches[0]; tid = row.get("id") or row.get("task_id")
     if not tid: return fail("invalid_kanban_task_id", failure_class="terminal", retry_safe=False, operation=operation, mutated=False)
-    context = {key: created[key] for key in ("repo", "issue", "clone_path") if created.get(key) not in (None, "")}
+    context = {key: created[key] for key in ("repo", "issue", "clone_path", "branch") if created.get(key) not in (None, "")}
     return ok(status="reconciled", operation=operation, task=row, task_id=tid, board=board, marker=marker, mutated=False, **context)
 
 def read_task_for_completion(request: Request) -> Result:
@@ -779,7 +831,7 @@ def verify_task_completed(request: Request) -> Result:
 
 def read_clone_preconditions(request: Request) -> Result:
     data, cfg = input_of(request), cfg_of(request)
-    repo, _, _, context = _fix_identity(request)
+    repo, issue, board, context = _fix_identity(request)
     clone_path = str(data.get("clone_path") or cfg.get("clone_path") or context.get("clone_path") or "")
     base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
     idle = upstream_noop(request, "reconcile_fix_task", "select_dispatch_task")
@@ -798,7 +850,7 @@ def read_clone_preconditions(request: Request) -> Result:
         return fail("clone_dirty", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, clone_status=status, repo=repo)
     if not origin.strip():
         return fail("origin_missing", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, repo=repo)
-    return ok(status="ready", operation="read_clone_preconditions", clone_path=clone_path, base_branch=base_branch, origin=origin, repo=repo)
+    return ok(status="ready", operation="read_clone_preconditions", clone_path=clone_path, base_branch=base_branch, origin=origin, repo=repo, issue=issue, board=board, branch=context.get("branch"), task_id=context.get("task_id"))
 
 
 def fetch_clone_origin(request: Request) -> Result:
@@ -808,10 +860,11 @@ def fetch_clone_origin(request: Request) -> Result:
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="fetch_clone_origin")
     clone_path = str(input_of(request).get("clone_path") or cond_get(request, "clone_path", "read_clone_preconditions") or "")
-    if dry_run_flag(request): return planned(operation="fetch_clone_origin", clone_path=clone_path)
+    repo, issue, _, context = _fix_identity(request)
+    if dry_run_flag(request): return planned(operation="fetch_clone_origin", clone_path=clone_path, repo=repo, issue=issue, branch=context.get("branch"))
     try: git(["fetch", "origin", "--prune"], cwd=clone_path)
     except CommandError as exc: return fail("fetch_failed", failure_class="retryable", retry_safe=True, operation="fetch_clone_origin", clone_path=clone_path, error=str(exc), mutated=True)
-    return ok(status="fetched", operation="fetch_clone_origin", clone_path=clone_path, mutated=True)
+    return ok(status="fetched", operation="fetch_clone_origin", clone_path=clone_path, repo=repo, issue=issue, branch=context.get("branch"), task_id=context.get("task_id"), mutated=True)
 
 
 def read_base_ref(request: Request) -> Result:
@@ -820,10 +873,25 @@ def read_base_ref(request: Request) -> Result:
     idle = upstream_noop(request, "fetch_clone_origin", "read_clone_preconditions")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_base_ref")
-    data, cfg = input_of(request), cfg_of(request); clone = str(data.get("clone_path") or cond_get(request, "clone_path", "fetch_clone_origin", "read_clone_preconditions") or ""); branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
-    try: head = remote_ref(clone, "origin", branch)
-    except CommandError as exc: return fail("base_ref_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_base_ref", error=str(exc), clone_path=clone, base_branch=branch)
-    return ok(status="read", operation="read_base_ref", clone_path=clone, base_branch=branch, base_head=head)
+    data, cfg = input_of(request), cfg_of(request)
+    clone = str(data.get("clone_path") or cond_get(request, "clone_path", "fetch_clone_origin", "read_clone_preconditions") or "")
+    base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
+    repo, issue, _, context = _fix_identity(request)
+    try:
+        head = remote_ref(clone, "origin", base_branch)
+    except CommandError as exc:
+        return fail("base_ref_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_base_ref", error=str(exc), clone_path=clone, base_branch=base_branch)
+    return ok(
+        status="read",
+        operation="read_base_ref",
+        clone_path=clone,
+        base_branch=base_branch,
+        base_head=head,
+        repo=repo,
+        issue=issue,
+        branch=context.get("branch"),
+        task_id=context.get("task_id"),
+    )
 
 
 def read_worktree_inventory(request: Request) -> Result:
@@ -832,27 +900,84 @@ def read_worktree_inventory(request: Request) -> Result:
     idle = upstream_noop(request, "read_clone_preconditions")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_worktree_inventory")
-    clone = str(input_of(request).get("clone_path") or cond_get(request, "clone_path", "read_clone_preconditions") or "")
-    try: text = worktree_list(clone); rows = parse_worktree_porcelain(text)
-    except (CommandError, ValueError) as exc: return fail("worktree_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_worktree_inventory", error=str(exc))
-    return ok(status="read", operation="read_worktree_inventory", clone_path=clone, worktrees=rows)
+    repo, issue, board, context = _fix_identity(request)
+    clone = str(
+        input_of(request).get("clone_path")
+        or cond_get(request, "clone_path", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions")
+        or context.get("clone_path")
+        or ""
+    )
+    try:
+        text = worktree_list(clone)
+        rows = parse_worktree_porcelain(text)
+    except (CommandError, ValueError) as exc:
+        return fail("worktree_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_worktree_inventory", error=str(exc))
+    return ok(
+        status="read",
+        operation="read_worktree_inventory",
+        clone_path=clone,
+        worktrees=rows,
+        repo=repo,
+        issue=issue,
+        board=board,
+        branch=context.get("branch"),
+        task_id=context.get("task_id"),
+    )
 
 
 def read_branch_provenance(request: Request) -> Result:
     idle = upstream_noop(request, "read_worktree_inventory")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_branch_provenance")
-    data = input_of(request); clone, branch = str(data.get("clone_path") or ""), str(data.get("branch") or "")
+    data = input_of(request)
+    repo, issue, board, context = _fix_identity(request)
+    inventory = cond_blob(request, "read_worktree_inventory")
+    clone = str(data.get("clone_path") or inventory.get("clone_path") or context.get("clone_path") or "")
+    branch = str(data.get("branch") or inventory.get("branch") or context.get("branch") or "")
+    task_id = str(data.get("task_id") or inventory.get("task_id") or context.get("task_id") or "")
+    receipt = str(data.get("receipt_path") or data.get("receipt_id") or inventory.get("receipt_path") or inventory.get("receipt") or "")
     if not clone or not branch:
-        return fail("missing_clone_or_branch", failure_class="terminal", retry_safe=False, operation="read_branch_provenance")
+        return fail("missing_clone_or_branch", failure_class="terminal", retry_safe=False, operation="read_branch_provenance", repo=repo, issue=issue, mutated=False)
     provenance = _branch_provenance(clone, branch)
     expected = _worktree_provenance(request, branch)
+    if not expected.get("task_id") and task_id:
+        expected = {**expected, "task_id": task_id}
+    if not expected.get("issue") and issue not in (None, ""):
+        expected = {**expected, "issue": str(issue)}
+    if not expected.get("repo") and repo:
+        expected = {**expected, "repo": repo}
+    if not expected.get("receipt") and receipt:
+        expected = {**expected, "receipt": receipt}
+    if not expected.get("branch"):
+        expected = {**expected, "branch": branch}
     error = _worktree_provenance_error(request, expected)
     if error["missing"] or error["conflicts"]:
-        return fail("missing_worktree_provenance" if error["missing"] else "conflicting_worktree_provenance", failure_class="terminal", retry_safe=False, operation="read_branch_provenance", **error)
+        return fail(
+            "conflicting_worktree_provenance" if error["conflicts"] else "missing_worktree_provenance",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_branch_provenance",
+            mutated=False,
+            **error,
+        )
     if branch_exists(clone, branch) and not _provenance_matches(expected, provenance):
-        return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, operation="read_branch_provenance", provenance=provenance, expected=expected)
-    return ok(status="read", operation="read_branch_provenance", provenance=provenance, clone_path=clone, branch=branch)
+        return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, operation="read_branch_provenance", provenance=provenance, expected=expected, mutated=False)
+    worktree_path = _dispatch_worktree_path(request, branch=branch)
+    return ok(
+        status="read",
+        operation="read_branch_provenance",
+        provenance=provenance,
+        expected=expected,
+        clone_path=clone,
+        branch=branch,
+        repo=expected.get("repo") or repo,
+        issue=expected.get("issue") or issue,
+        board=board,
+        task_id=expected.get("task_id"),
+        receipt=expected.get("receipt"),
+        worktree_path=worktree_path or None,
+        worktrees=inventory.get("worktrees") if isinstance(inventory.get("worktrees"), list) else [],
+    )
 
 
 def create_local_branch(request: Request) -> Result:
@@ -861,13 +986,26 @@ def create_local_branch(request: Request) -> Result:
     idle = upstream_noop(request, "read_branch_provenance", "read_clone_preconditions", "reconcile_fix_task")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="create_local_branch")
-    data = input_of(request); clone, branch, base = str(data.get("clone_path") or cond_get(request, "clone_path", "read_base_ref") or ""), str(data.get("branch") or ""), str(data.get("base_head") or cond_get(request, "base_head", "read_base_ref") or "")
-    if not clone or not branch or not base: return fail("missing_branch_inputs", failure_class="terminal", retry_safe=False, operation="create_local_branch")
-    inventory = cond_blob(request, "read_worktree_inventory")
-    path = Path(str(data.get("worktree_path") or "")).resolve()
+    data = input_of(request)
+    repo, issue, board, context = _fix_identity(request)
+    proven = cond_blob(request, "read_branch_provenance")
+    clone = str(data.get("clone_path") or proven.get("clone_path") or cond_get(request, "clone_path", "read_base_ref", "read_clone_preconditions") or context.get("clone_path") or "")
+    branch = str(data.get("branch") or proven.get("branch") or context.get("branch") or "")
+    base = str(data.get("base_head") or cond_get(request, "base_head", "read_base_ref") or "")
+    path_value = str(data.get("worktree_path") or proven.get("worktree_path") or _dispatch_worktree_path(request, branch=branch) or "").strip()
+    if not clone or not branch or not base or not path_value:
+        return fail("missing_branch_inputs", failure_class="terminal", retry_safe=False, operation="create_local_branch", repo=repo, issue=issue, branch=branch, clone_path=clone, worktree_path=path_value or None)
+    path = Path(path_value).expanduser().resolve()
+    worktrees = proven.get("worktrees") if isinstance(proven.get("worktrees"), list) else []
     if branch_exists(clone, branch):
-        actual = cond_blob(request, "read_branch_provenance").get("provenance") or _branch_provenance(clone, branch)
-        expected = _worktree_provenance(request, branch)
+        actual = proven.get("provenance") or _branch_provenance(clone, branch)
+        expected = proven.get("expected") if isinstance(proven.get("expected"), dict) else {
+            "task_id": str(proven.get("task_id") or context.get("task_id") or ""),
+            "issue": str(issue or ""),
+            "receipt": str(data.get("receipt_path") or data.get("receipt_id") or proven.get("receipt") or ""),
+            "repo": repo,
+            "branch": branch,
+        }
         if not _provenance_matches(expected, actual):
             return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, operation="create_local_branch", mutated=False)
         try:
@@ -876,18 +1014,21 @@ def create_local_branch(request: Request) -> Result:
             return fail("branch_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="create_local_branch", error=str(exc), mutated=False)
         if head != base:
             return fail("branch_create_failed", failure_class="terminal", retry_safe=False, operation="create_local_branch", head=head, base_head=base, mutated=False)
-        matching = [row for row in inventory.get("worktrees", []) if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == path]
+        matching = [row for row in worktrees if isinstance(row, dict) and Path(str(row.get("path") or "")).expanduser().resolve() == path]
         if path.exists() or matching:
             if any(str(row.get("branch") or "") == branch for row in matching):
-                return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, mutated=False)
+                return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=str(path), mutated=False)
             return fail("worktree_path_collision", failure_class="terminal", retry_safe=False, operation="create_local_branch", worktree_path=str(path))
-        return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, mutated=False)
-    if path.exists() or any(Path(str(row.get("path") or "")).resolve() == path for row in inventory.get("worktrees", []) if isinstance(row, dict)):
+        return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=str(path), mutated=False)
+    if path.exists() or any(Path(str(row.get("path") or "")).expanduser().resolve() == path for row in worktrees if isinstance(row, dict)):
         return fail("worktree_path_collision", failure_class="terminal", retry_safe=False, operation="create_local_branch", worktree_path=str(path))
-    if dry_run_flag(request): return planned(operation="create_local_branch", branch=branch, base_head=base)
-    try: git(["branch", branch, base], cwd=clone)
-    except CommandError as exc: return fail("branch_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_local_branch", error=str(exc), mutated=False)
-    return ok(status="created", operation="create_local_branch", clone_path=clone, branch=branch, mutated=True)
+    if dry_run_flag(request):
+        return planned(operation="create_local_branch", branch=branch, base_head=base, clone_path=clone, repo=repo, issue=issue, worktree_path=str(path))
+    try:
+        git(["branch", branch, base], cwd=clone)
+    except CommandError as exc:
+        return fail("branch_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_local_branch", error=str(exc), mutated=False)
+    return ok(status="created", operation="create_local_branch", clone_path=clone, branch=branch, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=str(path), mutated=True)
 
 
 def write_branch_provenance(request: Request) -> Result:
@@ -896,15 +1037,32 @@ def write_branch_provenance(request: Request) -> Result:
     idle = upstream_noop(request, "create_local_branch", "read_branch_provenance")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="write_branch_provenance")
-    data = input_of(request); clone, branch = str(data.get("clone_path") or ""), str(data.get("branch") or ""); values = data.get("provenance") or {}
-    if not clone or not branch or not isinstance(values, dict): return fail("missing_branch_provenance", failure_class="terminal", retry_safe=False, operation="write_branch_provenance")
-    if cond_blob(request, "create_local_branch").get("status") == "reused": return ok(status="verified", operation="write_branch_provenance", branch=branch, mutated=False)
-    if dry_run_flag(request): return planned(operation="write_branch_provenance", branch=branch)
+    data = input_of(request)
+    created = cond_blob(request, "create_local_branch")
+    proven = cond_blob(request, "read_branch_provenance")
+    repo, issue, board, context = _fix_identity(request)
+    clone = str(data.get("clone_path") or created.get("clone_path") or proven.get("clone_path") or context.get("clone_path") or "")
+    branch = str(data.get("branch") or created.get("branch") or proven.get("branch") or context.get("branch") or "")
+    values = data.get("provenance") if isinstance(data.get("provenance"), dict) else {
+        "task": str(data.get("task_id") or proven.get("task_id") or context.get("task_id") or ""),
+        "issue": str(issue or ""),
+        "receipt": str(data.get("receipt_path") or data.get("receipt_id") or ""),
+        "repo": repo,
+        "base": str(data.get("base_head") or cond_get(request, "base_head", "read_base_ref") or ""),
+    }
+    if not clone or not branch:
+        return fail("missing_branch_provenance", failure_class="terminal", retry_safe=False, operation="write_branch_provenance")
+    if created.get("status") == "reused":
+        return ok(status="verified", operation="write_branch_provenance", branch=branch, clone_path=clone, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=created.get("worktree_path"), mutated=False)
+    if dry_run_flag(request):
+        return planned(operation="write_branch_provenance", branch=branch, clone_path=clone, repo=repo, issue=issue)
     try:
         for key, value in values.items():
-            if value: branch_config_set(clone, branch, f"lokay-{key}", str(value))
-    except CommandError as exc: return fail("branch_provenance_write_failed", failure_class="retryable", retry_safe=True, operation="write_branch_provenance", error=str(exc), mutated=True)
-    return ok(status="written", operation="write_branch_provenance", branch=branch, mutated=True)
+            if value:
+                branch_config_set(clone, branch, f"lokay-{key}", str(value))
+    except CommandError as exc:
+        return fail("branch_provenance_write_failed", failure_class="retryable", retry_safe=True, operation="write_branch_provenance", error=str(exc), mutated=True)
+    return ok(status="written", operation="write_branch_provenance", branch=branch, clone_path=clone, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=created.get("worktree_path"), mutated=True)
 
 
 def add_worktree(request: Request) -> Result:
@@ -913,19 +1071,36 @@ def add_worktree(request: Request) -> Result:
     idle = upstream_noop(request, "create_local_branch", "write_branch_provenance")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="add_worktree")
-    data = input_of(request); clone, path, branch = str(data.get("clone_path") or ""), str(data.get("worktree_path") or ""), str(data.get("branch") or "")
-    root = Path(str(data.get("worktree_root") or cfg_of(request).get("worktree_root") or "")).resolve()
-    if not clone or not path or not branch: return fail("missing_worktree_inputs", failure_class="terminal", retry_safe=False, operation="add_worktree")
-    try: Path(path).resolve().relative_to(root)
-    except ValueError: return fail("worktree_path_escape", failure_class="terminal", retry_safe=False, operation="add_worktree", worktree_path=path)
-    inventory = cond_blob(request, "read_worktree_inventory")
-    matching = [row for row in inventory.get("worktrees", []) if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == Path(path).resolve()]
+    data = input_of(request)
+    created = cond_blob(request, "create_local_branch")
+    written = cond_blob(request, "write_branch_provenance")
+    repo, issue, board, context = _fix_identity(request)
+    clone = str(data.get("clone_path") or created.get("clone_path") or written.get("clone_path") or context.get("clone_path") or "")
+    branch = str(data.get("branch") or created.get("branch") or written.get("branch") or context.get("branch") or "")
+    path = str(data.get("worktree_path") or created.get("worktree_path") or written.get("worktree_path") or _dispatch_worktree_path(request, branch=branch) or "")
+    root_value = str(data.get("worktree_root") or cfg_of(request).get("worktree_root") or "")
+    if not clone or not path or not branch or not root_value:
+        return fail("missing_worktree_inputs", failure_class="terminal", retry_safe=False, operation="add_worktree", clone_path=clone, branch=branch, worktree_path=path or None)
+    root = Path(root_value).expanduser().resolve()
+    resolved = Path(path).expanduser().resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return fail("worktree_path_escape", failure_class="terminal", retry_safe=False, operation="add_worktree", worktree_path=path)
+    worktrees = created.get("worktrees") if isinstance(created.get("worktrees"), list) else []
+    if not worktrees:
+        proven = cond_blob(request, "read_branch_provenance")
+        worktrees = proven.get("worktrees") if isinstance(proven.get("worktrees"), list) else []
+    matching = [row for row in worktrees if isinstance(row, dict) and Path(str(row.get("path") or "")).expanduser().resolve() == resolved]
     if matching and any(str(row.get("branch") or "") == branch for row in matching):
-        return ok(status="reused", operation="add_worktree", worktree_path=path, branch=branch, mutated=False)
-    if dry_run_flag(request): return planned(operation="add_worktree", worktree_path=path, branch=branch)
-    try: worktree_add(clone, path, branch, create_branch=False)
-    except CommandError as exc: return fail("worktree_add_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="add_worktree", error=str(exc), mutated=False)
-    return ok(status="added", operation="add_worktree", worktree_path=path, branch=branch, mutated=True)
+        return ok(status="reused", operation="add_worktree", worktree_path=str(resolved), branch=branch, clone_path=clone, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), mutated=False)
+    if dry_run_flag(request):
+        return planned(operation="add_worktree", worktree_path=str(resolved), branch=branch, clone_path=clone, repo=repo, issue=issue)
+    try:
+        worktree_add(clone, str(resolved), branch, create_branch=False)
+    except CommandError as exc:
+        return fail("worktree_add_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="add_worktree", error=str(exc), mutated=False)
+    return ok(status="added", operation="add_worktree", worktree_path=str(resolved), branch=branch, clone_path=clone, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), mutated=True)
 
 
 def verify_worktree_head(request: Request) -> Result:
