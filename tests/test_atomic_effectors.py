@@ -482,6 +482,86 @@ class IntakeAlignedTests(unittest.TestCase):
         )
         self.assertEqual(board2, "mikolaj92-temida")
 
+    def test_dispatch_reads_board_despite_claim_busy(self) -> None:
+        task = {
+            "id": "t_14722de2",
+            "title": "[issue] mikolaj92/Temida#3590: retry",
+            "status": "ready",
+            "assignee": "lokay-intake",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            claim_path = Path(tmp) / "claim.json"
+            claim_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "repo": "mikolaj92/Temida",
+                        "issue": 3590,
+                        "board": "mikolaj92-temida",
+                        "assignee": "mikolaj92",
+                        "claimedAt": "2026-07-29T12:18:17.734195Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json", return_value=[task]) as listed:
+                read = issue_to_pr.read_dispatch_tasks(
+                    req(
+                        {
+                            "dry_run": False,
+                            "active_issue_path": tmp,
+                            "repos": [
+                                {"repo": "mikolaj92/lokay", "board": "mikolaj92-lokay"},
+                                {"repo": "mikolaj92/Temida", "board": "mikolaj92-temida"},
+                            ],
+                            "conduction": {
+                                "intake_kanban": {
+                                    "status": "failed",
+                                    "ok": False,
+                                    "reason": "claim_busy",
+                                    "failure_class": "terminal",
+                                },
+                                "intake_reserve_claim_file": {
+                                    "status": "failed",
+                                    "ok": False,
+                                    "reason": "claim_busy",
+                                    "failure_class": "terminal",
+                                    "selected": {
+                                        "repo": "mikolaj92/lokay",
+                                        "number": 99,
+                                        "board": "mikolaj92-lokay",
+                                    },
+                                },
+                                "intake_build_issue_claim_result": {
+                                    "status": "failed",
+                                    "ok": False,
+                                    "reason": "claim_busy",
+                                },
+                                "intake_reconcile_intake_task": {
+                                    "status": "failed",
+                                    "ok": False,
+                                    "reason": "upstream_failed",
+                                },
+                            },
+                        }
+                    )
+                )
+                selected = issue_to_pr.select_dispatch_task(
+                    req(
+                        {
+                            "dry_run": False,
+                            "conduction": {"read_dispatch_tasks": read},
+                        }
+                    )
+                )
+        self.assertEqual(read["status"], "read")
+        self.assertEqual(read["board"], "mikolaj92-temida")
+        self.assertNotEqual(read["board"], "mikolaj92-lokay")
+        self.assertEqual(selected["status"], "selected")
+        self.assertEqual(selected["task_id"], "t_14722de2")
+        listed.assert_called()
+        self.assertEqual(listed.call_args.args[0][1], "mikolaj92-temida")
+
     def test_kanban_dry_run_chain(self) -> None:
         selected = self._selected(1)
         claim_result = {"status": "claimed", "ok": True, "selected": selected}

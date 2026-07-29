@@ -176,7 +176,7 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
         "intake_reserve_claim_file": {"active_issue_path": cfg.paths.active_issue}, "intake_read_issue_claim_state": {},
         "intake_assign_issue": {}, "intake_add_issue_label": {"label": cfg.labels.in_progress}, "intake_verify_issue_claim": {"label": cfg.labels.in_progress, "required_labels": [cfg.labels.in_progress]}, "intake_build_issue_claim_result": {},
         "intake_read_intake_tasks": {}, "intake_find_intake_marker": {}, "intake_create_intake_task": {}, "intake_reconcile_intake_task": {},
-        "dispatch_read_dispatch_tasks": {"repos": repos, "limit": limit}, "dispatch_select_dispatch_task": {}, "dispatch_parse_issue_ref_from_task": {},
+        "dispatch_read_dispatch_tasks": {"repos": repos, "limit": limit, "active_issue_path": cfg.paths.active_issue}, "dispatch_select_dispatch_task": {}, "dispatch_parse_issue_ref_from_task": {},
         "dispatch_read_fix_tasks": {}, "dispatch_find_fix_task_marker": {}, "dispatch_create_fix_task": {}, "dispatch_reconcile_fix_task": {},
         "dispatch_read_clone_preconditions": {"worktree_root": cfg.paths.worktree_root, "base_branch": cfg.base_branch}, "dispatch_fetch_clone_origin": {},
         "dispatch_read_base_ref": {"base_branch": cfg.base_branch}, "dispatch_read_worktree_inventory": {"worktree_root": cfg.paths.worktree_root},

@@ -437,14 +437,24 @@ def _atomic_rows(request: Request, *ids: str) -> list[dict[str, Any]] | None:
 
 
 def read_dispatch_tasks(request: Request) -> Result:
-    """Read the dispatch board; policy selection is a separate process."""
-    terminal = _atomic_terminal(request, "read_dispatch_tasks", "intake_kanban")
-    if terminal:
-        return terminal
-    idle = upstream_noop(request, "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
-    if idle:
-        return noop(str(idle.get("reason") or "no_selected_issue"), operation="read_dispatch_tasks")
-    board = _atomic_board(request)
+    """Read the dispatch board; policy selection is a separate process.
+
+    Dispatch is intentionally independent of intake claim capacity when an
+    active claim already holds work. Idle intake still yields a clean noop.
+    """
+    held_board = _held_claim_board(request)
+    if not held_board:
+        idle = upstream_noop(
+            request,
+            "intake_reconcile_intake_task",
+            "intake_create_intake_task",
+            "intake_build_issue_claim_result",
+        )
+        if idle:
+            return noop(str(idle.get("reason") or "no_selected_issue"), operation="read_dispatch_tasks")
+    board = held_board or _atomic_board(request)
+    if not board:
+        board = _dispatch_board_fallback(request)
     if not board:
         return fail("missing_board", failure_class="terminal", retry_safe=False, operation="read_dispatch_tasks")
     try:
@@ -454,6 +464,93 @@ def read_dispatch_tasks(request: Request) -> Result:
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="read_dispatch_tasks", board=board)
     return ok(status="read", operation="read_dispatch_tasks", board=board, tasks=rows)
+
+
+def _dispatch_board_fallback(request: Request) -> str:
+    """Resolve board from active claim identity, then failed selection identity.
+
+    When intake is claim_busy, the held claim is the work that should continue;
+    never invent a board from repos[0].
+    """
+    data, cfg = input_of(request), cfg_of(request)
+    # 1) durable active claim identity — held work owns capacity
+    held = _held_claim_board(request)
+    if held:
+        return held
+    # 2) nested selected.board / repo on claim or selection blobs
+    for effector_id in (
+        "reserve_claim_file",
+        "select_issue_candidate",
+        "build_issue_claim_result",
+        "reconcile_intake_task",
+        "create_intake_task",
+        "find_intake_marker",
+    ):
+        blob = cond_blob(request, effector_id)
+        nested = blob.get("selected") if isinstance(blob.get("selected"), Mapping) else {}
+        candidate = str(blob.get("board") or (nested.get("board") if isinstance(nested, Mapping) else "") or "").strip()
+        if candidate:
+            return candidate
+        selected_repo = str((nested.get("repo") if isinstance(nested, Mapping) else "") or blob.get("repo") or "").strip()
+        if selected_repo:
+            matched = _board_for_repo(request, selected_repo)
+            if matched:
+                return matched
+    # 3) explicit selected/repo/board input only — never repos[0]
+    selected = data.get("selected") if isinstance(data.get("selected"), Mapping) else {}
+    candidate = str(data.get("board") or selected.get("board") or cfg.get("board") or "").strip()
+    if candidate:
+        return candidate
+    selected_repo = str(selected.get("repo") or data.get("repo") or "").strip()
+    if selected_repo:
+        return _board_for_repo(request, selected_repo)
+    return ""
+
+
+def _held_claim_board(request: Request) -> str:
+    """Return board from the single active claim when capacity is held."""
+    from lokay.steps.claim import _claim_file, _claims_in_directory, _read_claim
+
+    data, cfg = input_of(request), cfg_of(request)
+    path_value = data.get("active_issue_path") or cfg.get("active_issue_path") or (cfg.get("paths") or {}).get("active_issue")
+    if not path_value:
+        return ""
+    configured = Path(str(path_value)).expanduser()
+    path = _claim_file(str(path_value))
+    if path is None:
+        return ""
+    is_directory = (configured.exists() and configured.is_dir()) or configured.suffix.lower() != ".json"
+    if is_directory:
+        claims, error = _claims_in_directory(path.parent if path.name.endswith(".json") else configured)
+        if error or not claims:
+            return ""
+        # With global capacity 1 there should be exactly one held claim; with
+        # more, only a unique board is unambiguous enough to continue.
+        boards = {str(claim.get("board") or "").strip() for _, claim in claims if str(claim.get("board") or "").strip()}
+        if len(boards) == 1:
+            return next(iter(boards))
+        return ""
+    payload, error = _read_claim(path)
+    if error or not payload:
+        return ""
+    return str(payload.get("board") or "").strip()
+
+
+def _board_for_repo(request: Request, repo: str) -> str:
+    data, cfg = input_of(request), cfg_of(request)
+    repos = data.get("repos") if isinstance(data.get("repos"), list) else cfg.get("repos")
+    if not isinstance(repos, list):
+        return ""
+    wanted = repo.strip().casefold()
+    for entry in repos:
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("repo") or "").strip().casefold() != wanted:
+            continue
+        board = str(entry.get("board") or "").strip()
+        if board:
+            return board
+    return ""
 
 
 def select_dispatch_task(request: Request) -> Result:
