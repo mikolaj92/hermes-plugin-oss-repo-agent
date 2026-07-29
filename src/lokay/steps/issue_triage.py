@@ -19,10 +19,7 @@ def triage_gate(request: Request, operation: str, *upstream_ids: str) -> Result 
     terminal = terminal_upstream(request, operation, *upstream_ids)
     if terminal:
         return terminal
-    selected = data.get("selected")
-    if not isinstance(selected, Mapping) or not selected:
-        selected = cond_get(request, "selected", *upstream_ids, default=None)
-    if isinstance(selected, Mapping) and selected:
+    if triage_selected(request, *upstream_ids):
         return None
     if any(cond_blob(request, upstream_id) for upstream_id in upstream_ids):
         upstream = upstream_noop(request, *upstream_ids)
@@ -33,11 +30,52 @@ def triage_gate(request: Request, operation: str, *upstream_ids: str) -> Result 
 
 
 def triage_selected(request: Request, *upstream_ids: str) -> dict[str, Any]:
+    """Resolve the selected triage identity from input or successful conduction."""
     data = input_of(request)
     selected = data.get("selected")
-    if not isinstance(selected, Mapping) or not selected:
-        selected = cond_get(request, "selected", *upstream_ids, default={})
-    return dict(selected) if isinstance(selected, Mapping) else {}
+    if isinstance(selected, Mapping) and selected:
+        return dict(selected)
+    # Bare repo/number is only identity when the upstream blob itself proves a
+    # successful selection/mutation decision. Idle or failed blobs must not
+    # authorize receipt writes.
+    allowed_status = {
+        "selected",
+        "mutation_decided",
+        "classified",
+        "triage_labels_read",
+        "feedback_verified",
+        "feedback_already_posted",
+        "labels_verified",
+        "context_packet",
+        "snapshot_unchanged",
+        "written",
+        "exists",
+        "planned",
+        "feedback_observed",
+        "label_resolved",
+        "label_provisioned",
+        "triage_close_requested",
+        "triage_issue_closed_verified",
+        "already_closed",
+    }
+    for upstream_id in upstream_ids:
+        blob = cond_blob(request, upstream_id)
+        if not blob:
+            continue
+        nested = blob.get("selected")
+        if isinstance(nested, Mapping) and nested:
+            return dict(nested)
+        if blob.get("ok") is not True:
+            continue
+        status = str(blob.get("status") or "")
+        reason = str(blob.get("reason") or "")
+        if status not in allowed_status and not (status == "noop" and reason == "feedback_already_posted"):
+            continue
+        repo = str(blob.get("repo") or "").strip()
+        number = blob.get("number", blob.get("issue"))
+        if repo and isinstance(number, int) and not isinstance(number, bool) and number > 0:
+            return {"repo": repo, "number": number}
+    return {}
 
 
 def triage_identity(request: Request, *upstream_ids: str) -> dict[str, Any]:

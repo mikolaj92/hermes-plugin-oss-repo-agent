@@ -266,7 +266,7 @@ def _payload(request: Request, stage: str) -> dict[str, Any]:
     value.setdefault("stage", stage)
     if selected:
         value.setdefault("selected", dict(selected))
-    for key in ("repo", "issue", "number", "issue_url", "updated_at", "classification_revision", "candidate_class", "decision_digest", "run_id", "comment_id"):
+    for key in ("repo", "issue", "number", "issue_url", "updated_at", "issue_updated_at", "classification_revision", "candidate_class", "decision_digest", "run_id", "comment_id"):
         if key not in value:
             if key in data:
                 value[key] = data[key]
@@ -274,9 +274,47 @@ def _payload(request: Request, stage: str) -> dict[str, Any]:
                 value[key] = selected[key]
             elif key in cfg:
                 value[key] = cfg[key]
+    if "issue_updated_at" not in value and isinstance(selected.get("updatedAt"), str):
+        value["issue_updated_at"] = selected["updatedAt"]
     if "issue" not in value and "number" in value:
         value["issue"] = value["number"]
+    if stage == "feedback-verified":
+        verified = cond_blob(request, "verify_triage_feedback")
+        observed = cond_blob(request, "observe_triage_feedback")
+        for blob in (verified, observed):
+            if not isinstance(blob, Mapping) or not blob:
+                continue
+            if "comment_id" not in value and blob.get("comment_id") not in (None, ""):
+                value["comment_id"] = blob.get("comment_id")
+            if "decision_digest" not in value and blob.get("decision_digest"):
+                value["decision_digest"] = blob.get("decision_digest")
+            if "issue_updated_at" not in value and isinstance(blob.get("issue_updated_at") or blob.get("updated_at") or blob.get("updatedAt"), str):
+                value["issue_updated_at"] = blob.get("issue_updated_at") or blob.get("updated_at") or blob.get("updatedAt")
+            if "verified_readback_state" not in value and blob.get("verified_readback_state"):
+                value["verified_readback_state"] = blob.get("verified_readback_state")
+            elif "verified_readback_state" not in value and blob.get("verified") is True:
+                value["verified_readback_state"] = "verified"
+        comment = verified.get("comment") if isinstance(verified.get("comment"), Mapping) else None
+        if comment is not None and "comment_id" not in value:
+            database_id = comment.get("databaseId")
+            if isinstance(database_id, int) and not isinstance(database_id, bool) and database_id > 0:
+                value["comment_id"] = database_id
+            else:
+                url = str(comment.get("url") or "")
+                match = re.search(r"issuecomment-(\d+)", url)
+                if match:
+                    value["comment_id"] = int(match.group(1))
     return value
+
+
+def _stage_action(request: Request) -> str:
+    data = input_of(request)
+    raw = data.get("action")
+    if raw not in (None, ""):
+        return str(raw).strip().casefold()
+    decision = cond_blob(request, "decide_triage_mutation")
+    raw = decision.get("action") if isinstance(decision, Mapping) else None
+    return str(raw or "").strip().casefold()
 
 
 def _stage_request(request: Request, stage: str) -> Result:
@@ -287,6 +325,15 @@ def _stage_request(request: Request, stage: str) -> Result:
     terminal = terminal_upstream(request, operation, *_receipt_upstream(request, stage))
     if terminal:
         return terminal
+    action = _stage_action(request)
+    if stage in {"close-authorized", "close-verified"} and action and action != "close":
+        return noop("action_not_selected", action=action, operation=operation)
+    if stage in {"mutation-authorized", "mutation-verified"} and action and action not in {"add_ready", "remove_ready", "label", "close"}:
+        return noop("action_not_selected", action=action, operation=operation)
+    if stage == "feedback-verified" and action and action != "feedback":
+        verified = cond_blob(request, "verify_triage_feedback")
+        if not (verified.get("ok") is True and verified.get("status") in {"feedback_verified", "planned"}):
+            return noop("action_not_selected", action=action, operation=operation)
     data, cfg = input_of(request), cfg_of(request)
     payload = _payload(request, stage)
     try:
@@ -373,23 +420,39 @@ def _reduce(receipts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     pending: list[dict[str, Any]] = []
     terminal_digests: set[str] = set()
     latest_feedback_watermark: str | None = None
+    latest_decision_watermark: str | None = None
+    decision_digests: set[str] = set()
     for item in entries:
         stage = str(item.get("stage") or "")
         digest = str(item.get("decision_digest") or "")
         attempted = str(item.get("mutation_attempt_state") or item.get("attempt_state") or "").casefold()
         verified = str(item.get("verified_readback_state") or item.get("readback_state") or "").casefold()
-        if stage in {"mutation-verified", "close-verified"} or verified in {"verified", "succeeded", "closed"}:
+        selected = item.get("selected") if isinstance(item.get("selected"), Mapping) else {}
+        watermark = item.get("issue_updated_at") or item.get("updated_at") or item.get("issue_watermark") or selected.get("updatedAt")
+        if stage == "decision":
+            if digest:
+                decision_digests.add(digest)
+            if watermark is not None and (latest_decision_watermark is None or str(watermark) > latest_decision_watermark):
+                latest_decision_watermark = str(watermark)
+        if stage in {"mutation-verified", "feedback-verified", "close-verified"} or verified in {"verified", "succeeded", "closed"}:
             if digest:
                 terminal_digests.add(digest)
         if stage in {"feedback-observed", "feedback-verified"}:
-            watermark = item.get("issue_updated_at") or item.get("updated_at") or item.get("issue_watermark")
             if watermark is not None and (latest_feedback_watermark is None or str(watermark) > latest_feedback_watermark):
                 latest_feedback_watermark = str(watermark)
         if stage in {"mutation-authorized", "close-authorized"} or attempted in {"planned", "attempted", "uncertain", "started"}:
             if not digest or digest not in terminal_digests:
                 pending.append(item)
     pending = [item for item in pending if str(item.get("decision_digest") or "") not in terminal_digests]
-    return {"receipts": entries, "pending": pending, "reconcile_pending": bool(pending), "feedback_watermark": latest_feedback_watermark}
+    return {
+        "receipts": entries,
+        "pending": pending,
+        "reconcile_pending": bool(pending),
+        "feedback_watermark": latest_feedback_watermark,
+        "decision_recorded": bool(decision_digests),
+        "decision_watermark": latest_decision_watermark,
+        "triage_verified": bool(decision_digests.intersection(terminal_digests)),
+    }
 
 
 def reserve_triage_run_budget(request: Request) -> Result:

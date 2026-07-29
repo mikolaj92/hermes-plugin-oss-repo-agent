@@ -7,6 +7,7 @@ reported as safely retryable.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -382,13 +383,28 @@ def _marker_prefix(repo: str, number: int) -> str:
 def _comment_has_marker_prefix(comment: Mapping[str, Any], prefix: str) -> bool:
     return prefix in str(comment.get("body") or "")
 
+def _comment_database_id(comment: Mapping[str, Any]) -> int | None:
+    value = comment.get("databaseId")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    if isinstance(value, str) and value.isdigit() and int(value) > 0:
+        return int(value)
+    url = str(comment.get("url") or "")
+    match = re.search(r"issuecomment-(\d+)", url)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def _comment_id(comment: Mapping[str, Any]) -> str | int | None:
-    for key in ("databaseId", "id"):
-        value = comment.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            return value
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+    database_id = _comment_database_id(comment)
+    if database_id is not None:
+        return database_id
+    value = comment.get("id")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None
 
 
@@ -425,6 +441,7 @@ def post_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
             "feedback_already_posted",
             marker=str(chosen.get("body") or marker),
             comment_id=_comment_id(chosen),
+            decision_digest=digest,
             matches=len(existing),
             **_identity(request),
         )
@@ -441,13 +458,28 @@ def post_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
         return fail("feedback_post_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, marker=marker, **_identity(request))
     except (subprocess.TimeoutExpired, TypeError, ValueError, json.JSONDecodeError) as exc:
         return fail("feedback_verify_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, marker=marker, **_identity(request))
-    return ok(status="feedback_verified", verified=True, mutated=True, marker=marker, comment=matches[0], updatedAt=after.get("updatedAt"), **_identity(request))
-
+    return ok(
+        status="feedback_verified",
+        verified=True,
+        mutated=True,
+        marker=marker,
+        comment=matches[0],
+        comment_id=_comment_id(matches[0]),
+        decision_digest=digest,
+        updatedAt=after.get("updatedAt"),
+        issue_updated_at=after.get("updatedAt"),
+        verified_readback_state="verified",
+        **_identity(request),
+    )
 
 def verify_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
     post = cond_blob(request, "post_triage_feedback")
     gate = _gate(request, "feedback")
-    if gate is not None and not (post.get("ok") is True and post.get("status") in {"feedback_verified", "feedback_already_posted", "planned"}):
+    post_ready = post.get("ok") is True and (
+        post.get("status") in {"feedback_verified", "feedback_already_posted", "planned"}
+        or (post.get("status") == "noop" and post.get("reason") == "feedback_already_posted")
+    )
+    if gate is not None and not post_ready:
         return gate
     data, cfg, repo, number, gh = _values(request)
     bad = _invalid(repo, number)
@@ -467,23 +499,46 @@ def verify_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
         state = _read_issue(gh, repo, number)
         prefix = _marker_prefix(repo, number)
         matches = [x for x in state["comments"] if marker in str(x.get("body") or "") or _comment_has_marker_prefix(x, prefix)]
-        # Prefer exact marker; otherwise accept one issue-scoped marker.
+        # Prefer exact marker; otherwise accept the newest issue-scoped marker.
         exact = [x for x in matches if marker in str(x.get("body") or "")]
         if exact:
             matches = exact
+        elif matches:
+            matches = sorted(matches, key=lambda item: str(item.get("createdAt") or ""))[-1:]
         if len(matches) != 1 or not _comment_id(matches[0]):
             return fail("feedback_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, mutated=True, marker=marker, **_identity(request))
+        comment = matches[0]
+        comment_id = _comment_id(comment)
+        digest = _digest(request)
+        if not digest:
+            digest = str(post.get("decision_digest") or "")
+        if not digest and "<!-- lokay:issue-triage:" in marker:
+            tail = marker.rsplit(":", 1)[-1]
+            digest = tail.removesuffix(" -->").strip()
     except CommandError as exc:
         return fail("feedback_verify_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=True, **_identity(request))
     except (subprocess.TimeoutExpired, TypeError, ValueError, json.JSONDecodeError) as exc:
         return fail("feedback_verify_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=True, **_identity(request))
-    return ok(status="feedback_verified", verified=True, marker=marker, comment=matches[0], **_identity(request))
+    return ok(
+        status="feedback_verified",
+        verified=True,
+        marker=marker,
+        comment=comment,
+        comment_id=comment_id,
+        decision_digest=digest or None,
+        issue_updated_at=state.get("updatedAt"),
+        updated_at=state.get("updatedAt"),
+        verified_readback_state="verified",
+        **_identity(request),
+    )
 
 
 def observe_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
     """Select one later human response, excluding Lokay and marker comments."""
+    verified = cond_blob(request, "verify_triage_feedback")
     gate = _gate(request, "feedback")
-    if gate is not None:
+    verified_ready = verified.get("ok") is True and verified.get("status") in {"feedback_verified", "planned"}
+    if gate is not None and not verified_ready:
         return gate
     data, cfg, repo, number, gh = _values(request)
     bad = _invalid(repo, number)

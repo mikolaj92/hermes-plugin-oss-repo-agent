@@ -265,6 +265,10 @@ def select_triage_candidate(request: Request) -> Result:
             if not isinstance(summary, Mapping):
                 raise ValueError("malformed_receipt_index")
             pending = bool(summary.get("pending", False)) and not bool(summary.get("verified", False))
+            decision_recorded = summary.get("decision_recorded", False)
+            triage_verified = summary.get("triage_verified", False)
+            if type(decision_recorded) is not bool or type(triage_verified) is not bool:
+                raise ValueError("malformed_receipt_index")
             terminal_labels = {value.casefold() for value in (ready, duplicate, out_of_scope, frozen, blocked, in_progress, pr_opened)}
             if not pending and not ({frozen.casefold(), ready.casefold()} <= labels) and needs_feedback.casefold() not in labels and labels.intersection(terminal_labels):
                 continue
@@ -273,7 +277,17 @@ def select_triage_candidate(request: Request) -> Result:
             elif frozen.casefold() in labels and ready.casefold() in labels:
                 candidate_class, rank = "frozen_ready_conflict", 1
             elif not labels.intersection({value.casefold() for value in (ready, needs_feedback, duplicate, out_of_scope, frozen, blocked, in_progress, pr_opened)}):
-                candidate_class, rank = "untriaged", 2
+                updated_at = _parse_updated_at(row.get("updatedAt"), required=decision_recorded)
+                watermark = summary.get("feedback_watermark") or summary.get("decision_watermark")
+                if decision_recorded:
+                    if not isinstance(watermark, str):
+                        raise ValueError("missing_triage_watermark")
+                    _parse_updated_at(watermark, required=True)
+                    if triage_verified and _updated_at_key(updated_at) <= _updated_at_key(watermark):
+                        continue
+                    candidate_class, rank = ("feedback_updated", 3) if triage_verified else ("reconcile_decision", 0)
+                else:
+                    candidate_class, rank = "untriaged", 2
             elif needs_feedback.casefold() in labels:
                 updated_at = _parse_updated_at(row.get("updatedAt"), required=True)
                 watermark = summary.get("feedback_watermark")

@@ -294,6 +294,141 @@ class MutationAtomTests(unittest.TestCase):
         self.assertEqual(result["comment_id"], "IC_new")
         self.assertEqual(result["matches"], 2)
 
+    def test_feedback_verifies_conducted_already_posted_noop(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        marker = "<!-- lokay:issue-triage:owner/repo:4:digest -->"
+        request = {
+            "input": {
+                "dry_run": False,
+                "conduction": {
+                    "post_triage_feedback": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "feedback_already_posted",
+                        "repo": "owner/repo",
+                        "number": 4,
+                        "marker": marker,
+                        "comment_id": 5116451350,
+                        "decision_digest": "d" * 64,
+                    },
+                    "mutate_triage_issue_labels": {"ok": True, "status": "noop", "reason": "action_not_selected"},
+                    "read_triage_labels": {"ok": True, "status": "triage_labels_read", "repo": "owner/repo", "number": 4, "labels": []},
+                }
+            }
+        }
+        payload = {
+            "labels": [],
+            "state": "OPEN",
+            "stateReason": "",
+            "updatedAt": "2026-07-29T10:27:00Z",
+            "comments": [{
+                "id": "IC_existing",
+                "databaseId": 5116451350,
+                "url": "https://github.com/owner/repo/issues/4#issuecomment-5116451350",
+                "body": marker,
+                "createdAt": "2026-07-29T10:23:39Z",
+            }],
+        }
+        completed = unittest.mock.Mock(stdout=json.dumps(payload))
+        with unittest.mock.patch("lokay.steps.issue_triage_mutations.run_cmd", return_value=completed):
+            result = m.verify_triage_feedback(request)
+        self.assertEqual(result["status"], "feedback_verified", result)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["comment_id"], 5116451350)
+        self.assertEqual(result["decision_digest"], "d" * 64)
+        self.assertEqual(result["issue_updated_at"], "2026-07-29T10:27:00Z")
+
+    def test_feedback_receipt_publishes_after_already_posted_verify(self):
+        from lokay.steps import issue_triage_receipts as receipts
+        import tempfile
+        from pathlib import Path
+
+        digest = "a" * 64
+        marker = f"<!-- lokay:issue-triage:owner/repo:4:{digest} -->"
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = receipts.publish_triage_decision_receipt(
+                {
+                    "input": {
+                        "triage_receipts": tmp,
+                        "repo": "owner/repo",
+                        "issue": 4,
+                        "dry_run": False,
+                        "payload": {
+                            "schema_version": 1,
+                            "stage": "decision",
+                            "repo": "owner/repo",
+                            "issue": 4,
+                            "updated_at": "2026-07-29T10:27:00Z",
+                            "issue_updated_at": "2026-07-29T10:27:00Z",
+                            "decision_digest": digest,
+                            "selected": {"repo": "owner/repo", "number": 4, "updatedAt": "2026-07-29T10:27:00Z"},
+                        },
+                    },
+                    "config": {},
+                }
+            )
+            self.assertEqual(decision["status"], "written", decision)
+            request = {
+                "input": {
+                    "triage_receipts": tmp,
+                    "dry_run": False,
+                    "conduction": {
+                        "verify_triage_feedback": {
+                            "ok": True,
+                            "status": "feedback_verified",
+                            "verified": True,
+                            "repo": "owner/repo",
+                            "number": 4,
+                            "marker": marker,
+                            "comment_id": 5116451350,
+                            "decision_digest": digest,
+                            "issue_updated_at": "2026-07-29T10:27:00Z",
+                            "verified_readback_state": "verified",
+                        },
+                        "observe_triage_feedback": {
+                            "ok": True,
+                            "status": "noop",
+                            "reason": "no_human_response",
+                            "repo": "owner/repo",
+                            "number": 4,
+                        },
+                        "decide_triage_mutation": {
+                            "ok": True,
+                            "status": "mutation_decided",
+                            "action": "feedback",
+                            "repo": "owner/repo",
+                            "number": 4,
+                            "decision_digest": digest,
+                        },
+                    },
+                },
+                "config": {},
+            }
+            out = receipts.publish_triage_feedback_receipt(request)
+            self.assertEqual(out["status"], "written", out)
+            path = Path(out["receipt_path"])
+            self.assertTrue(path.name.startswith("feedback-verified-5116451350"))
+            payload = json.loads(path.read_text())
+            self.assertEqual(payload["stage"], "feedback-verified")
+            self.assertEqual(payload["decision_digest"], digest)
+            self.assertEqual(payload["issue_updated_at"], "2026-07-29T10:27:00Z")
+            index = receipts.read_triage_receipt_index(
+                {
+                    "input": {
+                        "triage_receipts": tmp,
+                        "repo": "owner/repo",
+                        "issue": 4,
+                    },
+                    "config": {},
+                }
+            )
+            summary = index["index"]
+            self.assertTrue(summary["decision_recorded"])
+            self.assertTrue(summary["triage_verified"])
+            self.assertEqual(summary["feedback_watermark"], "2026-07-29T10:27:00Z")
+            self.assertEqual(summary["decision_watermark"], "2026-07-29T10:27:00Z")
+
     def test_mutation_atoms_use_conducted_repo_number_identity(self):
         from lokay.steps import issue_triage_mutations as m
 

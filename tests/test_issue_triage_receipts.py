@@ -81,6 +81,19 @@ class ReceiptTests(unittest.TestCase):
         self.assertTrue(index["index"]["reconcile_pending"])
         self.assertEqual(len(index["index"]["pending"]), 1)
 
+    def test_index_records_verified_decision_revision(self):
+        decision = dict(self.payload, selected={"repo": "owner/repo", "number": 42, "updatedAt": self.payload["updated_at"]})
+        receipts.publish_triage_decision_receipt(self.req(payload=decision, updated_at=self.payload["updated_at"]))
+        before = receipts.read_triage_receipt_index(self.req())["index"]
+        self.assertTrue(before["decision_recorded"])
+        self.assertFalse(before["triage_verified"])
+        self.assertEqual(before["decision_watermark"], self.payload["updated_at"])
+        verified = dict(decision, stage="feedback-verified", comment_id=123, verified_readback_state="verified")
+        receipts.publish_triage_feedback_receipt(self.req(payload=verified, database_id=123))
+        after = receipts.read_triage_receipt_index(self.req())["index"]
+        self.assertTrue(after["triage_verified"])
+        self.assertEqual(after["feedback_watermark"], self.payload["updated_at"])
+
     def test_all_stage_atoms_publish_and_verify(self):
         funcs = (
             (receipts.publish_triage_decision_receipt, "decision", "c" * 64),
@@ -116,6 +129,45 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(same["status"], "exists")
         conflict = receipts.reserve_triage_run_budget({**request, "input": {**request["input"], "conduction": {"intake_select_triage_candidate": {"ok": True, "status": "selected", "selected": {**selected, "number": 43}}}}})
         self.assertEqual(conflict["reason"], "run_budget_conflict")
+
+    def test_prefixed_conducted_repo_number_is_selected_identity(self):
+        request = self.req(
+            conduction={
+                "intake_decide_triage_mutation": {
+                    "ok": True,
+                    "status": "mutation_decided",
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "action": "add_ready",
+                    "decision_digest": "d" * 64,
+                }
+            }
+        )
+        request["input"].pop("repo")
+        request["input"].pop("issue")
+        out = receipts.publish_triage_mutation_authorization(request)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "written")
+
+    def test_close_authorization_noops_for_feedback_action(self):
+        request = self.req(
+            payload=dict(self.payload, stage="close-authorized", decision_digest="f" * 64),
+            decision_digest="f" * 64,
+            conduction={
+                "decide_triage_mutation": {
+                    "ok": True,
+                    "status": "mutation_decided",
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "action": "feedback",
+                    "decision_digest": "f" * 64,
+                }
+            },
+        )
+        out = receipts.publish_triage_close_authorization(request)
+        self.assertEqual(out["status"], "noop", out)
+        self.assertEqual(out["reason"], "action_not_selected")
+        self.assertFalse(list(self.root.rglob("close-authorized-*.json")))
 
     def test_disabled_and_no_candidate_no_write_and_terminal_failure_propagates(self):
         disabled = receipts.publish_triage_decision_receipt(self.req(triage_enabled=False, payload=self.payload))
