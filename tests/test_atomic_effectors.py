@@ -876,7 +876,7 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(pr["status"], "planned")
         created = {"status": "created", "ok": True, "repo": "o/r", "issue": 1, "branch": "ai/fix/1", "base": "main"}
         with mock.patch("lokay.steps.issue_to_pr.run_cmd", return_value=SimpleNamespace(stdout=json.dumps([{"number": 2, "url": "https://example.test/pr/2", "baseRefName": "main", "headRefName": "ai/fix/1"}]))):
-            reconciled = issue_to_pr.reconcile_pull_request(req({"conduction": {"create_pull_request": created}}))
+            reconciled = issue_to_pr.reconcile_pull_request(req({"conduction": {"dispatch_create_pull_request": created}}))
         self.assertEqual(reconciled["status"], "reconciled")
         self.assertEqual(reconciled["repo"], "o/r")
         self.assertEqual(reconciled["branch"], "ai/fix/1")
