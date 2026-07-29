@@ -252,6 +252,24 @@ class MutationAtomTests(unittest.TestCase):
         self.assertEqual(mutate["status"], "planned", mutate)
         self.assertEqual(mutate["action"], "add_ready")
 
+    def test_decide_fails_closed_when_classifier_failed(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        result = m.decide_triage_mutation(
+            {
+                "input": {
+                    "repo": "owner/repo",
+                    "number": 4,
+                    "conduction": {
+                        "read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": [], "selected": {"repo": "owner/repo", "number": 4}},
+                        "classify_triage_issue": {"ok": False, "status": "failed", "reason": "classifier_failed:unverifiable_evidence_quote"},
+                    },
+                }
+            }
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "upstream_failed")
+
     def test_terminal_requires_verified_receipt(self):
         from lokay.steps import issue_triage_mutations as m
         rows = [{"repo": "owner/repo", "number": 4}, {"repo": "other/repo", "number": 9}]

@@ -241,6 +241,8 @@ def decide_triage_mutation(request: Mapping[str, Any]) -> dict[str, Any]:
     frozen = str(data.get("frozen_label") or cfg.get("frozen_label") or (cfg.get("labels") or {}).get("frozen") or "frozen").casefold()
     ready = str(data.get("ready_label") or cfg.get("ready_label") or (cfg.get("labels") or {}).get("ready") or "ai:ready").casefold()
     conducted = cond_blob(request, "classify_triage_issue")
+    if conducted.get("status") == "failed" or conducted.get("ok") is False:
+        return fail("upstream_failed", failure_class="terminal", retry_safe=False, upstream=conducted, **_identity(request))
     decision_value = data.get("decision")
     if decision_value is None:
         decision_value = conducted.get("classification")
