@@ -94,7 +94,7 @@ class PackageStructureTests(unittest.TestCase):
                     "verify_triage_feedback": ["post_triage_feedback", "mutate_triage_issue_labels", "read_triage_labels", "decide_triage_mutation"],
                     "observe_triage_feedback": ["verify_triage_feedback", "read_triage_labels", "decide_triage_mutation"],
                     "publish_triage_feedback_receipt": ["observe_triage_feedback", "verify_triage_feedback"],
-                    "publish_triage_mutation_verification": ["mutate_triage_issue_labels", "verify_triage_feedback"],
+                    "publish_triage_mutation_verification": ["mutate_triage_issue_labels", "verify_triage_feedback", "decide_triage_mutation"],
                     "publish_triage_close_authorization": ["decide_triage_mutation", "read_triage_issue_state", "read_triage_comments", "read_triage_canonical_issue", "read_triage_labels", "classify_triage_issue", "publish_triage_mutation_verification", "publish_triage_feedback_receipt"],
                     "close_triage_issue": ["publish_triage_close_authorization", "read_triage_labels", "decide_triage_mutation"],
                     "verify_triage_issue_closed": ["close_triage_issue", "read_triage_labels", "decide_triage_mutation"],

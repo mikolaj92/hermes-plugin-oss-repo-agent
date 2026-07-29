@@ -200,6 +200,50 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(out["reason"], "action_not_selected")
         self.assertFalse(list(self.root.rglob("mutation-verified-*.json")))
 
+    def test_mutation_verification_publishes_from_conducted_decide(self):
+        digest = "a" * 64
+        request = {
+            "input": {
+                "triage_receipts": str(self.root),
+                "dry_run": False,
+                "conduction": {
+                    "intake_decide_triage_mutation": {
+                        "ok": True,
+                        "status": "mutation_decided",
+                        "repo": "owner/repo",
+                        "number": 42,
+                        "action": "add_ready",
+                        "classification": "ready",
+                        "decision_digest": digest,
+                    },
+                    "intake_mutate_triage_issue_labels": {
+                        "ok": True,
+                        "status": "labels_verified",
+                        "repo": "owner/repo",
+                        "number": 42,
+                        "label": "ai:ready",
+                        "verified": True,
+                        "decision_digest": digest,
+                    },
+                    "intake_verify_triage_feedback": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "action_not_selected",
+                    },
+                },
+            },
+            "config": {},
+        }
+        out = receipts.publish_triage_mutation_verification(request)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "written", out)
+        payload = out["payload"]
+        self.assertEqual(payload["stage"], "mutation-verified")
+        self.assertEqual(payload["decision_digest"], digest)
+        self.assertEqual(payload["label"], "ai:ready")
+        self.assertEqual(payload["verified_readback_state"], "verified")
+        self.assertTrue(list(self.root.rglob("mutation-verified-*.json")))
+
     def test_disabled_and_no_candidate_no_write_and_terminal_failure_propagates(self):
         disabled = receipts.publish_triage_decision_receipt(self.req(triage_enabled=False, payload=self.payload))
         self.assertEqual(disabled["status"], "noop")

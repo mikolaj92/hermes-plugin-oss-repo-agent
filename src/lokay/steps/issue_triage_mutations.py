@@ -356,6 +356,9 @@ def mutate_triage_issue_labels(request: Mapping[str, Any]) -> dict[str, Any]:
         return bad
     decision = cond_blob(request, "decide_triage_mutation")
     action = str(data.get("action") or decision.get("action") or "")
+    digest = _digest(request)
+    if not digest:
+        digest = str(decision.get("decision_digest") or "")
     state = cond_blob(request, "read_triage_labels")
     labels = list(state.get("labels") or data.get("current_labels") or [])
     folded = {str(value).casefold() for value in labels}
@@ -368,7 +371,7 @@ def mutate_triage_issue_labels(request: Mapping[str, Any]) -> dict[str, Any]:
     if action == "remove_ready":
         label = next((value for value in labels if value.casefold() == ready.casefold()), ready)
         if label.casefold() not in folded:
-            return noop("ready_absent", **_identity(request))
+            return noop("ready_absent", action=action, decision_digest=digest or None, **_identity(request))
         verb = "--remove-label"
     else:
         label = str(data.get("label") or decision.get("label") or _configured_label(data, cfg, action)).strip()
@@ -381,22 +384,22 @@ def mutate_triage_issue_labels(request: Mapping[str, Any]) -> dict[str, Any]:
         if not label:
             return fail("missing_label", failure_class="terminal", retry_safe=False, **_identity(request))
         if label.casefold() in folded:
-            return noop("already_labeled", label=label, **_identity(request))
+            return noop("already_labeled", label=label, action=action, decision_digest=digest or None, **_identity(request))
         verb = "--add-label"
     if dry_run_flag(request):
-        return planned(action=action, label=label, **_identity(request))
+        return planned(action=action, label=label, decision_digest=digest or None, **_identity(request))
     try:
         run_cmd([gh, "issue", "edit", str(number), "--repo", repo, verb, label], timeout=60)
         after = _read_issue(gh, repo, number)
         actual = {value.casefold() for value in after["labels"]}
         expected = verb == "--add-label"
         if (label.casefold() in actual) != expected:
-            return fail("label_mutation_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, mutated=True, label=label, **_identity(request))
+            return fail("label_mutation_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, mutated=True, action=action, label=label, decision_digest=digest or None, **_identity(request))
     except (CommandError, subprocess.TimeoutExpired) as exc:
-        return fail("label_mutation_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, label=label, **_identity(request))
+        return fail("label_mutation_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, action=action, label=label, decision_digest=digest or None, **_identity(request))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        return fail("label_mutation_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, label=label, **_identity(request))
-    return ok(status="labels_verified", verified=True, mutated=True, labels=after["labels"], label=label, **_identity(request))
+        return fail("label_mutation_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, action=action, label=label, decision_digest=digest or None, **_identity(request))
+    return ok(status="labels_verified", verified=True, mutated=True, action=action, labels=after["labels"], label=label, decision_digest=digest or None, **_identity(request))
 
 
 def _marker(repo: str, number: int, digest: str) -> str:

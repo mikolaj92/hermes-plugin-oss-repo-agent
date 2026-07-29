@@ -168,7 +168,7 @@ config = { handler = "lokay.steps.issue_triage_receipts.publish_triage_feedback_
 [[correlation_paths.effectors]]
 id = "publish_triage_mutation_verification"
 capability = "lokay_step"
-conduction = ["mutate_triage_issue_labels", "verify_triage_feedback"]
+conduction = ["mutate_triage_issue_labels", "verify_triage_feedback", "decide_triage_mutation"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_triage_receipts.publish_triage_mutation_verification" }
 
@@ -1665,7 +1665,7 @@ config = { handler = "lokay.steps.issue_triage_receipts.publish_triage_feedback_
 [[correlation_paths.effectors]]
 id = "intake_publish_triage_mutation_verification"
 capability = "lokay_step"
-conduction = ["intake_mutate_triage_issue_labels", "intake_verify_triage_feedback"]
+conduction = ["intake_mutate_triage_issue_labels", "intake_verify_triage_feedback", "intake_decide_triage_mutation"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"] , cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_triage_receipts.publish_triage_mutation_verification" }
 

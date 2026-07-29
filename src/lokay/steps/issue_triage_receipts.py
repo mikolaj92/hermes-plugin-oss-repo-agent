@@ -120,7 +120,7 @@ def _receipt_upstream(request: Request, stage: str) -> tuple[str, ...]:
     specific = {
         "decision": ("classify_triage_issue", "decide_triage_action"),
         "mutation-authorized": ("decide_triage_mutation",),
-        "mutation-verified": ("mutate_triage_issue_labels", "verify_triage_feedback"),
+        "mutation-verified": ("decide_triage_mutation", "mutate_triage_issue_labels", "verify_triage_feedback"),
         "feedback-verified": ("verify_triage_feedback", "observe_triage_feedback"),
         "close-authorized": ("decide_triage_mutation", "close_triage_issue"),
         "close-verified": ("verify_triage_issue_closed",),
@@ -312,9 +312,23 @@ def _stage_action(request: Request) -> str:
     raw = data.get("action")
     if raw not in (None, ""):
         return str(raw).strip().casefold()
-    decision = cond_blob(request, "decide_triage_mutation")
-    raw = decision.get("action") if isinstance(decision, Mapping) else None
-    return str(raw or "").strip().casefold()
+    for name in (
+        "decide_triage_mutation",
+        "mutate_triage_issue_labels",
+        "ensure_triage_label",
+        "post_triage_feedback",
+        "verify_triage_feedback",
+    ):
+        blob = cond_blob(request, name)
+        if not isinstance(blob, Mapping) or not blob:
+            continue
+        raw = blob.get("action")
+        if raw not in (None, ""):
+            return str(raw).strip().casefold()
+        # Successful label mutation without explicit action is still a label path.
+        if name == "mutate_triage_issue_labels" and blob.get("ok") is True and blob.get("status") in {"labels_verified", "planned"}:
+            return "add_ready" if blob.get("label") else "label"
+    return ""
 
 
 def _stage_request(request: Request, stage: str) -> Result:
@@ -331,26 +345,45 @@ def _stage_request(request: Request, stage: str) -> Result:
     if stage == "mutation-authorized" and action and action not in {"add_ready", "remove_ready", "label", "close"}:
         return noop("action_not_selected", action=action, operation=operation)
     if stage == "mutation-verified":
-        # Graph wires labels+feedback verify, not decide. Treat non-label/close
-        # actions (including absent action with feedback-only verification) as idle.
         if action and action not in {"add_ready", "remove_ready", "label", "close"}:
             return noop("action_not_selected", action=action, operation=operation)
         if not action:
             labels = cond_blob(request, "mutate_triage_issue_labels")
             feedback = cond_blob(request, "verify_triage_feedback")
+            label_done = labels.get("ok") is True and labels.get("status") in {"labels_verified", "planned"}
             label_idle = labels.get("ok") is True and (
-                labels.get("status") in {"labels_verified", "planned"}
-                or (labels.get("status") == "noop" and labels.get("reason") in {"action_not_selected", "already_labeled", "ready_absent", "frozen"})
+                labels.get("status") == "noop"
+                and labels.get("reason") in {"action_not_selected", "already_labeled", "ready_absent", "frozen"}
             )
             feedback_done = feedback.get("ok") is True and feedback.get("status") in {"feedback_verified", "planned"}
             if feedback_done and (not labels or label_idle):
                 return noop("action_not_selected", action=action or "feedback", operation=operation)
+            if label_done:
+                action = "add_ready" if labels.get("label") else "label"
+            elif label_idle and not feedback_done:
+                return noop("action_not_selected", action=action or str(labels.get("action") or ""), operation=operation)
     if stage == "feedback-verified" and action and action != "feedback":
         verified = cond_blob(request, "verify_triage_feedback")
         if not (verified.get("ok") is True and verified.get("status") in {"feedback_verified", "planned"}):
             return noop("action_not_selected", action=action, operation=operation)
     data, cfg = input_of(request), cfg_of(request)
     payload = _payload(request, stage)
+    if stage in {"mutation-authorized", "mutation-verified", "close-authorized", "close-verified"} and not payload.get("decision_digest"):
+        for name in ("decide_triage_mutation", "publish_triage_mutation_authorization", "mutate_triage_issue_labels", "verify_triage_feedback"):
+            blob = cond_blob(request, name)
+            if isinstance(blob, Mapping) and blob.get("decision_digest"):
+                payload["decision_digest"] = blob["decision_digest"]
+                break
+            nested = blob.get("payload") if isinstance(blob, Mapping) else None
+            if isinstance(nested, Mapping) and nested.get("decision_digest"):
+                payload["decision_digest"] = nested["decision_digest"]
+                break
+    if stage == "mutation-verified":
+        labels = cond_blob(request, "mutate_triage_issue_labels")
+        if labels.get("ok") is True and labels.get("status") in {"labels_verified", "planned"}:
+            payload.setdefault("verified_readback_state", "verified")
+            if labels.get("label"):
+                payload.setdefault("label", labels.get("label"))
     try:
         root = _receipt_root(data, cfg)
         repo, _, issue = _identity({**data, **payload}, cfg, request, *_receipt_upstream(request, stage))
