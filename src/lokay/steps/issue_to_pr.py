@@ -1021,12 +1021,12 @@ def create_local_branch(request: Request) -> Result:
             head = local_branch_head(clone, branch)
         except CommandError as exc:
             return fail("branch_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="create_local_branch", error=str(exc), mutated=False)
+        matching = [row for row in worktrees if isinstance(row, dict) and Path(str(row.get("path") or "")).expanduser().resolve() == path]
+        if any(str(row.get("branch") or "") == branch for row in matching):
+            return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, head=head, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=str(path), worktrees=worktrees, mutated=False)
         if head != base:
             return fail("branch_create_failed", failure_class="terminal", retry_safe=False, operation="create_local_branch", head=head, base_head=base, mutated=False)
-        matching = [row for row in worktrees if isinstance(row, dict) and Path(str(row.get("path") or "")).expanduser().resolve() == path]
         if path.exists() or matching:
-            if any(str(row.get("branch") or "") == branch for row in matching):
-                return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=str(path), worktrees=worktrees, mutated=False)
             return fail("worktree_path_collision", failure_class="terminal", retry_safe=False, operation="create_local_branch", worktree_path=str(path))
         return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=str(path), worktrees=worktrees, mutated=False)
     if path.exists() or any(Path(str(row.get("path") or "")).expanduser().resolve() == path for row in worktrees if isinstance(row, dict)):
@@ -1102,7 +1102,7 @@ def add_worktree(request: Request) -> Result:
         worktrees = proven.get("worktrees") if isinstance(proven.get("worktrees"), list) else []
     matching = [row for row in worktrees if isinstance(row, dict) and Path(str(row.get("path") or "")).expanduser().resolve() == resolved]
     if matching and any(str(row.get("branch") or "") == branch for row in matching):
-        return ok(status="reused", operation="add_worktree", worktree_path=str(resolved), branch=branch, clone_path=clone, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), mutated=False)
+        return ok(status="reused", operation="add_worktree", worktree_path=str(resolved), branch=branch, head=created.get("head"), clone_path=clone, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), mutated=False)
     if dry_run_flag(request):
         return planned(operation="add_worktree", worktree_path=str(resolved), branch=branch, clone_path=clone, repo=repo, issue=issue)
     try:
@@ -1122,7 +1122,7 @@ def verify_worktree_head(request: Request) -> Result:
     added = cond_blob(request, "add_worktree")
     path = str(data.get("worktree_path") or added.get("worktree_path") or "")
     branch = str(data.get("branch") or added.get("branch") or "")
-    expected = str(data.get("base_head") or cond_get(request, "base_head", "read_base_ref") or "")
+    expected = str(added.get("head") or data.get("base_head") or cond_get(request, "base_head", "read_base_ref") or "")
     if not path or not branch:
         return fail("missing_worktree_or_branch", failure_class="terminal", retry_safe=False, operation="verify_worktree_head")
     try: head = rev_parse(path)

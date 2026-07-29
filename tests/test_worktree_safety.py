@@ -184,6 +184,18 @@ class TempGitSafetyTests(unittest.TestCase):
         retry = self.prepare(receipt_path=str(Path(self.tmp.name) / "retry-receipt.json"))
         self.assertEqual(retry["status"], "verified", retry)
 
+    def test_owned_worktree_reuses_committed_head_after_omp(self) -> None:
+        first = self.prepare()
+        self.assertEqual(first["status"], "verified", first)
+        worktree = self.worktrees / self.branch
+        (worktree / "repair.txt").write_text("fixed\n")
+        run_git(worktree, "add", "repair.txt")
+        run_git(worktree, "commit", "-m", "repair")
+        advanced_head = run_git(worktree, "rev-parse", "HEAD")
+        retry = self.prepare(receipt_path=str(Path(self.tmp.name) / "retry-receipt.json"))
+        self.assertEqual(retry["status"], "verified", retry)
+        self.assertEqual(retry["head"], advanced_head)
+
     def test_empty_stored_receipt_is_not_adopted(self) -> None:
         self.assertEqual(self.prepare()["status"], "verified")
         from lokay.adapters_git import branch_config_set
