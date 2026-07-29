@@ -218,6 +218,40 @@ class MutationAtomTests(unittest.TestCase):
         self.assertEqual(result["status"], "feedback_verified", result)
         self.assertEqual(result["comment"]["id"], "IC_kwDOExample")
 
+    def test_mutation_atoms_use_conducted_repo_number_identity(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        request = {
+            "input": {
+                "dry_run": True,
+                "conduction": {
+                    "read_triage_labels": {
+                        "ok": True,
+                        "status": "triage_labels_read",
+                        "repo": "owner/repo",
+                        "number": 4,
+                        "labels": [],
+                        "selected": {"repo": "owner/repo", "number": 4},
+                    },
+                    "decide_triage_mutation": {
+                        "ok": True,
+                        "status": "mutation_decided",
+                        "action": "add_ready",
+                        "classification": "ready",
+                        "repo": "owner/repo",
+                        "number": 4,
+                    },
+                },
+            }
+        }
+        ensure = m.ensure_triage_label(request)
+        self.assertNotEqual(ensure.get("reason"), "no_triage_selection", ensure)
+        self.assertEqual(ensure.get("repo"), "owner/repo")
+        self.assertEqual(ensure.get("number"), 4)
+        mutate = m.mutate_triage_issue_labels(request)
+        self.assertEqual(mutate["status"], "planned", mutate)
+        self.assertEqual(mutate["action"], "add_ready")
+
     def test_terminal_requires_verified_receipt(self):
         from lokay.steps import issue_triage_mutations as m
         rows = [{"repo": "owner/repo", "number": 4}, {"repo": "other/repo", "number": 9}]

@@ -26,12 +26,34 @@ def _selected(request: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(explicit, Mapping) and explicit:
         return dict(explicit)
     cond = _conduction(request)
-    for name in ("select_triage_candidate", "reserve_triage_run_budget", "classify_triage_issue", "decide_triage_mutation"):
+    for name in (
+        "select_triage_candidate",
+        "reserve_triage_run_budget",
+        "classify_triage_issue",
+        "decide_triage_mutation",
+        "read_triage_labels",
+        "read_triage_issue_state",
+    ):
         value = cond.get(name)
         if not isinstance(value, Mapping):
             value = next((blob for key, blob in cond.items() if key.endswith(f"_{name}") and isinstance(blob, Mapping)), None)
-        if isinstance(value, Mapping) and isinstance(value.get("selected"), Mapping) and value["selected"]:
-            return dict(value["selected"])
+        if not isinstance(value, Mapping) or not value:
+            continue
+        nested = value.get("selected")
+        if isinstance(nested, Mapping) and nested:
+            return dict(nested)
+        repo = str(value.get("repo") or "").strip()
+        number = value.get("number")
+        if repo and isinstance(number, int) and not isinstance(number, bool) and number > 0:
+            selected = {"repo": repo, "number": number}
+            for key in ("title", "body", "labels", "clone_path", "priority", "candidate_class", "triage_goal"):
+                if key in value:
+                    selected[key] = value[key]
+            return selected
+    repo = str(data.get("repo") or "").strip()
+    number = data.get("number") if isinstance(data.get("number"), int) and not isinstance(data.get("number"), bool) else data.get("issue")
+    if repo and isinstance(number, int) and not isinstance(number, bool) and number > 0:
+        return {"repo": repo, "number": number}
     return {}
 
 
