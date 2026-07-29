@@ -118,10 +118,11 @@ def parse_issue_ref_from_task(request: Request) -> Result:
     if not repo or not issue:
         return fail("unparseable_issue_ref", failure_class="terminal", retry_safe=False, title=title)
     loaded = cond_blob(request, "select_dispatch_task")
+    configured = _repo_context_for_repo(request, str(repo))
     context = {
-        key: loaded[key]
+        key: loaded.get(key) or configured.get(key)
         for key in ("board", "clone_path", "priority")
-        if loaded.get(key) not in (None, "")
+        if loaded.get(key) not in (None, "") or configured.get(key) not in (None, "")
     }
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", title.lower())[:40].strip("-")
     branch_prefix = str(cfg_of(request).get("branch_prefix") or "ai/fix")
@@ -432,7 +433,7 @@ def _atomic_repo(request: Request) -> str:
 
 def _atomic_rows(request: Request, *ids: str) -> list[dict[str, Any]] | None:
     blob = cond_blob(request, *ids)
-    rows = blob.get("tasks") or blob.get("rows") or blob.get("items")
+    rows = next((blob[key] for key in ("tasks", "rows", "items") if key in blob), None)
     return rows if isinstance(rows, list) and all(isinstance(row, dict) for row in rows) else None
 
 
@@ -507,33 +508,32 @@ def _dispatch_board_fallback(request: Request) -> str:
     return ""
 
 
-def _held_claim_board(request: Request) -> str:
-    """Return board from the single active claim when capacity is held."""
+def _held_claim_identity(request: Request) -> dict[str, Any] | None:
+    """Return the single unambiguous active claim payload, if any."""
     from lokay.steps.claim import _claim_file, _claims_in_directory, _read_claim
 
     data, cfg = input_of(request), cfg_of(request)
     path_value = data.get("active_issue_path") or cfg.get("active_issue_path") or (cfg.get("paths") or {}).get("active_issue")
     if not path_value:
-        return ""
+        return None
     configured = Path(str(path_value)).expanduser()
     path = _claim_file(str(path_value))
     if path is None:
-        return ""
+        return None
     is_directory = (configured.exists() and configured.is_dir()) or configured.suffix.lower() != ".json"
     if is_directory:
         claims, error = _claims_in_directory(path.parent if path.name.endswith(".json") else configured)
-        if error or not claims:
-            return ""
-        # With global capacity 1 there should be exactly one held claim; with
-        # more, only a unique board is unambiguous enough to continue.
-        boards = {str(claim.get("board") or "").strip() for _, claim in claims if str(claim.get("board") or "").strip()}
-        if len(boards) == 1:
-            return next(iter(boards))
-        return ""
+        if error or len(claims) != 1:
+            return None
+        return dict(claims[0][1])
     payload, error = _read_claim(path)
-    if error or not payload:
-        return ""
-    return str(payload.get("board") or "").strip()
+    return None if error or not payload else dict(payload)
+
+
+def _held_claim_board(request: Request) -> str:
+    """Return board from the single active claim when capacity is held."""
+    claim = _held_claim_identity(request)
+    return str((claim or {}).get("board") or "").strip()
 
 
 def _board_for_repo(request: Request, repo: str) -> str:
@@ -550,11 +550,47 @@ def _board_for_repo(request: Request, repo: str) -> str:
         board = str(entry.get("board") or "").strip()
         if board:
             return board
-    return ""
+
+
+def _repo_context_for_repo(request: Request, repo: str) -> dict[str, Any]:
+    data, cfg = input_of(request), cfg_of(request)
+    repos = data.get("repos") if isinstance(data.get("repos"), list) else cfg.get("repos")
+    if not isinstance(repos, list):
+        return {}
+    wanted = repo.strip().casefold()
+    matches = [dict(entry) for entry in repos if isinstance(entry, Mapping) and str(entry.get("repo") or "").strip().casefold() == wanted]
+    return matches[0] if len(matches) == 1 else {}
+
+
+def _fix_identity(request: Request) -> tuple[str, int | str, str, dict[str, Any]]:
+    data = input_of(request)
+    held = _held_claim_identity(request) or {}
+    sources = (
+        held,
+        data,
+        cond_blob(request, "reconcile_fix_task"),
+        cond_blob(request, "create_fix_task"),
+        cond_blob(request, "find_fix_task_marker"),
+        cond_blob(request, "read_fix_tasks"),
+        cond_blob(request, "parse_issue_ref_from_task"),
+    )
+    repo = str(next((source.get("repo") for source in sources if source.get("repo") not in (None, "")), "")).strip()
+    issue = next((source.get("issue") or source.get("number") for source in sources if source.get("issue") not in (None, "") or source.get("number") not in (None, "")), "")
+    board = str(next((source.get("board") for source in sources if source.get("board") not in (None, "")), "")).strip()
+    context = _repo_context_for_repo(request, repo) if repo else {}
+    return repo, issue, board or str(context.get("board") or "").strip(), context
+
+
+def _task_matches_issue(row: Mapping[str, Any], *, repo: str, issue: int | str) -> bool:
+    marker = f"github-issue:{repo}:{issue}"
+    body = str(row.get("body") or row.get("description") or "")
+    title = str(row.get("title") or "")
+    needle = f"{repo}#{issue}"
+    return marker in body or needle in title or needle in body
 
 
 def select_dispatch_task(request: Request) -> Result:
-    """Purely select the first ready dispatch task."""
+    """Select ready dispatch work, constrained to an active claim when held."""
     terminal = _atomic_terminal(request, "select_dispatch_task", "read_dispatch_tasks")
     if terminal:
         return terminal
@@ -566,6 +602,10 @@ def select_dispatch_task(request: Request) -> Result:
     if rows is None:
         return fail("missing_dispatch_rows", failure_class="terminal", retry_safe=False, operation="select_dispatch_task")
     requested = str(data.get("task_id") or "")
+    held = _held_claim_identity(request) or {}
+    held_repo = str(held.get("repo") or "").strip()
+    held_issue = held.get("issue")
+    ready: list[dict[str, Any]] = []
     for row in rows:
         tid = str(row.get("id") or row.get("task_id") or "")
         state = str(row.get("status") or row.get("state") or "").lower()
@@ -574,10 +614,22 @@ def select_dispatch_task(request: Request) -> Result:
             continue
         if state in {"done", "completed", "archived", "blocked"}:
             continue
-        if requested or title.startswith(("[fix-pr]", "[issue]", "[fix-pr-review]")):
-            context = {k: row[k] for k in ("repo", "clone_path", "priority", "board") if row.get(k) not in (None, "")}
-            return ok(status="selected", operation="select_dispatch_task", task=row, task_id=tid, **context)
-    return noop("no_ready_task", operation="select_dispatch_task")
+        if not (requested or title.startswith(("[fix-pr]", "[issue]", "[fix-pr-review]"))):
+            continue
+        if held_repo and held_issue not in (None, "") and not _task_matches_issue(row, repo=held_repo, issue=held_issue):
+            continue
+        ready.append(row)
+    if not ready:
+        reason = "held_claim_task_unavailable" if held_repo and held_issue not in (None, "") else "no_ready_task"
+        return noop(reason, operation="select_dispatch_task", repo=held_repo or None, issue=held_issue)
+    row = ready[0]
+    tid = str(row.get("id") or row.get("task_id") or "")
+    context = {k: row[k] for k in ("repo", "clone_path", "priority", "board") if row.get(k) not in (None, "")}
+    if held_repo:
+        context.setdefault("repo", held_repo)
+    if held.get("board"):
+        context.setdefault("board", held.get("board"))
+    return ok(status="selected", operation="select_dispatch_task", task=row, task_id=tid, **context)
 
 
 def read_fix_tasks(request: Request) -> Result:
@@ -596,7 +648,8 @@ def read_fix_tasks(request: Request) -> Result:
         return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_fix_tasks", board=board, error=str(exc))
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="read_fix_tasks", board=board)
-    return ok(status="read", operation="read_fix_tasks", board=board, tasks=rows)
+    repo, issue, board, context = _fix_identity(request)
+    return ok(status="read", operation="read_fix_tasks", board=board, repo=repo, issue=issue, clone_path=context.get("clone_path"), tasks=rows)
 
 
 def find_fix_task_marker(request: Request) -> Result:
@@ -605,17 +658,19 @@ def find_fix_task_marker(request: Request) -> Result:
         return terminal
     data = input_of(request)
     rows = data.get("tasks") if isinstance(data.get("tasks"), list) else _atomic_rows(request, "read_fix_tasks")
-    repo, issue = str(data.get("repo") or ""), str(data.get("issue") or data.get("number") or "")
+    repo, issue, board, _ = _fix_identity(request)
     marker = str(data.get("idempotency_key") or f"fix-pr:{repo}:{issue}")
     idle = upstream_noop(request, "read_fix_tasks", "select_dispatch_task")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="find_fix_task_marker")
+    if not repo or issue in (None, ""):
+        return fail("missing_repo_or_issue", failure_class="terminal", retry_safe=False, operation="find_fix_task_marker", idempotency_key=marker)
     if rows is None:
         return fail("missing_fix_rows", failure_class="terminal", retry_safe=False, operation="find_fix_task_marker", idempotency_key=marker)
     matches = [r for r in rows if marker in str(r.get("body") or r.get("description") or "")]
     if len(matches) > 1:
         return fail("ambiguous_fix_task", failure_class="terminal", retry_safe=False, operation="find_fix_task_marker", idempotency_key=marker, matches=matches)
-    return ok(status="found" if matches else "absent", operation="find_fix_task_marker", marker=marker, task=matches[0] if matches else None, task_id=(matches[0].get("id") or matches[0].get("task_id")) if matches else None)
+    return ok(status="found" if matches else "absent", operation="find_fix_task_marker", marker=marker, repo=repo, issue=issue, board=board, task=matches[0] if matches else None, task_id=(matches[0].get("id") or matches[0].get("task_id")) if matches else None)
 
 
 def create_fix_task(request: Request) -> Result:
@@ -626,19 +681,22 @@ def create_fix_task(request: Request) -> Result:
     idle = upstream_noop(request, "find_fix_task_marker", "select_dispatch_task")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="create_fix_task")
-    board, repo, issue = str(data.get("board") or _atomic_board(request)), str(data.get("repo") or ""), str(data.get("issue") or data.get("number") or "")
+    found = cond_blob(request, "find_fix_task_marker")
+    repo, issue, board, context = _fix_identity(request)
     title = str(data.get("title") or f"[fix-pr] {repo}#{issue}: Fix {repo}#{issue}")
-    marker = str(data.get("idempotency_key") or f"fix-pr:{repo}:{issue}")
-    if not board or not repo or not issue:
+    marker = str(data.get("idempotency_key") or found.get("marker") or f"fix-pr:{repo}:{issue}")
+    if not board or not repo or issue in (None, ""):
         return fail("missing_board_repo_issue", failure_class="terminal", retry_safe=False, operation="create_fix_task", idempotency_key=marker)
+    if found.get("task_id") not in (None, ""):
+        return ok(status="fix_task_exists", operation="create_fix_task", board=board, repo=repo, issue=issue, clone_path=context.get("clone_path"), task_id=found.get("task_id"), task=found.get("task"), idempotency_key=marker, mutated=False, reused=True)
     body = str(data.get("body") or f"Repository: {repo}\nIssue: #{issue}\nIdempotency-Key: {marker}\n")
     if dry_run_flag(request):
-        return planned(operation="create_fix_task", board=board, title=title, body=body, idempotency_key=marker)
+        return planned(operation="create_fix_task", board=board, title=title, body=body, idempotency_key=marker, repo=repo, issue=issue, clone_path=context.get("clone_path"))
     try:
         proc = run_cmd(["hermes", "kanban", "--board", board, "create", "--body", body, "--assignee", str(cfg.get("fixer_assignee") or "lokay-fixer"), "--idempotency-key", marker, title], timeout=90)
     except CommandError as exc:
         return fail("kanban_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_fix_task", board=board, idempotency_key=marker, error=str(exc), mutated=True)
-    return ok(status="created", operation="create_fix_task", board=board, title=title, idempotency_key=marker, stdout=(proc.stdout or "")[-400:], mutated=True)
+    return ok(status="created", operation="create_fix_task", board=board, title=title, idempotency_key=marker, repo=repo, issue=issue, clone_path=context.get("clone_path"), stdout=(proc.stdout or "")[-400:], mutated=True)
 
 
 def reconcile_fix_task(request: Request) -> Result:
@@ -663,8 +721,8 @@ def _reconcile_kanban_marker(request: Request, operation: str, peer: str, prefix
     if len(matches) != 1: return fail("reconcile_conflict" if len(matches) > 1 else "created_task_unresolved", failure_class="terminal", retry_safe=False, operation=operation, matches=matches, mutated=False)
     row = matches[0]; tid = row.get("id") or row.get("task_id")
     if not tid: return fail("invalid_kanban_task_id", failure_class="terminal", retry_safe=False, operation=operation, mutated=False)
-    return ok(status="reconciled", operation=operation, task=row, task_id=tid, board=board, marker=marker, mutated=False)
-
+    context = {key: created[key] for key in ("repo", "issue", "clone_path") if created.get(key) not in (None, "")}
+    return ok(status="reconciled", operation=operation, task=row, task_id=tid, board=board, marker=marker, mutated=False, **context)
 
 def read_task_for_completion(request: Request) -> Result:
     terminal = _atomic_terminal(request, "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt")
@@ -720,18 +778,27 @@ def verify_task_completed(request: Request) -> Result:
 
 
 def read_clone_preconditions(request: Request) -> Result:
-    data, cfg = input_of(request), cfg_of(request); clone_path = str(data.get("clone_path") or cfg.get("clone_path") or ""); base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
+    data, cfg = input_of(request), cfg_of(request)
+    repo, _, _, context = _fix_identity(request)
+    clone_path = str(data.get("clone_path") or cfg.get("clone_path") or context.get("clone_path") or "")
+    base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
     idle = upstream_noop(request, "reconcile_fix_task", "select_dispatch_task")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_clone_preconditions")
-    if not clone_path: return fail("missing_clone_path", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions")
+    if not clone_path:
+        return fail("missing_clone_path", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", repo=repo)
     clone = Path(clone_path)
-    if not (clone / ".git").exists(): return fail("clone_missing", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path)
-    try: status, origin = status_porcelain(clone), remote_url(clone)
-    except CommandError as exc: return fail("clone_precondition_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_clone_preconditions", error=str(exc), clone_path=clone_path)
-    if status.strip(): return fail("clone_dirty", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, clone_status=status)
-    if not origin.strip(): return fail("origin_missing", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path)
-    return ok(status="ready", operation="read_clone_preconditions", clone_path=clone_path, base_branch=base_branch, origin=origin)
+    if not (clone / ".git").exists():
+        return fail("clone_missing", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, repo=repo)
+    try:
+        status, origin = status_porcelain(clone), remote_url(clone)
+    except CommandError as exc:
+        return fail("clone_precondition_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_clone_preconditions", error=str(exc), clone_path=clone_path, repo=repo)
+    if status.strip():
+        return fail("clone_dirty", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, clone_status=status, repo=repo)
+    if not origin.strip():
+        return fail("origin_missing", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, repo=repo)
+    return ok(status="ready", operation="read_clone_preconditions", clone_path=clone_path, base_branch=base_branch, origin=origin, repo=repo)
 
 
 def fetch_clone_origin(request: Request) -> Result:

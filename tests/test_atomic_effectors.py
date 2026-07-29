@@ -360,6 +360,18 @@ class IntakeAlignedTests(unittest.TestCase):
             )
         self.assertEqual(tasks["status"], "intake_tasks_read")
 
+    def test_claim_result_fails_when_reservation_failed_and_verification_missing(self) -> None:
+        reserve = {
+            "status": "failed", "ok": False, "reason": "claim_busy",
+            "failure_class": "terminal", "mutated": False,
+        }
+        out = claim.build_issue_claim_result(req({"dry_run": False, "conduction": {"reserve_claim_file": reserve}}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["reason"], "claim_failed")
+        self.assertEqual(out["reserve_reason"], "claim_busy")
+        self.assertEqual(out["reserve"], reserve)
+
     def test_missing_required_label_fails_claim_verification(self) -> None:
         selected = self._selected(3590)
         reserve = {"status": "claim_reserved", "ok": True, "selected": selected, "claim_path": "/tmp/claim.json"}
@@ -693,6 +705,55 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(out["reason"], "upstream_failed")
         self.assertEqual(out["upstream"], failed)
         self.assertEqual(out["upstream_effector"], "read_dispatch_tasks")
+
+    def test_held_claim_selects_matching_task_not_newer_ready_task(self) -> None:
+        unrelated = {"id": "newer", "title": "[issue] mikolaj92/Temida#3650: unrelated", "status": "ready"}
+        held_task = {
+            "id": "t_14722de2",
+            "title": "[issue] mikolaj92/Temida#3590: retry response",
+            "body": "Repository: mikolaj92/Temida\nIssue: #3590\nIdempotency-Key: github-issue:mikolaj92/Temida:3590\n",
+            "status": "ready",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "claim.json").write_text(json.dumps({
+                "version": 1, "repo": "mikolaj92/Temida", "issue": 3590,
+                "board": "mikolaj92-temida", "assignee": "mikolaj92",
+                "claimedAt": "2026-07-29T12:18:17.734195Z",
+            }))
+            out = issue_to_pr.select_dispatch_task(req({
+                "active_issue_path": tmp,
+                "conduction": {"read_dispatch_tasks": {"status": "read", "ok": True, "tasks": [unrelated, held_task]}},
+            }))
+        self.assertEqual(out["task_id"], "t_14722de2")
+
+    def test_held_claim_without_ready_task_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "claim.json").write_text(json.dumps({
+                "version": 1, "repo": "o/r", "issue": 9, "board": "b",
+                "assignee": "mikolaj92", "claimedAt": "2026-07-29T12:18:17Z",
+            }))
+            out = issue_to_pr.select_dispatch_task(req({
+                "active_issue_path": tmp,
+                "conduction": {"read_dispatch_tasks": {"status": "read", "ok": True, "tasks": [{"id": "x", "title": "[issue] o/r#10", "status": "ready"}]}},
+            }))
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "held_claim_task_unavailable")
+
+    def test_fix_chain_resolves_identity_and_clone_from_configured_repos(self) -> None:
+        repos = [{"repo": "mikolaj92/Temida", "board": "mikolaj92-temida", "clone_path": "/clones/Temida"}]
+        parsed = {"status": "parsed", "ok": True, "repo": "mikolaj92/Temida", "issue": 3590, "board": "mikolaj92-temida", "clone_path": "/clones/Temida"}
+        read = {"status": "read", "ok": True, "repo": "mikolaj92/Temida", "issue": 3590, "board": "mikolaj92-temida", "clone_path": "/clones/Temida", "tasks": []}
+        found = issue_to_pr.find_fix_task_marker(req({"repos": repos, "conduction": {"read_fix_tasks": read}}))
+        self.assertEqual(found["marker"], "fix-pr:mikolaj92/Temida:3590")
+        created = issue_to_pr.create_fix_task(req({"repos": repos, "dry_run": True, "conduction": {"find_fix_task_marker": found}}))
+        self.assertEqual(created["repo"], "mikolaj92/Temida")
+        self.assertEqual(created["issue"], 3590)
+        self.assertEqual(created["clone_path"], "/clones/Temida")
+        reconciled = {"status": "reconciled", "ok": True, "repo": created["repo"], "issue": created["issue"], "board": created["board"], "clone_path": created["clone_path"]}
+        with mock.patch("lokay.steps.issue_to_pr.status_porcelain", return_value=""), mock.patch("lokay.steps.issue_to_pr.remote_url", return_value="git@github.com:mikolaj92/Temida.git"), mock.patch("pathlib.Path.exists", return_value=True):
+            pre = issue_to_pr.read_clone_preconditions(req({"repos": repos, "conduction": {"reconcile_fix_task": reconciled}}))
+        self.assertEqual(pre["status"], "ready")
+        self.assertEqual(pre["clone_path"], "/clones/Temida")
 
     def test_fix_task_creation_dry_chain(self) -> None:
         found = {"status": "absent", "ok": True, "task": None, "marker": "fix-pr:o/r:9"}

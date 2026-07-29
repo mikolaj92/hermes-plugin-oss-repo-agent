@@ -309,5 +309,6 @@ def build_issue_claim_result(request: Request) -> Result:
     if terminal: return terminal
     data=input_of(request); verify=cond_blob(request,"verify_issue_claim"); reserve=cond_blob(request,"reserve_claim_file");
     if verify.get("status")=="noop": return noop(str(verify.get("reason") or "no_selected_issue"),dry_run=dry_run_flag(request))
-    if verify.get("ok") is False: return fail("claim_failed",failure_class=str(verify.get("failure_class") or "terminal"),retry_safe=False,verify=verify,reserve=reserve,mutated=bool(verify.get("mutated")))
+    if verify.get("ok") is not True:
+        return fail("claim_failed",failure_class=str(verify.get("failure_class") or reserve.get("failure_class") or "terminal"),retry_safe=False,verify=verify,reserve=reserve,reserve_reason=reserve.get("reason"),mutated=bool(verify.get("mutated") or reserve.get("mutated")))
     return ok(status="claimed",selected=data.get("selected") or reserve.get("selected"),claim=reserve.get("claim"),claim_path=reserve.get("claim_path"),verified=verify.get("verified",False),mutated=bool(reserve.get("mutated") or verify.get("mutated")),dry_run=dry_run_flag(request))
