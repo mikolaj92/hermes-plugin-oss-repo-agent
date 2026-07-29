@@ -961,7 +961,7 @@ def read_branch_provenance(request: Request) -> Result:
             **error,
         )
     if branch_exists(clone, branch) and not _provenance_matches(expected, provenance):
-        stable_expected = {**expected, "receipt": provenance.get("receipt", "")}
+        stable_expected = {**expected, "receipt": provenance.get("receipt", "")} if provenance.get("receipt") else expected
         if not _provenance_matches(stable_expected, provenance):
             return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, operation="read_branch_provenance", provenance=provenance, expected=expected, mutated=False)
         if dry_run_flag(request):
@@ -1026,9 +1026,9 @@ def create_local_branch(request: Request) -> Result:
         matching = [row for row in worktrees if isinstance(row, dict) and Path(str(row.get("path") or "")).expanduser().resolve() == path]
         if path.exists() or matching:
             if any(str(row.get("branch") or "") == branch for row in matching):
-                return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=str(path), mutated=False)
+                return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=str(path), worktrees=worktrees, mutated=False)
             return fail("worktree_path_collision", failure_class="terminal", retry_safe=False, operation="create_local_branch", worktree_path=str(path))
-        return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=str(path), mutated=False)
+        return ok(status="reused", operation="create_local_branch", clone_path=clone, branch=branch, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=str(path), worktrees=worktrees, mutated=False)
     if path.exists() or any(Path(str(row.get("path") or "")).expanduser().resolve() == path for row in worktrees if isinstance(row, dict)):
         return fail("worktree_path_collision", failure_class="terminal", retry_safe=False, operation="create_local_branch", worktree_path=str(path))
     if dry_run_flag(request):

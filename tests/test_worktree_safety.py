@@ -179,6 +179,19 @@ class TempGitSafetyTests(unittest.TestCase):
         from lokay.adapters_git import branch_config_get
         self.assertEqual(branch_config_get(self.clone, self.branch, "lokay-receipt"), next_receipt)
 
+    def test_reused_branch_forwards_worktree_inventory(self) -> None:
+        self.assertEqual(self.prepare()["status"], "verified")
+        retry = self.prepare(receipt_path=str(Path(self.tmp.name) / "retry-receipt.json"))
+        self.assertEqual(retry["status"], "verified", retry)
+
+    def test_empty_stored_receipt_is_not_adopted(self) -> None:
+        self.assertEqual(self.prepare()["status"], "verified")
+        from lokay.adapters_git import branch_config_set
+        branch_config_set(self.clone, self.branch, "lokay-receipt", "")
+        rejected = self.prepare(receipt_path=str(Path(self.tmp.name) / "retry-receipt.json"))
+        self.assertEqual(rejected["reason"], "foreign_branch_ownership")
+
+
     def test_repair_provenance_missing_or_mismatched_fails_closed(self) -> None:
         base = {"clone_path": str(self.clone), "worktree_root": str(self.worktrees), "base_branch": "main", "dry_run": False, "conduction": {"build_repair_prompt": {"issue": "7", "receipt_id": str(Path(self.tmp.name) / "repair-receipt.json"), "repo": "owner/repo", "branch": self.branch}}}
         missing = prepare_chain(base)
