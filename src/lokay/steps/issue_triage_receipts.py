@@ -599,16 +599,15 @@ def verify_triage_receipt(request: Request) -> Result:
             expected = nested
             break
     if path_value is None:
-        path_value = data.get("receipt_path") or cfg.get("receipt_path")
-        if isinstance(data.get("payload"), Mapping):
-            expected = data.get("payload")
-    if not path_value:
         gate = _selected_gate(request, "verify_triage_receipt", *_RECEIPT_UPSTREAMS)
         if gate is not None:
             return gate
         terminal = terminal_upstream(request, "verify_triage_receipt", *_RECEIPT_UPSTREAMS)
         if terminal:
             return terminal
+        path_value = data.get("receipt_path") or cfg.get("receipt_path")
+        if isinstance(data.get("payload"), Mapping):
+            expected = data.get("payload")
     root = _receipt_root(data, cfg)
     try:
         if not path_value:

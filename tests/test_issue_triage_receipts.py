@@ -481,6 +481,48 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(out["status"], "verified", out)
         self.assertEqual(out["receipt_path"], mutation["receipt_path"])
 
+    def test_verify_noops_without_selection_despite_dispatch_path(self):
+        request = {
+            "input": {
+                "triage_receipts": str(self.root),
+                "receipt_path": "/Users/mini-m4-main/.hermes/state/lokay-dispatch-live/auto-worker-dispatch-example.json",
+                "paths": {"triage_receipts": str(self.root)},
+                "dry_run": False,
+                "conduction": {
+                    "intake_publish_triage_mutation_verification": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "no_triage_selection",
+                    },
+                    "intake_publish_triage_feedback_receipt": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "no_triage_selection",
+                    },
+                    "intake_publish_triage_close_authorization": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "no_triage_selection",
+                    },
+                    "intake_publish_triage_close_verification": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "no_triage_selection",
+                    },
+                    "intake_publish_triage_decision_receipt": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "triage_candidate_missing",
+                    },
+                },
+            },
+            "config": {},
+        }
+        out = receipts.verify_triage_receipt(request)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "noop", out)
+        self.assertIn(out.get("reason"), {"no_triage_selection", "triage_candidate_missing"}, out)
+
     def test_disabled_and_no_candidate_no_write_and_terminal_failure_propagates(self):
         disabled = receipts.publish_triage_decision_receipt(self.req(triage_enabled=False, payload=self.payload))
         self.assertEqual(disabled["status"], "noop")
