@@ -576,10 +576,10 @@ def publish_triage_close_verification(request: Request) -> Result:
 
 def verify_triage_receipt(request: Request) -> Result:
     data, cfg = input_of(request), cfg_of(request)
-    # Prefer an already-published receipt path from conduction so label/feedback
-    # verification does not depend on nested payload identity reconstruction.
-    path_value = data.get("receipt_path") or cfg.get("receipt_path")
-    expected: Mapping[str, Any] | None = data.get("payload") if isinstance(data.get("payload"), Mapping) else None
+    # Prefer conducted publish_* receipt paths over top-level receipt_path.
+    # auto_worker reuses the top-level key for dispatch/lifecycle receipts.
+    path_value = None
+    expected: Mapping[str, Any] | None = None
     for name in (
         "publish_triage_mutation_verification",
         "publish_triage_feedback_receipt",
@@ -590,15 +590,18 @@ def verify_triage_receipt(request: Request) -> Result:
         blob = cond_blob(request, name)
         if not isinstance(blob, Mapping) or blob.get("ok") is not True:
             continue
-        if blob.get("status") not in {"written", "exists", "planned", "verified"}:
+        # planned is dry-run only and has no durable file; skip it.
+        if blob.get("status") not in {"written", "exists", "verified"}:
             continue
-        if not path_value and blob.get("receipt_path"):
+        if blob.get("receipt_path"):
             path_value = blob.get("receipt_path")
-        nested = blob.get("payload") if isinstance(blob.get("payload"), Mapping) else None
-        if expected is None and isinstance(nested, Mapping):
+            nested = blob.get("payload") if isinstance(blob.get("payload"), Mapping) else None
             expected = nested
-        if path_value:
             break
+    if path_value is None:
+        path_value = data.get("receipt_path") or cfg.get("receipt_path")
+        if isinstance(data.get("payload"), Mapping):
+            expected = data.get("payload")
     if not path_value:
         gate = _selected_gate(request, "verify_triage_receipt", *_RECEIPT_UPSTREAMS)
         if gate is not None:
