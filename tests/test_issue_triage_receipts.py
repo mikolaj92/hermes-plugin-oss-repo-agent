@@ -365,6 +365,66 @@ class ReceiptTests(unittest.TestCase):
         self.assertFalse(index["reconcile_pending"], index)
         self.assertTrue(index["triage_verified"], index)
 
+    def test_verify_receipt_uses_published_mutation_path(self):
+        digest = "e" * 64
+        auth = dict(self.payload, stage="mutation-authorized", decision_digest=digest)
+        written = receipts.publish_triage_mutation_authorization(self.req(payload=auth, decision_digest=digest))
+        self.assertTrue(written["ok"], written)
+        verified_payload = dict(
+            self.payload,
+            stage="mutation-verified",
+            decision_digest=digest,
+            verified=True,
+            verified_readback_state="verified",
+            label="ai:ready",
+        )
+        mutation = receipts.publish_triage_mutation_verification(
+            self.req(payload=verified_payload, decision_digest=digest)
+        )
+        self.assertTrue(mutation["ok"], mutation)
+        request = {
+            "input": {
+                "triage_receipts": str(self.root),
+                "dry_run": False,
+                "conduction": {
+                    "intake_publish_triage_mutation_verification": {
+                        "ok": True,
+                        "status": "written",
+                        "receipt_path": mutation["receipt_path"],
+                        "payload": mutation["payload"],
+                    },
+                    "intake_publish_triage_feedback_receipt": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "action_not_selected",
+                    },
+                    "intake_publish_triage_close_authorization": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "action_not_selected",
+                    },
+                    "intake_publish_triage_close_verification": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "action_not_selected",
+                    },
+                    "intake_publish_triage_decision_receipt": {
+                        "ok": True,
+                        "status": "written",
+                        "receipt_path": written["receipt_path"],
+                        "payload": written["payload"],
+                    },
+                },
+            },
+            "config": {},
+        }
+        out = receipts.verify_triage_receipt(request)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "verified", out)
+        self.assertTrue(out.get("verified"))
+        self.assertEqual(out["receipt_path"], mutation["receipt_path"])
+        self.assertEqual(out["payload"]["stage"], "mutation-verified")
+
     def test_disabled_and_no_candidate_no_write_and_terminal_failure_propagates(self):
         disabled = receipts.publish_triage_decision_receipt(self.req(triage_enabled=False, payload=self.payload))
         self.assertEqual(disabled["status"], "noop")

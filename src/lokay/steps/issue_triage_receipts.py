@@ -209,21 +209,29 @@ def _safe_existing_path(path: Path, root: Any) -> Path:
 
 def _publish(path: Path, payload: Mapping[str, Any], operation: str = "receipt") -> Result:
     value = dict(payload)
+    selected = value.get("selected") if isinstance(value.get("selected"), Mapping) else None
+    identity = {
+        key: value[key]
+        for key in ("repo", "number", "issue", "decision_digest", "comment_id")
+        if key in value
+    }
+    if selected:
+        identity["selected"] = dict(selected)
     with _receipt_directory_lock(path.parent):
         try:
             current = _read(path)
         except FileNotFoundError:
             current = None
         except (OSError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
-            return fail(f"{operation}_conflict", error=str(exc), receipt_path=str(path))
+            return fail(f"{operation}_conflict", error=str(exc), receipt_path=str(path), **identity)
         if current is not None:
             if current == value:
                 try:
                     _fsync_dir(path.parent)
                 except OSError as exc:
-                    return fail(f"{operation}_durability_unconfirmed", error=str(exc), receipt_path=str(path))
-                return ok(status="exists", receipt_path=str(path), payload=value)
-            return fail(f"{operation}_conflict", receipt_path=str(path))
+                    return fail(f"{operation}_durability_unconfirmed", error=str(exc), receipt_path=str(path), **identity)
+                return ok(status="exists", receipt_path=str(path), payload=value, **identity)
+            return fail(f"{operation}_conflict", receipt_path=str(path), **identity)
         temp: Path | None = None
         linked = False
         try:
@@ -255,8 +263,8 @@ def _publish(path: Path, payload: Mapping[str, Any], operation: str = "receipt")
                 except Exception as rollback_exc:
                     rollback_error = rollback_exc
             text = str(exc) if rollback_error is None else f"{exc}; rollback durability unconfirmed: {rollback_error}"
-            return fail(f"{operation}_write_failed", error=text, receipt_path=str(path), mutated=linked)
-    return ok(status="written", receipt_path=str(path), payload=value, mutated=True)
+            return fail(f"{operation}_write_failed", error=text, receipt_path=str(path), mutated=linked, **identity)
+    return ok(status="written", receipt_path=str(path), payload=value, mutated=True, **identity)
 
 
 def _payload(request: Request, stage: str) -> dict[str, Any]:
@@ -566,36 +574,65 @@ def publish_triage_close_authorization(request: Request) -> Result:
 def publish_triage_close_verification(request: Request) -> Result:
     return _stage_request(request, "close-verified")
 
-
 def verify_triage_receipt(request: Request) -> Result:
-    gate = _selected_gate(request, "verify_triage_receipt", *_RECEIPT_UPSTREAMS)
-    if gate is not None:
-        return gate
-    terminal = terminal_upstream(request, "verify_triage_receipt", *_RECEIPT_UPSTREAMS)
-    if terminal:
-        return terminal
     data, cfg = input_of(request), cfg_of(request)
+    # Prefer an already-published receipt path from conduction so label/feedback
+    # verification does not depend on nested payload identity reconstruction.
+    path_value = data.get("receipt_path") or cfg.get("receipt_path")
+    expected: Mapping[str, Any] | None = data.get("payload") if isinstance(data.get("payload"), Mapping) else None
+    for name in (
+        "publish_triage_mutation_verification",
+        "publish_triage_feedback_receipt",
+        "publish_triage_close_verification",
+        "publish_triage_close_authorization",
+        "publish_triage_decision_receipt",
+    ):
+        blob = cond_blob(request, name)
+        if not isinstance(blob, Mapping) or blob.get("ok") is not True:
+            continue
+        if blob.get("status") not in {"written", "exists", "planned", "verified"}:
+            continue
+        if not path_value and blob.get("receipt_path"):
+            path_value = blob.get("receipt_path")
+        nested = blob.get("payload") if isinstance(blob.get("payload"), Mapping) else None
+        if expected is None and isinstance(nested, Mapping):
+            expected = nested
+        if path_value:
+            break
+    if not path_value:
+        gate = _selected_gate(request, "verify_triage_receipt", *_RECEIPT_UPSTREAMS)
+        if gate is not None:
+            return gate
+        terminal = terminal_upstream(request, "verify_triage_receipt", *_RECEIPT_UPSTREAMS)
+        if terminal:
+            return terminal
     root = _receipt_root(data, cfg)
-    upstream = _conduction_payload(request, str(data.get("stage") or "decision"))
-    path_value = data.get("receipt_path") or (upstream or {}).get("receipt_path") or cfg.get("receipt_path")
     try:
         if not path_value:
+            upstream = _conduction_payload(request, str(data.get("stage") or "decision"))
             stage = str(data.get("stage") or (upstream or {}).get("stage") or "decision")
             payload = _payload(request, stage)
             repo, _, issue = _identity({**data, **payload}, cfg, request, *_RECEIPT_UPSTREAMS)
             identity = data.get("identity") or payload.get("updated_at") or payload.get("decision_digest") or payload.get("comment_id")
+            if stage == "feedback-verified":
+                comment_id = payload.get("comment_id") or data.get("database_id") or data.get("comment_id")
+                digest = str(payload.get("decision_digest") or data.get("decision_digest") or "")
+                if comment_id in (None, "") or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                    raise ValueError("unsafe_receipt_identity")
+                identity = f"{comment_id}-{digest}"
+            elif stage in {"mutation-authorized", "mutation-verified", "close-authorized", "close-verified"}:
+                identity = payload.get("decision_digest") or identity
             path_value = str(_receipt_path(root, repo, issue, stage, identity))
+            if expected is None and isinstance(upstream, Mapping):
+                expected = upstream
         path = _safe_existing_path(Path(str(path_value)), root)
     except (TypeError, ValueError) as exc:
         return fail("receipt_identity_invalid", error=str(exc))
-    expected = data.get("payload")
-    if not isinstance(expected, Mapping) and isinstance(upstream, Mapping):
-        expected = upstream
     try:
         actual = _read(path)
         if isinstance(expected, Mapping) and actual != dict(expected):
             return fail("receipt_conflict", receipt_path=str(path))
-        return ok(status="verified", receipt_path=str(path), payload=actual)
+        return ok(status="verified", receipt_path=str(path), payload=actual, verified=True)
     except (OSError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
         return fail("receipt_verify_failed", error=str(exc), receipt_path=str(path))
 
