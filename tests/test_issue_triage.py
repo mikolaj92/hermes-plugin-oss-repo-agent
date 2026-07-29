@@ -177,6 +177,47 @@ class MutationAtomTests(unittest.TestCase):
         close_request = {**request, "input": {**request["input"], "action": "close", "conduction": {**request["input"]["conduction"], "publish_triage_close_authorization": {"ok": True, "status": "published", "payload": {"authorized": True, "verified": True}}}}}
         self.assertEqual(m.close_triage_issue(close_request)["status"], "planned")
 
+    def test_feedback_uses_conducted_digest_and_gh_comment_id(self):
+        from lokay.steps import issue_triage_mutations as m
+        from unittest import mock
+
+        classification = payload("needs_feedback", question="Which behavior?")
+        digest = issue_triage.decision_digest(classification)
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 4,
+                "dry_run": False,
+                "conduction": {
+                    "read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": [], "comments": []},
+                    "decide_triage_mutation": {"ok": True, "status": "mutation_decided", "action": "feedback", "classification": "needs_feedback"},
+                    "classify_triage_issue": {
+                        "ok": True,
+                        "status": "classified",
+                        "classification": classification,
+                        "action": "needs_feedback",
+                        "question": "Which behavior?",
+                        "decision_digest": digest,
+                    },
+                },
+            }
+        }
+        planned = m.post_triage_feedback({**request, "input": {**request["input"], "dry_run": True}})
+        self.assertEqual(planned["status"], "planned")
+        self.assertIn(digest, planned["marker"])
+        self.assertIn("Which behavior?", planned["body"])
+        after = {
+            "labels": [],
+            "state": "OPEN",
+            "stateReason": "",
+            "updatedAt": "2026-07-29T09:00:00Z",
+            "comments": [{"id": "IC_kwDOExample", "body": planned["body"]}],
+        }
+        with mock.patch.object(m, "run_cmd", return_value=mock.Mock(stdout="", stderr="", returncode=0)), mock.patch.object(m, "_read_issue", return_value=after):
+            result = m.post_triage_feedback(request)
+        self.assertEqual(result["status"], "feedback_verified", result)
+        self.assertEqual(result["comment"]["id"], "IC_kwDOExample")
+
     def test_terminal_requires_verified_receipt(self):
         from lokay.steps import issue_triage_mutations as m
         rows = [{"repo": "owner/repo", "number": 4}, {"repo": "other/repo", "number": 9}]

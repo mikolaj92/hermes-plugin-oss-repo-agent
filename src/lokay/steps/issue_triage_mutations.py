@@ -351,6 +351,16 @@ def _marker(repo: str, number: int, digest: str) -> str:
     return f"<!-- lokay:issue-triage:{repo}:{number}:{digest} -->"
 
 
+def _comment_id(comment: Mapping[str, Any]) -> str | int | None:
+    for key in ("databaseId", "id"):
+        value = comment.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def post_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
     """Post one marker-bearing question, verifying the marker and comment id."""
     gate = _gate(request, "feedback")
@@ -362,9 +372,15 @@ def post_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
         return bad
     if _frozen_state(request):
         return noop("frozen", **_identity(request))
-    digest = str(data.get("decision_digest") or data.get("digest") or "")
+    digest = _digest(request)
+    if not digest:
+        return fail("missing_decision_digest", failure_class="terminal", retry_safe=False, **_identity(request))
     marker = _marker(repo, number, digest)
-    question = str(data.get("question") or "Please provide maintainer confirmation for this issue.").strip()
+    question = str(
+        data.get("question")
+        or cond_get(request, "question", "classify_triage_issue", "decide_triage_mutation")
+        or "Please provide maintainer confirmation for this issue."
+    ).strip()
     state = cond_blob(request, "read_triage_labels")
     comments = state.get("comments") or data.get("comments") or []
     if not isinstance(comments, list):
@@ -373,7 +389,7 @@ def post_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
     if len(matches) > 1:
         return fail("feedback_marker_conflict", failure_class="terminal", retry_safe=False, matches=len(matches), **_identity(request))
     if matches:
-        return noop("feedback_already_posted", marker=marker, comment_id=matches[0].get("databaseId"), **_identity(request))
+        return noop("feedback_already_posted", marker=marker, comment_id=_comment_id(matches[0]), **_identity(request))
     body = f"{question}\n\n{marker}"
     if dry_run_flag(request):
         return planned(marker=marker, body=body, **_identity(request))
@@ -381,7 +397,7 @@ def post_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
         run_cmd([gh, "issue", "comment", str(number), "--repo", repo, "--body", body], timeout=60)
         after = _read_issue(gh, repo, number)
         matches = [x for x in after["comments"] if marker in str(x.get("body") or "")]
-        if len(matches) != 1 or not matches[0].get("databaseId"):
+        if len(matches) != 1 or not _comment_id(matches[0]):
             return fail("feedback_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, mutated=True, marker=marker, **_identity(request))
     except CommandError as exc:
         return fail("feedback_post_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, marker=marker, **_identity(request))
@@ -398,7 +414,12 @@ def verify_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
     bad = _invalid(repo, number)
     if bad:
         return bad
-    marker = str(data.get("marker") or _marker(repo, number, str(data.get("decision_digest") or data.get("digest") or "")))
+    digest = _digest(request)
+    marker = str(data.get("marker") or "")
+    if not marker:
+        if not digest:
+            return fail("missing_decision_digest", failure_class="terminal", retry_safe=False, **_identity(request))
+        marker = _marker(repo, number, digest)
     if _frozen_state(request):
         return noop("frozen", **_identity(request))
     if dry_run_flag(request):
