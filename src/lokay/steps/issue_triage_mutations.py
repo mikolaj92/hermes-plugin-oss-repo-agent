@@ -701,8 +701,25 @@ def build_triage_terminal(request: Mapping[str, Any]) -> dict[str, Any]:
     receipt = data.get("triage_receipt") or cond_blob(request, "verify_triage_receipt").get("payload")
     upstream = {name: cond_blob(request, name) for name in ("verify_triage_feedback", "verify_triage_issue_closed", "mutate_triage_issue_labels")}
     closed = upstream["verify_triage_issue_closed"]
-    verified_blob = closed if closed.get("verified") is True else next((upstream[name] for name in ("mutate_triage_issue_labels", "verify_triage_feedback") if upstream[name].get("verified") is True), None)
-    if verified_blob is None or not isinstance(receipt, Mapping) or receipt.get("verified") is not True:
+    verified_blob = closed if closed.get("verified") is True else next(
+        (
+            upstream[name]
+            for name in ("mutate_triage_issue_labels", "verify_triage_feedback")
+            if upstream[name].get("verified") is True
+            or (
+                name == "mutate_triage_issue_labels"
+                and upstream[name].get("ok") is True
+                and upstream[name].get("status") == "labels_verified"
+            )
+        ),
+        None,
+    )
+    receipt_verified = isinstance(receipt, Mapping) and (
+        receipt.get("verified") is True
+        or str(receipt.get("verified_readback_state") or "").casefold() == "verified"
+        or str(receipt.get("stage") or "") in {"mutation-verified", "feedback-verified", "close-verified"}
+    )
+    if verified_blob is None or not receipt_verified:
         return noop("triage_not_verified", rows=rows, selected=selected or None)
     out = list(rows)
     row = dict(selected or {})

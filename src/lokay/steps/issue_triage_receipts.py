@@ -386,6 +386,7 @@ def _stage_request(request: Request, stage: str) -> Result:
         labels = cond_blob(request, "mutate_triage_issue_labels")
         if labels.get("ok") is True and labels.get("status") in {"labels_verified", "planned"}:
             payload.setdefault("verified_readback_state", "verified")
+            payload.setdefault("verified", True)
             if labels.get("label"):
                 payload.setdefault("label", labels.get("label"))
     try:

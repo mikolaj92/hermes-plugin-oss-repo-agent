@@ -520,6 +520,59 @@ class MutationAtomTests(unittest.TestCase):
         self.assertNotIn("triage_verified", result.get("selected") or {})
         self.assertNotIn("triage_receipt", result.get("selected") or {})
 
+    def test_terminal_accepts_mutation_verified_readback(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        rows = [{"repo": "owner/repo", "number": 4, "labels": []}, {"repo": "other/repo", "number": 9}]
+        receipt = {
+            "stage": "mutation-verified",
+            "decision_digest": "a" * 64,
+            "verified_readback_state": "verified",
+            "label": "ai:ready",
+            "repo": "owner/repo",
+            "number": 4,
+        }
+        result = m.build_triage_terminal(
+            {
+                "input": {
+                    "repo": "owner/repo",
+                    "number": 4,
+                    "rows": rows,
+                    "conduction": {
+                        "select_triage_candidate": {
+                            "ok": True,
+                            "status": "selected",
+                            "selected": {"repo": "owner/repo", "number": 4, "labels": []},
+                        },
+                        "reserve_triage_run_budget": {
+                            "ok": True,
+                            "status": "reserved",
+                            "selected": {"repo": "owner/repo", "number": 4, "labels": []},
+                        },
+                        "mutate_triage_issue_labels": {
+                            "ok": True,
+                            "status": "labels_verified",
+                            "verified": True,
+                            "label": "ai:ready",
+                            "labels": ["ai:ready"],
+                            "repo": "owner/repo",
+                            "number": 4,
+                        },
+                        "verify_triage_receipt": {
+                            "ok": True,
+                            "status": "verified",
+                            "payload": receipt,
+                        },
+                    },
+                }
+            }
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "triage_terminal", result)
+        self.assertTrue(result["triage_verified"])
+        self.assertEqual(result["selected"]["labels"], ["ai:ready"])
+        self.assertTrue(result["selected"]["triage_verified"])
+
     def test_nonselected_branches_noop_without_commands(self):
         from lokay.steps import issue_triage_mutations as m
 
