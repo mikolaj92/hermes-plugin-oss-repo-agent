@@ -375,6 +375,13 @@ def _marker(repo: str, number: int, digest: str) -> str:
     return f"<!-- lokay:issue-triage:{repo}:{number}:{digest} -->"
 
 
+def _marker_prefix(repo: str, number: int) -> str:
+    return f"<!-- lokay:issue-triage:{repo}:{number}:"
+
+
+def _comment_has_marker_prefix(comment: Mapping[str, Any], prefix: str) -> bool:
+    return prefix in str(comment.get("body") or "")
+
 def _comment_id(comment: Mapping[str, Any]) -> str | int | None:
     for key in ("databaseId", "id"):
         value = comment.get(key)
@@ -409,11 +416,17 @@ def post_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
     comments = state.get("comments") or data.get("comments") or []
     if not isinstance(comments, list):
         return fail("invalid_comments", failure_class="terminal", retry_safe=False, **_identity(request))
-    matches = [x for x in comments if isinstance(x, Mapping) and marker in str(x.get("body") or "")]
-    if len(matches) > 1:
-        return fail("feedback_marker_conflict", failure_class="terminal", retry_safe=False, matches=len(matches), **_identity(request))
-    if matches:
-        return noop("feedback_already_posted", marker=marker, comment_id=_comment_id(matches[0]), **_identity(request))
+    prefix = _marker_prefix(repo, number)
+    existing = [x for x in comments if isinstance(x, Mapping) and _comment_has_marker_prefix(x, prefix)]
+    if len(existing) > 1:
+        return fail("feedback_marker_conflict", failure_class="terminal", retry_safe=False, matches=len(existing), **_identity(request))
+    if existing:
+        return noop(
+            "feedback_already_posted",
+            marker=str(existing[0].get("body") or marker),
+            comment_id=_comment_id(existing[0]),
+            **_identity(request),
+        )
     body = f"{question}\n\n{marker}"
     if dry_run_flag(request):
         return planned(marker=marker, body=body, **_identity(request))
@@ -431,16 +444,17 @@ def post_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def verify_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
+    post = cond_blob(request, "post_triage_feedback")
     gate = _gate(request, "feedback")
-    if gate is not None:
+    if gate is not None and not (post.get("ok") is True and post.get("status") in {"feedback_verified", "feedback_already_posted", "planned"}):
         return gate
     data, cfg, repo, number, gh = _values(request)
     bad = _invalid(repo, number)
     if bad:
         return bad
-    digest = _digest(request)
-    marker = str(data.get("marker") or "")
+    marker = str(data.get("marker") or post.get("marker") or "")
     if not marker:
+        digest = _digest(request)
         if not digest:
             return fail("missing_decision_digest", failure_class="terminal", retry_safe=False, **_identity(request))
         marker = _marker(repo, number, digest)
@@ -450,8 +464,13 @@ def verify_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
         return planned(marker=marker, **_identity(request))
     try:
         state = _read_issue(gh, repo, number)
-        matches = [x for x in state["comments"] if marker in str(x.get("body") or "")]
-        if len(matches) != 1:
+        prefix = _marker_prefix(repo, number)
+        matches = [x for x in state["comments"] if marker in str(x.get("body") or "") or _comment_has_marker_prefix(x, prefix)]
+        # Prefer exact marker; otherwise accept one issue-scoped marker.
+        exact = [x for x in matches if marker in str(x.get("body") or "")]
+        if exact:
+            matches = exact
+        if len(matches) != 1 or not _comment_id(matches[0]):
             return fail("feedback_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, mutated=True, marker=marker, **_identity(request))
     except CommandError as exc:
         return fail("feedback_verify_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), mutated=True, **_identity(request))

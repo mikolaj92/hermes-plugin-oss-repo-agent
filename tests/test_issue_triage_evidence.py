@@ -32,6 +32,24 @@ class GitHubReadTests(unittest.TestCase):
         self.assertEqual(result["failure_class"], "retryable_read")
         self.assertFalse(result["mutated"])
 
+    def test_comments_shape_accepts_gh_issue_view_ids(self):
+        from lokay.steps import issue_triage_evidence as evidence
+
+        comments = evidence._comments_shape(
+            [
+                {
+                    "id": "IC_kwDOExample",
+                    "url": "https://github.com/owner/repo/issues/4#issuecomment-99",
+                    "author": {"login": "maintainer"},
+                    "authorAssociation": "MEMBER",
+                    "createdAt": "2026-07-29T09:00:00Z",
+                    "body": "Need more detail",
+                }
+            ]
+        )
+        self.assertEqual(comments[0]["databaseId"], 99)
+        self.assertEqual(comments[0]["id"], "IC_kwDOExample")
+
     def test_repository_state_pins_exact_oid(self):
         repository = {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}}
         with mock.patch.object(evidence, "run_cmd", side_effect=[proc(json.dumps(repository)), proc(OID + "\n")]) as run:

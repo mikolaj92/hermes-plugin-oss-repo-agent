@@ -118,20 +118,37 @@ def read_triage_issue_state(request: Request) -> Result:
         return _bad("malformed_issue_payload", error=str(exc), **ident)
 
 
+def _comment_database_id(item: Mapping[str, Any]) -> int | None:
+    value = item.get("databaseId")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    url = str(item.get("url") or "")
+    match = re.search(r"issuecomment-(\d+)", url)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def _comments_shape(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         raise ValueError("malformed_comments_payload")
     comments: list[dict[str, Any]] = []
     for item in value:
-        if not isinstance(item, Mapping) or isinstance(item.get("databaseId"), bool) or not isinstance(item.get("databaseId"), int) or item["databaseId"] <= 0:
+        if not isinstance(item, Mapping):
+            raise ValueError("malformed_comments_payload")
+        database_id = _comment_database_id(item)
+        node_id = item.get("id")
+        if database_id is None and not (isinstance(node_id, str) and node_id.strip()):
             raise ValueError("malformed_comments_payload")
         if not isinstance(item.get("body"), str) or not _timestamp(item.get("createdAt")):
             raise ValueError("malformed_comments_payload")
         author = item.get("author")
         if not isinstance(author, Mapping) or not isinstance(author.get("login"), str) or not author["login"].strip():
             raise ValueError("malformed_comments_payload")
-        association = item.get("authorAssociation")
-        comments.append(dict(item))
+        normalized = dict(item)
+        if database_id is not None:
+            normalized["databaseId"] = database_id
+        comments.append(normalized)
     return comments
 
 

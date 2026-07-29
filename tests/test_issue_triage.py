@@ -218,6 +218,45 @@ class MutationAtomTests(unittest.TestCase):
         self.assertEqual(result["status"], "feedback_verified", result)
         self.assertEqual(result["comment"]["id"], "IC_kwDOExample")
 
+    def test_feedback_dedupes_existing_issue_marker_prefix(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        classification = payload("needs_feedback", question="Which behavior?")
+        digest = issue_triage.decision_digest(classification)
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 4,
+                "dry_run": False,
+                "conduction": {
+                    "read_triage_labels": {
+                        "ok": True,
+                        "status": "triage_labels_read",
+                        "labels": [],
+                        "comments": [
+                            {
+                                "id": "IC_old",
+                                "body": "Please provide maintainer confirmation for this issue.\n\n<!-- lokay:issue-triage:owner/repo:4:olddigest -->",
+                            }
+                        ],
+                    },
+                    "decide_triage_mutation": {"ok": True, "status": "mutation_decided", "action": "feedback", "classification": "needs_feedback"},
+                    "classify_triage_issue": {
+                        "ok": True,
+                        "status": "classified",
+                        "classification": classification,
+                        "action": "needs_feedback",
+                        "question": "Which behavior?",
+                        "decision_digest": digest,
+                    },
+                },
+            }
+        }
+        result = m.post_triage_feedback(request)
+        self.assertEqual(result["status"], "noop", result)
+        self.assertEqual(result["reason"], "feedback_already_posted")
+        self.assertEqual(result["comment_id"], "IC_old")
+
     def test_mutation_atoms_use_conducted_repo_number_identity(self):
         from lokay.steps import issue_triage_mutations as m
 
