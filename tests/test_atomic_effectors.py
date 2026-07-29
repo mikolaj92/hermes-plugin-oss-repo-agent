@@ -281,7 +281,10 @@ class IntakeAlignedTests(unittest.TestCase):
         self.assertFalse(assign["mutated"])
         with mock.patch("lokay.steps.claim.run_cmd") as run_cmd:
             run_cmd.side_effect = [
-                mock.Mock(stdout="", returncode=0),
+                mock.Mock(stdout=json.dumps([]), returncode=0),  # list labels
+                mock.Mock(stdout="", returncode=0),  # create label
+                mock.Mock(stdout=json.dumps([{"name": "ai:in-progress"}]), returncode=0),  # re-list
+                mock.Mock(stdout="", returncode=0),  # issue edit
                 mock.Mock(
                     stdout=json.dumps(
                         {
@@ -290,7 +293,7 @@ class IntakeAlignedTests(unittest.TestCase):
                         }
                     ),
                     returncode=0,
-                ),
+                ),  # verify view
             ]
             labeled = claim.add_issue_label(
                 req(
@@ -324,16 +327,10 @@ class IntakeAlignedTests(unittest.TestCase):
                     }
                 )
             )
-        self.assertEqual(run_cmd.call_count, 2)
-        self.assertEqual(
-            run_cmd.call_args_list[0].args[0][:5],
-            ["gh", "issue", "edit", "3590", "--repo"],
-        )
-        self.assertIn("--add-label", run_cmd.call_args_list[0].args[0])
-        self.assertEqual(
-            run_cmd.call_args_list[1].args[0][:5],
-            ["gh", "issue", "view", "3590", "--repo"],
-        )
+        self.assertEqual(run_cmd.call_count, 5)
+        self.assertEqual(run_cmd.call_args_list[0].args[0][:3], ["gh", "label", "list"])
+        self.assertIn("--add-label", run_cmd.call_args_list[3].args[0])
+        self.assertEqual(run_cmd.call_args_list[4].args[0][:3], ["gh", "issue", "view"])
         self.assertEqual(verified["status"], "claim_verified")
         self.assertTrue(verified["verified"])
         self.assertIn("ai:in-progress", verified["labels"])
@@ -362,6 +359,128 @@ class IntakeAlignedTests(unittest.TestCase):
                 )
             )
         self.assertEqual(tasks["status"], "intake_tasks_read")
+
+    def test_missing_required_label_fails_claim_verification(self) -> None:
+        selected = self._selected(3590)
+        reserve = {"status": "claim_reserved", "ok": True, "selected": selected, "claim_path": "/tmp/claim.json"}
+        state = {
+            "status": "claim_state_read",
+            "ok": True,
+            "repo": "o/r",
+            "number": 3590,
+            "assignees": ["mikolaj92"],
+            "labels": ["ai:ready"],
+            "selected": selected,
+        }
+        assign = {
+            "status": "issue_assigned",
+            "ok": True,
+            "reused": True,
+            "mutated": False,
+            "assignee": "mikolaj92",
+            "repo": "o/r",
+            "number": 3590,
+        }
+        out = claim.verify_issue_claim(
+            req(
+                {
+                    "dry_run": False,
+                    "selected": selected,
+                    "assignee": "mikolaj92",
+                    "conduction": {
+                        "reserve_claim_file": reserve,
+                        "read_issue_claim_state": state,
+                        "assign_issue": assign,
+                        "intake_add_issue_label": {
+                            "status": "failed",
+                            "ok": False,
+                            "reason": "add_issue_label_failed",
+                            "mutated": True,
+                        },
+                    },
+                }
+            )
+        )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "upstream_failed")
+
+    def test_add_issue_label_provisions_missing_label(self) -> None:
+        selected = self._selected(3590)
+        state = {
+            "status": "claim_state_read",
+            "ok": True,
+            "repo": "o/r",
+            "number": 3590,
+            "assignees": ["mikolaj92"],
+            "labels": ["ai:ready"],
+            "selected": selected,
+        }
+        assign = {
+            "status": "issue_assigned",
+            "ok": True,
+            "reused": True,
+            "mutated": False,
+            "assignee": "mikolaj92",
+        }
+        with mock.patch("lokay.steps.claim.run_cmd") as run_cmd:
+            run_cmd.side_effect = [
+                mock.Mock(stdout=json.dumps([]), returncode=0),  # list labels
+                mock.Mock(stdout="", returncode=0),  # create label
+                mock.Mock(stdout=json.dumps([{"name": "ai:in-progress"}]), returncode=0),  # re-list
+                mock.Mock(stdout="", returncode=0),  # issue edit
+            ]
+            out = claim.add_issue_label(
+                req(
+                    {
+                        "dry_run": False,
+                        "selected": selected,
+                        "label": "ai:in-progress",
+                        "conduction": {
+                            "reserve_claim_file": {"status": "claim_reserved", "ok": True, "selected": selected},
+                            "read_issue_claim_state": state,
+                            "assign_issue": assign,
+                        },
+                    }
+                )
+            )
+        self.assertEqual(out["status"], "issue_label_added")
+        self.assertTrue(out["mutated"])
+        self.assertTrue(out.get("provisioned"))
+        self.assertEqual(run_cmd.call_count, 4)
+        self.assertEqual(run_cmd.call_args_list[0].args[0][:3], ["gh", "label", "list"])
+        self.assertEqual(run_cmd.call_args_list[1].args[0][:3], ["gh", "label", "create"])
+        self.assertEqual(run_cmd.call_args_list[3].args[0][:3], ["gh", "issue", "edit"])
+
+    def test_dispatch_board_resolves_from_intake_selected(self) -> None:
+        board = issue_to_pr._atomic_board(
+            req(
+                {
+                    "conduction": {
+                        "intake_build_issue_claim_result": {
+                            "status": "claimed",
+                            "ok": True,
+                            "selected": {"repo": "o/r", "number": 3590, "board": "mikolaj92-temida"},
+                        }
+                    }
+                }
+            )
+        )
+        self.assertEqual(board, "mikolaj92-temida")
+        board2 = issue_to_pr._atomic_board(
+            req(
+                {
+                    "conduction": {
+                        "intake_reconcile_intake_task": {
+                            "status": "intake_reconciled",
+                            "ok": True,
+                            "board": "mikolaj92-temida",
+                            "task_id": "t1",
+                        }
+                    }
+                }
+            )
+        )
+        self.assertEqual(board2, "mikolaj92-temida")
 
     def test_kanban_dry_run_chain(self) -> None:
         selected = self._selected(1)

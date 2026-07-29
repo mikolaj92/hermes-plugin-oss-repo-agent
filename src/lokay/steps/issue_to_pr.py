@@ -8,7 +8,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from dataclasses import dataclass
 
 from lokay.envelope import Request, Result
@@ -384,7 +384,45 @@ _DISPATCH_TAIL_ANCESTRY = (
 )
 def _atomic_board(request: Request) -> str:
     data, cfg = input_of(request), cfg_of(request)
-    return str(data.get("board") or cond_get(request, "board", "read_dispatch_tasks", "read_fix_tasks") or cfg.get("board") or "")
+    selected = data.get("selected") if isinstance(data.get("selected"), Mapping) else {}
+    if not isinstance(selected, dict):
+        selected = {}
+    board = str(
+        data.get("board")
+        or selected.get("board")
+        or cond_get(
+            request,
+            "board",
+            "read_dispatch_tasks",
+            "read_fix_tasks",
+            "reconcile_intake_task",
+            "create_intake_task",
+            "read_intake_tasks",
+            "find_intake_marker",
+            "build_issue_claim_result",
+            "select_issue_candidate",
+            "reserve_claim_file",
+        )
+        or cfg.get("board")
+        or ""
+    )
+    if board:
+        return board
+    for effector_id in (
+        "reconcile_intake_task",
+        "create_intake_task",
+        "read_intake_tasks",
+        "find_intake_marker",
+        "build_issue_claim_result",
+        "select_issue_candidate",
+        "reserve_claim_file",
+    ):
+        blob = cond_blob(request, effector_id)
+        nested = blob.get("selected") if isinstance(blob.get("selected"), Mapping) else {}
+        candidate = str(blob.get("board") or (nested.get("board") if isinstance(nested, Mapping) else "") or "")
+        if candidate:
+            return candidate
+    return ""
 
 
 def _atomic_repo(request: Request) -> str:

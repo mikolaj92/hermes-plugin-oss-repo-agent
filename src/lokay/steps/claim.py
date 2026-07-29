@@ -221,20 +221,53 @@ def assign_issue(request: Request) -> Result:
 
 
 def add_issue_label(request: Request) -> Result:
-    """Add exactly one configured label to the issue."""
+    """Add exactly one configured label to the issue, provisioning it if needed."""
     from lokay.envelope import cond_blob, terminal_upstream
     terminal=terminal_upstream(request,"add_issue_label","read_issue_claim_state","reserve_claim_file")
     if terminal: return terminal
     idle = upstream_noop(request, "read_issue_claim_state", "reserve_claim_file", "assign_issue")
     if idle:
         return noop(str(idle.get("reason") or "no_selected_issue"), operation="add_issue_label")
-    data=input_of(request); cfg=cfg_of(request); state=cond_blob(request,"read_issue_claim_state"); repo=str(data.get("repo") or state.get("repo") or ""); number=data.get("number") or state.get("number") or 0; label=str(data.get("label") or cfg.get("label") or ""); labels=set(state.get("labels") or [])
+    data=input_of(request); cfg=cfg_of(request); state=cond_blob(request,"read_issue_claim_state"); repo=str(data.get("repo") or state.get("repo") or ""); number=data.get("number") or state.get("number") or 0; label=str(data.get("label") or cfg.get("label") or cfg.get("in_progress_label") or ""); labels=set(state.get("labels") or []); gh=str(cfg.get("gh_cli") or "gh")
     if not label: return fail("missing_label",failure_class="terminal",retry_safe=False,repo=repo,number=number)
     if label in labels: return ok(status="issue_label_added",mutated=False,reused=True,repo=repo,number=number,label=label,dry_run=dry_run_flag(request))
     if dry_run_flag(request): return planned(repo=repo,number=number,label=label)
-    try: run_cmd([str(cfg.get("gh_cli") or "gh"),"issue","edit",str(number),"--repo",repo,"--add-label",label],timeout=60)
-    except (CommandError,subprocess.TimeoutExpired) as exc: return fail("add_issue_label_failed",failure_class="reconcile_then_retry",retry_safe=False,error=str(exc),mutated=True,repo=repo,number=number,label=label)
-    return ok(status="issue_label_added",mutated=True,repo=repo,number=number,label=label)
+    provisioned=False
+    try:
+        listed=run_cmd([gh,"label","list","--repo",repo,"--limit","200","--json","name"],timeout=60)
+        available=json.loads((listed.stdout or "").strip() or "[]")
+        if not isinstance(available,list):
+            raise ValueError("invalid label list")
+        matches=[item for item in available if isinstance(item,dict) and str(item.get("name") or "").casefold()==label.casefold()]
+        if len(matches)>1:
+            return fail("ambiguous_configured_label",failure_class="terminal",retry_safe=False,repo=repo,number=number,label=label)
+        if not matches:
+            color=str(data.get("label_color") or cfg.get("label_color") or "FBCA04")
+            description=str(data.get("label_description") or cfg.get("label_description") or "Issue currently being handled by repo-agent")
+            create=[gh,"label","create",label,"--repo",repo,"--color",color]
+            if description:
+                create.extend(["--description",description])
+            try:
+                run_cmd(create,timeout=60)
+                provisioned=True
+            except CommandError as exc:
+                # Concurrent create races resolve by re-listing.
+                if "already exists" not in str(exc).casefold():
+                    raise
+            after=run_cmd([gh,"label","list","--repo",repo,"--limit","200","--json","name"],timeout=60)
+            available=json.loads((after.stdout or "").strip() or "[]")
+            matches=[item for item in available if isinstance(item,dict) and str(item.get("name") or "").casefold()==label.casefold()]
+            if len(matches)!=1:
+                return fail("label_provision_readback_mismatch",failure_class="reconcile_then_retry",retry_safe=False,mutated=provisioned,repo=repo,number=number,label=label)
+            label=str(matches[0].get("name") or label)
+        else:
+            label=str(matches[0].get("name") or label)
+        run_cmd([gh,"issue","edit",str(number),"--repo",repo,"--add-label",label],timeout=60)
+    except (CommandError,subprocess.TimeoutExpired) as exc:
+        return fail("add_issue_label_failed",failure_class="reconcile_then_retry",retry_safe=False,error=str(exc),mutated=True,repo=repo,number=number,label=label,provisioned=provisioned)
+    except (TypeError,ValueError,json.JSONDecodeError) as exc:
+        return fail("add_issue_label_failed",failure_class="terminal",retry_safe=False,error=str(exc),mutated=provisioned,repo=repo,number=number,label=label,provisioned=provisioned)
+    return ok(status="issue_label_added",mutated=True,repo=repo,number=number,label=label,provisioned=provisioned)
 
 
 def verify_issue_claim(request: Request) -> Result:
@@ -245,10 +278,12 @@ def verify_issue_claim(request: Request) -> Result:
     idle = upstream_noop(request, "read_issue_claim_state", "reserve_claim_file", "assign_issue", "intake_add_issue_label")
     if idle:
         return noop(str(idle.get("reason") or "no_selected_issue"), operation="verify_issue_claim")
-    data=input_of(request); cfg=cfg_of(request); state=cond_blob(request,"read_issue_claim_state"); assign=cond_blob(request,"assign_issue"); labels=cond_blob(request,"intake_add_issue_label"); selected=data.get("selected") or state.get("selected") or {}; repo=str(data.get("repo") or state.get("repo") or selected.get("repo") or ""); number=data.get("number") or state.get("number") or selected.get("number") or selected.get("issue") or 0; assignee=str(data.get("assignee") or assign.get("assignee") or cfg.get("assignee") or "mikolaj92"); required=set(data.get("required_labels") or labels.get("required_labels") or ([labels.get("label")] if labels.get("label") else [])); mutated=bool(assign.get("mutated") or labels.get("mutated"))
+    data=input_of(request); cfg=cfg_of(request); state=cond_blob(request,"read_issue_claim_state"); assign=cond_blob(request,"assign_issue"); labels=cond_blob(request,"intake_add_issue_label"); selected=data.get("selected") or state.get("selected") or {}; repo=str(data.get("repo") or state.get("repo") or selected.get("repo") or ""); number=data.get("number") or state.get("number") or selected.get("number") or selected.get("issue") or 0; assignee=str(data.get("assignee") or assign.get("assignee") or cfg.get("assignee") or "mikolaj92"); required_label=str(data.get("label") or cfg.get("label") or cfg.get("in_progress_label") or labels.get("label") or ""); required=set(data.get("required_labels") or labels.get("required_labels") or ([required_label] if required_label else [])); mutated=bool(assign.get("mutated") or labels.get("mutated"))
     if dry_run_flag(request): return ok(status="claim_verified",verified=False,mutated=False,dry_run=True,assignee=assignee,required_labels=sorted(required),repo=repo,number=number)
     if not repo or isinstance(number,bool) or not isinstance(number,int) or number<=0:
         return fail("invalid_selected_issue",failure_class="terminal",retry_safe=False,selected=selected)
+    if not required:
+        return fail("missing_required_labels",failure_class="terminal",retry_safe=False,repo=repo,number=number,assignee=assignee)
     try:
         proc=run_cmd([str(cfg.get("gh_cli") or "gh"),"issue","view",str(number),"--repo",repo,"--json","assignees,labels"],timeout=60)
         current=json.loads((proc.stdout or "").strip())
