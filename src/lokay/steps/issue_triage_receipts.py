@@ -86,7 +86,11 @@ def _receipt_path(root: Any, repo: Any, issue: Any, stage: Any, identity: Any) -
     else:
         identity = _component(raw_identity, "receipt_identity")
         if stage == "feedback-verified":
-            if not identity.isdigit() or int(identity) <= 0:
+            # Legacy pure comment ids remain readable; current writes use
+            # comment_id-decision_digest so reclassification cannot collide.
+            if identity.isdigit() and int(identity) > 0:
+                pass
+            elif not re.fullmatch(r"[1-9][0-9]*-[0-9a-f]{64}", identity):
                 raise ValueError("invalid_comment_id")
         elif not re.fullmatch(r"[0-9a-f]{64}", identity):
             raise ValueError("invalid_decision_digest")
@@ -389,7 +393,11 @@ def _stage_request(request: Request, stage: str) -> Result:
         repo, _, issue = _identity({**data, **payload}, cfg, request, *_receipt_upstream(request, stage))
         identity = data.get("identity") or payload.get("updated_at") or payload.get("decision_digest") or payload.get("comment_id")
         if stage == "feedback-verified":
-            identity = payload.get("comment_id") or data.get("database_id") or identity
+            comment_id = payload.get("comment_id") or data.get("database_id") or data.get("comment_id")
+            digest = str(payload.get("decision_digest") or data.get("decision_digest") or "")
+            if comment_id in (None, "") or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("unsafe_receipt_identity")
+            identity = f"{comment_id}-{digest}"
         elif stage in {"mutation-authorized", "mutation-verified", "close-authorized", "close-verified"}:
             identity = payload.get("decision_digest") or identity
         path = _receipt_path(root, repo, issue, stage, identity)
@@ -461,14 +469,15 @@ def read_triage_receipt_index(request: Request) -> Result:
     except (OSError, TypeError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
         return fail("triage_receipt_index_failed", error=str(exc))
 
-
 def _reduce(receipts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+
     entries = [dict(item) for item in receipts if isinstance(item, Mapping)]
     entries.sort(key=lambda item: str(item.get("receipt_path") or ""))
     pending: list[dict[str, Any]] = []
     terminal_digests: set[str] = set()
     latest_feedback_watermark: str | None = None
     latest_decision_watermark: str | None = None
+    latest_decision_digest: str | None = None
     decision_digests: set[str] = set()
     for item in entries:
         stage = str(item.get("stage") or "")
@@ -482,6 +491,9 @@ def _reduce(receipts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                 decision_digests.add(digest)
             if watermark is not None and (latest_decision_watermark is None or str(watermark) > latest_decision_watermark):
                 latest_decision_watermark = str(watermark)
+                latest_decision_digest = digest or latest_decision_digest
+            elif latest_decision_digest is None and digest:
+                latest_decision_digest = digest
         if stage in {"mutation-verified", "feedback-verified", "close-verified"} or verified in {"verified", "succeeded", "closed"}:
             if digest:
                 terminal_digests.add(digest)
@@ -491,6 +503,9 @@ def _reduce(receipts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         if stage in {"mutation-authorized", "close-authorized"} or attempted in {"planned", "attempted", "uncertain", "started"}:
             if not digest or digest not in terminal_digests:
                 pending.append(item)
+    # Superseded decisions must not keep the issue permanently reconcile_pending.
+    if latest_decision_digest and latest_decision_watermark is not None:
+        pending = [item for item in pending if str(item.get("decision_digest") or "") == latest_decision_digest]
     pending = [item for item in pending if str(item.get("decision_digest") or "") not in terminal_digests]
     return {
         "receipts": entries,

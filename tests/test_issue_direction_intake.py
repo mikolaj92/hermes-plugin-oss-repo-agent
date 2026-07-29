@@ -196,6 +196,54 @@ class IssueDirectionIntakeTests(unittest.TestCase):
         self.assertEqual(planned["status"], "planned")
         self.assertIn("lokay:owner/repo:99:issue-direction", planned["comment_marker"])
 
+    def test_default_comment_marker_is_consistent_without_config(self) -> None:
+        poll = self._poll()
+        expected = "lokay:intake:owner/repo:99:out_of_direction"
+        read = {
+            "status": "comments_read",
+            "ok": True,
+            "comments": [],
+            "selected": poll["selected"],
+            "repo": "owner/repo",
+            "number": 99,
+        }
+        decided = issue_direction.decide_issue_comment(
+            req({"conduction": {"read_issue_comments": read}, "dry_run": False})
+        )
+        self.assertEqual(decided["comment_marker"], expected)
+        self.assertTrue(decided["should_post"])
+        planned = issue_direction.post_issue_comment(
+            req(
+                {
+                    "dry_run": True,
+                    "conduction": {
+                        "read_issue_comments": read,
+                        "decide_issue_comment": decided,
+                    },
+                }
+            )
+        )
+        self.assertEqual(planned["status"], "planned")
+        self.assertEqual(planned["comment_marker"], expected)
+        verified = issue_direction.verify_issue_comment(
+            req(
+                {
+                    "dry_run": True,
+                    "conduction": {
+                        "post_issue_comment": {
+                            "ok": True,
+                            "status": "comment_posted",
+                            "repo": "owner/repo",
+                            "number": 99,
+                        },
+                        "read_issue_comments": read,
+                    },
+                }
+            )
+        )
+        self.assertEqual(verified["status"], "comment_verified")
+        self.assertEqual(verified["comment_marker"], expected)
+
 
 if __name__ == "__main__":
     unittest.main()

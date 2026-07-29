@@ -477,11 +477,18 @@ def post_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
     if existing:
         existing.sort(key=lambda item: str(item.get("createdAt") or ""))
         chosen = existing[-1]
+        body = str(chosen.get("body") or "")
+        posted_digest = digest
+        if "<!-- lokay:issue-triage:" in body:
+            tail = body.rsplit(":", 1)[-1]
+            extracted = tail.removesuffix(" -->").strip()
+            if re.fullmatch(r"[0-9a-f]{64}", extracted):
+                posted_digest = extracted
         return noop(
             "feedback_already_posted",
-            marker=str(chosen.get("body") or marker),
+            marker=body or marker,
             comment_id=_comment_id(chosen),
-            decision_digest=digest,
+            decision_digest=posted_digest,
             matches=len(existing),
             **_identity(request),
         )
@@ -549,7 +556,15 @@ def verify_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
             return fail("feedback_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, mutated=True, marker=marker, **_identity(request))
         comment = matches[0]
         comment_id = _comment_id(comment)
-        digest = _digest(request)
+        body = str(comment.get("body") or "")
+        digest = ""
+        if "<!-- lokay:issue-triage:" in body:
+            tail = body.rsplit(":", 1)[-1]
+            extracted = tail.removesuffix(" -->").strip()
+            if re.fullmatch(r"[0-9a-f]{64}", extracted):
+                digest = extracted
+        if not digest:
+            digest = _digest(request)
         if not digest:
             digest = str(post.get("decision_digest") or "")
         if not digest and "<!-- lokay:issue-triage:" in marker:

@@ -372,6 +372,22 @@ def decide_issue_action(request: Request) -> Result:
     )
 
 
+def _issue_comment_marker(*sources: Mapping[str, Any] | None, repo: str = "", number: Any = 0) -> str:
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        value = str(source.get("comment_marker") or "").strip()
+        if value:
+            return value
+    repo_text = str(repo or "").strip()
+    try:
+        issue = int(number)
+    except (TypeError, ValueError):
+        issue = 0
+    if repo_text and not isinstance(number, bool) and issue > 0:
+        return f"lokay:intake:{repo_text}:{issue}:out_of_direction"
+    return "lokay:intake:out_of_direction"
+
 def read_issue_comments(request: Request) -> Result:
     """Read comments for one issue; no policy or mutation."""
     from lokay.envelope import terminal_upstream
@@ -384,7 +400,7 @@ def read_issue_comments(request: Request) -> Result:
     data = input_of(request); cfg = cfg_of(request); selected = data.get("selected") or cond_blob(request, "select_issue_candidate", "decide_issue_action").get("selected") or {}
     if not isinstance(selected, dict): selected = {}
     repo = str(data.get("repo") or selected.get("repo") or cfg.get("repo") or ""); number = data.get("number") or data.get("issue") or selected.get("number") or 0; gh = str(cfg.get("gh_cli") or "gh")
-    context={"repo":repo,"number":number,"comment_marker":str(data.get("comment_marker") or "")}
+    context={"repo":repo,"number":number,"comment_marker":_issue_comment_marker(data, cfg, repo=repo, number=number)}
     if not repo or isinstance(number, bool) or not isinstance(number, int) or number <= 0: return fail("missing_repo_or_number", failure_class="terminal", retry_safe=False, **context)
     try: view=run_cmd([gh,"issue","view",str(number),"--repo",repo,"--json","comments"],timeout=60)
     except CommandError as exc: return fail("comment_read_failed",failure_class="retryable_read",retry_safe=True,error=str(exc),mutated=False,**context)
@@ -404,7 +420,7 @@ def decide_issue_comment(request: Request) -> Result:
     idle = upstream_noop(request, "read_issue_comments", "select_issue_candidate", "decide_issue_action")
     if idle:
         return noop(str(idle.get("reason") or "no_selected_issue"), operation="decide_issue_comment")
-    data=input_of(request); read=cond_blob(request,"read_issue_comments"); comments=data.get("comments") if isinstance(data.get("comments"),list) else read.get("comments",[]); marker=str(data.get("comment_marker") or read.get("comment_marker") or "")
+    data=input_of(request); read=cond_blob(request,"read_issue_comments"); comments=data.get("comments") if isinstance(data.get("comments"),list) else read.get("comments",[]); repo=str(data.get("repo") or read.get("repo") or ""); number=data.get("number") or read.get("number") or 0; marker=_issue_comment_marker(data, read, repo=repo, number=number)
     if not isinstance(comments,list) or any(not isinstance(x,dict) for x in comments): return fail("malformed_comments",failure_class="terminal",retry_safe=False,mutated=False)
     matches=sum(str(x.get("body") or "").count(f"<!-- {marker} -->") for x in comments) if marker else 0
     if matches>1: return fail("comment_marker_conflict",failure_class="terminal",retry_safe=False,matches=matches,mutated=False)
@@ -421,7 +437,7 @@ def post_issue_comment(request: Request) -> Result:
         return noop(str(idle.get("reason") or "no_selected_issue"), operation="post_issue_comment")
     if terminal: return terminal
     data=input_of(request); decide=cond_blob(request,"decide_issue_comment"); read=cond_blob(request,"read_issue_comments"); selected=data.get("selected") or read.get("selected") or {}; cfg=cfg_of(request); dry=dry_run_flag(request)
-    should=decide.get("should_post", data.get("should_post", True)); marker=str(data.get("comment_marker") or decide.get("comment_marker") or read.get("comment_marker") or ""); repo=str(data.get("repo") or read.get("repo") or (selected.get("repo") if isinstance(selected,dict) else "")); number=data.get("number") or read.get("number") or (selected.get("number") if isinstance(selected,dict) else 0); reason=str(data.get("reason") or "out_of_direction"); body=str(data.get("body") or f"lokay intake: skipping this issue (reason={reason})."); context={"repo":repo,"number":number,"comment_marker":marker,"reason":reason,"idempotency_key":f"issue:{repo}:{number}:comment:{marker}"}
+    should=decide.get("should_post", data.get("should_post", True)); repo=str(data.get("repo") or read.get("repo") or (selected.get("repo") if isinstance(selected,dict) else "")); number=data.get("number") or read.get("number") or (selected.get("number") if isinstance(selected,dict) else 0); marker=_issue_comment_marker(data, decide, read, cfg, repo=repo, number=number); reason=str(data.get("reason") or "out_of_direction"); body=str(data.get("body") or f"lokay intake: skipping this issue (reason={reason})."); context={"repo":repo,"number":number,"comment_marker":marker,"reason":reason,"idempotency_key":f"issue:{repo}:{number}:comment:{marker}"}
     if not should: return noop("already_commented",dry_run=dry,**{key: value for key, value in context.items() if key != "reason"})
     if not repo or isinstance(number,bool) or not isinstance(number,int) or number<=0: return fail("missing_repo_or_number",failure_class="terminal",retry_safe=False,**{key: value for key, value in context.items() if key != "reason"})
     if dry: return planned(**context,body=body[:240])
@@ -436,7 +452,7 @@ def verify_issue_comment(request: Request) -> Result:
     from lokay.envelope import cond_blob, terminal_upstream
     terminal=terminal_upstream(request,"verify_issue_comment","post_issue_comment")
     if terminal: return terminal
-    data=input_of(request); post=cond_blob(request,"post_issue_comment"); read=cond_blob(request,"read_issue_comments"); repo=str(data.get("repo") or post.get("repo") or read.get("repo") or ""); number=data.get("number") or post.get("number") or read.get("number") or 0; marker=str(data.get("comment_marker") or post.get("comment_marker") or read.get("comment_marker") or ""); cfg=cfg_of(request); dry=dry_run_flag(request)
+    data=input_of(request); post=cond_blob(request,"post_issue_comment"); read=cond_blob(request,"read_issue_comments"); repo=str(data.get("repo") or post.get("repo") or read.get("repo") or ""); number=data.get("number") or post.get("number") or read.get("number") or 0; cfg=cfg_of(request); dry=dry_run_flag(request); marker=_issue_comment_marker(data, post, read, cfg, repo=repo, number=number)
     if dry or post.get("status")=="noop": return ok(status="comment_verified",verified=False,mutated=False,dry_run=dry,**{"repo":repo,"number":number,"comment_marker":marker})
     try: view=run_cmd([str(cfg.get("gh_cli") or "gh"),"issue","view",str(number),"--repo",repo,"--json","comments"],timeout=60)
     except CommandError as exc: return fail("comment_verify_read_failed",failure_class="retryable_read",retry_safe=True,error=str(exc),mutated=True,**{"repo":repo,"number":number,"comment_marker":marker})

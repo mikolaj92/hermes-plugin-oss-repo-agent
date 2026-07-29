@@ -288,6 +288,83 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(out["payload"]["verified_readback_state"], "verified")
         self.assertEqual(out["payload"]["label"], "ai:ready")
 
+    def test_feedback_receipt_identity_scopes_by_digest(self):
+        comment_id = 5117775811
+        old_digest = "c" * 64
+        new_digest = "d" * 64
+        first = self.req(
+            payload=dict(
+                self.payload,
+                stage="feedback-verified",
+                comment_id=comment_id,
+                decision_digest=old_digest,
+                verified_readback_state="verified",
+                issue_updated_at=self.payload["updated_at"],
+            ),
+            database_id=comment_id,
+            decision_digest=old_digest,
+        )
+        out1 = receipts.publish_triage_feedback_receipt(first)
+        self.assertTrue(out1["ok"], out1)
+        self.assertTrue(out1["receipt_path"].endswith(f"feedback-verified-{comment_id}-{old_digest}.json"), out1)
+        second = self.req(
+            payload=dict(
+                self.payload,
+                stage="feedback-verified",
+                comment_id=comment_id,
+                decision_digest=new_digest,
+                verified_readback_state="verified",
+                issue_updated_at="2026-07-29T12:46:45Z",
+            ),
+            database_id=comment_id,
+            decision_digest=new_digest,
+        )
+        out2 = receipts.publish_triage_feedback_receipt(second)
+        self.assertTrue(out2["ok"], out2)
+        self.assertEqual(out2["status"], "written", out2)
+        self.assertTrue(out2["receipt_path"].endswith(f"feedback-verified-{comment_id}-{new_digest}.json"), out2)
+        self.assertNotEqual(out1["receipt_path"], out2["receipt_path"])
+
+    def test_superseded_decision_pending_is_dropped(self):
+        old = dict(
+            self.payload,
+            stage="decision",
+            decision_digest="1" * 64,
+            issue_updated_at="2026-07-29T12:00:00Z",
+            updated_at="2026-07-29T12:00:00Z",
+        )
+        new = dict(
+            self.payload,
+            stage="decision",
+            decision_digest="2" * 64,
+            issue_updated_at="2026-07-29T12:30:00Z",
+            updated_at="2026-07-29T12:30:00Z",
+        )
+        auth_old = dict(
+            self.payload,
+            stage="mutation-authorized",
+            decision_digest="1" * 64,
+            mutation_attempt_state="attempted",
+            issue_updated_at="2026-07-29T12:00:00Z",
+        )
+        feedback_new = dict(
+            self.payload,
+            stage="feedback-verified",
+            decision_digest="2" * 64,
+            comment_id=99,
+            verified_readback_state="verified",
+            issue_updated_at="2026-07-29T12:30:00Z",
+        )
+        receipts.publish_triage_decision_receipt(self.req(payload=old, decision_digest=old["decision_digest"], updated_at=old["updated_at"]))
+        receipts.publish_triage_mutation_authorization(self.req(payload=auth_old, decision_digest=auth_old["decision_digest"]))
+        receipts.publish_triage_decision_receipt(self.req(payload=new, decision_digest=new["decision_digest"], updated_at=new["updated_at"]))
+        receipts.publish_triage_feedback_receipt(
+            self.req(payload=feedback_new, decision_digest=feedback_new["decision_digest"], database_id=99)
+        )
+        index = receipts.read_triage_receipt_index(self.req())["index"]
+        self.assertFalse(index["reconcile_pending"], index)
+        self.assertTrue(index["triage_verified"], index)
+
     def test_disabled_and_no_candidate_no_write_and_terminal_failure_propagates(self):
         disabled = receipts.publish_triage_decision_receipt(self.req(triage_enabled=False, payload=self.payload))
         self.assertEqual(disabled["status"], "noop")
