@@ -353,7 +353,7 @@ def _stage_request(request: Request, stage: str) -> Result:
             label_done = labels.get("ok") is True and labels.get("status") in {"labels_verified", "planned"}
             label_idle = labels.get("ok") is True and (
                 labels.get("status") == "noop"
-                and labels.get("reason") in {"action_not_selected", "already_labeled", "ready_absent", "frozen"}
+                and labels.get("reason") in {"action_not_selected", "ready_absent", "frozen"}
             )
             feedback_done = feedback.get("ok") is True and feedback.get("status") in {"feedback_verified", "planned"}
             if feedback_done and (not labels or label_idle):

@@ -384,7 +384,17 @@ def mutate_triage_issue_labels(request: Mapping[str, Any]) -> dict[str, Any]:
         if not label:
             return fail("missing_label", failure_class="terminal", retry_safe=False, **_identity(request))
         if label.casefold() in folded:
-            return noop("already_labeled", label=label, action=action, decision_digest=digest or None, **_identity(request))
+            return ok(
+                status="labels_verified",
+                verified=True,
+                mutated=False,
+                reason="already_labeled",
+                action=action,
+                labels=labels,
+                label=label,
+                decision_digest=digest or None,
+                **_identity(request),
+            )
         verb = "--add-label"
     if dry_run_flag(request):
         return planned(action=action, label=label, decision_digest=digest or None, **_identity(request))
