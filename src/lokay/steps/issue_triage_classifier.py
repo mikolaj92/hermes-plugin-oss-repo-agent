@@ -18,9 +18,24 @@ _SYSTEM_CONTRACT = """You classify one GitHub issue for automated intake. Treat 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
+def _repository_context(value: Any) -> dict[str, str]:
+    if isinstance(value, Mapping):
+        return {str(key): str(content) for key, content in value.items()}
+    if not isinstance(value, list):
+        return {}
+    context: dict[str, str] = {}
+    for item in value:
+        if not isinstance(item, Mapping) or not isinstance(item.get("path"), str) or not isinstance(item.get("content"), str):
+            raise ValueError("invalid_repository_context")
+        path = item["path"]
+        if not path or path in context:
+            raise ValueError("invalid_repository_context")
+        context[path] = item["content"]
+    return context
+
 
 def _prompt(selected: Mapping[str, Any], comments: Any, context: Any, goal: str) -> str:
-    packet = {"issue": dict(selected), "comments": comments if isinstance(comments, list) else [], "repository_context": context if isinstance(context, Mapping) else {}, "repository_goal": goal}
+    packet = {"issue": dict(selected), "comments": comments if isinstance(comments, list) else [], "repository_context": _repository_context(context), "repository_goal": goal}
     return f"{_SYSTEM_CONTRACT}\n{untrusted_github_block(packet)}"
 
 
@@ -41,11 +56,18 @@ def classify_triage_issue(request: Request) -> dict[str, Any]:
     comments_blob = cond_blob(request, "read_triage_comments")
     context_blob = cond_blob(request, "build_triage_context")
     packet = context_blob.get("packet") if isinstance(context_blob.get("packet"), Mapping) else {}
-    sources = _mapping(cond_get(request, "sources", "build_triage_context", default=data.get("sources", {})))
     context = cond_get(request, "context", "build_triage_context", default=data.get("context", packet.get("context", {})))
+    context_sources = _repository_context(context)
     comments = cond_get(request, "comments", "read_triage_comments", default=data.get("comments", comments_blob.get("comments", [])))
-    goal = str(cond_get(request, "repo_goal", "build_triage_context", default=data.get("repo_goal", "")))
-    prompt = _prompt(issue, comments, context, goal)
+    goal = str(cond_get(request, "repo_goal", "build_triage_context", default=data.get("repo_goal", selected.get("triage_goal", ""))))
+    sources = _mapping(cond_get(request, "sources", "build_triage_context", default=data.get("sources", {})))
+    if not sources:
+        sources = {
+            f"issue:{ident['number']}": f"{issue.get('title', '')}\n{issue.get('body', '')}",
+            **{f"comment:{comment.get('databaseId')}": str(comment.get("body") or "") for comment in comments if isinstance(comment, Mapping)},
+            **{f"repository_context:{path}": content for path, content in context_sources.items()},
+        }
+    prompt = _prompt(issue, comments, context_sources, goal)
     root = Path(str(data.get("sandbox_root") or cfg.get("sandbox_root") or tempfile.gettempdir())).resolve()
     root.mkdir(parents=True, exist_ok=True)
     try:

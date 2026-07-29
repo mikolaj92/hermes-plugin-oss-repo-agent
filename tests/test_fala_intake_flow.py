@@ -120,7 +120,7 @@ class TickAllHostPathTests(unittest.TestCase):
             mode="dry-run",
             repos=(
                 RepoEntry(repo="o/first", board="first-board", clone_path="/tmp/first"),
-                RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida"),
+                RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida", triage_context_paths=("CONTRIBUTING.md",)),
             ),
         )
         runner = mock.AsyncMock(return_value=self._host())
@@ -132,6 +132,8 @@ class TickAllHostPathTests(unittest.TestCase):
             self.assertNotEqual(value.get("board"), "first-board")
             self.assertNotEqual(value.get("clone_path"), "/tmp/first")
         self.assertEqual(runner.await_args.kwargs["inputs"]["repos"][1]["repo"], "o/temida")
+        self.assertEqual(runner.await_args.kwargs["inputs"]["repos"][1]["triage_context_paths"], ["CONTRIBUTING.md"])
+        self.assertEqual(inputs["intake_build_triage_context"]["triage_context_paths"], ["README.md"])
 
 
     def test_empty_auto_worker_is_idle_and_not_worked(self) -> None:

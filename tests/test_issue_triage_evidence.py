@@ -154,6 +154,17 @@ class PinnedContextTests(unittest.TestCase):
         self.assertEqual(result["packet"]["context"][0]["content"], "committed\n")
         self.assertNotIn("DIRTY SECRET", json.dumps(result))
 
+    def test_build_accepts_production_triage_context_keys(self):
+        request = self.request()
+        request["input"].pop("context_paths")
+        request["input"]["triage_context_paths"] = ["README.md"]
+        request["input"]["triage_context_max_bytes"] = 1024
+        with mock.patch.object(evidence, "read_triage_repository_state", return_value=self.remote_state()):
+            result = evidence.build_triage_context(request)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["packet"]["context_paths"], ["README.md"])
+        self.assertEqual(result["packet"]["context"][0]["content"], "committed\n")
+
     def test_invalid_path_traversal_and_cap_fail_closed(self):
         with mock.patch.object(evidence, "read_triage_repository_state", return_value=self.remote_state()):
             traversal = evidence.build_triage_context(self.request(context_paths=["../README.md"]))

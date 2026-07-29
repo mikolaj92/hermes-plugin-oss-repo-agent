@@ -269,8 +269,8 @@ def _validate_context_paths(paths: Sequence[str], *, clone_path: str | Path | No
 def _committed_context(request: Request, head: str) -> Result:
     data, cfg = input_of(request), cfg_of(request)
     clone = str(data.get("clone_path") or cfg.get("clone_path") or "").strip()
-    paths = data.get("context_paths", cfg.get("context_paths", ()))
-    cap = data.get("context_max_bytes", cfg.get("context_max_bytes", 131072))
+    paths = data.get("triage_context_paths", data.get("context_paths", cfg.get("triage_context_paths", cfg.get("context_paths", ()))))
+    cap = data.get("triage_context_max_bytes", data.get("context_max_bytes", cfg.get("triage_context_max_bytes", cfg.get("context_max_bytes", 131072))))
     try:
         cap = int(cap)
         if isinstance(cap, bool) or cap < 1:
@@ -305,6 +305,10 @@ def build_triage_context(request: Request) -> Result:
     data, cfg = input_of(request), cfg_of(request)
     ident = _identity(request, "read_triage_repository_state", "select_triage_candidate", "reserve_triage_run_budget")
     values = {**data, "selected": ident["selected"], "repo": ident["repo"] or data.get("repo"), "number": ident["number"] or data.get("number"), "clone_path": ident["clone_path"] or data.get("clone_path")}
+    selected = ident.get("selected") if isinstance(ident.get("selected"), Mapping) else {}
+    for key in ("triage_goal", "triage_context_paths", "auto_close_duplicates", "auto_close_out_of_scope"):
+        if key in selected:
+            values[key] = selected[key]
     pre = _local_snapshot({"input": values, "config": cfg})
     if not pre.get("ok"):
         return pre

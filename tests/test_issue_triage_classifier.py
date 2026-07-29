@@ -72,6 +72,22 @@ class ClassifierSandboxTests(unittest.TestCase):
             out = issue_triage_classifier.classify_triage_issue(req)
         self.assertEqual(out["status"], "planned")
         run_omp.assert_not_called()
+    @mock.patch("lokay.steps.issue_triage_classifier.run_omp")
+    def test_forwards_committed_context_packet_and_builds_sources(self, run_omp) -> None:
+        value = {"schema_version": 1, "classification": "ready", "reason": "Matches repository", "question": "", "canonical_issue": 0, "evidence": [{"kind": "repository_context", "identity": "repository_context:README.md", "quote": "Reliable issue automation"}]}
+        run_omp.return_value = {"status": "completed", "stdout": json.dumps(value)}
+        with tempfile.TemporaryDirectory() as tmp:
+            req = request(tmp)
+            req["input"].pop("context")
+            req["input"].pop("sources")
+            req["input"]["conduction"] = {
+                "build_triage_context": {"packet": {"context": [{"path": "README.md", "sha256": "0" * 64, "bytes": 26, "content": "Reliable issue automation"}]}},
+                "read_triage_issue_state": {"issue": req["input"]["selected"]},
+                "read_triage_comments": {"comments": []},
+            }
+            out = issue_triage_classifier.classify_triage_issue(req)
+        self.assertEqual(out["status"], "classified", out)
+        self.assertIn('"repository_context":{"README.md":"Reliable issue automation"}', run_omp.call_args.kwargs["prompt"])
 
 
 if __name__ == "__main__":

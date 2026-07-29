@@ -69,6 +69,10 @@ def _repo_context(entry: dict[str, Any], data: dict[str, Any], cfg: dict[str, An
         "board": str(entry.get("board") or data.get("board") or cfg.get("board") or ""),
         "clone_path": str(entry.get("clone_path") or data.get("clone_path") or ""),
         "priority": entry.get("priority", data.get("priority", 0)),
+        "triage_goal": str(entry.get("triage_goal") or data.get("triage_goal") or cfg.get("repo_goal") or ""),
+        "triage_context_paths": entry.get("triage_context_paths", data.get("triage_context_paths", cfg.get("triage_context_paths", ()))),
+        "auto_close_duplicates": entry.get("auto_close_duplicates", data.get("auto_close_duplicates", cfg.get("auto_close_duplicates", False))),
+        "auto_close_out_of_scope": entry.get("auto_close_out_of_scope", data.get("auto_close_out_of_scope", cfg.get("auto_close_out_of_scope", False))),
     }
 
 
@@ -144,6 +148,10 @@ def normalize_issue_rows(request: Request) -> Result:
                 "board": str(issue.get("board") or source.get("board") or data.get("board") or ""),
                 "clone_path": str(issue.get("clone_path") or source.get("clone_path") or data.get("clone_path") or ""),
                 "priority": issue.get("priority", source.get("priority", data.get("priority", 0))),
+                "triage_goal": str(issue.get("triage_goal") or source.get("triage_goal") or data.get("triage_goal") or ""),
+                "triage_context_paths": issue.get("triage_context_paths", source.get("triage_context_paths", data.get("triage_context_paths", ()))),
+                "auto_close_duplicates": issue.get("auto_close_duplicates", source.get("auto_close_duplicates", data.get("auto_close_duplicates", False))),
+                "auto_close_out_of_scope": issue.get("auto_close_out_of_scope", source.get("auto_close_out_of_scope", data.get("auto_close_out_of_scope", False))),
                 "number": int(issue.get("number") or 0),
                 "title": str(issue.get("title") or ""),
                 "body": str(issue.get("body") or ""),

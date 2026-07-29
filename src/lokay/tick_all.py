@@ -116,8 +116,17 @@ def _step_config(cfg: Any, *, dry_run: bool, **extra: Any) -> dict[str, Any]:
         },
         "max_active_issues": getattr(cfg.automation, "max_active_issues", 1),
         "repos": [
-            {"repo": entry.repo, "board": entry.board, "clone_path": entry.clone_path, "priority": entry.priority}
-            for entry in cfg.repos
+        {
+            "repo": entry.repo,
+            "board": entry.board,
+            "clone_path": entry.clone_path,
+            "priority": entry.priority,
+            "triage_goal": cfg.effective_triage_goal(entry),
+            "triage_context_paths": list(cfg.effective_triage_context_paths(entry)),
+            "auto_close_duplicates": cfg.effective_auto_close_duplicates(entry),
+            "auto_close_out_of_scope": cfg.effective_auto_close_out_of_scope(entry),
+        }
+        for entry in cfg.repos
         ],
         "dry_run": dry_run,
         **extra,
@@ -126,7 +135,16 @@ def _step_config(cfg: Any, *, dry_run: bool, **extra: Any) -> dict[str, Any]:
 
 def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", db_path: str = "") -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     repos = [
-        {"repo": r.repo, "board": r.board, "clone_path": r.clone_path, "priority": r.priority}
+        {
+            "repo": r.repo,
+            "board": r.board,
+            "clone_path": r.clone_path,
+            "priority": r.priority,
+            "triage_goal": cfg.effective_triage_goal(r),
+            "triage_context_paths": list(cfg.effective_triage_context_paths(r)),
+            "auto_close_duplicates": cfg.effective_auto_close_duplicates(r),
+            "auto_close_out_of_scope": cfg.effective_auto_close_out_of_scope(r),
+        }
         for r in cfg.repos
     ]
     suffix = run_id or ""
