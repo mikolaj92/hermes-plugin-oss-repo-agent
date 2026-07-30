@@ -334,7 +334,7 @@ exit 0
         layout = self._layout(db=db)
         config = layout / "deployment" / "versions" / self.candidate.name / "source" / "config.toml"
         config.chmod(0o644)
-        config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['status', 'valid']\n\n[automation]\nautomerge = true\nrequire_human_approval = false\nrequire_checks = false\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
+        config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['status', 'valid']\n\n[automation]\nautomerge = true\nrequire_human_approval = false\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
         config.chmod(0o444)
         completed = self._run("lokay_status.sh", db=db, deployment=layout / "deployment")
         self.assertNotEqual(completed.returncode, 0)
@@ -346,7 +346,7 @@ exit 0
         layout = self._layout(db=db)
         config = layout / "deployment" / "versions" / self.candidate.name / "source" / "config.toml"
         config.chmod(0o644)
-        config.write_text("automerge = true\n\n[automation]\nautomerge = false\nrequire_human_approval = false\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
+        config.write_text("automerge = true\nrequire_checks = false\n\n[automation]\nautomerge = false\nrequire_human_approval = false\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
         config.chmod(0o444)
         completed = self._run("lokay_status.sh", db=db, deployment=layout / "deployment")
         self.assertNotIn("identity-policy-config-mismatch", completed.stdout)
@@ -358,7 +358,7 @@ exit 0
         version = layout / "deployment" / "versions" / self.candidate.name
         config = version / "source" / "config.toml"
         config.chmod(0o644)
-        config.write_text("automerge = true\nrequire_human_approval = false\nrequire_checks = true\nrequire_test_evidence = true\n\n[automation]\nautomerge = false\n[executor]\nenabled = true\n", encoding="utf-8")
+        config.write_text("automerge = true\nrequire_human_approval = false\nrequire_checks = false\nrequire_test_evidence = true\n\n[automation]\nautomerge = false\nrequire_checks = true\n[executor]\nenabled = true\n", encoding="utf-8")
         config.chmod(0o444)
         manifest_path = version / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -543,7 +543,7 @@ exit 0
         version = layout / "deployment" / "versions" / self.candidate.name
         config = version / "source" / "config.toml"
         config.chmod(0o644)
-        config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['health', 'valid']\n\n[automation]\nautomerge = true\nrequire_human_approval = false\nrequire_checks = false\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
+        config.write_text("mode = 'dry-run'\nnote = 'literal # is data'\ntags = ['health', 'valid']\n\n[automation]\nautomerge = true\nrequire_human_approval = false\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
         config.chmod(0o444)
         manifest_path = version / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

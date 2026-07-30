@@ -124,6 +124,31 @@ class LifecycleReconcileTests(unittest.TestCase):
         pending["triage_decide_triage_action"] = decision
         self.assertEqual(self._decide(pending)["outcome"], "wait_pending_checks")
 
+    def test_missing_evidence_resumes_repair_without_configured_checks(self):
+        decision = {
+            "ok": True,
+            "status": "decided",
+            "action": "repair",
+            "reason": "missing_test_evidence",
+        }
+        no_checks = self._conduction(checks=[])
+        no_checks["triage_decide_triage_action"] = decision
+        request = {
+            "input": self.data | {"conduction": no_checks},
+            "config": self.config | {"require_checks": False, "require_test_evidence": True},
+        }
+        result = cleanup_reconcile.decide_lifecycle_transition(request)
+        self.assertEqual(result["outcome"], "resume_repair")
+        self.assertEqual(result["repair_reason"], "missing_test_evidence")
+
+    def test_pending_checks_still_wait_when_checks_are_not_required(self):
+        pending = self._conduction(checks=[{"state": "IN_PROGRESS", "conclusion": ""}])
+        request = {
+            "input": self.data | {"conduction": pending},
+            "config": self.config | {"require_checks": False, "require_test_evidence": True},
+        }
+        self.assertEqual(cleanup_reconcile.decide_lifecycle_transition(request)["outcome"], "wait_pending_checks")
+
 
 
     def test_merged_and_closed_are_finalized(self):
