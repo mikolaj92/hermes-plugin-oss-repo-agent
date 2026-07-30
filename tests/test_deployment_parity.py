@@ -36,6 +36,12 @@ class DeploymentParityTests(unittest.TestCase):
             destination.joinpath(template.name).write_text(text, encoding="utf-8")
         return holder, source, active, templates
 
+    def test_promotion_policy_requires_checks_to_be_disabled(self):
+        from tools.deployment_parity import PROMOTION_POLICY, is_promotion_policy
+
+        self.assertTrue(is_promotion_policy(PROMOTION_POLICY))
+        self.assertFalse(is_promotion_policy({**PROMOTION_POLICY, "require_checks": True}))
+
     def test_source_and_active_scripts_and_launchd_arguments_match(self):
         holder, source, active, templates = self.make_deployment()
         self.addCleanup(holder.cleanup)

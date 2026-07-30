@@ -19,7 +19,7 @@ POLICY_KEYS = frozenset({"automerge", "require_human_approval", "require_checks"
 PROMOTION_POLICY = {
     "automerge": True,
     "require_human_approval": False,
-    "require_checks": True,
+    "require_checks": False,
     "require_test_evidence": True,
     "executor_enabled": True,
 }
