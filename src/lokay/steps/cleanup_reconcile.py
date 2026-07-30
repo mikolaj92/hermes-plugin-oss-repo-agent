@@ -17,7 +17,7 @@ from lokay.adapters_cli import CommandError, run_cmd
 from lokay.adapters_git import parse_worktree_porcelain, worktree_list
 from lokay.envelope import Request, Result, cfg_of, cond_blob, dry_run_flag, fail, input_of, noop, ok, planned, upstream_noop
 from lokay.steps.cleanup import _publish_cleanup_receipt, _receipt_directory_lock
-from lokay.steps.claim import _claim_file, _read_claim, claim_directory_lock
+from lokay.steps.claim import _claim_file, _claims_in_directory, _read_claim, claim_directory_lock
 
 _ACTIVE_PROCESS_STATUSES = {"pending", "ready", "running", "waiting", "retry_wait", "cancel_requested"}
 _TERMINAL_PROCESS_STATUSES = {"succeeded", "failed", "cancelled", "timed_out"}
@@ -528,6 +528,69 @@ def _lifecycle_linked_numbers(pr: dict[str, Any]) -> list[int] | None:
     return sorted(set(numbers))
 
 
+def _durable_merged_lifecycle_context(request: Request) -> Result | None:
+    """Recover one claimed merged identity; GitHub readback remains authoritative."""
+    data, cfg = input_of(request), cfg_of(request)
+    claim_value = data.get("claim_path") or data.get("active_issue_path") or cfg.get("active_issue_path") or cfg.get("active_issue") or cfg.get("claim_root")
+    receipt_value = data.get("merge_receipts") or cfg.get("merge_receipts")
+    if not claim_value or not receipt_value:
+        return None
+    claim_path = Path(str(claim_value)).expanduser()
+    receipt_root = Path(str(receipt_value)).expanduser()
+    if not claim_path.exists() or not receipt_root.exists():
+        return None
+    try:
+        if claim_path.is_dir():
+            claim_rows, claim_error = _claims_in_directory(claim_path)
+            claims = [claim for _, claim in claim_rows]
+        else:
+            claim, claim_error = _read_claim(claim_path)
+            claims = [claim] if claim is not None else []
+        if claim_error or not claims:
+            raise ValueError(claim_error or "missing active claim")
+        claimed = {(str(claim.get("repo") or "").strip(), _positive_int(claim.get("issue"), "issue")) for claim in claims}
+        if not receipt_root.is_dir():
+            raise ValueError("merge receipt root is not a directory")
+        paths = sorted(receipt_root.glob("*.json"))
+        if len(paths) > 256:
+            raise ValueError("too many merge receipts")
+        identities: set[tuple[str, int, int, str, str]] = set()
+        for path in paths:
+            try:
+                receipt = _read_regular_json(path)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            provenance = receipt.get("verified_provenance")
+            receipt_repo = str(receipt.get("repo") or "")
+            if (
+                receipt.get("phase") != "MERGED"
+                or not isinstance(provenance, dict)
+                or provenance.get("source") != "github_pr_readback"
+                or provenance.get("state") != "MERGED"
+                or str(provenance.get("repo") or "") != receipt_repo
+            ):
+                continue
+            number = _positive_int(provenance.get("number"), "pr_number")
+            if receipt.get("pr") != number:
+                raise ValueError("merge receipt PR identity mismatch")
+            branch = str(provenance.get("head_ref") or "").strip()
+            head = str(provenance.get("head_oid") or "").strip()
+            branch_match = re.fullmatch(r"ai/fix/([1-9][0-9]*)(?:-[A-Za-z0-9._-]+)?", branch)
+            receipt_issue = int(branch_match.group(1)) if branch_match else 0
+            if (receipt_repo, receipt_issue) not in claimed:
+                continue
+            if not head or receipt.get("headSha") != head:
+                raise ValueError("merge receipt head identity mismatch")
+            identities.add((receipt_repo, receipt_issue, number, branch, head))
+        matches = [{"repo": item[0], "issue": item[1], "pr_number": item[2], "branch": item[3], "head_oid": item[4]} for item in sorted(identities)]
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return fail("lifecycle_durable_context_invalid", failure_class="terminal", retry_safe=False, mutated=False, error=str(exc))
+    if not matches:
+        return None
+    if len(matches) != 1:
+        return fail("lifecycle_durable_context_ambiguous", failure_class="terminal", retry_safe=False, mutated=False, count=len(matches))
+    return ok(status="resolved", mutated=False, **matches[0])
+
 def _resolve_lifecycle_context(request: Request) -> Result:
     """Resolve one lifecycle identity without choosing a configured repository."""
     data, cfg = input_of(request), cfg_of(request)
@@ -543,11 +606,14 @@ def _resolve_lifecycle_context(request: Request) -> Result:
         return upstream
     load_idle = upstream_noop(request, "triage_load_pr_fields", "load_pr_fields")
     decide_idle = upstream_noop(request, "triage_decide_triage_action", "decide_triage_action")
-    if load_idle and decide_idle:
+    durable = _durable_merged_lifecycle_context(request) if load_idle and decide_idle else None
+    if durable is not None and durable.get("ok") is not True:
+        return durable
+    if load_idle and decide_idle and durable is None:
         return noop(str(decide_idle.get("reason") or load_idle.get("reason") or "no_selected_pr"), operation="resolve_lifecycle_context", worked=False)
     load = cond_blob(request, "triage_load_pr_fields", "load_pr_fields")
     decide = cond_blob(request, "triage_decide_triage_action", "decide_triage_action", "decide")
-    conduction = [blob for blob in (load, decide) if blob]
+    conduction = [blob for blob in (load, decide, durable) if blob and blob.get("status") != "noop"]
     explicit_prs = [data.get("pr")] if isinstance(data.get("pr"), dict) else []
     triage_prs: list[dict[str, Any]] = []
     for blob in conduction:
@@ -574,7 +640,7 @@ def _resolve_lifecycle_context(request: Request) -> Result:
     repo = str(first_value("repo", "repository", "nameWithOwner") or "").strip()
     explicit_sources = [data, cfg]
     explicit_issue_raw = next((source.get(key) for source in explicit_sources for key in ("issue", "issue_number") if source.get(key) not in (None, "", [])), None)
-    issue_raw = explicit_issue_raw
+    issue_raw = explicit_issue_raw if explicit_issue_raw not in (None, "") else (durable.get("issue") if durable else None)
     pr_raw = first_value("pr_number", "number")
     branch = str(first_value("branch", "head_ref", "headRefName") or "").strip()
     head = str(first_value("head_oid", "headRefOid", "expected_head_oid") or "").strip()

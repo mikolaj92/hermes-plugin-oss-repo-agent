@@ -15,7 +15,7 @@ class LifecycleReconcileTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
         self.claim = root / "claim-owner_repo-10.json"
-        self.claim.write_text(json.dumps({"repo": "owner/repo", "issue": 10}), encoding="utf-8")
+        self.claim.write_text(json.dumps({"version": 1, "repo": "owner/repo", "issue": 10, "board": "owner-repo", "assignee": "owner", "claimedAt": "2026-01-01T00:00:00Z"}), encoding="utf-8")
         self.claim.chmod(0o600)
         self.data = {
             "repo": "owner/repo", "issue": 10, "pr_number": 11,
@@ -68,6 +68,57 @@ class LifecycleReconcileTests(unittest.TestCase):
         self.assertEqual((local["status"], local["reason"]), ("noop", "no_open_prs"))
         run_cmd.assert_not_called()
 
+    def test_lifecycle_readers_recover_one_claimed_merged_receipt(self):
+        root = Path(self.temp.name)
+        receipts = root / "merges"
+        receipts.mkdir()
+        payload = {"phase": "MERGED", "repo": "owner/repo", "pr": 11, "headSha": "abc123",
+            "verified_provenance": {"source": "github_pr_readback", "state": "MERGED", "repo": "owner/repo",
+                "number": 11, "head_ref": "ai/fix/10-recover", "head_oid": "abc123"}}
+        (receipts / "merged.json").write_text(json.dumps(payload), encoding="utf-8")
+        (receipts / "merged.json").chmod(0o600)
+        stale = receipts / "stale-issue.json"
+        stale.write_text(json.dumps({"phase": "MERGED", "repo": "owner/repo", "pr": 99, "headSha": "def456",
+            "verified_provenance": {"source": "github_pr_readback", "state": "MERGED", "repo": "owner/repo",
+                "number": 99, "head_ref": "ai/fix/9-stale", "head_oid": "def456"}}), encoding="utf-8")
+        stale.chmod(0o600)
+        conduction = {
+            "triage_load_pr_fields": {"ok": True, "status": "noop", "reason": "no_open_prs", "mutated": False},
+            "triage_decide_triage_action": {"ok": True, "status": "noop", "reason": "no_open_prs", "mutated": False},
+        }
+        request = {"input": {"conduction": conduction, "merge_receipts": str(receipts), "claim_path": str(self.claim)}, "config": self.config}
+        responses = [
+            {"number": 10, "state": "CLOSED"},
+            {"number": 11, "state": "MERGED", "headRefName": "ai/fix/10-recover", "headRefOid": "abc123",
+                "closingIssuesReferences": [{"number": 10}], "statusCheckRollup": []},
+            [],
+        ]
+        with mock.patch.object(cleanup_reconcile, "run_cmd", side_effect=[mock.Mock(stdout=json.dumps(value)) for value in responses]):
+            github = cleanup_reconcile.read_lifecycle_github_state(request)
+        self.assertEqual((github["status"], github["repo"], github["pr_number"]), ("read", "owner/repo", 11))
+        result = self._decide({"read_lifecycle_github_state": github, "read_lifecycle_local_evidence": self._local()})
+        self.assertEqual(result["outcome"], "finalize_merged")
+
+    def test_lifecycle_durable_context_deduplicates_republished_identity(self):
+        root = Path(self.temp.name)
+        receipts = root / "merges"
+        receipts.mkdir()
+        payload = {"phase": "MERGED", "repo": "owner/repo", "pr": 11, "headSha": "abc123",
+            "verified_provenance": {"source": "github_pr_readback", "state": "MERGED", "repo": "owner/repo",
+                "number": 11, "head_ref": "ai/fix/10-recover", "head_oid": "abc123"}}
+        for name in ("one.json", "two.json"):
+            path = receipts / name
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            path.chmod(0o600)
+        (receipts / "stale.json").write_text("not-json", encoding="utf-8")
+        conduction = {
+            "triage_load_pr_fields": {"ok": True, "status": "noop", "reason": "no_open_prs"},
+            "triage_decide_triage_action": {"ok": True, "status": "noop", "reason": "no_open_prs"},
+        }
+        result = cleanup_reconcile._resolve_lifecycle_context({"input": {
+            "conduction": conduction, "merge_receipts": str(receipts), "claim_path": str(self.claim)}, "config": self.config})
+        self.assertEqual((result["status"], result["repo"], result["issue"], result["pr_number"]),
+            ("resolved", "owner/repo", 10, 11))
     def test_lifecycle_context_ignores_one_noop_when_peer_has_identity(self):
         selected = {
             "number": 11,
