@@ -1503,7 +1503,7 @@ def create_pull_request(request: Request) -> Result:
             if len(rows) > 1:
                 return fail("ambiguous_existing_prs", failure_class="terminal", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], prs=rows, mutated=False)
             if rows:
-                return observed_result(rows[0], status="exists", mutated=False)
+                return fail("branch_pr_issue_mismatch", failure_class="terminal", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, prs=rows, mutated=False)
 
             try:
                 proc = run_cmd([gh, "pr", "create", "--repo", repo, "--base", base, "--head", branch, "--title", title, "--body", body], timeout=120)
