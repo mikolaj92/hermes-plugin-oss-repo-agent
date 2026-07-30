@@ -741,6 +741,60 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(out["status"], "noop")
         self.assertEqual(out["reason"], "held_claim_task_unavailable")
 
+    def test_next_dispatch_selects_fix_task_after_handoff(self) -> None:
+        issue_task = {
+            "id": "issue-1",
+            "title": "[issue] o/r#9: bug",
+            "body": "Repository: o/r\nIssue: #9\nIdempotency-Key: github-issue:o/r:9\n",
+            "status": "ready",
+        }
+        first = issue_to_pr.select_dispatch_task(req({
+            "conduction": {"read_dispatch_tasks": {"status": "read", "ok": True, "tasks": [issue_task]}},
+        }))
+        self.assertEqual(first["task_id"], "issue-1")
+        fix_task = {
+            "id": "fix-1",
+            "title": "[fix-pr] o/r#9: Fix o/r#9",
+            "body": "Repository: o/r\nIssue: #9\nIdempotency-Key: fix-pr:o/r:9\n",
+            "status": "ready",
+        }
+        second = issue_to_pr.select_dispatch_task(req({
+            "conduction": {"read_dispatch_tasks": {"status": "read", "ok": True, "tasks": [issue_task, fix_task]}},
+        }))
+        self.assertEqual(second["task_id"], "fix-1")
+        requested = issue_to_pr.select_dispatch_task(req({
+            "task_id": "issue-1",
+            "conduction": {"read_dispatch_tasks": {"status": "read", "ok": True, "tasks": [issue_task, fix_task]}},
+        }))
+        self.assertEqual(requested["status"], "noop")
+        self.assertEqual(requested["reason"], "fix_task_handoff")
+        self.assertEqual(requested["task_id"], "issue-1")
+
+    def test_fix_marker_does_not_prefix_match_another_issue(self) -> None:
+        issue_9 = {"id": "issue-9", "title": "[issue] o/r#9: bug", "status": "ready"}
+        fix_90 = {
+            "id": "fix-90", "title": "[fix-pr] o/r#90: Fix o/r#90", "status": "ready",
+            "body": "Idempotency-Key: fix-pr:o/r:90\n",
+        }
+        selected = issue_to_pr.select_dispatch_task(req({
+            "conduction": {"read_dispatch_tasks": {"status": "read", "ok": True, "tasks": [issue_9, fix_90]}},
+        }))
+        self.assertEqual(selected["task_id"], "issue-9")
+
+    def test_non_fix_task_cannot_claim_fix_marker(self) -> None:
+        impostor = {
+            "id": "issue-1", "title": "[issue] o/r#9: bug", "status": "ready",
+            "body": "Idempotency-Key: fix-pr:o/r:9\n",
+        }
+        found = issue_to_pr.find_fix_task_marker(req({
+            "conduction": {"read_fix_tasks": {
+                "status": "read", "ok": True, "repo": "o/r", "issue": 9,
+                "board": "b", "tasks": [impostor],
+            }},
+        }))
+        self.assertEqual(found["status"], "absent")
+        self.assertIsNone(found.get("task_id"))
+
     def test_absent_fix_marker_does_not_inherit_dispatch_task_id(self) -> None:
         found = issue_to_pr.find_fix_task_marker(req({
             "repos": [{"repo": "mikolaj92/Temida", "board": "mikolaj92-temida", "clone_path": "/clones/Temida"}],
@@ -769,6 +823,59 @@ class IssueToPrTests(unittest.TestCase):
         }))
         self.assertEqual(created["status"], "planned")
         self.assertNotEqual(created.get("status"), "fix_task_exists")
+
+    def test_issue_task_reconciliation_stops_before_pr_work(self) -> None:
+        fix_task = {
+            "id": "fix-1",
+            "title": "[fix-pr] o/r#9: Fix o/r#9",
+            "body": "Idempotency-Key: fix-pr:o/r:9",
+            "status": "ready",
+        }
+        with mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json", return_value=[fix_task]):
+            out = issue_to_pr.reconcile_fix_task(req({
+                "conduction": {
+                    "select_dispatch_task": {
+                        "status": "selected", "ok": True, "task_id": "issue-1",
+                        "task": {"id": "issue-1", "title": "[issue] o/r#9: bug"},
+                    },
+                    "create_fix_task": {
+                        "status": "created", "ok": True, "board": "b",
+                        "repo": "o/r", "issue": 9, "idempotency_key": "fix-pr:o/r:9",
+                    },
+                }
+            }))
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "fix_task_handoff")
+        self.assertEqual(out["source_task_id"], "issue-1")
+        self.assertEqual(out["task_id"], "fix-1")
+        downstream = issue_to_pr.read_clone_preconditions(req({
+            "conduction": {"reconcile_fix_task": out},
+        }))
+        self.assertEqual(downstream["status"], "noop")
+        self.assertEqual(downstream["reason"], "fix_task_handoff")
+
+    def test_fix_task_reconciliation_continues_to_pr_work(self) -> None:
+        fix_task = {
+            "id": "fix-1",
+            "title": "[fix-pr] o/r#9: Fix o/r#9",
+            "body": "Idempotency-Key: fix-pr:o/r:9",
+            "status": "ready",
+        }
+        with mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json", return_value=[fix_task]):
+            out = issue_to_pr.reconcile_fix_task(req({
+                "conduction": {
+                    "select_dispatch_task": {
+                        "status": "selected", "ok": True, "task_id": "fix-1", "task": fix_task,
+                    },
+                    "create_fix_task": {
+                        "status": "fix_task_exists", "ok": True, "board": "b",
+                        "repo": "o/r", "issue": 9, "task_id": "fix-1",
+                        "task": fix_task, "idempotency_key": "fix-pr:o/r:9",
+                    },
+                }
+            }))
+        self.assertEqual(out["status"], "reconciled")
+        self.assertEqual(out["task_id"], "fix-1")
 
     def test_branch_chain_resolves_from_inventory_identity(self) -> None:
         repos = [{"repo": "mikolaj92/Temida", "board": "mikolaj92-temida", "clone_path": "/clones/Temida"}]
@@ -1295,7 +1402,7 @@ class RepairTests(unittest.TestCase):
     @mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json")
     def test_review_task_reconciliation_uses_created_identity(self, kanban: mock.Mock) -> None:
         marker = "fix-pr-review:o/r:9"
-        kanban.return_value = [{"id": "task-1", "body": f"Idempotency-Key: {marker}"}]
+        kanban.return_value = [{"id": "task-1", "title": "[fix-pr-review] o/r#9", "body": f"Idempotency-Key: {marker}"}]
         out = repair.reconcile_review_task(req({
             "conduction": {
                 "decide_triage_action": {

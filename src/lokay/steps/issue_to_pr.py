@@ -633,6 +633,33 @@ def _task_matches_issue(row: Mapping[str, Any], *, repo: str, issue: int | str) 
     return marker in body or needle in title or needle in body
 
 
+def _fix_marker_for_issue_task(row: Mapping[str, Any]) -> str:
+    title = str(row.get("title") or "")
+    if not title.startswith("[issue]"):
+        return ""
+    body = str(row.get("body") or row.get("description") or "")
+    match = re.search(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)\b", title)
+    if match:
+        return f"fix-pr:{match.group(1)}:{match.group(2)}"
+    repo = re.search(r"^Repository:\s*(\S+)\s*$", body, re.M)
+    issue = re.search(r"^Issue:\s*#?([0-9]+)\s*$", body, re.M)
+    if repo and issue:
+        return f"fix-pr:{repo.group(1)}:{issue.group(1)}"
+    return ""
+
+
+def _task_has_marker(row: Mapping[str, Any], marker: str) -> bool:
+    body = str(row.get("body") or row.get("description") or "")
+    return bool(marker) and re.search(rf"^Idempotency-Key:\s*{re.escape(marker)}\s*$", body, re.M) is not None
+
+def _task_has_prefixed_marker(row: Mapping[str, Any], prefix: str, marker: str) -> bool:
+    return str(row.get("title") or "").startswith(f"[{prefix}]") and _task_has_marker(row, marker)
+
+
+def _has_fix_task(rows: list[dict[str, Any]], marker: str) -> bool:
+    return any(_task_has_prefixed_marker(row, "fix-pr", marker) for row in rows)
+
+
 def select_dispatch_task(request: Request) -> Result:
     """Select ready dispatch work, constrained to an active claim when held."""
     terminal = _atomic_terminal(request, "select_dispatch_task", "read_dispatch_tasks")
@@ -654,7 +681,13 @@ def select_dispatch_task(request: Request) -> Result:
         tid = str(row.get("id") or row.get("task_id") or "")
         state = str(row.get("status") or row.get("state") or "").lower()
         title = str(row.get("title") or "")
+        marker = _fix_marker_for_issue_task(row)
+        superseded = _has_fix_task(rows, marker)
         if requested and tid != requested:
+            continue
+        if requested and superseded:
+            return noop("fix_task_handoff", operation="select_dispatch_task", task_id=tid, marker=marker)
+        if superseded:
             continue
         if state in {"done", "completed", "archived", "blocked"}:
             continue
@@ -711,7 +744,7 @@ def find_fix_task_marker(request: Request) -> Result:
         return fail("missing_repo_or_issue", failure_class="terminal", retry_safe=False, operation="find_fix_task_marker", idempotency_key=marker)
     if rows is None:
         return fail("missing_fix_rows", failure_class="terminal", retry_safe=False, operation="find_fix_task_marker", idempotency_key=marker)
-    matches = [r for r in rows if marker in str(r.get("body") or r.get("description") or "")]
+    matches = [r for r in rows if _task_has_prefixed_marker(r, "fix-pr", marker)]
     if len(matches) > 1:
         return fail("ambiguous_fix_task", failure_class="terminal", retry_safe=False, operation="find_fix_task_marker", idempotency_key=marker, matches=matches)
     return ok(
@@ -755,8 +788,25 @@ def create_fix_task(request: Request) -> Result:
 
 
 def reconcile_fix_task(request: Request) -> Result:
-    """Read authoritative fix-task state after an uncertain create."""
-    return _reconcile_kanban_marker(request, "reconcile_fix_task", "create_fix_task", "fix-pr")
+    """Reconcile fix-task state and stop intake tasks at the handoff boundary."""
+    reconciled = _reconcile_kanban_marker(request, "reconcile_fix_task", "create_fix_task", "fix-pr")
+    if reconciled.get("ok") is not True or reconciled.get("status") in {"noop", "planned"}:
+        return reconciled
+    selected = cond_blob(request, "select_dispatch_task").get("task")
+    title = str(selected.get("title") or "") if isinstance(selected, Mapping) else ""
+    if title.startswith("[issue]"):
+        return noop(
+            "fix_task_handoff",
+            operation="reconcile_fix_task",
+            board=reconciled.get("board"),
+            repo=reconciled.get("repo"),
+            issue=reconciled.get("issue"),
+            task=reconciled.get("task"),
+            task_id=reconciled.get("task_id"),
+            source_task_id=cond_get(request, "task_id", "select_dispatch_task"),
+            marker=reconciled.get("marker"),
+        )
+    return reconciled
 
 
 def _reconcile_kanban_marker(request: Request, operation: str, peer: str, prefix: str) -> Result:
@@ -772,7 +822,7 @@ def _reconcile_kanban_marker(request: Request, operation: str, peer: str, prefix
     try: rows = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
     except CommandError as exc: return fail("reconcile_read_failed", failure_class="retryable_read", retry_safe=True, operation=operation, error=str(exc), board=board)
     if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows): return fail("invalid_reconcile_read", failure_class="terminal", retry_safe=False, operation=operation)
-    matches = [r for r in rows if marker in str(r.get("body") or r.get("description") or "")]
+    matches = [r for r in rows if _task_has_prefixed_marker(r, prefix, marker)]
     if len(matches) != 1: return fail("reconcile_conflict" if len(matches) > 1 else "created_task_unresolved", failure_class="terminal", retry_safe=False, operation=operation, matches=matches, mutated=False)
     row = matches[0]; tid = row.get("id") or row.get("task_id")
     if not tid: return fail("invalid_kanban_task_id", failure_class="terminal", retry_safe=False, operation=operation, mutated=False)

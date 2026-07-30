@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "tla-precheck": "0.1.7",
+    "typescript": "^5.9.3"
+  }
+}
