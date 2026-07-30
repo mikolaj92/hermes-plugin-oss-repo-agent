@@ -1380,10 +1380,11 @@ def normalize_pr_labels(request: Request) -> Result:
     idle = upstream_noop(request, "reconcile_pull_request")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="normalize_pr_labels")
+    reconciled = cond_blob(request, "reconcile_pull_request")
     labels = input_of(request).get("labels") or ["ai:generated", "ai:pr-opened"]
     if not isinstance(labels, list) or any(not str(label).strip() for label in labels): return fail("invalid_pr_labels", failure_class="terminal", retry_safe=False, operation="normalize_pr_labels")
     normalized = list(dict.fromkeys(str(label).strip() for label in labels))
-    return ok(status="normalized", operation="normalize_pr_labels", labels=normalized)
+    return ok(status="normalized", operation="normalize_pr_labels", labels=normalized, repo=reconciled.get("repo"), number=reconciled.get("number") or reconciled.get("pr_number"), issue=reconciled.get("issue"), board=reconciled.get("board"), task_id=reconciled.get("task_id"))
 
 
 def add_pr_label(request: Request) -> Result:
@@ -1392,64 +1393,73 @@ def add_pr_label(request: Request) -> Result:
     idle = upstream_noop(request, "normalize_pr_labels")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="add_pr_label")
-    data, cfg = input_of(request), cfg_of(request); repo, number, label = str(data.get("repo") or ""), int(data.get("number") or data.get("pr_number") or 0), str(data.get("label") or "")
-    if not repo or not number or not label: return fail("missing_pr_label_inputs", failure_class="terminal", retry_safe=False, operation="add_pr_label")
-    if dry_run_flag(request): return planned(operation="add_pr_label", repo=repo, number=number, label=label)
-    try: run_cmd([str(cfg.get("gh_cli") or "gh"), "pr", "edit", str(number), "--repo", repo, "--add-label", label], timeout=60)
-    except CommandError as exc: return fail("pr_label_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="add_pr_label", error=str(exc), label=label, mutated=True)
-    return ok(status="added", operation="add_pr_label", repo=repo, number=number, label=label, mutated=True)
+    data, cfg = input_of(request), cfg_of(request); normalized = cond_blob(request, "normalize_pr_labels")
+    repo = str(data.get("repo") or normalized.get("repo") or "")
+    number = int(data.get("number") or data.get("pr_number") or normalized.get("number") or 0)
+    labels = data.get("labels") or normalized.get("labels") or ([data.get("label")] if data.get("label") else [])
+    if not repo or not number or not isinstance(labels, list) or not labels or any(not str(label).strip() for label in labels): return fail("missing_pr_label_inputs", failure_class="terminal", retry_safe=False, operation="add_pr_label")
+    labels = [str(label).strip() for label in labels]
+    if dry_run_flag(request): return planned(operation="add_pr_label", repo=repo, number=number, labels=labels)
+    added = []
+    try:
+        for label in labels:
+            run_cmd([str(cfg.get("gh_cli") or "gh"), "pr", "edit", str(number), "--repo", repo, "--add-label", str(label)], timeout=60)
+            added.append(str(label))
+    except CommandError as exc: return fail("pr_label_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="add_pr_label", error=str(exc), labels=labels, added=added, mutated=True)
+    return ok(status="added", operation="add_pr_label", repo=repo, number=number, issue=normalized.get("issue"), board=normalized.get("board"), task_id=normalized.get("task_id"), labels=added, results=[{"ok": True, "label": label} for label in added], mutated=True)
 
 
 def aggregate_pr_label_results(request: Request) -> Result:
     terminal = _atomic_terminal(request, "aggregate_pr_label_results", "add_pr_label")
-    if terminal:
-        return terminal
+    if terminal: return terminal
     idle = upstream_noop(request, "add_pr_label")
-    if idle:
-        return noop(str(idle.get("reason") or "no_ready_task"), operation="aggregate_pr_label_results")
-    results = input_of(request).get("results") or []
+    if idle: return noop(str(idle.get("reason") or "no_ready_task"), operation="aggregate_pr_label_results")
+    labeled = cond_blob(request, "add_pr_label")
+    results = input_of(request).get("results") or labeled.get("results") or []
     if not isinstance(results, list): return fail("missing_pr_label_results", failure_class="terminal", retry_safe=False, operation="aggregate_pr_label_results")
     failed = [r for r in results if isinstance(r, dict) and r.get("ok") is False]
     if failed: return fail("partial_labels_failed" if len(failed) < len(results) else "all_labels_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="aggregate_pr_label_results", results=results, mutated=bool(results))
-    return ok(status="labeled", operation="aggregate_pr_label_results", results=results, mutated=bool(results))
+    return ok(status="labeled", operation="aggregate_pr_label_results", repo=labeled.get("repo"), number=labeled.get("number"), issue=labeled.get("issue"), board=labeled.get("board"), task_id=labeled.get("task_id"), results=results, mutated=bool(results))
 
 
 def add_issue_label(request: Request) -> Result:
     terminal = _atomic_terminal(request, "add_issue_label", "aggregate_pr_label_results")
     if terminal: return terminal
     idle = upstream_noop(request, "aggregate_pr_label_results")
-    if idle:
-        return noop(str(idle.get("reason") or "no_ready_task"), operation="add_issue_label")
-    data, cfg = input_of(request), cfg_of(request); repo, issue, label = str(data.get("repo") or ""), int(data.get("issue") or data.get("number") or 0), str(data.get("label") or "")
-    if not repo or not issue or not label: return fail("missing_issue_label_inputs", failure_class="terminal", retry_safe=False, operation="add_issue_label")
-    if dry_run_flag(request): return planned(operation="add_issue_label", repo=repo, issue=issue, label=label)
-    try: run_cmd([str(cfg.get("gh_cli") or "gh"), "issue", "edit", str(issue), "--repo", repo, "--add-label", label], timeout=60)
-    except CommandError as exc: return fail("issue_label_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="add_issue_label", error=str(exc), label=label, mutated=True)
-    return ok(status="added", operation="add_issue_label", repo=repo, issue=issue, label=label, mutated=True)
+    if idle: return noop(str(idle.get("reason") or "no_ready_task"), operation="add_issue_label")
+    data, cfg = input_of(request), cfg_of(request); labeled = cond_blob(request, "aggregate_pr_label_results")
+    repo = str(data.get("repo") or labeled.get("repo") or ""); issue = int(data.get("issue") or data.get("number") or labeled.get("issue") or 0)
+    labels = data.get("labels") or ([data.get("label")] if data.get("label") else ["ai:pr-opened"])
+    if not repo or not issue or not isinstance(labels, list) or not labels or any(not str(label).strip() for label in labels): return fail("missing_issue_label_inputs", failure_class="terminal", retry_safe=False, operation="add_issue_label")
+    if dry_run_flag(request): return planned(operation="add_issue_label", repo=repo, issue=issue, labels=labels)
+    added = []
+    try:
+        for label in labels:
+            run_cmd([str(cfg.get("gh_cli") or "gh"), "issue", "edit", str(issue), "--repo", repo, "--add-label", str(label)], timeout=60); added.append(str(label))
+    except CommandError as exc: return fail("issue_label_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="add_issue_label", error=str(exc), labels=labels, added=added, mutated=True)
+    return ok(status="added", operation="add_issue_label", repo=repo, issue=issue, board=labeled.get("board"), task_id=labeled.get("task_id"), labels=added, results=[{"ok": True, "label": label} for label in added], mutated=True)
 
 
 def aggregate_issue_label_results(request: Request) -> Result:
     terminal = _atomic_terminal(request, "aggregate_issue_label_results", "add_issue_label")
-    if terminal:
-        return terminal
+    if terminal: return terminal
     idle = upstream_noop(request, "add_issue_label")
-    if idle:
-        return noop(str(idle.get("reason") or "no_ready_task"), operation="aggregate_issue_label_results")
-    results = input_of(request).get("results") or []
+    if idle: return noop(str(idle.get("reason") or "no_ready_task"), operation="aggregate_issue_label_results")
+    labeled = cond_blob(request, "add_issue_label"); results = input_of(request).get("results") or labeled.get("results") or []
     if not isinstance(results, list): return fail("missing_issue_label_results", failure_class="terminal", retry_safe=False, operation="aggregate_issue_label_results")
     failed = [r for r in results if isinstance(r, dict) and r.get("ok") is False]
     if failed: return fail("partial_labels_failed" if len(failed) < len(results) else "all_labels_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="aggregate_issue_label_results", results=results, mutated=bool(results))
-    return ok(status="labeled", operation="aggregate_issue_label_results", results=results, mutated=bool(results))
+    return ok(status="labeled", operation="aggregate_issue_label_results", repo=labeled.get("repo"), issue=labeled.get("issue"), board=labeled.get("board"), task_id=labeled.get("task_id"), results=results, mutated=bool(results))
 
 
 def build_dispatch_receipt(request: Request) -> Result:
     terminal = _atomic_terminal(request, "build_dispatch_receipt", "aggregate_issue_label_results")
-    if terminal:
-        return terminal
+    if terminal: return terminal
     idle = upstream_noop(request, "aggregate_issue_label_results")
-    if idle:
-        return noop(str(idle.get("reason") or "no_ready_task"), operation="build_dispatch_receipt")
-    data = input_of(request); return ok(status="built", operation="build_dispatch_receipt", payload=dict(data.get("payload") or {}))
+    if idle: return noop(str(idle.get("reason") or "no_ready_task"), operation="build_dispatch_receipt")
+    data = input_of(request); labeled = cond_blob(request, "aggregate_issue_label_results")
+    payload = dict(data.get("payload") or {"repo": labeled.get("repo"), "issue": labeled.get("issue"), "board": labeled.get("board"), "task_id": labeled.get("task_id")})
+    return ok(status="built", operation="build_dispatch_receipt", receipt_path=data.get("receipt_path") or cfg_of(request).get("receipt_path"), payload=payload, repo=labeled.get("repo"), issue=labeled.get("issue"), board=labeled.get("board"), task_id=labeled.get("task_id"))
 
 
 def publish_dispatch_receipt(request: Request) -> Result:
@@ -1459,7 +1469,7 @@ def publish_dispatch_receipt(request: Request) -> Result:
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="publish_dispatch_receipt")
     data = input_of(request)
-    path = str(data.get("receipt_path") or cfg_of(request).get("receipt_path") or "")
+    path = str(data.get("receipt_path") or cfg_of(request).get("receipt_path") or cond_get(request, "receipt_path", "build_dispatch_receipt") or "")
     payload = data.get("payload") or cond_get(request, "payload", "build_dispatch_receipt")
     if not path or not isinstance(payload, dict):
         return fail("missing_receipt_inputs", failure_class="terminal", retry_safe=False, operation="publish_dispatch_receipt")
@@ -1480,7 +1490,7 @@ def verify_dispatch_receipt(request: Request) -> Result:
     idle = upstream_noop(request, "publish_dispatch_receipt", "build_dispatch_receipt")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_dispatch_receipt")
-    data = input_of(request); path = str(data.get("receipt_path") or cfg_of(request).get("receipt_path") or ""); payload = data.get("payload") or cond_get(request, "payload", "build_dispatch_receipt")
+    data = input_of(request); path = str(data.get("receipt_path") or cfg_of(request).get("receipt_path") or cond_get(request, "receipt_path", "publish_dispatch_receipt") or cond_get(request, "receipt_path", "build_dispatch_receipt") or ""); payload = data.get("payload") or cond_get(request, "payload", "build_dispatch_receipt")
     if not path or not Path(path).is_file(): return fail("receipt_missing", failure_class="terminal", retry_safe=False, operation="verify_dispatch_receipt")
     try: actual = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc: return fail("receipt_readback_failed", failure_class="terminal", retry_safe=False, operation="verify_dispatch_receipt", error=str(exc))

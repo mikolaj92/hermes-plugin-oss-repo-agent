@@ -894,6 +894,22 @@ class IssueToPrTests(unittest.TestCase):
             self.assertEqual(published["status"], "published")
             self.assertEqual(verified["status"], "verified")
 
+    def test_live_shaped_labels_and_receipt_preserve_identity(self) -> None:
+        reconciled = {"status": "reconciled", "ok": True, "repo": "o/r", "number": 2, "issue": 1, "board": "b", "task_id": "t1"}
+        normalized = issue_to_pr.normalize_pr_labels(req({"conduction": {"dispatch_reconcile_pull_request": reconciled}}))
+        with mock.patch("lokay.steps.issue_to_pr.run_cmd"):
+            pr_labeled = issue_to_pr.add_pr_label(req({"dry_run": False, "conduction": {"dispatch_normalize_pr_labels": normalized}}))
+        pr_results = issue_to_pr.aggregate_pr_label_results(req({"conduction": {"dispatch_add_pr_label": pr_labeled}}))
+        with mock.patch("lokay.steps.issue_to_pr.run_cmd"):
+            issue_labeled = issue_to_pr.add_issue_label(req({"dry_run": False, "conduction": {"dispatch_aggregate_pr_label_results": pr_results}}))
+        issue_results = issue_to_pr.aggregate_issue_label_results(req({"conduction": {"dispatch_add_issue_label": issue_labeled}}))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "dispatch.json")
+            built = issue_to_pr.build_dispatch_receipt(req({"dry_run": False, "receipt_path": path, "conduction": {"dispatch_aggregate_issue_label_results": issue_results}}))
+            published = issue_to_pr.publish_dispatch_receipt(req({"dry_run": False, "conduction": {"dispatch_build_dispatch_receipt": built}}))
+            verified = issue_to_pr.verify_dispatch_receipt(req({"dry_run": False, "conduction": {"dispatch_publish_dispatch_receipt": published, "dispatch_build_dispatch_receipt": built}}))
+        self.assertEqual([normalized["status"], pr_labeled["status"], pr_results["status"], issue_labeled["status"], issue_results["status"], published["status"], verified["status"]], ["normalized", "added", "labeled", "added", "labeled", "published", "verified"])
+        self.assertEqual(built["payload"], {"repo": "o/r", "issue": 1, "board": "b", "task_id": "t1"})
 
 class RepairTests(unittest.TestCase):
     def test_build_repair_prompt_uses_exact_linked_issue_and_lane_context(self) -> None:
