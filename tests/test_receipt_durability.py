@@ -27,6 +27,9 @@ class ReceiptDurabilityTests(unittest.TestCase):
     def test_dispatch_build_publish_verify_lifecycle(self):
         with tempfile.TemporaryDirectory() as t:
             b,p,v=self.dispatch(Path(t)/"d.json",{"phase":"DISPATCHED","issue":1}); self.assertEqual((b["status"],p["status"],v["status"]),("built","published","verified"))
+    def test_dispatch_receipt_is_private(self):
+        with tempfile.TemporaryDirectory() as t:
+            path=Path(t)/"d.json"; self.dispatch(path,{"phase":"DISPATCHED","issue":1}); self.assertEqual(path.stat().st_mode & 0o777,0o600)
     def test_merge_build_publish_verify_preserves_provenance(self):
         with tempfile.TemporaryDirectory() as t:
             b,r,p,v=self.merge(Path(t)/"m.json",{"candidate":"pr-7"}); self.assertEqual((b["status"],r["status"],p["status"],v["status"]),("merge_receipt_built","receipt_provenance_read","written","merge_receipt_verified")); self.assertEqual(json.loads((Path(t)/"m.json").read_text())["verified_provenance"],PROVENANCE)

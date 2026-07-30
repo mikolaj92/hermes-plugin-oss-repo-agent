@@ -1497,11 +1497,27 @@ def publish_dispatch_receipt(request: Request) -> Result:
         return fail("missing_receipt_inputs", failure_class="terminal", retry_safe=False, operation="publish_dispatch_receipt")
     if dry_run_flag(request):
         return planned(operation="publish_dispatch_receipt", receipt_path=path, payload=payload)
+    target = Path(path)
+    temporary: Path | None = None
     try:
-        target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+        temporary = Path(temporary_name)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        temporary = None
+        directory_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except (OSError, TypeError, ValueError) as exc:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         return fail("receipt_write_failed", failure_class="retryable", retry_safe=True, operation="publish_dispatch_receipt", receipt_path=path, error=str(exc), mutated=True)
     return ok(status="published", operation="publish_dispatch_receipt", receipt_path=path, payload=payload, mutated=True)
 
