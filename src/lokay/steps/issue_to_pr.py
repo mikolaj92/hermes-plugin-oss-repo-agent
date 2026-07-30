@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1123,13 +1124,14 @@ def verify_worktree_head(request: Request) -> Result:
     path = str(data.get("worktree_path") or added.get("worktree_path") or "")
     branch = str(data.get("branch") or added.get("branch") or "")
     expected = str(added.get("head") or data.get("base_head") or cond_get(request, "base_head", "read_base_ref") or "")
+    base = str(data.get("base_head") or cond_get(request, "base_head", "read_base_ref") or expected)
     if not path or not branch:
         return fail("missing_worktree_or_branch", failure_class="terminal", retry_safe=False, operation="verify_worktree_head")
     try: head = rev_parse(path)
     except CommandError as exc: return fail("worktree_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="verify_worktree_head", error=str(exc))
     if expected and head != expected: return fail("worktree_base_mismatch", failure_class="terminal", retry_safe=False, operation="verify_worktree_head", head=head, base_head=expected)
     repo, issue, board, context = _fix_identity(request)
-    return ok(status="verified", operation="verify_worktree_head", head=head, base_head=expected or head, worktree_path=path, branch=branch, repo=repo, issue=issue, board=board, task_id=added.get("task_id") or context.get("task_id"))
+    return ok(status="verified", operation="verify_worktree_head", head=head, base_head=base, worktree_path=path, branch=branch, repo=repo, issue=issue, board=board, task_id=added.get("task_id") or context.get("task_id"))
 
 
 def read_omp_preconditions(request: Request) -> Result:
@@ -1170,10 +1172,27 @@ def invoke_omp(request: Request) -> Result:
         if repo and issue not in (None, "") and pre.get("branch") else ""
     ))
     if not path or not prompt: return fail("missing_worktree_or_prompt", failure_class="terminal", retry_safe=False, operation="invoke_omp")
+    values = dict(operation="invoke_omp", worktree_path=path, branch=pre.get("branch"), pre_head=pre.get("pre_head"), base_head=pre.get("base_head"), repo=repo, issue=issue, board=board, task_id=pre.get("task_id") or context.get("task_id"))
+    if dry_run_flag(request): return planned(**values)
+    try:
+        dirty_paths = _omp_diff_paths(path)
+    except CommandError as exc:
+        return fail("omp_precondition_failed", failure_class="terminal", retry_safe=False, operation="invoke_omp", error=str(exc))
+    if dirty_paths:
+        return fail("omp_worktree_dirty", failure_class="terminal", retry_safe=False, operation="invoke_omp", paths=dirty_paths)
+    if pre.get("pre_head") and pre.get("base_head") and pre["pre_head"] != pre["base_head"]:
+        try:
+            ancestry = run_cmd(["git", "merge-base", "--is-ancestor", str(pre["base_head"]), str(pre["pre_head"])], cwd=path, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return fail("omp_branch_ancestry_read_failed", failure_class="retryable_read", retry_safe=True, operation="invoke_omp", error=str(exc), base_head=pre.get("base_head"), pre_head=pre.get("pre_head"))
+        if ancestry.returncode == 1:
+            return fail("omp_branch_diverged", failure_class="terminal", retry_safe=False, operation="invoke_omp", base_head=pre.get("base_head"), pre_head=pre.get("pre_head"))
+        if ancestry.returncode != 0:
+            return fail("omp_branch_ancestry_read_failed", failure_class="retryable_read", retry_safe=True, operation="invoke_omp", error=ancestry.stderr.strip(), base_head=pre.get("base_head"), pre_head=pre.get("pre_head"))
+        return ok(status="reused", operation="invoke_omp", worktree_path=path, branch=pre.get("branch"), pre_head=pre.get("pre_head"), base_head=pre.get("base_head"), repo=repo, issue=issue, board=board, task_id=pre.get("task_id") or context.get("task_id"), mutated=False)
     try: out = run_omp(prompt=prompt, cwd=path, command=str(data.get("command") or cfg.get("executor_command") or "omp"), model=str(data.get("model") or cfg.get("model") or "omniroute/omp/default"), thinking=str(data.get("thinking") or cfg.get("thinking") or "medium"), timeout=float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800), dry_run=dry_run_flag(request))
     except CommandError as exc: return fail("omp_failed", failure_class="terminal", retry_safe=False, operation="invoke_omp", error=str(exc), mutated=True)
-    values = dict(operation="invoke_omp", omp=out, worktree_path=path, branch=pre.get("branch"), pre_head=pre.get("pre_head"), base_head=pre.get("base_head"), repo=repo, issue=issue, board=board, task_id=pre.get("task_id") or context.get("task_id"))
-    return planned(**values) if dry_run_flag(request) else ok(status="invoked", mutated=True, **values)
+    return ok(status="invoked", mutated=True, omp=out, **values)
 
 
 def verify_omp_postconditions(request: Request) -> Result:
@@ -1187,10 +1206,11 @@ def verify_omp_postconditions(request: Request) -> Result:
     pre = cond_blob(request, "read_omp_preconditions")
     path = str(data.get("worktree_path") or invoked.get("worktree_path") or pre.get("worktree_path") or "")
     before = str(data.get("pre_head") or invoked.get("pre_head") or pre.get("pre_head") or "")
-    try: head = rev_parse(path); paths = _escaped_omp_paths(path, _omp_diff_paths(path))
+    try: head = rev_parse(path); dirty_paths = _omp_diff_paths(path); escaped_paths = _escaped_omp_paths(path, dirty_paths)
     except (CommandError, OSError, ValueError) as exc: return fail("omp_postcondition_failed", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", error=str(exc))
-    if paths: return fail("omp_diff_path_escape", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", paths=paths)
-    if before and head == before: return fail("omp_head_unchanged", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", head=head, pre_head=before)
+    if escaped_paths: return fail("omp_diff_path_escape", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", paths=escaped_paths)
+    if dirty_paths: return fail("omp_worktree_dirty", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", paths=dirty_paths)
+    if before and head == before and invoked.get("status") != "reused": return fail("omp_head_unchanged", failure_class="terminal", retry_safe=False, operation="verify_omp_postconditions", head=head, pre_head=before)
     return ok(status="verified", operation="verify_omp_postconditions", head=head, base_head=invoked.get("base_head") or pre.get("base_head"), worktree_path=path, branch=invoked.get("branch") or pre.get("branch"), repo=invoked.get("repo") or pre.get("repo"), issue=invoked.get("issue") or pre.get("issue"), board=invoked.get("board") or pre.get("board"), task_id=invoked.get("task_id") or pre.get("task_id"))
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from lokay.steps import cleanup, issue_to_pr
@@ -215,6 +216,59 @@ class TempGitSafetyTests(unittest.TestCase):
         mismatched["conduction"] = {"build_repair_prompt": {"task_id": "another-task", "issue": "7", "receipt_id": str(Path(self.tmp.name) / "repair-receipt.json"), "repo": "owner/repo", "branch": self.branch}}
         foreign = prepare_chain(mismatched)
         self.assertEqual(foreign["reason"], "foreign_branch_ownership")
+
+    def test_advanced_owned_worktree_preserves_original_base_for_omp(self) -> None:
+        base = run_git(self.clone, "rev-parse", "main")
+        prepared = self.prepare()
+        self.assertEqual(prepared["status"], "verified", prepared)
+        worktree = self.worktrees / self.branch
+        (worktree / "fix.txt").write_text("fixed\n")
+        run_git(worktree, "add", "fix.txt")
+        run_git(worktree, "commit", "-m", "fix")
+        head = run_git(worktree, "rev-parse", "HEAD")
+        advanced = self.prepare()
+        self.assertEqual(advanced["head"], head)
+        self.assertEqual(advanced["base_head"], base)
+        preconditions = issue_to_pr.read_omp_preconditions(request({**self.common, "conduction": {"dispatch_verify_worktree_head": advanced}}))
+        with mock.patch("lokay.steps.issue_to_pr.run_omp") as run_omp:
+            invoked = issue_to_pr.invoke_omp(request({**self.common, "conduction": {"dispatch_read_omp_preconditions": preconditions}}))
+        run_omp.assert_not_called()
+        self.assertEqual(invoked["status"], "reused")
+        verified = issue_to_pr.verify_omp_postconditions(request({**self.common, "conduction": {"dispatch_invoke_omp": invoked, "dispatch_read_omp_preconditions": preconditions}}))
+        self.assertEqual(verified["status"], "verified", verified)
+        self.assertEqual(verified["head"], head)
+        self.assertEqual(verified["base_head"], base)
+
+    def test_advanced_owned_dirty_worktree_does_not_skip_omp(self) -> None:
+        self.prepare()
+        worktree = self.worktrees / self.branch
+        (worktree / "fix.txt").write_text("fixed\n")
+        run_git(worktree, "add", "fix.txt")
+        run_git(worktree, "commit", "-m", "fix")
+        advanced = self.prepare()
+        (worktree / "leftover.txt").write_text("uncommitted\n")
+        preconditions = issue_to_pr.read_omp_preconditions(request({**self.common, "conduction": {"dispatch_verify_worktree_head": advanced}}))
+        with mock.patch("lokay.steps.issue_to_pr.run_omp") as run_omp:
+            invoked = issue_to_pr.invoke_omp(request({**self.common, "conduction": {"dispatch_read_omp_preconditions": preconditions}}))
+        run_omp.assert_not_called()
+        self.assertEqual(invoked["reason"], "omp_worktree_dirty")
+        self.assertFalse(invoked["mutated"])
+
+    def test_diverged_owned_worktree_does_not_skip_omp(self) -> None:
+        base = run_git(self.clone, "rev-parse", "main")
+        self.prepare()
+        worktree = self.worktrees / self.branch
+        run_git(worktree, "checkout", "--orphan", "diverged")
+        (worktree / "README").write_text("diverged\n")
+        run_git(worktree, "add", "README")
+        run_git(worktree, "commit", "-m", "diverged")
+        diverged = run_git(worktree, "rev-parse", "HEAD")
+        preconditions = {"status": "ready", "ok": True, "worktree_path": str(worktree), "branch": self.branch, "pre_head": diverged, "base_head": base, **self.identity}
+        with mock.patch("lokay.steps.issue_to_pr.run_omp") as run_omp:
+            invoked = issue_to_pr.invoke_omp(request({**self.common, "prompt": "fix", "conduction": {"dispatch_read_omp_preconditions": preconditions}}))
+        run_omp.assert_not_called()
+        self.assertEqual(invoked["reason"], "omp_branch_diverged")
+        self.assertFalse(invoked["mutated"])
 
     def test_live_shaped_repair_input_has_complete_provenance(self) -> None:
         request_data = {
