@@ -1014,6 +1014,8 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(out["pr_number"], 11)
         for value in ("owner/repo", "#10", "ai/fix/11", "/clone", "board", "priority 2"):
             self.assertIn(value, out["prompt"])
+        self.assertIn("Commit the changes locally so HEAD advances.", out["prompt"])
+        self.assertIn("Do not push, force-push, or merge.", out["prompt"])
 
     def test_build_repair_prompt_rejects_invalid_linked_issue_identity(self) -> None:
         base = {"number": 11, "title": "fix", "headRefName": "ai/fix/11"}

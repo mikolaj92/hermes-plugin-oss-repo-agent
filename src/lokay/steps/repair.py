@@ -1445,7 +1445,7 @@ def build_repair_prompt(request: Request) -> Result:
         f"Reason: {reason}\n"
         f"Failing checks: {', '.join(str(item) for item in failures) if failures else 'n/a'}\n"
         "Update the branch to fix CI/merge issues. Keep scope minimal.\n"
-        "Do not force-push. Do not merge.\n"
+        "Commit the changes locally so HEAD advances. Do not push, force-push, or merge.\n"
     )
     task_id = created.get("task_id") or data.get("task_id")
     return ok(
