@@ -570,15 +570,15 @@ def _durable_merged_lifecycle_context(request: Request) -> Result | None:
                 or str(provenance.get("repo") or "") != receipt_repo
             ):
                 continue
-            number = _positive_int(provenance.get("number"), "pr_number")
-            if receipt.get("pr") != number:
-                raise ValueError("merge receipt PR identity mismatch")
             branch = str(provenance.get("head_ref") or "").strip()
-            head = str(provenance.get("head_oid") or "").strip()
             branch_match = re.fullmatch(r"ai/fix/([1-9][0-9]*)(?:-[A-Za-z0-9._-]+)?", branch)
             receipt_issue = int(branch_match.group(1)) if branch_match else 0
             if (receipt_repo, receipt_issue) not in claimed:
                 continue
+            number = _positive_int(provenance.get("number"), "pr_number")
+            if receipt.get("pr") != number:
+                raise ValueError("merge receipt PR identity mismatch")
+            head = str(provenance.get("head_oid") or "").strip()
             if not head or receipt.get("headSha") != head:
                 raise ValueError("merge receipt head identity mismatch")
             identities.add((receipt_repo, receipt_issue, number, branch, head))

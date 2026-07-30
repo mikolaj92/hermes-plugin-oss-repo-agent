@@ -82,6 +82,11 @@ class LifecycleReconcileTests(unittest.TestCase):
             "verified_provenance": {"source": "github_pr_readback", "state": "MERGED", "repo": "owner/repo",
                 "number": 99, "head_ref": "ai/fix/9-stale", "head_oid": "def456"}}), encoding="utf-8")
         stale.chmod(0o600)
+        unrelated = receipts / "unrelated-malformed.json"
+        unrelated.write_text(json.dumps({"phase": "MERGED", "repo": "owner/repo", "pr": "invalid",
+            "verified_provenance": {"source": "github_pr_readback", "state": "MERGED", "repo": "owner/repo",
+                "number": "invalid", "head_ref": "ai/fix/8-unrelated", "head_oid": ""}}), encoding="utf-8")
+        unrelated.chmod(0o600)
         conduction = {
             "triage_load_pr_fields": {"ok": True, "status": "noop", "reason": "no_open_prs", "mutated": False},
             "triage_decide_triage_action": {"ok": True, "status": "noop", "reason": "no_open_prs", "mutated": False},
