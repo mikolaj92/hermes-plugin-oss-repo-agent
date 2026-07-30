@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import unittest.mock
 
 from lokay.steps import cleanup
 from lokay.steps.orchestration import aggregate_lane_results
@@ -79,6 +80,27 @@ class AggregateLaneResultsTests(unittest.TestCase):
         }))
         self.assertTrue(out["cleanup_authorized"])
         self.assertEqual(out["cleanup_identity"], {"repo": "o/r", "board": "b", "clone_path": "/repo", "priority": 3, "issue": 7, "pr_number": 8, "branch": "ai/fix/7", "head_oid": "abc"})
+
+    def test_terminal_lifecycle_resolves_exact_repository_metadata(self) -> None:
+        identity = {"repo": "o/r", "issue": 7, "pr_number": 8, "branch": "ai/fix/7", "head_oid": "abc"}
+        lifecycle = {"status": "decided", "ok": True, "mutated": False, "outcome": "finalize_merged", "identity": identity}
+        out = aggregate_lane_results(request(
+            {"auto_worker_lifecycle_decide_lifecycle_transition": lifecycle},
+            repos=[{"repo": "other/r", "board": "wrong", "clone_path": "/wrong", "priority": 1},
+                   {"repo": "o/r", "board": "b", "clone_path": "/repo", "priority": 3}],
+        ))
+        self.assertTrue(out["cleanup_authorized"], out)
+        self.assertEqual(out["cleanup_identity"], {**identity, "board": "b", "clone_path": "/repo", "priority": 3})
+
+    def test_terminal_lifecycle_rejects_ambiguous_repository_metadata(self) -> None:
+        identity = {"repo": "o/r", "issue": 7, "pr_number": 8, "branch": "ai/fix/7", "head_oid": "abc"}
+        lifecycle = {"status": "decided", "ok": True, "mutated": False, "outcome": "finalize_merged", "identity": identity}
+        out = aggregate_lane_results(request(
+            {"auto_worker_lifecycle_decide_lifecycle_transition": lifecycle},
+            repos=[{"repo": "o/r", "board": "a", "clone_path": "/a", "priority": 1},
+                   {"repo": "o/r", "board": "b", "clone_path": "/b", "priority": 2}],
+        ))
+        self.assertFalse(out["cleanup_authorized"])
 
     def test_terminal_lifecycle_identity_must_match_merge_provenance(self) -> None:
         provenance = {"source": "github_pr_readback", "repo": "o/r", "number": 8, "head_ref": "ai/fix/7", "head_oid": "abc"}

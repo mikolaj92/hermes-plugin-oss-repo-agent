@@ -287,6 +287,21 @@ def _verified_cleanup_identity(request: Request, lanes: Mapping[str, dict[str, A
         if value not in (None, ""):
             identity[key] = value
 
+    repositories = data.get("repos")
+    if isinstance(repositories, list):
+        matches = [item for item in repositories if isinstance(item, Mapping) and str(item.get("repo") or "") == str(identity.get("repo") or "")]
+        if len(matches) > 1:
+            return None
+        if matches:
+            repository = matches[0]
+            for key in ("board", "clone_path", "priority"):
+                value = repository.get(key)
+                if value not in (None, ""):
+                    existing = identity.get(key)
+                    if existing not in (None, "") and str(existing) != str(value):
+                        return None
+                    identity[key] = value
+
     required = ("repo", "issue", "pr_number", "branch", "head_oid")
     if any(key not in identity or identity[key] in (None, "") for key in required):
         return None
