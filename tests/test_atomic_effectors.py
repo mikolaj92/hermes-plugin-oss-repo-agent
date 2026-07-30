@@ -911,6 +911,94 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual([normalized["status"], pr_labeled["status"], pr_results["status"], issue_labeled["status"], issue_results["status"], published["status"], verified["status"]], ["normalized", "added", "labeled", "added", "labeled", "published", "verified"])
         self.assertEqual(built["payload"], {"repo": "o/r", "issue": 1, "board": "b", "task_id": "t1"})
 
+    def test_live_shaped_completion_reconciles_board_and_task(self) -> None:
+        selected = {
+            "status": "selected",
+            "ok": True,
+            "board": "mikolaj92-temida",
+            "task_id": "t_54ac7a8b",
+            "task": {"id": "t_54ac7a8b", "status": "ready"}
+        }
+        verified_receipt = {
+            "status": "verified",
+            "ok": True,
+            "receipt_path": "/path/receipt.json"
+        }
+        with mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json") as list_cmd:
+            list_cmd.return_value = [{"id": "t_54ac7a8b", "status": "ready"}]
+            res = issue_to_pr.read_task_for_completion(req({
+                "conduction": {
+                    "dispatch_select_dispatch_task": selected,
+                    "dispatch_verify_dispatch_receipt": verified_receipt
+                }
+            }))
+        self.assertEqual(res["status"], "read")
+        self.assertEqual(res["board"], "mikolaj92-temida")
+        self.assertEqual(res["task_id"], "t_54ac7a8b")
+        list_cmd.assert_called_once_with(["--board", "mikolaj92-temida", "list", "--json", "--sort", "created-desc"])
+
+    def test_live_shaped_verify_task_completed_success(self) -> None:
+        completed = {
+            "status": "completed",
+            "ok": True,
+            "board": "mikolaj92-temida",
+            "task_id": "t_54ac7a8b",
+        }
+        with mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json") as list_cmd:
+            list_cmd.return_value = [{"id": "t_54ac7a8b", "status": "done"}]
+            res = issue_to_pr.verify_task_completed(req({
+                "conduction": {
+                    "dispatch_complete_task": completed
+                }
+            }))
+        self.assertEqual(res["status"], "verified")
+        self.assertEqual(res["task_id"], "t_54ac7a8b")
+        list_cmd.assert_called_once_with(["--board", "mikolaj92-temida", "list", "--json", "--sort", "created-desc"])
+
+    def test_live_shaped_verify_task_completed_failure(self) -> None:
+        completed = {
+            "status": "completed",
+            "ok": True,
+            "board": "mikolaj92-temida",
+            "task_id": "t_54ac7a8b",
+        }
+        with mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json") as list_cmd:
+            list_cmd.return_value = [{"id": "t_54ac7a8b", "status": "ready"}]
+            res = issue_to_pr.verify_task_completed(req({
+                "conduction": {
+                    "dispatch_complete_task": completed
+                }
+            }))
+        self.assertEqual(res["status"], "failed")
+        self.assertEqual(res["reason"], "task_not_completed")
+        self.assertEqual(res["task_id"], "t_54ac7a8b")
+
+    def test_reconcile_pull_request_edges(self) -> None:
+        created = {"status": "created", "ok": True, "repo": "o/r", "issue": 1, "branch": "ai/fix/1", "base": "main"}
+
+        # Edge 1: No PRs found
+        with mock.patch("lokay.steps.issue_to_pr.run_cmd", return_value=SimpleNamespace(stdout=json.dumps([]))):
+            res = issue_to_pr.reconcile_pull_request(req({"conduction": {"dispatch_create_pull_request": created}}))
+        self.assertEqual(res["reason"], "no_matching_pr")
+        self.assertFalse(res["ok"])
+
+        # Edge 2: Multiple PRs found
+        multiple_prs = [
+            {"number": 2, "url": "https://example.test/pr/2", "baseRefName": "main", "headRefName": "ai/fix/1"},
+            {"number": 3, "url": "https://example.test/pr/3", "baseRefName": "main", "headRefName": "ai/fix/1"},
+        ]
+        with mock.patch("lokay.steps.issue_to_pr.run_cmd", return_value=SimpleNamespace(stdout=json.dumps(multiple_prs))):
+            res = issue_to_pr.reconcile_pull_request(req({"conduction": {"dispatch_create_pull_request": created}}))
+        self.assertEqual(res["reason"], "ambiguous_matching_prs")
+        self.assertFalse(res["ok"])
+
+        # Edge 3: Invalid/non-positive PR number
+        bad_pr = [{"number": 0, "url": "https://example.test/pr/0", "baseRefName": "main", "headRefName": "ai/fix/1"}]
+        with mock.patch("lokay.steps.issue_to_pr.run_cmd", return_value=SimpleNamespace(stdout=json.dumps(bad_pr))):
+            res = issue_to_pr.reconcile_pull_request(req({"conduction": {"dispatch_create_pull_request": created}}))
+        self.assertEqual(res["reason"], "invalid_pr_number")
+        self.assertFalse(res["ok"])
+
 class RepairTests(unittest.TestCase):
     def test_build_repair_prompt_uses_exact_linked_issue_and_lane_context(self) -> None:
         out = repair.build_repair_prompt(req({

@@ -404,6 +404,7 @@ def _atomic_board(request: Request) -> str:
             "build_issue_claim_result",
             "select_issue_candidate",
             "reserve_claim_file",
+            "select_dispatch_task",
         )
         or cfg.get("board")
         or ""
@@ -418,6 +419,7 @@ def _atomic_board(request: Request) -> str:
         "build_issue_claim_result",
         "select_issue_candidate",
         "reserve_claim_file",
+        "select_dispatch_task",
     ):
         blob = cond_blob(request, effector_id)
         nested = blob.get("selected") if isinstance(blob.get("selected"), Mapping) else {}
@@ -821,13 +823,22 @@ def complete_task(request: Request) -> Result:
 def verify_task_completed(request: Request) -> Result:
     terminal = _atomic_terminal(request, "verify_task_completed", "complete_task")
     if terminal: return terminal
-    idle = upstream_noop(request, "complete_task", "decide_task_completion", "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
+    idle = upstream_noop(request, "complete_task")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_task_completed")
-    read = read_task_for_completion(request)
-    if read.get("ok") is False: return read
-    state = str(read["task"].get("status") or read["task"].get("state") or "").lower()
-    return ok(status="verified" if state in {"done", "completed", "archived"} else "not_completed", operation="verify_task_completed", task_id=read["task_id"], completed=state in {"done", "completed", "archived"})
+    completed = cond_blob(request, "complete_task")
+    board = str(completed.get("board") or _atomic_board(request) or "")
+    task_id = str(completed.get("task_id") or cond_get(request, "task_id", "complete_task") or "")
+    if not board or not task_id: return fail("missing_board_or_task_id", failure_class="terminal", retry_safe=False, operation="verify_task_completed")
+    try: rows = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
+    except CommandError as exc: return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, operation="verify_task_completed", error=str(exc), board=board, task_id=task_id)
+    if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows): return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="verify_task_completed")
+    found = [r for r in rows if str(r.get("id") or r.get("task_id") or "") == task_id]
+    if len(found) != 1: return fail("task_not_found" if not found else "ambiguous_task", failure_class="terminal", retry_safe=False, operation="verify_task_completed", task_id=task_id)
+    state = str(found[0].get("status") or found[0].get("state") or "").lower()
+    if state not in {"done", "completed", "archived"}:
+        return fail("task_not_completed", failure_class="reconcile_then_retry", retry_safe=False, operation="verify_task_completed", task_id=task_id, state=state)
+    return ok(status="verified", operation="verify_task_completed", task_id=task_id)
 
 
 def read_clone_preconditions(request: Request) -> Result:
@@ -1370,7 +1381,18 @@ def reconcile_pull_request(request: Request) -> Result:
     branch = str(data.get("branch") or created.get("branch") or "")
     base = str(data.get("base_branch") or created.get("base") or cfg_of(request).get("base_branch") or "main")
     read = _read_open_prs(repo, branch, base, str(cfg_of(request).get("gh_cli") or "gh"), operation="reconcile_pull_request", identity={"issue": created.get("issue"), "board": created.get("board"), "task_id": created.get("task_id")})
-    return read if read.get("ok") is not True else read | {"status": "reconciled"}
+    if read.get("ok") is not True:
+        return read
+    prs = read.get("prs") or []
+    if not prs:
+        return fail("no_matching_pr", failure_class="terminal", retry_safe=False, operation="reconcile_pull_request", repo=repo, branch=branch)
+    if len(prs) > 1:
+        return fail("ambiguous_matching_prs", failure_class="terminal", retry_safe=False, operation="reconcile_pull_request", prs=prs)
+    pr = prs[0]
+    num = pr.get("number")
+    if not isinstance(num, int) or num <= 0:
+        return fail("invalid_pr_number", failure_class="terminal", retry_safe=False, operation="reconcile_pull_request", number=num)
+    return ok(status="reconciled", operation="reconcile_pull_request", repo=repo, branch=branch, base=base, prs=prs, number=num, url=pr.get("url"), issue=created.get("issue"), board=created.get("board"), task_id=created.get("task_id"))
 
 
 def normalize_pr_labels(request: Request) -> Result:
