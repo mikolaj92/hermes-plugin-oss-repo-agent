@@ -1727,6 +1727,54 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(out["reason"], "missing_test_evidence")
         self.assertEqual(out["failures"], [])
 
+    def test_decide_repair_attempt_allows_missing_checks_only_when_disabled(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+
+        data = {
+            "enabled": True,
+            "live": True,
+            "dry_run": False,
+            "repo": "o/r",
+            "number": 1,
+            "verified_head": "abc",
+            "candidate": "c1",
+            "run_id": "r1",
+            "conduction": {
+                "triage_decide_triage_action": {
+                    "ok": True,
+                    "status": "decided",
+                    "action": "repair",
+                    "reason": "missing_test_evidence",
+                },
+            },
+        }
+        allowed = decide_repair_attempt(req(data | {"require_checks": False}))
+        self.assertEqual(allowed["status"], "invoke")
+        self.assertTrue(allowed["authorize"])
+        self.assertEqual(allowed["checks"], [])
+
+        required = decide_repair_attempt(req(data | {"require_checks": True}))
+        self.assertEqual(required["status"], "failed")
+        self.assertEqual(required["conflict"], "missing_check_evidence")
+
+    def test_decide_repair_attempt_keeps_nonempty_pending_checks_pending(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+
+        out = decide_repair_attempt(req({
+            "enabled": True,
+            "live": True,
+            "dry_run": False,
+            "require_checks": False,
+            "repo": "o/r",
+            "number": 1,
+            "verified_head": "abc",
+            "candidate": "c1",
+            "run_id": "r1",
+            "checks": [{"name": "ci", "conclusion": "IN_PROGRESS"}],
+        }))
+        self.assertEqual(out["status"], "pending")
+        self.assertFalse(out["authorize"])
+
 
 
     def test_decide_repair_attempt_repeated_head_blocks_changed_checks(self) -> None:

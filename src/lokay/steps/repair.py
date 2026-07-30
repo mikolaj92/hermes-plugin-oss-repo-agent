@@ -1202,6 +1202,9 @@ def decide_repair_attempt(request: Request) -> Result:
     if identity is None:
         return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict=identity_error)
     checks, check_error, pending = _repair_checks(request)
+    require_checks = bool(data.get("require_checks", cfg.get("require_checks", True)))
+    if checks is None and not require_checks and check_error == "missing_check_evidence":
+        checks, check_error, pending = [], None, False
     if checks is None:
         return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict=check_error, **identity)
     completed = cond_blob(request, "read_repair_completed_receipt")
