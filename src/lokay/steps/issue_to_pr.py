@@ -221,7 +221,7 @@ def _worktree_branch(request: Request) -> tuple[str, list[str]]:
 
 def _branch_provenance(clone_path: str, branch: str) -> dict[str, str]:
     values: dict[str, str] = {}
-    for key in ("task", "issue", "receipt", "repo", "base"):
+    for key in ("task", "issue", "receipt", "repo", "base", "local-oid"):
         try:
             values[key] = branch_config_get(clone_path, branch, f"lokay-{key}").strip()
         except CommandError:
@@ -1064,7 +1064,7 @@ def write_branch_provenance(request: Request) -> Result:
     repo, issue, board, context = _fix_identity(request)
     clone = str(data.get("clone_path") or created.get("clone_path") or proven.get("clone_path") or context.get("clone_path") or "")
     branch = str(data.get("branch") or created.get("branch") or proven.get("branch") or context.get("branch") or "")
-    values = data.get("provenance") if isinstance(data.get("provenance"), dict) else {
+    values = dict(data["provenance"]) if isinstance(data.get("provenance"), dict) else {
         "task": str(data.get("task_id") or proven.get("task_id") or context.get("task_id") or ""),
         "issue": str(issue or ""),
         "receipt": str(data.get("receipt_path") or data.get("receipt_id") or ""),
@@ -1073,10 +1073,26 @@ def write_branch_provenance(request: Request) -> Result:
     }
     if not clone or not branch:
         return fail("missing_branch_provenance", failure_class="terminal", retry_safe=False, operation="write_branch_provenance")
-    if created.get("status") == "reused":
-        return ok(status="verified", operation="write_branch_provenance", branch=branch, clone_path=clone, repo=repo, issue=issue, board=board, task_id=context.get("task_id"), worktree_path=created.get("worktree_path"), mutated=False)
     if dry_run_flag(request):
         return planned(operation="write_branch_provenance", branch=branch, clone_path=clone, repo=repo, issue=issue)
+    try:
+        local_oid = local_branch_head(clone, branch)
+    except CommandError as exc:
+        return fail("branch_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="write_branch_provenance", error=str(exc), mutated=created.get("status") != "reused")
+    if not local_oid:
+        return fail("branch_head_read_failed", failure_class="terminal", retry_safe=False, operation="write_branch_provenance", mutated=created.get("status") != "reused")
+    values["local-oid"] = local_oid
+    if created.get("status") == "reused":
+        actual = proven.get("provenance") or _branch_provenance(clone, branch)
+        expected = proven.get("expected") if isinstance(proven.get("expected"), dict) else {
+            "task_id": str(proven.get("task_id") or context.get("task_id") or ""),
+            "issue": str(issue or ""),
+            "receipt": str(data.get("receipt_path") or data.get("receipt_id") or proven.get("receipt") or ""),
+            "repo": repo,
+            "branch": branch,
+        }
+        if not _provenance_matches(expected, actual):
+            return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, operation="write_branch_provenance", mutated=False)
     try:
         for key, value in values.items():
             if value:

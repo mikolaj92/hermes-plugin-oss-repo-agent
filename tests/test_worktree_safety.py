@@ -149,6 +149,25 @@ class TempGitSafetyTests(unittest.TestCase):
         self.assertFalse(wt.exists())
         self.assertFalse(run_git(self.clone, "branch", "--list", self.branch))
 
+    def test_composed_cleanup_preserves_branch_advanced_past_recorded_head(self) -> None:
+        prepared = self.prepare()
+        self.assertTrue(prepared["ok"], prepared)
+        recorded = run_git(self.clone, "rev-parse", self.branch)
+        worktree = self.worktrees / self.branch
+        (worktree / "later.txt").write_text("later\n")
+        run_git(worktree, "add", "later.txt")
+        run_git(worktree, "commit", "-m", "later")
+        actual = run_git(self.clone, "rev-parse", self.branch)
+        identity = {"repo": self.identity["repo"], "issue": self.identity["issue"], "pr_number": 8, "branch": self.branch, "local_branch": self.branch, "clone_path": str(self.clone), "worktree_path": str(worktree), "task": self.identity["task_id"], "receipt": self.identity["receipt_path"], "local_oid": recorded, "remote_oid": actual, "target_branch": self.branch}
+        conduction = {
+            "aggregate_lane_results": {"ok": True, "status": "aggregated", "cleanup_authorized": True, "cleanup_identity": identity},
+            "validate_cleanup_identity": {"ok": True, "status": "validated", "identity": identity},
+            "verify_branch_delete_guards": {"ok": True, "status": "verified"},
+        }
+        result = cleanup.read_local_branch_ownership(request({"conduction": conduction}))
+        self.assertEqual(result["reason"], "local_branch_head_mismatch")
+        self.assertEqual(run_git(self.clone, "rev-parse", self.branch), actual)
+
     def test_dirty_clone_fails_before_branch_mutation(self) -> None:
         (self.clone / "dirty.txt").write_text("dirty\n")
         result = self.prepare()
@@ -231,6 +250,30 @@ class TempGitSafetyTests(unittest.TestCase):
         retry = self.prepare(receipt_path=str(Path(self.tmp.name) / "retry-receipt.json"))
         self.assertEqual(retry["status"], "verified", retry)
         self.assertEqual(retry["head"], advanced_head)
+
+    def test_reused_branch_overwrites_stale_input_with_observed_head(self) -> None:
+        first = self.prepare()
+        self.assertEqual(first["status"], "verified", first)
+        worktree = self.worktrees / self.branch
+        (worktree / "repair.txt").write_text("fixed\n")
+        run_git(worktree, "add", "repair.txt")
+        run_git(worktree, "commit", "-m", "repair")
+        observed = run_git(worktree, "rev-parse", "HEAD")
+        stale = "0" * 40
+        values = {**self.common, "provenance": {"task": self.identity["task_id"], "issue": str(self.identity["issue"]), "receipt": self.common["receipt_path"], "repo": self.identity["repo"], "local-oid": stale}}
+        prepared = prepare_chain(values)
+        self.assertEqual(prepared["status"], "verified", prepared)
+        from lokay.adapters_git import branch_config_get
+        self.assertEqual(branch_config_get(self.clone, self.branch, "lokay-local-oid"), observed)
+
+    def test_reused_branch_backfills_observed_local_oid(self) -> None:
+        first = self.prepare()
+        self.assertEqual(first["status"], "verified", first)
+        from lokay.adapters_git import branch_config_get, branch_config_unset
+        branch_config_unset(self.clone, self.branch, "lokay-local-oid")
+        prepared = self.prepare()
+        self.assertEqual(prepared["status"], "verified", prepared)
+        self.assertEqual(branch_config_get(self.clone, self.branch, "lokay-local-oid"), run_git(self.clone, "rev-parse", self.branch))
 
     def test_empty_stored_receipt_is_not_adopted(self) -> None:
         self.assertEqual(self.prepare()["status"], "verified")

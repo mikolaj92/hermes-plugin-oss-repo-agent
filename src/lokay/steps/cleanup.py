@@ -10,6 +10,7 @@ import os
 import stat
 import re
 import tempfile
+import sqlite3
 from pathlib import Path
 from typing import Any
 from lokay.envelope import Request, Result
@@ -527,6 +528,35 @@ def parse_cleanup_issue_number(request: Request) -> Result:
     return ok(status="parsed", branch=branch, issue=int(match.group(1)))
 
 
+def _durable_branch_local_oid(db_path: str, receipt: str, *, repo: str, issue: str, branch: str, task: str) -> str:
+    """Recover one legacy branch head from its exact dispatch run evidence."""
+    match = re.fullmatch(r"auto-worker-dispatch-(auto-worker-[A-Za-z0-9-]+)\.json", Path(receipt).name)
+    if not db_path or match is None:
+        return ""
+    connection = sqlite3.connect(f"file:{Path(db_path).expanduser().resolve()}?mode=ro", uri=True, timeout=0)
+    try:
+        rows = connection.execute(
+            "SELECT output_json FROM processes WHERE run_id = ? AND id LIKE ? AND status = 'succeeded'",
+            (match.group(1), "%:dispatch_verify_worktree_head"),
+        ).fetchall()
+    finally:
+        connection.close()
+    heads: set[str] = set()
+    for (raw,) in rows:
+        try:
+            values = json.loads(raw or "{}").get("values", {})
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(values, dict) and values.get("ok") is True and values.get("status") == "verified"
+            and str(values.get("repo") or "") == repo and str(values.get("issue") or "") == issue
+            and str(values.get("branch") or "") == branch and str(values.get("task_id") or "") == task
+            and str(values.get("head") or "").strip()
+        ):
+            heads.add(str(values["head"]).strip())
+    return next(iter(heads)) if len(heads) == 1 else ""
+
+
 def read_branch_ownership(request: Request) -> Result:
     """Read all branch ownership keys with one git-config read."""
     data, cfg = input_of(request), cfg_of(request)
@@ -543,7 +573,7 @@ def read_branch_ownership(request: Request) -> Result:
     clone = str(data.get("clone_path") or aggregate_identity.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
     if not clone or not branch:
         return fail("missing_branch_ownership_context", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch)
-    pattern = rf"^branch\.{re.escape(branch_config_section(branch))}\.lokay-(task|issue|receipt|repo)$"
+    pattern = rf"^branch\.{re.escape(branch_config_section(branch))}\.lokay-(task|issue|receipt|repo|local-oid)$"
     try:
         raw = git(["config", "--local", "--get-regexp", pattern], cwd=clone)
     except CommandError as exc:
@@ -557,11 +587,20 @@ def read_branch_ownership(request: Request) -> Result:
         if not separator or not key.startswith(prefix):
             continue
         name = key.removeprefix(prefix)
-        if name in {"task", "issue", "receipt", "repo"} and value.strip():
+        if name in {"task", "issue", "receipt", "repo", "local-oid"} and value.strip():
             ownership[name] = value.strip()
-    if set(ownership) != {"task", "issue", "receipt", "repo"}:
+    if not {"task", "issue", "receipt", "repo"}.issubset(ownership):
         return fail("branch_ownership_missing", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch, ownership=ownership)
-    return ok(status="read", clone_path=clone, branch=branch, ownership=ownership, **ownership)
+    if "local-oid" not in ownership:
+        db_path = str(data.get("db_path") or cfg.get("db_path") or "").strip()
+        try:
+            recovered = _durable_branch_local_oid(db_path, ownership["receipt"], repo=ownership["repo"], issue=ownership["issue"], branch=branch, task=ownership["task"])
+        except sqlite3.Error as exc:
+            return fail("branch_ownership_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, branch=branch)
+        if not recovered:
+            return fail("branch_head_provenance_missing", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch, ownership=ownership)
+        ownership["local-oid"] = recovered
+    return ok(status="read", clone_path=clone, branch=branch, ownership=ownership, local_oid=ownership["local-oid"], **ownership)
 
 
 def derive_cleanup_paths(request: Request) -> Result:
@@ -624,7 +663,7 @@ def validate_cleanup_identity(request: Request) -> Result:
         if any(ownership.get(key) in (None, "") for key in ("task", "receipt")):
             return fail("cleanup_identity_missing", failure_class="terminal", retry_safe=False, identity=identity, ownership=ownership)
         identity.update(branch=branch, local_branch=str(identity.get("local_branch") or branch), clone_path=clone, worktree_path=worktree,
-                        task=str(ownership["task"]), receipt=str(ownership["receipt"]), remote_oid=str(identity.get("remote_oid") or identity.get("head_oid") or ""))
+                        task=str(ownership["task"]), receipt=str(ownership["receipt"]), local_oid=str(ownership.get("local-oid") or ""), remote_oid=str(identity.get("remote_oid") or identity.get("head_oid") or ""))
         return ok(status="validated", identity=identity, **identity)
     if aggregate_present:
         return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False)
@@ -790,7 +829,8 @@ def read_local_branch_ownership(request: Request) -> Result:
     branch = str(identity.get("local_branch") if composed else data.get("local_branch") or _cleanup_value(request, "local_branch", default=cfg.get("local_branch", "")) or data.get("branch") or cfg.get("branch", "") or "").strip()
     if not clone or not branch:
         return fail("missing_branch_context", failure_class="terminal", retry_safe=False)
-    authorized_head = str(identity.get("remote_oid") or "").strip() if composed else ""
+    authorized_head = str(identity.get("local_oid") or "").strip() if composed else ""
+    merged_head = str(identity.get("remote_oid") or "").strip() if composed else ""
     try:
         exists = branch_exists(clone, branch)
         expected = ({"task": str(identity.get("task") or ""), "issue": str(identity.get("issue") or ""),
@@ -798,13 +838,16 @@ def read_local_branch_ownership(request: Request) -> Result:
                     if composed else _cleanup_provenance(data, cfg, branch, conduction_of(request)))
         owned = not exists or _cleanup_owner_matches(clone, branch, expected, task_optional=composed)
         head = local_branch_head(clone, branch) if exists else ""
-    except CommandError as exc:
+        ancestry = run_cmd(["git", "merge-base", "--is-ancestor", authorized_head, merged_head], cwd=clone, check=False) if composed and authorized_head and merged_head else None
+    except (CommandError, OSError) as exc:
         return fail("branch_ownership_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, branch=branch)
     if not owned:
         return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch)
-    if composed and exists and (not authorized_head or head != authorized_head):
-        return fail("local_branch_head_mismatch", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch, expected_head=authorized_head, actual_head=head)
-    return ok(status="read", clone_path=clone, branch=branch, exists=exists, owned=True, head=head, remote_oid=authorized_head, exact_head_required=composed)
+    if ancestry is not None and ancestry.returncode not in (0, 1):
+        return fail("branch_ownership_read_failed", failure_class="retryable_read", retry_safe=True, clone_path=clone, branch=branch, returncode=ancestry.returncode, stderr=ancestry.stderr)
+    if composed and (not authorized_head or not merged_head or ancestry is None or ancestry.returncode == 1 or (exists and head != authorized_head)):
+        return fail("local_branch_head_mismatch", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch, expected_head=authorized_head, actual_head=head, merged_head=merged_head)
+    return ok(status="read", clone_path=clone, branch=branch, exists=exists, owned=True, head=head, local_oid=authorized_head, merged_oid=merged_head, exact_head_required=composed)
 
 
 def delete_local_branch(request: Request) -> Result:
@@ -824,13 +867,13 @@ def delete_local_branch(request: Request) -> Result:
         return ok(status="absent", clone_path=clone, branch=branch, mutated=False)
     if ownership.get("owned") is not True:
         return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch)
-    if ownership.get("exact_head_required") is True and (not ownership.get("head") or ownership.get("head") != ownership.get("remote_oid")):
+    if ownership.get("exact_head_required") is True and (not ownership.get("head") or ownership.get("head") != ownership.get("local_oid")):
         return fail("local_branch_head_mismatch", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch)
     if dry_run_flag(request):
         return planned(clone_path=clone, branch=branch)
     try:
         if ownership.get("exact_head_required") is True:
-            expected_oid = str(ownership.get("remote_oid") or "")
+            expected_oid = str(ownership.get("local_oid") or "")
             if not expected_oid:
                 return fail("local_branch_head_mismatch", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch)
             git_delete_local_branch_if_head(clone, branch, expected_oid)
@@ -931,7 +974,7 @@ def release_claim_file(request: Request) -> Result:
         return idle
     data, cfg = input_of(request), cfg_of(request)
     identity = cond_blob(request, "read_claim_identity")
-    path = Path(str(data.get("claim_path") or identity.get("claim_path") or cfg.get("active_issue_path") or "")).expanduser()
+    path = Path(str(identity.get("claim_path") or data.get("claim_path") or cfg.get("active_issue_path") or "")).expanduser()
     if identity.get("status") == "already_absent" or not path.exists():
         return ok(status="already_absent", claim_path=str(path), mutated=False)
     if dry_run_flag(request):
@@ -957,7 +1000,7 @@ def verify_claim_absent(request: Request) -> Result:
     if idle:
         return idle
     identity = cond_blob(request, "read_claim_identity", "release_claim_file")
-    path = Path(str(input_of(request).get("claim_path") or identity.get("claim_path") or "")).expanduser()
+    path = Path(str(identity.get("claim_path") or input_of(request).get("claim_path") or "")).expanduser()
     if path.exists():
         return fail("claim_not_absent", failure_class="reconcile_then_retry", retry_safe=False, claim_path=str(path), mutated=bool(cond_blob(request, "release_claim_file").get("mutated")))
     return ok(status="verified", claim_path=str(path), absent=True)

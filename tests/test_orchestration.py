@@ -140,6 +140,7 @@ class AggregateLaneResultsTests(unittest.TestCase):
             f"branch.{cleanup.branch_config_section(local)}.lokay-issue 7",
             f"branch.{cleanup.branch_config_section(local)}.lokay-receipt /state/repair.json",
             f"branch.{cleanup.branch_config_section(local)}.lokay-repo o/r",
+            f"branch.{cleanup.branch_config_section(local)}.lokay-local-oid {head}",
         ])):
             owned = cleanup.read_branch_ownership({"input": {"conduction": conduction}, "config": {}})
         self.assertTrue(owned["ok"], owned)
