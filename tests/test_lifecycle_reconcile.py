@@ -134,8 +134,8 @@ class LifecycleReconcileTests(unittest.TestCase):
         no_checks = self._conduction(checks=[])
         no_checks["triage_decide_triage_action"] = decision
         request = {
-            "input": self.data | {"conduction": no_checks},
-            "config": self.config | {"require_checks": False, "require_test_evidence": True},
+            "input": self.data | {"require_checks": False, "conduction": no_checks},
+            "config": self.config | {"require_test_evidence": True},
         }
         result = cleanup_reconcile.decide_lifecycle_transition(request)
         self.assertEqual(result["outcome"], "resume_repair")
@@ -144,8 +144,8 @@ class LifecycleReconcileTests(unittest.TestCase):
     def test_pending_checks_still_wait_when_checks_are_not_required(self):
         pending = self._conduction(checks=[{"state": "IN_PROGRESS", "conclusion": ""}])
         request = {
-            "input": self.data | {"conduction": pending},
-            "config": self.config | {"require_checks": False, "require_test_evidence": True},
+            "input": self.data | {"require_checks": False, "conduction": pending},
+            "config": self.config | {"require_test_evidence": True},
         }
         self.assertEqual(cleanup_reconcile.decide_lifecycle_transition(request)["outcome"], "wait_pending_checks")
 

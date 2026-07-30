@@ -921,7 +921,8 @@ def decide_lifecycle_transition(request: Request) -> Result:
     labels = _lifecycle_labels(issue.get("labels"))
     check_state = str(github.get("checks_state") or _lifecycle_check_state(pr))
     raw_checks = pr.get("statusCheckRollup") if "statusCheckRollup" in pr else pr.get("checks")
-    if cfg_of(request).get("require_checks", True) is False and (raw_checks is None or raw_checks == []):
+    require_checks = bool(data.get("require_checks", cfg_of(request).get("require_checks", True)))
+    if not require_checks and (raw_checks is None or raw_checks == []):
         check_state = "passed"
     if check_state == "pending":
         return ok(status="decided", outcome="wait_pending_checks", action="wait_pending_checks", mutated=False, identity=identity, checks_state=check_state)
