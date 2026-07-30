@@ -176,7 +176,7 @@ def reserve_claim_file(request: Request) -> Result:
             if match:
                 return ok(status="claim_reserved", claim=match[1], claim_path=str(match[0]), reused=True, mutated=False, selected=selected)
             if is_directory and len(claims) >= max_active:
-                return fail("claim_busy", failure_class="terminal", retry_safe=False, selected=selected, claim_path=str(path), active_claims=[claim for _, claim in claims], max_active_issues=max_active)
+                return noop("claim_busy", selected=selected, claim_path=str(path), active_claims=[claim for _, claim in claims], max_active_issues=max_active)
             claim, error, reused = _reserve_claim(path, repo=repo.strip(), issue=number, board=str(board).strip(), assignee=assignee)
     except OSError as exc:
         return fail("claim_create_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False, selected=selected, claim_path=str(path))

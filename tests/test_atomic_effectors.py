@@ -212,6 +212,8 @@ class IntakeAlignedTests(unittest.TestCase):
             _reserve_claim(Path(tmp) / "first.json", repo="o/r", issue=1, board="b", assignee="a")
             out = claim.reserve_claim_file(req({"dry_run": False, "selected": self._selected(2)}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1}))
             self.assertEqual(out["reason"], "claim_busy")
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["status"], "noop")
             reused = claim.reserve_claim_file(req({"dry_run": False, "selected": self._selected(1)}, {"assignee": "a", "active_issue_path": tmp, "max_active_issues": 1}))
             self.assertTrue(reused["ok"])
             self.assertTrue(reused["reused"])
