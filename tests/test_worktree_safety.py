@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from lokay.steps import cleanup, issue_to_pr
+from lokay.steps import cleanup, issue_to_pr, orchestration
 
 
 WORKTREE_ATOMS = ("read_clone_preconditions", "fetch_clone_origin", "read_base_ref", "read_worktree_inventory", "read_branch_provenance", "create_local_branch", "write_branch_provenance", "add_worktree", "verify_worktree_head")
@@ -111,6 +111,41 @@ class TempGitSafetyTests(unittest.TestCase):
         self.assertEqual(removed["status"], "removed", removed)
         deleted = delete_chain({**self.common, "worktree_path": str(wt), "conduction": {**guards, "remove_worktree": removed, "verify_worktree_absent": {"ok": True, "status": "verified", "absent": True}, "read_local_branch_ownership": {"ok": True, "status": "read", "exists": True, "owned": True}, "delete_local_branch": {"ok": True, "status": "deleted"}}})
         self.assertEqual(deleted["status"], "verified", deleted)
+        self.assertFalse(wt.exists())
+        self.assertFalse(run_git(self.clone, "branch", "--list", self.branch))
+
+    def test_terminal_lifecycle_runs_composed_cleanup_through_branch_absence(self) -> None:
+        prepared = self.prepare()
+        self.assertTrue(prepared["ok"], prepared)
+        wt = self.worktrees / self.branch
+        head = run_git(self.clone, "rev-parse", self.branch)
+        provenance = {"source": "github_pr_readback", "repo": self.identity["repo"], "number": 8, "head_ref": self.branch, "head_oid": head}
+        lifecycle_identity = {"repo": self.identity["repo"], "issue": self.identity["issue"], "pr_number": 8, "branch": self.branch, "head_oid": head}
+        aggregate = orchestration.aggregate_lane_results(request({"conduction": {
+            "triage_verify_merge_receipt": {"status": "merge_receipt_verified", "ok": True, "verified_provenance": provenance},
+            "triage_decide_triage_action": {"status": "verified", "ok": True, "board": "b", "clone_path": str(self.clone), "priority": 1, **lifecycle_identity},
+            "lifecycle_decide_lifecycle_transition": {"status": "decided", "ok": True, "outcome": "finalize_merged", "identity": lifecycle_identity},
+        }}))
+        self.assertTrue(aggregate["cleanup_authorized"], aggregate)
+        conduction = {"aggregate_lane_results": aggregate}
+        base = {"worktree_root": str(self.worktrees), "dry_run": False}
+        for atom in ("resolve_cleanup_branch_source", "parse_cleanup_issue_number", "read_branch_ownership", "derive_cleanup_paths", "validate_cleanup_identity"):
+            result = getattr(cleanup, atom)(request({**base, "conduction": conduction}))
+            self.assertTrue(result["ok"], result)
+            conduction[atom] = result
+        closed = mock.Mock(stdout='{"state":"CLOSED"}')
+        no_prs = mock.Mock(stdout="[]")
+        with mock.patch.object(cleanup, "run_cmd", side_effect=[closed, no_prs]):
+            for atom in ("check_issue_closed", "check_no_open_pr_for_branch"):
+                result = getattr(cleanup, atom)(request({**base, "conduction": conduction}))
+                self.assertTrue(result["ok"], result)
+                conduction[atom] = result
+        for atom in ("verify_cleanup_guards", "read_worktree_ownership", "read_worktree_cleanliness", "remove_worktree", "verify_worktree_absent", "verify_branch_delete_guards", "read_local_branch_ownership", "delete_local_branch", "verify_local_branch_absent"):
+            result = getattr(cleanup, atom)(request({**base, "conduction": conduction}))
+            self.assertTrue(result["ok"], result)
+            conduction[atom] = result
+        self.assertEqual(conduction["verify_worktree_absent"]["status"], "verified")
+        self.assertEqual(conduction["verify_local_branch_absent"]["status"], "verified")
         self.assertFalse(wt.exists())
         self.assertFalse(run_git(self.clone, "branch", "--list", self.branch))
 

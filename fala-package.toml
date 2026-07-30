@@ -2855,7 +2855,7 @@ config = { handler = "lokay.steps.cleanup.verify_branch_delete_guards" }
 [[correlation_paths.effectors]]
 id = "cleanup_read_local_branch_ownership"
 capability = "lokay_step"
-conduction = ["aggregate_lane_results", "cleanup_verify_branch_delete_guards"]
+conduction = ["aggregate_lane_results", "cleanup_verify_branch_delete_guards", "cleanup_validate_cleanup_identity"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.cleanup.read_local_branch_ownership" }
 

@@ -30,7 +30,7 @@ def local_branch_head(clone_path: str | Path, branch: str) -> str:
     return git(["rev-parse", "--verify", f"refs/heads/{branch}"], cwd=clone_path)
 
 
-def _branch_config_section(branch: str) -> str:
+def branch_config_section(branch: str) -> str:
     """Return a collision-safe git-config subsection for any branch name.
 
     Git rejects '/' inside branch.* subsections when set via `git config`.
@@ -42,7 +42,7 @@ def _branch_config_section(branch: str) -> str:
 
 def _branch_config_key(branch: str, key: str) -> str:
     # Git variable names reject underscores; provenance field names use them.
-    return f"branch.{_branch_config_section(branch)}.{key.replace('_', '-')}"
+    return f"branch.{branch_config_section(branch)}.{key.replace('_', '-')}"
 
 
 def branch_config_get(clone_path: str | Path, branch: str, key: str) -> str:

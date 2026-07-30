@@ -242,16 +242,28 @@ def _verified_cleanup_identity(request: Request, lanes: Mapping[str, dict[str, A
         if isinstance(provenance, Mapping) and provenance.get("source") == "github_pr_readback":
             evidence = candidate
             break
-    if evidence is None:
-        for candidate in lifecycle_evidence:
-            if str(candidate.get("status") or "") == "decided" and str(candidate.get("outcome") or "") in {"finalize_merged", "finalize_closed"}:
-                identity = candidate.get("identity")
-                if isinstance(identity, Mapping):
-                    evidence = candidate
-                    provenance = identity
-                    break
-    if evidence is None or not isinstance(provenance, Mapping):
+    lifecycle = next((candidate for candidate in lifecycle_evidence
+                      if str(candidate.get("status") or "") == "decided"
+                      and str(candidate.get("outcome") or "") == "finalize_merged"
+                      and isinstance(candidate.get("identity"), Mapping)), None)
+    if lifecycle is None:
         return None
+    lifecycle_identity = lifecycle["identity"]
+    if evidence is None:
+        evidence = lifecycle
+        provenance = lifecycle_identity
+    if not isinstance(provenance, Mapping):
+        return None
+    for key, aliases in {
+        "repo": ("repo",), "issue": ("issue", "issue_number"),
+        "pr_number": ("pr_number", "number", "pr"),
+        "branch": ("branch", "head_ref", "headRefName"),
+        "head_oid": ("head_oid", "expected_head_oid", "headRefOid"),
+    }.items():
+        expected = _identity_value((provenance,), *aliases)
+        actual = _identity_value((lifecycle_identity,), *aliases)
+        if expected not in (None, "") and str(expected) != str(actual or ""):
+            return None
 
     contextual: list[Mapping[str, Any]] = []
     for tail in ("decide_triage_action", "load_pr_fields", "select_fix_pr", "decide_lifecycle_transition"):

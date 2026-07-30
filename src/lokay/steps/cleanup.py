@@ -16,6 +16,7 @@ from lokay.envelope import Request, Result
 
 from lokay.adapters_cli import CommandError, hermes_kanban_json, run_cmd
 from lokay.adapters_git import (
+    branch_config_section,
     branch_config_get,
     branch_exists,
     delete_local_branch as git_delete_local_branch,
@@ -535,11 +536,14 @@ def read_branch_ownership(request: Request) -> Result:
     idle = _cleanup_upstream_noop(request, "read_branch_ownership", "resolve_cleanup_branch_source", "parse_cleanup_issue_number")
     if idle:
         return idle
-    branch = str(data.get("branch") or cond_get(request, "branch", "parse_cleanup_issue_number", "resolve_cleanup_branch_source", default=cfg.get("branch", ""))).strip()
-    clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
+    aggregate_gate, aggregate_identity = _cleanup_aggregate_gate(request, "read_branch_ownership")
+    if aggregate_gate is not None:
+        return aggregate_gate
+    branch = str(data.get("local_branch") or aggregate_identity.get("local_branch") or data.get("branch") or cond_get(request, "branch", "parse_cleanup_issue_number", "resolve_cleanup_branch_source", default=cfg.get("branch", ""))).strip()
+    clone = str(data.get("clone_path") or aggregate_identity.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
     if not clone or not branch:
         return fail("missing_branch_ownership_context", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch)
-    pattern = rf"^branch\.{re.escape(_branch_config_section(branch))}\.lokay-(task|issue|receipt|repo)$"
+    pattern = rf"^branch\.{re.escape(branch_config_section(branch))}\.lokay-(task|issue|receipt|repo)$"
     try:
         raw = git(["config", "--local", "--get-regexp", pattern], cwd=clone)
     except CommandError as exc:
@@ -547,7 +551,7 @@ def read_branch_ownership(request: Request) -> Result:
             return fail("branch_ownership_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, branch=branch)
         raw = ""
     ownership: dict[str, str] = {}
-    prefix = f"branch.{_branch_config_section(branch)}.lokay-"
+    prefix = f"branch.{branch_config_section(branch)}.lokay-"
     for line in raw.splitlines():
         key, separator, value = line.partition(" ")
         if not separator or not key.startswith(prefix):
@@ -570,8 +574,11 @@ def derive_cleanup_paths(request: Request) -> Result:
     if idle:
         return idle
     parsed = cond_blob(request, "parse_cleanup_issue_number")
-    branch = str(data.get("branch") or parsed.get("branch") or cond_get(request, "branch", "resolve_cleanup_branch_source", default=cfg.get("branch", ""))).strip()
-    local_branch = str(data.get("local_branch") or cond_get(request, "local_branch", "validate_cleanup_identity", default="")).strip() or branch
+    aggregate_gate, aggregate_identity = _cleanup_aggregate_gate(request, "derive_cleanup_paths")
+    if aggregate_gate is not None:
+        return aggregate_gate
+    branch = str(data.get("branch") or aggregate_identity.get("branch") or parsed.get("branch") or cond_get(request, "branch", "resolve_cleanup_branch_source", default=cfg.get("branch", ""))).strip()
+    local_branch = str(data.get("local_branch") or aggregate_identity.get("local_branch") or "").strip() or branch
     root_value = str(data.get("worktree_root") or cfg.get("worktree_root") or "").strip()
     if not local_branch or not root_value:
         return fail("missing_cleanup_path_context", failure_class="terminal", retry_safe=False, branch=branch, local_branch=local_branch, worktree_root=root_value)
@@ -605,10 +612,19 @@ def validate_cleanup_identity(request: Request) -> Result:
             return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False, error=str(exc))
         branch = str(identity.get("branch") or "").strip()
         clone = str(identity.get("clone_path") or "").strip()
-        worktree = str(identity.get("worktree_path") or cond_get(request, "worktree_path", "derive_cleanup_paths", default="")).strip()
-        if not branch or not clone or not worktree:
+        derived_path = str(cond_get(request, "worktree_path", "derive_cleanup_paths", default="")).strip()
+        worktree = str(identity.get("worktree_path") or derived_path).strip()
+        if derived_path and (not worktree or Path(worktree).resolve(strict=False) != Path(derived_path).resolve(strict=False)):
+            return fail("cleanup_identity_mismatch", failure_class="terminal", retry_safe=False, field="worktree_path", expected=derived_path, actual=worktree)
+        ownership = cond_blob(request, "read_branch_ownership").get("ownership")
+        if not branch or not clone or not worktree or not isinstance(ownership, dict):
             return fail("cleanup_identity_missing", failure_class="terminal", retry_safe=False, identity=identity, branch=branch, clone_path=clone, worktree_path=worktree)
-        identity.update(branch=branch, clone_path=clone, worktree_path=worktree)
+        if str(ownership.get("repo") or "") != str(identity.get("repo") or "") or str(ownership.get("issue") or "") != str(issue):
+            return fail("cleanup_identity_mismatch", failure_class="terminal", retry_safe=False, identity=identity, ownership=ownership)
+        if any(ownership.get(key) in (None, "") for key in ("task", "receipt")):
+            return fail("cleanup_identity_missing", failure_class="terminal", retry_safe=False, identity=identity, ownership=ownership)
+        identity.update(branch=branch, local_branch=str(identity.get("local_branch") or branch), clone_path=clone, worktree_path=worktree,
+                        task=str(ownership["task"]), receipt=str(ownership["receipt"]), remote_oid=str(identity.get("remote_oid") or identity.get("head_oid") or ""))
         return ok(status="validated", identity=identity, **identity)
     if aggregate_present:
         return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False)
@@ -676,9 +692,11 @@ def read_worktree_ownership(request: Request) -> Result:
     if idle:
         return idle
     data, cfg = input_of(request), cfg_of(request)
-    clone = str(data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
-    path = str(data.get("worktree_path") or cond_get(request, "worktree_path", "derive_cleanup_paths", default=cfg.get("worktree_path", ""))).strip()
-    branch = str(data.get("local_branch") or _cleanup_value(request, "local_branch", default=cfg.get("local_branch", "")) or data.get("branch") or cfg.get("branch", "")).strip()
+    validated = cond_blob(request, "validate_cleanup_identity").get("identity")
+    identity = validated if isinstance(validated, dict) else {}
+    clone = str(data.get("clone_path") or identity.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
+    path = str(data.get("worktree_path") or identity.get("worktree_path") or cond_get(request, "worktree_path", "derive_cleanup_paths", default=cfg.get("worktree_path", ""))).strip()
+    branch = str(data.get("local_branch") or identity.get("local_branch") or _cleanup_value(request, "local_branch", default=cfg.get("local_branch", "")) or data.get("branch") or cfg.get("branch", "")).strip()
     if not clone or not path or not branch:
         return fail("missing_worktree_ownership_context", failure_class="terminal", retry_safe=False, clone_path=clone, worktree_path=path, branch=branch)
     try:
@@ -764,6 +782,9 @@ def read_local_branch_ownership(request: Request) -> Result:
     gate, identity = _cleanup_aggregate_gate(request, "read_local_branch_ownership")
     if gate is not None:
         return gate
+    validated = cond_blob(request, "validate_cleanup_identity").get("identity")
+    if isinstance(validated, dict):
+        identity = {**identity, **validated}
     composed = bool(identity)
     clone = str(identity.get("clone_path") if composed else data.get("clone_path") or _cleanup_value(request, "clone_path", default=cfg.get("clone_path", "")) or "").strip()
     branch = str(identity.get("local_branch") if composed else data.get("local_branch") or _cleanup_value(request, "local_branch", default=cfg.get("local_branch", "")) or data.get("branch") or cfg.get("branch", "") or "").strip()
