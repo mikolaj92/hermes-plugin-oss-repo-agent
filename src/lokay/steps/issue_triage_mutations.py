@@ -218,21 +218,26 @@ def read_triage_labels(request: Mapping[str, Any]) -> dict[str, Any]:
         return fail("triage_labels_read_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False, **_identity(request))
     return ok(status="triage_labels_read", **state, **_identity(request), selected=_selected(request) or data.get("selected"), dry_run=dry_run_flag(request))
 
-def _configured_label(data: Mapping[str, Any], cfg: Mapping[str, Any], action: str = "") -> str:
+def _configured_label(data: Mapping[str, Any], cfg: Mapping[str, Any], action: str = "", classification: str = "") -> str:
     action = str(action or "").strip().casefold()
+    classification = str(classification or "").strip().casefold()
     label = data.get("label") or data.get("triage_label")
-    if not label:
-        labels = data.get("labels") or cfg.get("labels")
-        if isinstance(labels, Mapping):
-            if action in {"add_ready", "remove_ready", "ready"}:
-                label = labels.get("ready") or labels.get(action)
-            else:
-                label = labels.get(action)
+    labels = data.get("labels") or cfg.get("labels")
+    labels = labels if isinstance(labels, Mapping) else {}
     if not label and action in {"add_ready", "remove_ready", "ready"}:
-        label = data.get("ready_label") or cfg.get("ready_label")
+        label = labels.get("ready") or labels.get(action) or data.get("ready_label") or cfg.get("ready_label")
+    if not label and action == "feedback":
+        # Poll re-entry keys only on needs_feedback; class labels are terminal.
+        label = (
+            data.get("needs_feedback_label")
+            or cfg.get("needs_feedback_label")
+            or labels.get("needs_feedback")
+            or "ai:needs-feedback"
+        )
     if not label and action:
-        label = data.get(f"{action}_label") or cfg.get(f"{action}_label")
+        label = labels.get(action) or data.get(f"{action}_label") or cfg.get(f"{action}_label")
     return str(label or "").strip()
+
 
 
 def decide_triage_mutation(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -281,13 +286,18 @@ def decide_triage_mutation(request: Mapping[str, Any]) -> dict[str, Any]:
         action = "close"
     else:
         return fail("unknown_triage_action", failure_class="terminal", retry_safe=False, **_identity(request))
-    return ok(
+    label = _configured_label(data, cfg, action, classification) if action in {"add_ready", "feedback", "label"} else None
+    result = ok(
         status="mutation_decided",
         action=action,
         classification=classification,
         decision_digest=digest or None,
         **_identity(request),
     )
+    if label:
+        result["label"] = label
+    return result
+
 
 def _repo_labels(gh: str, repo: str) -> list[dict[str, Any]]:
     proc = run_cmd([gh, "label", "list", "--repo", repo, "--limit", "1000", "--json", "name,color,description"], timeout=60)
@@ -303,13 +313,13 @@ def ensure_triage_label(request: Mapping[str, Any]) -> dict[str, Any]:
     bad = _invalid(repo, number)
     if _frozen_state(request):
         return noop("frozen", **_identity(request))
-    gate = _gate(request, "add_ready", "remove_ready", "label")
+    gate = _gate(request, "add_ready", "remove_ready", "label", "feedback")
     if gate is not None:
         return gate
     if bad:
         return bad
     action = _action(request) or str(data.get("label_kind") or data.get("action") or "")
-    label = _configured_label(data, cfg, action)
+    label = _configured_label(data, cfg, action, _classification(request))
     if not label and action in {"add_ready", "remove_ready", "ready"}:
         label = str(data.get("ready_label") or cfg.get("ready_label") or "ai:ready")
     if not label:
@@ -347,7 +357,7 @@ def ensure_triage_label(request: Mapping[str, Any]) -> dict[str, Any]:
 
 def mutate_triage_issue_labels(request: Mapping[str, Any]) -> dict[str, Any]:
     """Add/remove a classification label, then verify with a fresh issue read."""
-    gate = _gate(request, "add_ready", "remove_ready", "label")
+    gate = _gate(request, "add_ready", "remove_ready", "label", "feedback")
     if gate is not None:
         return gate
     data, cfg, repo, number, gh = _values(request)
@@ -374,10 +384,12 @@ def mutate_triage_issue_labels(request: Mapping[str, Any]) -> dict[str, Any]:
             return noop("ready_absent", action=action, decision_digest=digest or None, **_identity(request))
         verb = "--remove-label"
     else:
-        label = str(data.get("label") or decision.get("label") or _configured_label(data, cfg, action)).strip()
+        classification = str(data.get("classification") or decision.get("classification") or _classification(request) or "")
+        label = str(data.get("label") or decision.get("label") or _configured_label(data, cfg, action, classification)).strip()
         if not label:
             names = cfg.get("labels") if isinstance(cfg.get("labels"), Mapping) else {}
-            kind = str(data.get("classification") or decision.get("classification") or "")
+            # Feedback always stamps needs_feedback so poll can re-enter.
+            kind = "needs_feedback" if action == "feedback" else (classification if classification not in {"", "ambiguous"} else "needs_feedback")
             label = str(data.get(f"{kind}_label") or names.get(kind) or "").strip()
         if action == "add_ready" and not label:
             label = ready
@@ -633,12 +645,13 @@ def close_triage_issue(request: Mapping[str, Any]) -> dict[str, Any]:
         return bad
     decision = _decision(request)
     action = _action(request, decision)
-    if action and action != "close":
+    authorized = _close_authorized(request)
+    if action and action != "close" and not authorized:
         return noop("action_not_selected", action=action, classification=_classification(request, decision), **_identity(request))
     if _frozen_state(request):
         return noop("frozen", **_identity(request))
     state = cond_blob(request, "read_triage_labels")
-    if not _close_authorized(request):
+    if not authorized:
         return noop("close_not_authorized", **_identity(request))
     if state.get("state") == "CLOSED":
         return ok(status="already_closed", reconciled=True, **_identity(request))
@@ -658,7 +671,7 @@ def verify_triage_issue_closed(request: Mapping[str, Any]) -> dict[str, Any]:
     data, cfg, repo, number, gh = _values(request)
     decision = _decision(request)
     action = _action(request, decision)
-    if action and action != "close":
+    if action and action != "close" and not _close_authorized(request):
         return noop("action_not_selected", action=action, classification=_classification(request, decision), **_identity(request))
     bad = _invalid(repo, number)
     if bad:

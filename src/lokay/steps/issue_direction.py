@@ -204,11 +204,13 @@ def decide_issue_action(request: Request) -> Result:
     """Pure router: accept | reject_comment | skip for one selected issue.
 
     Alignment rules (first match wins after empty/noop checks):
+    - priority block (existing PR repair priority)
+    - triage precedence (verified triage receipt)
     - reject labels (ai:out-of-scope / wontfix / invalid / configured)
+    - empty title → reject_comment
     - deny keywords in title/body
     - require keywords when configured (must hit at least one)
     - repo_goal token overlap when goal is configured
-    - empty title → reject_comment
     - otherwise accept (including when no direction policy is configured)
     """
     priority_failure = terminal_upstream(request, "decide_issue_action", "decide_issue_priority")

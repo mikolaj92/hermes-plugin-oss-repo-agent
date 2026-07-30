@@ -45,6 +45,25 @@ class IssueDecideMatrixTests(unittest.TestCase):
         self.assertEqual(out["action"], "reject_comment")
         self.assertEqual(out["reason"], "out_of_direction_label")
 
+    def test_reject_empty_title(self) -> None:
+        out = issue_direction.decide_issue_action(
+            req({"selected": self._selected(title="   ", body="Has body text")})
+        )
+        self.assertEqual(out["action"], "reject_comment")
+        self.assertEqual(out["reason"], "empty_title")
+
+    def test_empty_title_precedes_deny_keyword(self) -> None:
+        out = issue_direction.decide_issue_action(
+            req(
+                {
+                    "selected": self._selected(title="", body="Please redesign everything"),
+                    "direction_deny_keywords": ["redesign"],
+                }
+            )
+        )
+        self.assertEqual(out["action"], "reject_comment")
+        self.assertEqual(out["reason"], "empty_title")
+
     def test_reject_deny_keyword(self) -> None:
         out = issue_direction.decide_issue_action(
             req(
@@ -367,6 +386,33 @@ class PrDecideMatrixTests(unittest.TestCase):
         )
         self.assertEqual(out["action"], "skip")
         self.assertEqual(out["reason"], "ai_blocked_label")
+
+    def test_eligibility_precedes_failing_readiness(self) -> None:
+        cases = (
+            ({"isDraft": True}, "draft_pr"),
+            ({"labels": [{"name": "AI:BLOCKED"}]}, "ai_blocked_label"),
+            ({"author": {"login": "contributor"}}, "external_author"),
+            ({"headRefName": "feature/manual"}, "non_ai_fix_branch"),
+            ({"baseRefName": "develop"}, "wrong_base"),
+            ({"state": ""}, "missing_state"),
+            ({"headRefName": ""}, "non_ai_fix_branch"),
+            ({"baseRefName": ""}, "wrong_base"),
+        )
+        for pr_overrides, reason in cases:
+            with self.subTest(reason=reason, pr=pr_overrides):
+                out = triage.decide_triage_action(
+                    req(
+                        {
+                            "pr": self._pr(**pr_overrides),
+                            "repo": "owner/repo",
+                            "checks_pass": False,
+                            "evidence_pass": False,
+                            "automerge": True,
+                        }
+                    )
+                )
+                self.assertEqual(out["action"], "skip", out)
+                self.assertEqual(out["reason"], reason, out)
 
     def test_load_pr_fields_requests_is_draft_and_decide_skips_draft(self) -> None:
         """Regression: draft gate must use isDraft from load_pr_fields, not inject it."""

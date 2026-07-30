@@ -19,6 +19,8 @@ tasks. This plugin only bridges the two where needed:
 It intentionally does not mirror every Kanban status back into GitHub.
 The explicit mapping contract lives in
 [`docs/github-kanban-mapping.md`](docs/github-kanban-mapping.md).
+The process/lane/ownership scaffold lives in
+[`docs/process-map.md`](docs/process-map.md).
 
 ## Install
 

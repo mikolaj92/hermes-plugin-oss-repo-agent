@@ -588,10 +588,21 @@ class MutationAtomTests(unittest.TestCase):
             ):
                 self.assertEqual(result["status"], "noop")
                 self.assertEqual(result["reason"], "action_not_selected")
-        labels_request = {"input": {"repo": "owner/repo", "number": 4, "dry_run": False, "action": "feedback", "conduction": request["input"]["conduction"]}}
+        labels_request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 4,
+                "dry_run": True,
+                "action": "feedback",
+                "classification": "needs_feedback",
+                "conduction": request["input"]["conduction"],
+            }
+        }
         with unittest.mock.patch("lokay.steps.issue_triage_mutations.run_cmd", side_effect=no_command):
             result = m.mutate_triage_issue_labels(labels_request)
-        self.assertEqual((result["status"], result["reason"]), ("noop", "action_not_selected"))
+        self.assertEqual(result["status"], "planned", result)
+        self.assertEqual(result.get("label"), "ai:needs-feedback", result)
+        self.assertEqual(result.get("action"), "feedback", result)
 
     def test_unauthorized_close_never_runs_command(self):
         from lokay.steps import issue_triage_mutations as m

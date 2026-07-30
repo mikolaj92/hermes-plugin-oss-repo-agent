@@ -655,7 +655,13 @@ def _task_has_marker(row: Mapping[str, Any], marker: str) -> bool:
     return bool(marker) and re.search(rf"^Idempotency-Key:\s*{re.escape(marker)}\s*$", body, re.M) is not None
 
 def _task_has_prefixed_marker(row: Mapping[str, Any], prefix: str, marker: str) -> bool:
-    return str(row.get("title") or "").startswith(f"[{prefix}]") and _task_has_marker(row, marker)
+    title = str(row.get("title") or "")
+    if prefix == "fix-pr":
+        if not title.startswith("[fix-pr]") or title.startswith("[fix-pr-review]"):
+            return False
+    elif not title.startswith(f"[{prefix}]"):
+        return False
+    return _task_has_marker(row, marker)
 
 
 def _has_fix_task(rows: list[dict[str, Any]], marker: str) -> bool:
@@ -693,7 +699,7 @@ def select_dispatch_task(request: Request) -> Result:
             continue
         if state in {"done", "completed", "archived", "blocked"}:
             continue
-        if not (requested or title.startswith(("[fix-pr]", "[issue]", "[fix-pr-review]"))):
+        if not (requested or title.startswith("[issue]") or (title.startswith("[fix-pr]") and not title.startswith("[fix-pr-review]"))):
             continue
         if held_repo and held_issue not in (None, "") and not _task_matches_issue(row, repo=held_repo, issue=held_issue):
             continue

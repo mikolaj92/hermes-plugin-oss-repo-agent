@@ -106,7 +106,11 @@ class ReceiptTests(unittest.TestCase):
             payload = dict(self.payload, stage=stage, decision_digest=digest)
             out = func(self.req(payload=payload, decision_digest=digest, updated_at=self.payload["updated_at"]))
             self.assertTrue(out["ok"], out)
-            checked = receipts.verify_triage_receipt(self.req(receipt_path=out["receipt_path"], payload=payload))
+            published = out.get("payload") or payload
+            if stage == "close-authorized":
+                self.assertIs(published.get("authorized"), False, published)
+                self.assertEqual(published.get("reason"), "classification_not_closeable", published)
+            checked = receipts.verify_triage_receipt(self.req(receipt_path=out["receipt_path"], payload=published))
             self.assertTrue(checked["ok"], checked)
 
     def test_flat_index_covers_all_normalized_rows_and_nested_compatibility(self):
@@ -149,7 +153,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertTrue(out["ok"], out)
         self.assertEqual(out["status"], "written")
 
-    def test_close_authorization_noops_for_feedback_action(self):
+    def test_close_authorization_noops_for_feedback_without_closeable_class(self):
         request = self.req(
             payload=dict(self.payload, stage="close-authorized", decision_digest="f" * 64),
             decision_digest="f" * 64,
@@ -160,6 +164,7 @@ class ReceiptTests(unittest.TestCase):
                     "repo": "owner/repo",
                     "number": 42,
                     "action": "feedback",
+                    "classification": "needs_feedback",
                     "decision_digest": "f" * 64,
                 }
             },
@@ -168,6 +173,155 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(out["status"], "noop", out)
         self.assertEqual(out["reason"], "action_not_selected")
         self.assertFalse(list(self.root.rglob("close-authorized-*.json")))
+
+    def test_close_authorization_evaluates_duplicate_policy_for_feedback(self):
+        digest = "f" * 64
+        request = self.req(
+            payload=dict(self.payload, stage="close-authorized", decision_digest=digest),
+            decision_digest=digest,
+            auto_close_duplicates=True,
+            conduction={
+                "classify_triage_issue": {
+                    "ok": True,
+                    "status": "classified",
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "classification": {
+                        "classification": "duplicate",
+                        "canonical_issue": 12,
+                        "reason": "same bug",
+                        "question": "Confirm duplicate of #12?",
+                    },
+                    "decision_digest": digest,
+                },
+                "decide_triage_mutation": {
+                    "ok": True,
+                    "status": "mutation_decided",
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "action": "feedback",
+                    "classification": "duplicate",
+                    "decision_digest": digest,
+                },
+                "read_triage_issue_state": {
+                    "ok": True,
+                    "status": "issue_state_read",
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "issue": {
+                        "repo": "owner/repo",
+                        "number": 42,
+                        "state": "OPEN",
+                        "updatedAt": "2026-07-28T10:00:00Z",
+                        "labels": ["duplicate"],
+                    },
+                    "classified_updatedAt": "2026-07-28T10:00:00Z",
+                },
+                "read_triage_labels": {
+                    "ok": True,
+                    "status": "triage_labels_read",
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "state": "OPEN",
+                    "updatedAt": "2026-07-28T10:00:00Z",
+                    "classified_updatedAt": "2026-07-28T10:00:00Z",
+                    "labels": ["duplicate"],
+                    "comments": [
+                        {
+                            "databaseId": 7,
+                            "author": {"login": "maintainer"},
+                            "authorAssociation": "MEMBER",
+                            "createdAt": "2026-07-28T09:00:00Z",
+                            "body": "This is a duplicate of #12.",
+                        }
+                    ],
+                },
+                "read_triage_comments": {
+                    "ok": True,
+                    "status": "comments_read",
+                    "comments": [
+                        {
+                            "databaseId": 7,
+                            "author": {"login": "maintainer"},
+                            "authorAssociation": "MEMBER",
+                            "createdAt": "2026-07-28T09:00:00Z",
+                            "body": "This is a duplicate of #12.",
+                        }
+                    ],
+                },
+                "read_triage_canonical_issue": {
+                    "ok": True,
+                    "status": "canonical_read",
+                    "canonical": {"number": 12, "state": "OPEN"},
+                },
+            },
+        )
+        out = receipts.publish_triage_close_authorization(request)
+        self.assertTrue(out["ok"], out)
+        self.assertIn(out["status"], {"written", "planned", "exists"}, out)
+        payload = out.get("payload") or {}
+        self.assertTrue(payload.get("authorized"), payload)
+        self.assertEqual(payload.get("classification"), "duplicate")
+        self.assertTrue(list(self.root.rglob("close-authorized-*.json")) or out["status"] == "planned")
+
+    def test_close_authorization_denies_duplicate_when_auto_close_disabled(self):
+        digest = "e" * 64
+        request = self.req(
+            payload=dict(self.payload, stage="close-authorized", decision_digest=digest),
+            decision_digest=digest,
+            auto_close_duplicates=False,
+            conduction={
+                "decide_triage_mutation": {
+                    "ok": True,
+                    "status": "mutation_decided",
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "action": "feedback",
+                    "classification": "duplicate",
+                    "decision_digest": digest,
+                },
+                "classify_triage_issue": {
+                    "ok": True,
+                    "status": "classified",
+                    "classification": {"classification": "duplicate", "canonical_issue": 12},
+                    "decision_digest": digest,
+                },
+                "read_triage_labels": {
+                    "ok": True,
+                    "status": "triage_labels_read",
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "state": "OPEN",
+                    "updatedAt": "2026-07-28T10:00:00Z",
+                    "classified_updatedAt": "2026-07-28T10:00:00Z",
+                    "labels": ["duplicate"],
+                    "comments": [],
+                },
+            },
+        )
+        out = receipts.publish_triage_close_authorization(request)
+        self.assertTrue(out["ok"], out)
+        payload = out.get("payload") or {}
+        self.assertFalse(payload.get("authorized"), payload)
+        self.assertEqual(payload.get("reason"), "auto_close_disabled")
+
+    def test_close_authorization_rejects_injected_authorized_without_class(self):
+        digest = "c" * 64
+        request = self.req(
+            payload=dict(
+                self.payload,
+                stage="close-authorized",
+                decision_digest=digest,
+                authorized=True,
+                verified=True,
+            ),
+            decision_digest=digest,
+        )
+        out = receipts.publish_triage_close_authorization(request)
+        self.assertTrue(out["ok"], out)
+        payload = out.get("payload") or {}
+        self.assertFalse(payload.get("authorized"), payload)
+        self.assertEqual(payload.get("reason"), "classification_not_closeable")
 
     def test_mutation_verification_noops_for_feedback_without_decide(self):
         request = {

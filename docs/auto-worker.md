@@ -1,19 +1,24 @@
 # Auto-worker (Fala 0.7.15 package host)
 
 Atomic effectors are composed into correlation paths. `auto_worker`, invoked by
-`lokay-tick-all`, is the sole scheduled mutator. Intake, dispatch, existing-PR
-triage/repair, lifecycle reconciliation, and cleanup remain independent lanes
-inside that one tick. Individual ticks are CLI entrypoints for manual diagnostics only.
+`lokay-tick-all`, is the sole scheduled mutator. One tick composes four work
+lanes (intake, dispatch, PR triage/repair, thin lifecycle), one aggregate join,
+and one gated cleanup lane—with intentional couplings (repair priority can block
+intake; aggregate authorizes cleanup). Individual ticks are CLI entrypoints for
+manual diagnostics only.
+
+Canonical process/lane/ownership map: [`process-map.md`](process-map.md).
 
 ## Paths
 
 | Path id | Diagnostic CLI | Effectors (high level) |
 |---------|----------------|-------------------------|
-| `issue_intake` | `lokay-tick-intake` | poll → direction → comment → claim → kanban |
+| `issue_intake` | `lokay-tick-intake` | poll → pre-intake triage (classify/mutate/feedback/close + receipts) → eligibility → direction → comment → claim → kanban |
 | `issue_to_pr` | `lokay-tick-dispatch` | load → parse → worktree → omp → push → pr → labels → receipt → complete |
 | `pr_triage` | `lokay-tick-triage` | load PR → checks → evidence → decide → apply (merge/comment/repair) |
-| `cleanup` | `lokay-tick-cleanup` | parse branch → verify closed/no PR → remove worktree → delete branch → release claim |
-| `auto_worker` | `lokay-tick-all` | one package-host run with independent intake/dispatch, existing-PR triage/repair, lifecycle reconciliation, aggregate authorization, and cleanup lanes |
+| `cleanup` | `lokay-tick-cleanup` | parse branch → verify closed/no PR → remove worktree → delete branch → release claim → receipt → maintenance task |
+| `cleanup_reconcile` | (no dedicated tick; diag/no-target) | validate identity → read GH+local evidence → decide no-target reconcile → receipts (not an auto_worker lane) |
+| `auto_worker` | `lokay-tick-all` | one package-host run composing intake, dispatch, PR triage/repair, thin lifecycle, aggregate authorization, and gated cleanup |
 
 Fala 0.7.15 package-host conduction passes each upstream effector result directly
 to the next prefixed handler; effectors remain single-purpose subprocess adapters.

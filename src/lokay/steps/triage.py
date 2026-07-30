@@ -885,13 +885,14 @@ def decide_triage_action(request: Request) -> Result:
         if isinstance(x, dict)
     }
     labels |= {str(x) for x in (pr.get("labels") or []) if isinstance(x, str)}
-    if state and state != "OPEN":
-        return ok(status="decided", action="skip", reason=f"state_{state.lower()}")
+    if state != "OPEN":
+        reason = f"state_{state.lower()}" if state else "missing_state"
+        return ok(status="decided", action="skip", reason=reason)
     if is_draft:
         return ok(status="decided", action="skip", reason="draft_pr")
-    if head and not head.startswith(branch_prefix):
+    if not head.startswith(branch_prefix):
         return ok(status="decided", action="skip", reason="non_ai_fix_branch", head=head)
-    if base and base != base_branch:
+    if base != base_branch:
         return ok(status="decided", action="skip", reason="wrong_base", base=base, base_branch=base_branch)
     if require_owner and not author_login:
         return ok(status="decided", action="skip", reason="missing_author", owner=repo_owner)
@@ -903,7 +904,8 @@ def decide_triage_action(request: Request) -> Result:
             author=author_login,
             owner=repo_owner,
         )
-    if "ai:blocked" in labels:
+    blocked_label = str(data.get("blocked_label") or cfg.get("blocked_label") or "ai:blocked")
+    if blocked_label.casefold() in {label.casefold() for label in labels}:
         return ok(status="decided", action="skip", reason="ai_blocked_label")
     if not checks_pass:
         return ok(status="decided", action="repair", reason="checks_not_green")

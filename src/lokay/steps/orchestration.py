@@ -302,7 +302,7 @@ def _verified_cleanup_identity(request: Request, lanes: Mapping[str, dict[str, A
                         return None
                     identity[key] = value
 
-    required = ("repo", "issue", "pr_number", "branch", "head_oid")
+    required = ("repo", "issue", "pr_number", "branch", "head_oid", "board", "clone_path", "priority")
     if any(key not in identity or identity[key] in (None, "") for key in required):
         return None
     if provenance.get("repo") not in (None, identity["repo"]):
@@ -322,6 +322,12 @@ def _verified_cleanup_identity(request: Request, lanes: Mapping[str, dict[str, A
                 if repair_identity.get(key) not in (None, "") and str(repair_identity[key]) != str(value):
                     return None
                 repair_identity[key] = value
+            elif key == "board" and repair_identity.get(key) in (None, ""):
+                value = identity.get(key)
+                if value not in (None, ""):
+                    repair_identity[key] = value
+        if repair_identity.get("board") in (None, ""):
+            return None
         # A repair receipt identifies owned local state, but only terminal merge/lifecycle
         # evidence authorizes deleting it.
         if identity is not None and all(str(identity.get(key) or "") == str(repair_identity.get(key) or "") for key in ("repo", "issue", "pr_number", "branch")) and str(identity.get("head_oid") or "") == str(repair_identity.get("remote_oid") or ""):
@@ -372,6 +378,7 @@ def aggregate_lane_results(request: Request) -> Result:
         "mutated": False,
         "worked": worked,
         "idle": not failures and not worked and not pending,
+        "pending": pending,
         "lanes": lanes,
         "terminal_failures": failures,
         "cleanup_authorized": False,

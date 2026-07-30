@@ -782,6 +782,43 @@ class IssueToPrTests(unittest.TestCase):
         }))
         self.assertEqual(selected["task_id"], "issue-9")
 
+    def test_dispatch_selection_excludes_fix_pr_review(self) -> None:
+        review = {
+            "id": "review-1",
+            "title": "[fix-pr-review] o/r#9: repair checks",
+            "body": "Repository: o/r\nIssue: #9\nIdempotency-Key: fix-pr-review:o/r:9\n",
+            "status": "ready",
+        }
+        only_review = issue_to_pr.select_dispatch_task(req({
+            "conduction": {"read_dispatch_tasks": {"status": "read", "ok": True, "tasks": [review]}},
+        }))
+        self.assertEqual(only_review["status"], "noop")
+        self.assertEqual(only_review["reason"], "no_ready_task")
+
+        fix = {
+            "id": "fix-1",
+            "title": "[fix-pr] o/r#9: Fix o/r#9",
+            "body": "Repository: o/r\nIssue: #9\nIdempotency-Key: fix-pr:o/r:9\n",
+            "status": "ready",
+        }
+        selected = issue_to_pr.select_dispatch_task(req({
+            "conduction": {"read_dispatch_tasks": {"status": "read", "ok": True, "tasks": [review, fix]}},
+        }))
+        self.assertEqual(selected["status"], "selected")
+        self.assertEqual(selected["task_id"], "fix-1")
+
+        issue_task = {
+            "id": "issue-1",
+            "title": "[issue] o/r#9: bug",
+            "body": "Repository: o/r\nIssue: #9\nIdempotency-Key: github-issue:o/r:9\n",
+            "status": "ready",
+        }
+        # Review markers must not supersede the issue task for dispatch handoff.
+        still_issue = issue_to_pr.select_dispatch_task(req({
+            "conduction": {"read_dispatch_tasks": {"status": "read", "ok": True, "tasks": [issue_task, review]}},
+        }))
+        self.assertEqual(still_issue["task_id"], "issue-1")
+
     def test_non_fix_task_cannot_claim_fix_marker(self) -> None:
         impostor = {
             "id": "issue-1", "title": "[issue] o/r#9: bug", "status": "ready",
@@ -1873,6 +1910,33 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(out["status"], "invoke")
         self.assertTrue(out["authorize"])
         self.assertEqual(out["reason"], "missing_test_evidence")
+        self.assertEqual(out["failures"], [])
+
+    def test_decide_repair_attempt_invokes_for_merge_conflict(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+
+        out = decide_repair_attempt(req({
+            "enabled": True,
+            "live": True,
+            "dry_run": False,
+            "repo": "o/r",
+            "number": 1,
+            "verified_head": "abc",
+            "candidate": "c1",
+            "run_id": "r1",
+            "checks": [{"name": "ci", "conclusion": "SUCCESS"}],
+            "conduction": {
+                "triage_decide_triage_action": {
+                    "ok": True,
+                    "status": "decided",
+                    "action": "repair",
+                    "reason": "merge_conflict",
+                },
+            },
+        }))
+        self.assertEqual(out["status"], "invoke")
+        self.assertTrue(out["authorize"])
+        self.assertEqual(out["reason"], "merge_conflict")
         self.assertEqual(out["failures"], [])
 
     def test_decide_repair_attempt_allows_missing_checks_only_when_disabled(self) -> None:
@@ -3757,7 +3821,7 @@ class TriageTests(unittest.TestCase):
         self.assertFalse(automated_comment["pass_"])
 
     def test_decide_triage_action_routes(self) -> None:
-        base = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "labels": [], "author": {"login": "o"}}, "checks_pass": True, "evidence_pass": True, "automerge": True}
+        base = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "labels": [], "author": {"login": "o"}, "headRefName": "ai/fix/1", "baseRefName": "main"}, "checks_pass": True, "evidence_pass": True, "automerge": True, "repo": "o/r"}
         self.assertEqual(triage.decide_triage_action(req(base))["action"], "merge")
         self.assertEqual(triage.decide_triage_action(req({**base, "checks_pass": False}))["action"], "repair")
         conducted = {

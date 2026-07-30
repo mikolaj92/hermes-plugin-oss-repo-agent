@@ -14,7 +14,7 @@ import tempfile
 from typing import Any
 
 from lokay.envelope import Request, Result, fail, noop, ok, planned, cfg_of, input_of, cond_blob, cond_get, dry_run_flag, terminal_upstream
-from lokay.steps.issue_triage import triage_gate, triage_identity, triage_selected
+from lokay.steps.issue_triage import authorize_duplicate_close, authorize_out_of_scope_close, triage_gate, triage_identity, triage_selected
 
 _SCHEMA_VERSION = 1
 _COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -352,12 +352,12 @@ def _stage_request(request: Request, stage: str) -> Result:
     if terminal:
         return terminal
     action = _stage_action(request)
-    if stage in {"close-authorized", "close-verified"} and action and action != "close":
+    if stage in {"close-authorized", "close-verified"} and action and action not in {"close", "feedback"}:
         return noop("action_not_selected", action=action, operation=operation)
-    if stage == "mutation-authorized" and action and action not in {"add_ready", "remove_ready", "label", "close"}:
+    if stage == "mutation-authorized" and action and action not in {"add_ready", "remove_ready", "label", "close", "feedback"}:
         return noop("action_not_selected", action=action, operation=operation)
     if stage == "mutation-verified":
-        if action and action not in {"add_ready", "remove_ready", "label", "close"}:
+        if action and action not in {"add_ready", "remove_ready", "label", "close", "feedback"}:
             return noop("action_not_selected", action=action, operation=operation)
         if not action:
             labels = cond_blob(request, "mutate_triage_issue_labels")
@@ -397,6 +397,8 @@ def _stage_request(request: Request, stage: str) -> Result:
             payload.setdefault("verified", True)
             if labels.get("label"):
                 payload.setdefault("label", labels.get("label"))
+            if labels.get("action"):
+                payload.setdefault("action", labels.get("action"))
     try:
         root = _receipt_root(data, cfg)
         repo, _, issue = _identity({**data, **payload}, cfg, request, *_receipt_upstream(request, stage))
@@ -568,7 +570,220 @@ def publish_triage_feedback_receipt(request: Request) -> Result:
 
 
 def publish_triage_close_authorization(request: Request) -> Result:
-    return _stage_request(request, "close-authorized")
+    return _publish_close_authorization(request)
+
+
+def _bool_flag(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return default
+    if isinstance(value, str):
+        text = value.strip().casefold()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
+def _close_classification(request: Request) -> tuple[str, Mapping[str, Any]]:
+    data = input_of(request)
+    for name in ("classify_triage_issue", "decide_triage_mutation"):
+        blob = cond_blob(request, name)
+        if not isinstance(blob, Mapping) or not blob:
+            continue
+        classification = blob.get("classification")
+        if isinstance(classification, Mapping):
+            name_value = str(classification.get("classification") or "").strip().casefold()
+            if name_value:
+                return name_value, classification
+        raw = blob.get("classification") if name == "decide_triage_mutation" else None
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip().casefold(), {"classification": raw.strip()}
+    raw = data.get("classification")
+    if isinstance(raw, Mapping):
+        name_value = str(raw.get("classification") or "").strip().casefold()
+        return name_value, raw
+    text = str(raw or "").strip().casefold()
+    return text, {"classification": text} if text else {}
+
+
+def _fresh_close_state(request: Request, classification: Mapping[str, Any], kind: str) -> dict[str, Any]:
+    data, cfg = input_of(request), cfg_of(request)
+    issue_blob = cond_blob(request, "read_triage_issue_state")
+    labels_blob = cond_blob(request, "read_triage_labels")
+    issue = issue_blob.get("issue") if isinstance(issue_blob.get("issue"), Mapping) else {}
+    selected = triage_selected(request, *_receipt_upstream(request, "close-authorized"))
+    repo = str(
+        data.get("repo")
+        or issue.get("repo")
+        or labels_blob.get("repo")
+        or selected.get("repo")
+        or cfg.get("repo")
+        or ""
+    ).strip()
+    number = data.get("number") if data.get("number") is not None else data.get("issue")
+    if number is None:
+        number = issue.get("number") if issue.get("number") is not None else labels_blob.get("number")
+    if number is None:
+        number = selected.get("number") if selected.get("number") is not None else selected.get("issue")
+    labels = list(issue.get("labels") or labels_blob.get("labels") or data.get("labels") or [])
+    if labels and isinstance(labels[0], Mapping):
+        labels = [str(item.get("name") or "") for item in labels]
+    updated_at = (
+        issue.get("updatedAt")
+        or labels_blob.get("updatedAt")
+        or data.get("updatedAt")
+        or data.get("issue_updated_at")
+        or selected.get("updatedAt")
+    )
+    classified_updated = (
+        data.get("classified_updatedAt")
+        or issue_blob.get("classified_updatedAt")
+        or labels_blob.get("classified_updatedAt")
+        or selected.get("classified_updatedAt")
+        or updated_at
+    )
+    preexisting = data.get("preexisting_labels")
+    if not isinstance(preexisting, list):
+        preexisting = selected.get("preexisting_labels") if isinstance(selected.get("preexisting_labels"), list) else labels
+    state = {
+        "repo": repo,
+        "number": number,
+        "state": str(issue.get("state") or labels_blob.get("state") or data.get("state") or "OPEN").upper(),
+        "updatedAt": updated_at,
+        "classified_updatedAt": classified_updated,
+        "labels": labels,
+        "preexisting_labels": list(preexisting or []),
+    }
+    if kind == "duplicate":
+        canonical_blob = cond_blob(request, "read_triage_canonical_issue")
+        canonical = canonical_blob.get("canonical") if isinstance(canonical_blob.get("canonical"), Mapping) else None
+        if canonical is None and isinstance(data.get("canonical"), Mapping):
+            canonical = data.get("canonical")
+        if canonical is not None:
+            state["canonical"] = dict(canonical)
+        elif isinstance(classification.get("canonical_issue"), int):
+            # Leave unverified so authorize_* rejects rather than inventing success.
+            pass
+    return state
+
+
+def _close_comments(request: Request) -> list[dict[str, Any]]:
+    data = input_of(request)
+    comments_blob = cond_blob(request, "read_triage_comments")
+    labels_blob = cond_blob(request, "read_triage_labels")
+    raw = data.get("comments")
+    if not isinstance(raw, list):
+        raw = comments_blob.get("comments") if isinstance(comments_blob.get("comments"), list) else labels_blob.get("comments")
+    if not isinstance(raw, list):
+        return []
+    return [dict(item) for item in raw if isinstance(item, Mapping)]
+
+
+def _publish_close_authorization(request: Request) -> Result:
+    operation = "publish_triage_close_authorization"
+    gate = _selected_gate(request, operation, *_receipt_upstream(request, "close-authorized"))
+    if gate is not None:
+        return gate
+    terminal = terminal_upstream(request, operation, *_receipt_upstream(request, "close-authorized"))
+    if terminal:
+        return terminal
+    action = _stage_action(request)
+    kind, classification = _close_classification(request)
+    if action and action not in {"close", "feedback"}:
+        return noop("action_not_selected", action=action, operation=operation)
+    if action == "feedback" and kind not in {"duplicate", "out_of_scope"}:
+        return noop("action_not_selected", action=action, classification=kind or None, operation=operation)
+
+    data, cfg = input_of(request), cfg_of(request)
+    selected = triage_selected(request, *_receipt_upstream(request, "close-authorized"))
+    state = _fresh_close_state(request, classification if isinstance(classification, Mapping) else {}, kind)
+    comments = _close_comments(request)
+    auto_close = False
+    decision: Mapping[str, Any]
+    if kind == "duplicate":
+        auto_close = _bool_flag(
+            data.get("auto_close_duplicates", selected.get("auto_close_duplicates", cfg.get("auto_close_duplicates", False))),
+            False,
+        )
+        decision = authorize_duplicate_close(
+            classification if isinstance(classification, Mapping) else {"classification": kind},
+            state,
+            comments,
+            auto_close=auto_close,
+        )
+    elif kind == "out_of_scope":
+        auto_close = _bool_flag(
+            data.get("auto_close_out_of_scope", selected.get("auto_close_out_of_scope", cfg.get("auto_close_out_of_scope", False))),
+            False,
+        )
+        goal = str(
+            data.get("triage_goal")
+            or selected.get("triage_goal")
+            or cfg.get("triage_goal")
+            or data.get("repo_goal")
+            or cfg.get("repo_goal")
+            or ""
+        )
+        reject_raw = (
+            data.get("direction_reject_labels")
+            or cfg.get("direction_reject_labels")
+            or data.get("reject_labels")
+            or cfg.get("reject_labels")
+            or ("ai:out-of-scope", "wontfix", "invalid")
+        )
+        if isinstance(reject_raw, str):
+            reject_labels = tuple(part.strip() for part in reject_raw.split(",") if part.strip())
+        else:
+            reject_labels = tuple(str(part).strip() for part in reject_raw if str(part).strip())
+        decision = authorize_out_of_scope_close(
+            classification if isinstance(classification, Mapping) else {"classification": kind},
+            state,
+            comments,
+            auto_close=auto_close,
+            triage_goal=goal,
+            reject_labels=reject_labels,
+        )
+    elif action == "close":
+        # Explicit close without a closeable classification never authorizes.
+        decision = {"authorized": False, "reason": "classification_not_closeable"}
+    else:
+        # Payload-only / stage-atom path: never trust caller-supplied authorized.
+        decision = {"authorized": False, "reason": "classification_not_closeable"}
+
+    payload = _payload(request, "close-authorized")
+    if not payload.get("decision_digest"):
+        for name in ("decide_triage_mutation", "classify_triage_issue", "mutate_triage_issue_labels", "verify_triage_feedback"):
+            blob = cond_blob(request, name)
+            if isinstance(blob, Mapping) and blob.get("decision_digest"):
+                payload["decision_digest"] = blob["decision_digest"]
+                break
+            nested = blob.get("payload") if isinstance(blob, Mapping) else None
+            if isinstance(nested, Mapping) and nested.get("decision_digest"):
+                payload["decision_digest"] = nested["decision_digest"]
+                break
+    payload["authorized"] = bool(decision.get("authorized") is True)
+    payload["verified"] = True
+    payload["reason"] = decision.get("reason")
+    if decision.get("evidence") is not None:
+        payload["evidence"] = decision.get("evidence")
+    payload["classification"] = kind or (classification.get("classification") if isinstance(classification, Mapping) else kind)
+    payload["action"] = "close" if payload["authorized"] else (action or kind or "close")
+    payload["auto_close"] = auto_close
+    payload.setdefault("close_policy", kind or "none")
+
+    try:
+        root = _receipt_root(data, cfg)
+        repo, _, issue = _identity({**data, **payload}, cfg, request, *_receipt_upstream(request, "close-authorized"))
+        identity = payload.get("decision_digest") or data.get("identity") or payload.get("updated_at")
+        path = _receipt_path(root, repo, issue, "close-authorized", identity)
+    except (TypeError, ValueError) as exc:
+        return fail("receipt_identity_invalid", error=str(exc), operation=operation)
+    if dry_run_flag(request):
+        return planned(receipt_path=str(path), payload=payload, selected=payload.get("selected"), authorized=bool(payload.get("authorized") is True))
+    return _publish(path, payload)
 
 
 def publish_triage_close_verification(request: Request) -> Result:

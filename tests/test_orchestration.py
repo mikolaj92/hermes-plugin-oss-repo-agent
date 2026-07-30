@@ -123,14 +123,15 @@ class AggregateLaneResultsTests(unittest.TestCase):
     def test_repair_cleanup_preserves_distinct_local_branch(self) -> None:
         repo, issue, pr, branch, head = "o/r", 7, 8, "ai/fix/7", "a" * 40
         import hashlib
-        local = f"lokay/repair/{hashlib.sha256(f'{repo}\0{pr}\0{branch}'.encode()).hexdigest()}"
+        digest = hashlib.sha256(f"{repo}\0{pr}\0{branch}".encode()).hexdigest()
+        local = f"lokay/repair/{digest}"
         lifecycle = {"status": "decided", "ok": True, "outcome": "finalize_merged", "identity": {"repo": repo, "issue": issue, "pr_number": pr, "branch": branch, "head_oid": head}}
         repair = {"status": "verified", "ok": True, "payload": {"config": {"repo": repo, "issue": issue, "pr_number": pr, "branch": branch, "target_branch": branch, "local_branch": local, "worktree_path": f"/worktrees/{local}", "receipt": "/state/repair.json", "remote_oid": head, "clone_path": "/repo"}}}
         conduction = {
             "triage_verify_repair_receipt": repair,
             "lifecycle_decide_lifecycle_transition": lifecycle,
         }
-        out = aggregate_lane_results(request(conduction))
+        out = aggregate_lane_results(request(conduction, repos=[{"repo": repo, "board": "b", "clone_path": "/repo", "priority": 3}]))
         self.assertTrue(out["cleanup_authorized"], out)
         self.assertEqual(out["cleanup_identity"]["branch"], branch)
         self.assertEqual(out["cleanup_identity"]["local_branch"], local)
@@ -199,6 +200,7 @@ class AggregateLaneResultsTests(unittest.TestCase):
             },
         }))
         self.assertFalse(waiting["idle"])
+        self.assertTrue(waiting["pending"])
 
         selected_repair = aggregate_lane_results(request({
             "auto_worker_triage_decide_triage_action": {
@@ -207,6 +209,14 @@ class AggregateLaneResultsTests(unittest.TestCase):
         }))
         self.assertFalse(selected_repair["worked"])
         self.assertTrue(selected_repair["idle"])
+        self.assertFalse(selected_repair["pending"])
+
+    def test_incomplete_cleanup_identity_does_not_authorize(self) -> None:
+        identity = {"repo": "o/r", "issue": 7, "pr_number": 8, "branch": "ai/fix/7", "head_oid": "abc"}
+        lifecycle = {"status": "decided", "ok": True, "mutated": False, "outcome": "finalize_merged", "identity": identity}
+        out = aggregate_lane_results(request({"auto_worker_lifecycle_decide_lifecycle_transition": lifecycle}))
+        self.assertFalse(out["cleanup_authorized"])
+        self.assertNotIn("cleanup_identity", out)
 
     def test_expected_triage_noops_do_not_fail_closed(self) -> None:
         out = aggregate_lane_results(request({

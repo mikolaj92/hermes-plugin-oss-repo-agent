@@ -1117,7 +1117,7 @@ def read_maintenance_tasks(request: Request) -> Result:
     if idle:
         return idle
     data, cfg = input_of(request), cfg_of(request)
-    board = str(data.get("board") or cfg.get("board") or "").strip()
+    board = str(_cleanup_value(request, "board") or data.get("board") or cfg.get("board") or "").strip()
     if not board:
         return fail("missing_board", failure_class="terminal", retry_safe=False)
     try:
@@ -1177,10 +1177,10 @@ def create_maintenance_task(request: Request) -> Result:
     if found.get("found") is True:
         return ok(status="exists", task_id=_task_id(found.get("task") or {}), marker=found.get("marker"), mutated=False)
     data, cfg = input_of(request), cfg_of(request)
-    board = str(data.get("board") or cfg.get("board") or "").strip()
-    repo = str(data.get("repo") or cfg.get("repo") or "").strip()
-    path = str(data.get("worktree_path") or "").strip()
-    pr = str(data.get("pr_number") or data.get("number") or "").strip()
+    board = str(_cleanup_value(request, "board") or data.get("board") or cfg.get("board") or "").strip()
+    repo = str(_cleanup_value(request, "repo") or data.get("repo") or cfg.get("repo") or "").strip()
+    path = str(_cleanup_value(request, "worktree_path") or data.get("worktree_path") or "").strip()
+    pr = str(_cleanup_value(request, "pr_number", "number") or data.get("pr_number") or data.get("number") or "").strip()
     marker = str(found.get("marker") or f"maintenance:{repo or path}:pr:{pr or 'none'}")
     reason = str(data.get("reason") or "dirty_worktree")
     title = f"[maintenance] dirty worktree: {path or repo or reason}"
