@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import json
@@ -980,7 +981,7 @@ class IssueToPrTests(unittest.TestCase):
         push_read = {"status": "read", "ok": True, "worktree_path": "/wt", "branch": "ai/fix/1", "local_oid": "abc"}
         pushed = issue_to_pr.push_branch(req({"worktree_path": "/wt", "branch": "ai/fix/1", "dry_run": True, "conduction": {"read_push_head": push_read}}))
         self.assertEqual(pushed["status"], "planned")
-        pr_decision = {"status": "create", "ok": True, "should_create": True}
+        pr_decision = {"status": "create", "ok": True, "should_create": True, "issue": 1}
         pr = issue_to_pr.create_pull_request(req({"repo": "o/r", "branch": "ai/fix/1", "dry_run": True, "conduction": {"decide_existing_pr": pr_decision}}))
         self.assertEqual(pr["status"], "planned")
         created = {"status": "created", "ok": True, "repo": "o/r", "issue": 1, "branch": "ai/fix/1", "base": "main"}
@@ -1002,6 +1003,42 @@ class IssueToPrTests(unittest.TestCase):
             verified = issue_to_pr.verify_dispatch_receipt(req({"receipt_path": path, "dry_run": False, "conduction": {"publish_dispatch_receipt": published, "build_dispatch_receipt": built}}))
             self.assertEqual(published["status"], "published")
             self.assertEqual(verified["status"], "verified")
+
+    def test_create_pull_request_serializes_recheck_create_and_reconcile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = {"created": False, "creates": 0, "branch": ""}
+            gate = __import__("threading").Barrier(2)
+
+            def gh(args, **kwargs):
+                row = {"number": 2, "url": "https://example.test/pr/2", "baseRefName": "main", "headRefName": state["branch"], "closingIssuesReferences": [{"number": 1}]}
+                if args[1:3] == ["pr", "list"]:
+                    if "closingIssuesReferences" in args[args.index("--json") + 1]:
+                        return SimpleNamespace(stdout=json.dumps([row] if state["created"] else []))
+                    branch_row = {key: value for key, value in row.items() if key != "closingIssuesReferences"}
+                    requested_branch = args[args.index("--head") + 1]
+                    return SimpleNamespace(stdout=json.dumps([branch_row] if state["created"] and state["branch"] == requested_branch else []))
+                if args[1:3] == ["pr", "create"]:
+                    state["creates"] += 1
+                    state["branch"] = args[args.index("--head") + 1]
+                    state["created"] = True
+                    return SimpleNamespace(stdout="created")
+                raise AssertionError(args)
+
+            original_lock_path = issue_to_pr._pr_creation_lock_path
+            def synchronized_lock_path(request, repo, issue):
+                gate.wait(timeout=2)
+                return original_lock_path(request, repo, issue)
+            requests = [
+                req({"repo": "o/r", "branch": branch, "issue": 1, "dry_run": False, "conduction": {"decide_existing_pr": {"ok": True, "status": "create", "should_create": True}}}, {"task_receipts": tmp})
+                for branch in ("ai/fix/1-intake", "ai/fix/1-canonical")
+            ]
+            with mock.patch("lokay.steps.issue_to_pr.run_cmd", side_effect=gh), mock.patch("lokay.steps.issue_to_pr._pr_creation_lock_path", side_effect=synchronized_lock_path):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(issue_to_pr.create_pull_request, requests))
+
+        self.assertEqual(state["creates"], 1)
+        self.assertEqual({result["status"] for result in results}, {"created", "noop"})
+        self.assertTrue(all(result.get("number") == 2 for result in results))
 
     def test_live_shaped_labels_and_receipt_preserve_identity(self) -> None:
         reconciled = {"status": "reconciled", "ok": True, "repo": "o/r", "number": 2, "issue": 1, "board": "b", "task_id": "t1"}

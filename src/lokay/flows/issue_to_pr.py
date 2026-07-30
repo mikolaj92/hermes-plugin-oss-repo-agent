@@ -154,6 +154,7 @@ async def run_issue_to_pr_flow(
         "executor_enabled": cfg.executor.enabled,
         "dry_run": is_dry,
         "receipt_path": receipt,
+        "task_receipts": cfg.paths.task_receipts,
         "pr_opened_label": cfg.labels.pr_opened,
         "generated_label": cfg.labels.generated,
     }

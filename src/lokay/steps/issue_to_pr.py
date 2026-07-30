@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import fcntl
+import hashlib
 import os
 import re
 import subprocess
@@ -1378,19 +1380,35 @@ def verify_push_oid(request: Request) -> Result:
     if not local or not remote: return fail("missing_push_oids", failure_class="terminal", retry_safe=False, operation="verify_push_oid")
     if local != remote: return fail("push_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_push_oid", local_oid=local, remote_oid=remote, mutated=True)
     return ok(status="verified", operation="verify_push_oid", local_oid=local, remote_oid=remote, repo=pushed.get("repo") or read.get("repo"), issue=pushed.get("issue") or read.get("issue"), board=pushed.get("board") or read.get("board"), task_id=pushed.get("task_id") or read.get("task_id"), branch=pushed.get("branch") or read.get("branch"))
-
-
 def _read_open_prs(repo: str, branch: str, base: str, gh: str, *, operation: str, identity: dict[str, Any]) -> Result:
     if not repo or not branch:
         return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False, operation=operation)
     try:
         proc = run_cmd([gh, "pr", "list", "--repo", repo, "--head", branch, "--base", base, "--state", "open", "--json", "number,url,baseRefName,headRefName"])
         rows = json.loads(proc.stdout or "[]")
-    except (CommandError, json.JSONDecodeError) as exc:
+    except (CommandError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
         return fail("pr_list_failed", failure_class="retryable_read", retry_safe=True, operation=operation, error=str(exc))
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         return fail("invalid_pr_list", failure_class="terminal", retry_safe=False, operation=operation)
     return ok(status="read", operation=operation, prs=rows, repo=repo, branch=branch, base=base, **identity)
+
+
+def _read_open_prs_for_issue(repo: str, issue: int, gh: str, *, operation: str) -> Result:
+    try:
+        proc = run_cmd([gh, "pr", "list", "--repo", repo, "--state", "open", "--limit", "1000", "--json", "number,url,baseRefName,headRefName,closingIssuesReferences"])
+        rows = json.loads(proc.stdout or "[]")
+    except (CommandError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+        return fail("issue_pr_list_failed", failure_class="retryable_read", retry_safe=True, operation=operation, error=str(exc), repo=repo, issue=issue)
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return fail("invalid_issue_pr_list", failure_class="retryable_read", retry_safe=True, operation=operation, repo=repo, issue=issue)
+    matches: list[dict[str, Any]] = []
+    for row in rows:
+        references = row.get("closingIssuesReferences")
+        if not isinstance(references, list) or any(not isinstance(ref, dict) for ref in references):
+            return fail("invalid_issue_pr_links", failure_class="retryable_read", retry_safe=True, operation=operation, repo=repo, issue=issue, pr=row)
+        if any(ref.get("number") == issue for ref in references):
+            matches.append(row)
+    return ok(status="read", operation=operation, prs=matches, repo=repo, issue=issue)
 
 
 def read_open_pr_for_branch(request: Request) -> Result:
@@ -1418,20 +1436,98 @@ def decide_existing_pr(request: Request) -> Result:
     return ok(status="exists" if rows else "create", operation="decide_existing_pr", existing=rows[0] if rows else None, should_create=not bool(rows), repo=read.get("repo"), issue=read.get("issue"), board=read.get("board"), task_id=read.get("task_id"), branch=read.get("branch"), base=read.get("base"))
 
 
+def _pr_creation_lock_path(request: Request, repo: str, issue: int) -> Path:
+    cfg = cfg_of(request)
+    root = str(cfg.get("task_receipts") or (cfg.get("paths") or {}).get("task_receipts") or "").strip()
+    if not root:
+        raise ValueError("missing_pr_creation_lock_root")
+    digest = hashlib.sha256(f"{repo}\0{issue}".encode()).hexdigest()
+    directory = Path(root) / "pr-creation-locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{digest}.lock"
+
 def create_pull_request(request: Request) -> Result:
     terminal = _atomic_terminal(request, "create_pull_request", "decide_existing_pr")
-    if terminal: return terminal
+    if terminal:
+        return terminal
     idle = upstream_noop(request, "decide_existing_pr")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="create_pull_request")
-    data, cfg = input_of(request), cfg_of(request); decision = cond_blob(request, "decide_existing_pr"); repo, branch, base = str(data.get("repo") or decision.get("repo") or ""), str(data.get("branch") or decision.get("branch") or ""), str(data.get("base_branch") or decision.get("base") or cfg.get("base_branch") or "main"); issue = data.get("issue") or decision.get("issue")
-    if not repo or not branch: return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False, operation="create_pull_request")
-    if not decision.get("should_create", True): return ok(status="exists", operation="create_pull_request", repo=repo, issue=issue, branch=branch, base=base, **(decision.get("existing") or {}), mutated=False)
-    if dry_run_flag(request): return planned(operation="create_pull_request", repo=repo, issue=issue, branch=branch, base=base)
-    gh = str(cfg.get("gh_cli") or "gh"); title = str(data.get("title") or f"fix: {repo}#{issue}"); body = str(data.get("body") or f"Closes #{issue}.\n\nAutomated fix via lokay.")
-    try: proc = run_cmd([gh, "pr", "create", "--repo", repo, "--base", base, "--head", branch, "--title", title, "--body", body], timeout=120)
-    except CommandError as exc: return fail("pr_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_pull_request", error=str(exc), mutated=True)
-    return ok(status="created", operation="create_pull_request", repo=repo, issue=issue, board=decision.get("board"), task_id=decision.get("task_id"), branch=branch, base=base, stdout=(proc.stdout or "")[-400:], mutated=True)
+
+    data, cfg = input_of(request), cfg_of(request)
+    decision = cond_blob(request, "decide_existing_pr")
+    repo = str(data.get("repo") or decision.get("repo") or "")
+    branch = str(data.get("branch") or decision.get("branch") or "")
+    base = str(data.get("base_branch") or decision.get("base") or cfg.get("base_branch") or "main")
+    issue = data.get("issue") or decision.get("issue")
+    if not repo or not branch:
+        return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False, operation="create_pull_request")
+    if not isinstance(issue, int) or issue <= 0:
+        return fail("missing_issue", failure_class="terminal", retry_safe=False, operation="create_pull_request")
+    if dry_run_flag(request):
+        return planned(operation="create_pull_request", repo=repo, issue=issue, branch=branch, base=base)
+
+    gh = str(cfg.get("gh_cli") or "gh")
+    title = str(data.get("title") or f"fix: {repo}#{issue}")
+    body = str(data.get("body") or f"Closes #{issue}.\n\nAutomated fix via lokay.")
+    identity = {"issue": issue, "board": decision.get("board"), "task_id": decision.get("task_id")}
+
+    def observed_result(row: dict[str, Any], *, status: str, mutated: bool) -> Result:
+        if str(row.get("headRefName") or "") != branch or str(row.get("baseRefName") or "") != base:
+            return fail("pr_identity_mismatch", failure_class="terminal", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, branch=branch, base=base, pr=row, mutated=mutated)
+        number = row.get("number")
+        if not isinstance(number, int) or number <= 0:
+            return fail("invalid_pr_number", failure_class="terminal", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, pr=row, mutated=mutated)
+        return ok(status=status, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, number=number, url=row.get("url"), mutated=mutated)
+
+    try:
+        lock_path = _pr_creation_lock_path(request, repo, issue)
+        with lock_path.open("a+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            linked = _read_open_prs_for_issue(repo, issue, gh, operation="create_pull_request")
+            if linked.get("ok") is not True:
+                return linked
+            linked_rows = linked.get("prs") or []
+            if len(linked_rows) > 1:
+                return fail("ambiguous_issue_prs", failure_class="terminal", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], prs=linked_rows, mutated=False)
+            if linked_rows:
+                existing = linked_rows[0]
+                if str(existing.get("headRefName") or "") != branch or str(existing.get("baseRefName") or "") != base:
+                    return noop("issue_pr_already_open", operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, number=existing.get("number"), url=existing.get("url"), existing=existing)
+                return observed_result(existing, status="exists", mutated=False)
+
+            current = _read_open_prs(repo, branch, base, gh, operation="create_pull_request", identity=identity)
+            if current.get("ok") is not True:
+                return current
+            rows = current.get("prs") or []
+            if len(rows) > 1:
+                return fail("ambiguous_existing_prs", failure_class="terminal", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], prs=rows, mutated=False)
+            if rows:
+                return observed_result(rows[0], status="exists", mutated=False)
+
+            try:
+                proc = run_cmd([gh, "pr", "create", "--repo", repo, "--base", base, "--head", branch, "--title", title, "--body", body], timeout=120)
+            except (CommandError, subprocess.TimeoutExpired, OSError) as exc:
+                observed = _read_open_prs_for_issue(repo, issue, gh, operation="create_pull_request")
+                observed_rows = (observed.get("prs") or []) if observed.get("ok") is True else []
+                if len(observed_rows) == 1:
+                    result = observed_result(observed_rows[0], status="reconciled", mutated=True)
+                    if result.get("ok") is True:
+                        return result
+                return fail("pr_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, error=str(exc), reconciliation=observed, prs=observed_rows, mutated=True)
+
+            observed = _read_open_prs_for_issue(repo, issue, gh, operation="create_pull_request")
+            if observed.get("ok") is not True:
+                return fail("pr_create_reconciliation_failed", failure_class="retryable_read", retry_safe=True, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, upstream=observed, mutated=True)
+            observed_rows = observed.get("prs") or []
+            if len(observed_rows) != 1:
+                return fail("pr_create_reconciliation_ambiguous" if observed_rows else "pr_create_reconciliation_missing", failure_class="terminal", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, prs=observed_rows, mutated=True)
+            result = observed_result(observed_rows[0], status="created", mutated=True)
+            if result.get("ok") is True:
+                result["stdout"] = (proc.stdout or "")[-400:]
+            return result
+    except (OSError, ValueError) as exc:
+        return fail(str(exc) if isinstance(exc, ValueError) else "pr_creation_lock_failed", failure_class="terminal", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, error=str(exc), mutated=False)
 
 
 def reconcile_pull_request(request: Request) -> Result:
