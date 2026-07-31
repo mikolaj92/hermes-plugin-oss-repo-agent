@@ -1073,31 +1073,125 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
             mutated=False,
         )
     if actual_head == expected["pre_head"] and actual_status == expected["pre_status"]:
+        # Always classify this reservation's invoke evidence on the unchanged path.
+        # Global attempt_recovery only drives the recovery-claim path in decide; it must
+        # not gate whether we inspect mutated invoke evidence for reinvoke safety.
+        reservation_path = str(state_read.get("reservation_path") or "").strip()
+        if not reservation_path:
+            return fail(
+                "repair_attempt_reconciliation_state_required",
+                failure_class="terminal",
+                retry_safe=False,
+                operation="read_repair_attempt_reconciliation",
+            )
         data, cfg = input_of(request), cfg_of(request)
-        recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
-        if isinstance(recovery, dict):
-            reservation_path = str(state_read.get("reservation_path") or "").strip()
-            if not reservation_path:
-                return fail("repair_attempt_reconciliation_state_required", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation")
-            identity = _repair_recovery_identity(request, state, recovery)
-            if identity is None:
-                return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke identity unknown")
-            path_id = identity[1]
-            invoke_process_id = f"{identity[0]}:{path_id}:{'triage_invoke_repair_omp' if path_id == 'auto_worker' else 'invoke_repair_omp'}"
+        path_id = data.get("path_id") if "path_id" in data else cfg.get("path_id")
+        if not isinstance(path_id, str) or path_id not in {"auto_worker", "pr_triage"}:
+            path_id = "auto_worker"
+        run_id = state.get("run_id")
+        if isinstance(run_id, str) and run_id:
+            invoke_process_id = (
+                f"{run_id}:{path_id}:"
+                f"{'triage_invoke_repair_omp' if path_id == 'auto_worker' else 'invoke_repair_omp'}"
+            )
             invoke_evidence = _read_repair_invoke_evidence(Path(reservation_path), invoke_process_id)
             if isinstance(invoke_evidence, dict) and not invoke_evidence.get("ok", True):
                 return invoke_evidence
-            if invoke_evidence is None:
-                journal = _read_repair_journal_pre_omp_evidence(request, state, Path(reservation_path), identity)
-                if isinstance(journal, dict):
-                    return journal
-                if journal is not True:
-                    return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke mutation unknown")
-            elif invoke_evidence.get("mutated") is True:
-                return fail("repair_attempt_reconciliation_mutated_blocked", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="explicit invoke mutated blocks recovery")
-            elif invoke_evidence.get("status") != "failed" or invoke_evidence.get("mutated") is not False:
-                return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke mutation unknown")
-        return ok(status="unchanged", operation="read_repair_attempt_reconciliation", reconciliation_required=True, authorize_reinvoke=True, snapshot=snapshot, mutated=False)
+            if isinstance(invoke_evidence, dict) and invoke_evidence.get("mutated") is True:
+                # Operator (or empty-tree fail-closed) may rewind a message-only OMP tip
+                # back to pre_head. Prove the voided mutation had no tree delta before
+                # authorizing reinvoke; a rewound real content change stays blocked.
+                post_head = str(invoke_evidence.get("post_head") or "")
+                if not post_head or post_head == actual_head:
+                    return fail(
+                        "repair_attempt_reconciliation_mutated_blocked",
+                        failure_class="terminal",
+                        retry_safe=False,
+                        operation="read_repair_attempt_reconciliation",
+                        conflict="explicit invoke mutated blocks recovery",
+                    )
+                try:
+                    changed = git(
+                        ["diff", "--name-only", expected["pre_head"], post_head],
+                        cwd=context["worktree_path"],
+                    )
+                except (CommandError, OSError) as exc:
+                    return fail(
+                        "repair_attempt_reconciliation_read_failed",
+                        failure_class="retryable_read",
+                        retry_safe=True,
+                        operation="read_repair_attempt_reconciliation",
+                        error=str(exc),
+                        mutated=False,
+                    )
+                if str(changed).strip():
+                    return fail(
+                        "repair_attempt_reconciliation_mutated_blocked",
+                        failure_class="terminal",
+                        retry_safe=False,
+                        operation="read_repair_attempt_reconciliation",
+                        conflict="explicit invoke mutated blocks recovery",
+                        before_oid=expected["pre_head"],
+                        after_oid=post_head,
+                    )
+                # Empty-tree voided mutation: authorize reinvoke without foreign recovery.
+                # Must return here — status=succeeded + mutated=true would otherwise hit
+                # mutation_unknown via the next elif.
+                return ok(
+                    status="unchanged",
+                    operation="read_repair_attempt_reconciliation",
+                    reconciliation_required=True,
+                    authorize_reinvoke=True,
+                    voided_empty_attempt=True,
+                    snapshot=snapshot,
+                    before_oid=expected["pre_head"],
+                    after_oid=post_head,
+                    mutated=False,
+                )
+            elif isinstance(invoke_evidence, dict) and (
+                invoke_evidence.get("status") != "failed" or invoke_evidence.get("mutated") is not False
+            ):
+                return fail(
+                    "repair_attempt_reconciliation_mutation_unknown",
+                    failure_class="terminal",
+                    retry_safe=False,
+                    operation="read_repair_attempt_reconciliation",
+                    conflict="invoke mutation unknown",
+                )
+            elif invoke_evidence is None:
+                # Optional journal proof when a matching recovery hint is configured.
+                recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
+                if isinstance(recovery, dict):
+                    identity = _repair_recovery_identity(request, state, recovery)
+                    if identity is None:
+                        return fail(
+                            "repair_attempt_reconciliation_mutation_unknown",
+                            failure_class="terminal",
+                            retry_safe=False,
+                            operation="read_repair_attempt_reconciliation",
+                            conflict="invoke identity unknown",
+                        )
+                    journal = _read_repair_journal_pre_omp_evidence(
+                        request, state, Path(reservation_path), identity
+                    )
+                    if isinstance(journal, dict):
+                        return journal
+                    if journal is not True:
+                        return fail(
+                            "repair_attempt_reconciliation_mutation_unknown",
+                            failure_class="terminal",
+                            retry_safe=False,
+                            operation="read_repair_attempt_reconciliation",
+                            conflict="invoke mutation unknown",
+                        )
+        return ok(
+            status="unchanged",
+            operation="read_repair_attempt_reconciliation",
+            reconciliation_required=True,
+            authorize_reinvoke=True,
+            snapshot=snapshot,
+            mutated=False,
+        )
     return fail("repair_attempt_reconciliation_dirty", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", snapshot=snapshot, mutated=False)
 
 
@@ -1118,6 +1212,47 @@ def reserve_repair_attempt(request: Request) -> Result:
         if recovery.get("ok") is not True or recovery.get("status") != "verified" or recovery.get("recovery_verified") is not True:
             return fail("repair_attempt_recovery_verification_required", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt")
         return ok(status="recovered", operation="reserve_repair_attempt", reservation_path=str(decision.get("reservation_path") or ""), recovery_claim=recovery.get("recovery_claim"), recovery_claim_path=recovery.get("recovery_claim_path"), mutated=False)
+    if decision.get("reason") == "voided_empty_attempt_reinvoke":
+        identity, error = _repair_identity(request)
+        if identity is None:
+            return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", conflict=error)
+        path = str(decision.get("reservation_path") or input_of(request).get("reservation_path") or "")
+        if not path:
+            if _repair_state_root(request) is None:
+                return fail("missing_repair_state_root", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", **identity)
+            path = str(_repair_reservation_path(request, identity))
+        try:
+            existing = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            return fail("repair_attempt_reservation_readback_failed", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", error=str(exc), reservation_path=path)
+        stored = _reservation_identity(existing)
+        required_baseline = ("pre_head", "pre_status", "repo_branch", "local_branch", "worktree_path")
+        if (
+            stored is None
+            or existing.get("status") != "reserved"
+            or existing.get("attempted") is not True
+            or any(key not in existing for key in required_baseline)
+            or str(stored["repo"]) != str(identity["repo"])
+            or int(stored["pr_number"]) != int(identity["pr_number"])
+            or str(stored["verified_head"]) != str(identity["verified_head"])
+            or str(existing.get("pre_head") or "") != str(identity["verified_head"])
+        ):
+            return fail(
+                "repair_attempt_reservation_mismatch",
+                failure_class="terminal",
+                retry_safe=False,
+                operation="reserve_repair_attempt",
+                reservation_path=path,
+                conflict="voided_empty_reservation_baseline_mismatch",
+            )
+        return ok(
+            status="reopened",
+            operation="reserve_repair_attempt",
+            reservation=existing,
+            reservation_path=path,
+            authorize_reinvoke=True,
+            mutated=False,
+        )
     if decision.get("reason") == "resume_postconditions" or decision.get("resume_postconditions") is True:
         identity, error = _repair_identity(request)
         if identity is None:
@@ -1228,7 +1363,7 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
     path = str(input_of(request).get("reservation_path") or source.get("reservation_path") or "")
     if not path:
         return fail("missing_repair_attempt_reservation", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation")
-    if source.get("status") not in {"recovered", "resumed"} and (context_blob.get("ok") is not True or context_blob.get("status") != "read"):
+    if source.get("status") not in {"recovered", "resumed", "reopened"} and (context_blob.get("ok") is not True or context_blob.get("status") != "read"):
         return fail("repair_attempt_context_required", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -1237,14 +1372,14 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
     stored = _reservation_identity(payload)
     reserved = source.get("reservation") if isinstance(source.get("reservation"), dict) else None
     reserved_identity = _reservation_identity(reserved)
-    if stored is None or (source.get("status") not in {"recovered", "resumed"} and (reserved_identity is None or stored != reserved_identity)):
+    if stored is None or (source.get("status") not in {"recovered", "resumed", "reopened"} and (reserved_identity is None or stored != reserved_identity)):
         return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="invalid_reservation_identity")
     if source.get("status") == "resumed" and (reserved_identity is None or stored != reserved_identity):
         return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="invalid_reservation_identity")
     required_baseline = ("pre_head", "pre_status", "repo_branch", "local_branch", "worktree_path")
     if payload.get("status") != "reserved" or payload.get("attempted") is not True or any(key not in payload for key in required_baseline):
         return fail("repair_attempt_reservation_invalid", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
-    if source.get("status") not in {"recovered", "resumed"}:
+    if source.get("status") not in {"recovered", "resumed", "reopened"}:
         context = {key: str(context_blob.get(key) or "") for key in ("repo", "pr_number", "branch", "local_branch", "worktree_path")}
         try:
             context_pr = int(context["pr_number"])
@@ -1261,7 +1396,7 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
             return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="reservation_context_mismatch")
     current_candidate = str(input_of(request).get("candidate") or input_of(request).get("candidate_id") or cfg_of(request).get("candidate") or "")
     current_run_id = str(input_of(request).get("run_id") or cfg_of(request).get("run_id") or "")
-    if source.get("status") not in {"recovered", "resumed"} and (not current_candidate or not current_run_id or current_candidate != str(stored["candidate"]) or current_run_id != str(stored["run_id"])):
+    if source.get("status") not in {"recovered", "resumed", "reopened"} and (not current_candidate or not current_run_id or current_candidate != str(stored["candidate"]) or current_run_id != str(stored["run_id"])):
         return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="missing_repair_provenance")
     if source.get("status") == "resumed":
         decision = cond_blob(request, "decide_repair_attempt")
@@ -1295,6 +1430,55 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
             verified=True,
             resumed=True,
             resume_postconditions=True,
+            reservation=payload,
+            reservation_path=path,
+            pre_head=str(payload.get("pre_head") or ""),
+            mutated=False,
+        )
+    if source.get("status") == "reopened":
+        decision = cond_blob(request, "decide_repair_attempt")
+        if (
+            decision.get("reason") != "voided_empty_attempt_reinvoke"
+            or decision.get("authorize_reinvoke") is not True
+            or str(payload.get("pre_head") or "") != str(stored["verified_head"])
+            or str(stored["verified_head"]) != str(decision.get("verified_head") or stored["verified_head"])
+        ):
+            return fail(
+                "repair_attempt_reservation_mismatch",
+                failure_class="terminal",
+                retry_safe=False,
+                operation="verify_repair_attempt_reservation",
+                reservation_path=path,
+                conflict="voided_empty_reservation_baseline_mismatch",
+            )
+        if context_blob.get("ok") is True and context_blob.get("status") == "read":
+            context = {key: str(context_blob.get(key) or "") for key in ("repo", "pr_number", "branch", "local_branch", "worktree_path")}
+            try:
+                context_pr = int(context["pr_number"])
+            except (TypeError, ValueError):
+                context_pr = 0
+            if (
+                not context["repo"] or context_pr <= 0
+                or str(stored["repo"]) != context["repo"]
+                or int(stored["pr_number"]) != context_pr
+                or str(payload.get("repo_branch") or "") != context["branch"]
+                or str(payload.get("local_branch") or "") != context["local_branch"]
+                or Path(str(payload.get("worktree_path") or "")).resolve() != Path(context["worktree_path"]).resolve()
+            ):
+                return fail(
+                    "repair_attempt_reservation_mismatch",
+                    failure_class="terminal",
+                    retry_safe=False,
+                    operation="verify_repair_attempt_reservation",
+                    reservation_path=path,
+                    conflict="reservation_context_mismatch",
+                )
+        return ok(
+            status="verified",
+            operation="verify_repair_attempt_reservation",
+            verified=True,
+            reopened=True,
+            authorize_reinvoke=True,
             reservation=payload,
             reservation_path=path,
             pre_head=str(payload.get("pre_head") or ""),
@@ -1478,6 +1662,44 @@ def decide_repair_attempt(request: Request) -> Result:
             if not original and not continued:
                 return fail("terminal_conflict", failure_class="terminal", retry_safe=False, decision="terminal_conflict", authorize=False, conflict="repair_recovery_continuation_required", **identity)
             return ok(status="invoke", decision="invoke", authorize=True, reason="verified_failed_attempt_recovery", checks=checks, attempt_state=_repair_attempt_state(identity, checks), reservation_path=str(cond_blob(request, "read_repair_attempt_state").get("reservation_path") or ""), recovery_claim=claim, recovery_claim_path=recovery.get("recovery_claim_path"), continuation=continuation.get("continuation"), continuation_path=continuation.get("continuation_path"), **identity)
+        if (
+            reconciliation.get("ok") is True
+            and reconciliation.get("status") == "unchanged"
+            and reconciliation.get("authorize_reinvoke") is True
+            and reconciliation.get("voided_empty_attempt") is True
+        ):
+            snapshot = reconciliation.get("snapshot") if isinstance(reconciliation.get("snapshot"), dict) else {}
+            if (
+                str(snapshot.get("pre_head") or state.get("pre_head") or "") != str(identity["verified_head"])
+                or str(snapshot.get("actual_head") or "") != str(identity["verified_head"])
+                or str(snapshot.get("remote_oid") or "") not in {"", str(identity["verified_head"])}
+            ):
+                return fail(
+                    "terminal_conflict",
+                    failure_class="terminal",
+                    retry_safe=False,
+                    decision="terminal_conflict",
+                    authorize=False,
+                    conflict="voided_empty_reinvoke_identity_mismatch",
+                    **identity,
+                )
+            reservation_path = str(
+                cond_blob(request, "read_repair_attempt_state", "triage_read_repair_attempt_state").get("reservation_path")
+                or state.get("reservation_path")
+                or ""
+            )
+            return ok(
+                status="invoke",
+                decision="invoke",
+                authorize=True,
+                reason="voided_empty_attempt_reinvoke",
+                authorize_reinvoke=True,
+                checks=checks,
+                attempt_state=_repair_attempt_state(identity, checks),
+                reservation_path=reservation_path,
+                snapshot=snapshot,
+                **identity,
+            )
         if prior_status in {"pending", "waiting", "awaiting_checks", "running", "authorized"}:
             return ok(status="pending", decision="wait", authorize=False, reason="awaiting_checks", **identity)
         if prior_status in {"reserved", "repaired", "succeeded", "completed", "invoked", "failed", "already_repaired"} or state.get("attempted") is True:
