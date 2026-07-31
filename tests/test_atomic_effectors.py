@@ -1077,6 +1077,109 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual({result["status"] for result in results}, {"created", "noop"})
         self.assertTrue(all(result.get("number") == 2 for result in results))
 
+    def test_create_pull_request_lock_root_reads_live_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = {
+                "ok": True,
+                "status": "create",
+                "should_create": True,
+                "repo": "o/r",
+                "issue": 1,
+                "board": "b",
+                "task_id": "t1",
+                "branch": "ai/fix/1",
+                "base": "main",
+            }
+            request = {
+                "input": {
+                    "repo": "o/r",
+                    "branch": "ai/fix/1",
+                    "issue": 1,
+                    "dry_run": False,
+                    "task_receipts": tmp,
+                    "conduction": {"dispatch_decide_existing_pr": decision},
+                },
+                # Live Fala package config is handler-only.
+                "config": {"handler": "lokay.steps.issue_to_pr.create_pull_request"},
+            }
+            created = {
+                "number": 9,
+                "url": "https://example.test/pr/9",
+                "baseRefName": "main",
+                "headRefName": "ai/fix/1",
+                "closingIssuesReferences": [{"number": 1}],
+            }
+
+            def gh(args, **kwargs):
+                if args[1:3] == ["pr", "list"]:
+                    if "closingIssuesReferences" in args[args.index("--json") + 1]:
+                        return SimpleNamespace(stdout=json.dumps([created] if state["created"] else []))
+                    return SimpleNamespace(stdout=json.dumps([created] if state["created"] else []))
+                if args[1:3] == ["pr", "create"]:
+                    state["created"] = True
+                    return SimpleNamespace(stdout="https://example.test/pr/9")
+                raise AssertionError(args)
+
+            state = {"created": False}
+            with mock.patch("lokay.steps.issue_to_pr.run_cmd", side_effect=gh):
+                result = issue_to_pr.create_pull_request(request)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "created")
+            self.assertEqual(result["number"], 9)
+            self.assertTrue((Path(tmp) / "pr-creation-locks").is_dir())
+
+    def test_create_pull_request_falls_back_to_branch_recon(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = {
+                "ok": True,
+                "status": "create",
+                "should_create": True,
+                "repo": "o/r",
+                "issue": 1,
+                "board": "b",
+                "task_id": "t1",
+                "branch": "ai/fix/1",
+                "base": "main",
+            }
+            branch_row = {
+                "number": 9,
+                "url": "https://example.test/pr/9",
+                "baseRefName": "main",
+                "headRefName": "ai/fix/1",
+            }
+
+            def gh(args, **kwargs):
+                if args[1:3] == ["pr", "list"]:
+                    if "closingIssuesReferences" in args[args.index("--json") + 1]:
+                        # Issue link lag: create succeeded, closing refs not visible yet.
+                        return SimpleNamespace(stdout=json.dumps([]))
+                    requested = args[args.index("--head") + 1]
+                    return SimpleNamespace(
+                        stdout=json.dumps([branch_row] if state["created"] and requested == "ai/fix/1" else [])
+                    )
+                if args[1:3] == ["pr", "create"]:
+                    state["created"] = True
+                    return SimpleNamespace(stdout="created")
+                raise AssertionError(args)
+
+            state = {"created": False}
+            with mock.patch("lokay.steps.issue_to_pr.run_cmd", side_effect=gh):
+                result = issue_to_pr.create_pull_request(
+                    req(
+                        {
+                            "repo": "o/r",
+                            "branch": "ai/fix/1",
+                            "issue": 1,
+                            "dry_run": False,
+                            "conduction": {"decide_existing_pr": decision},
+                        },
+                        {"task_receipts": tmp},
+                    )
+                )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "created")
+            self.assertEqual(result["number"], 9)
+
     def test_live_shaped_labels_and_receipt_preserve_identity(self) -> None:
         reconciled = {"status": "reconciled", "ok": True, "repo": "o/r", "number": 2, "issue": 1, "board": "b", "task_id": "t1"}
         normalized = issue_to_pr.normalize_pr_labels(req({"conduction": {"dispatch_reconcile_pull_request": reconciled}}))

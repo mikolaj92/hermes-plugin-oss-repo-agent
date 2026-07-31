@@ -1443,14 +1443,101 @@ def decide_existing_pr(request: Request) -> Result:
 
 
 def _pr_creation_lock_path(request: Request, repo: str, issue: int) -> Path:
-    cfg = cfg_of(request)
-    root = str(cfg.get("task_receipts") or (cfg.get("paths") or {}).get("task_receipts") or "").strip()
+    data, cfg = input_of(request), cfg_of(request)
+    # Live effectors put path roots in declared inputs; package config is handler-only.
+    root = str(
+        data.get("task_receipts")
+        or cfg.get("task_receipts")
+        or (data.get("paths") if isinstance(data.get("paths"), Mapping) else {}).get("task_receipts")
+        or (cfg.get("paths") if isinstance(cfg.get("paths"), Mapping) else {}).get("task_receipts")
+        or ""
+    ).strip()
     if not root:
         raise ValueError("missing_pr_creation_lock_root")
     digest = hashlib.sha256(f"{repo}\0{issue}".encode()).hexdigest()
     directory = Path(root) / "pr-creation-locks"
     directory.mkdir(parents=True, exist_ok=True)
     return directory / f"{digest}.lock"
+
+
+def _observe_open_pr_after_create(
+    *,
+    repo: str,
+    issue: int,
+    branch: str,
+    base: str,
+    gh: str,
+    identity: dict[str, Any],
+    observed_result,
+    status: str,
+) -> Result | None:
+    """Prefer issue-linked PR; fall back to exact branch/base head after create."""
+    linked = _read_open_prs_for_issue(repo, issue, gh, operation="create_pull_request")
+    if linked.get("ok") is True:
+        rows = linked.get("prs") or []
+        if len(rows) == 1:
+            result = observed_result(rows[0], status=status, mutated=True)
+            if result.get("ok") is True:
+                return result
+        if len(rows) > 1:
+            return fail(
+                "pr_create_reconciliation_ambiguous",
+                failure_class="terminal",
+                retry_safe=False,
+                operation="create_pull_request",
+                repo=repo,
+                issue=issue,
+                board=identity.get("board"),
+                task_id=identity.get("task_id"),
+                branch=branch,
+                base=base,
+                prs=rows,
+                mutated=True,
+            )
+    elif linked.get("ok") is not True and status == "created":
+        # Hard read failure after successful create: keep retryable signal when no branch fallback.
+        pass
+
+    by_branch = _read_open_prs(repo, branch, base, gh, operation="create_pull_request", identity=identity)
+    if by_branch.get("ok") is not True:
+        if linked.get("ok") is not True:
+            return fail(
+                "pr_create_reconciliation_failed",
+                failure_class="retryable_read",
+                retry_safe=True,
+                operation="create_pull_request",
+                repo=repo,
+                issue=issue,
+                board=identity.get("board"),
+                task_id=identity.get("task_id"),
+                branch=branch,
+                base=base,
+                upstream=linked,
+                mutated=True,
+            )
+        return None
+    rows = by_branch.get("prs") or []
+    if len(rows) == 1:
+        result = observed_result(rows[0], status=status, mutated=True)
+        if result.get("ok") is True:
+            return result
+        return result
+    if len(rows) > 1:
+        return fail(
+            "pr_create_reconciliation_ambiguous",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="create_pull_request",
+            repo=repo,
+            issue=issue,
+            board=identity.get("board"),
+            task_id=identity.get("task_id"),
+            branch=branch,
+            base=base,
+            prs=rows,
+            mutated=True,
+        )
+    return None
 
 def create_pull_request(request: Request) -> Result:
     terminal = _atomic_terminal(request, "create_pull_request", "decide_existing_pr")
@@ -1473,7 +1560,7 @@ def create_pull_request(request: Request) -> Result:
     if dry_run_flag(request):
         return planned(operation="create_pull_request", repo=repo, issue=issue, branch=branch, base=base)
 
-    gh = str(cfg.get("gh_cli") or "gh")
+    gh = str(data.get("gh_cli") or cfg.get("gh_cli") or "gh")
     title = str(data.get("title") or f"fix: {repo}#{issue}")
     body = str(data.get("body") or f"Closes #{issue}.\n\nAutomated fix via lokay.")
     identity = {"issue": issue, "board": decision.get("board"), "task_id": decision.get("task_id")}
@@ -1514,24 +1601,62 @@ def create_pull_request(request: Request) -> Result:
             try:
                 proc = run_cmd([gh, "pr", "create", "--repo", repo, "--base", base, "--head", branch, "--title", title, "--body", body], timeout=120)
             except (CommandError, subprocess.TimeoutExpired, OSError) as exc:
-                observed = _read_open_prs_for_issue(repo, issue, gh, operation="create_pull_request")
-                observed_rows = (observed.get("prs") or []) if observed.get("ok") is True else []
-                if len(observed_rows) == 1:
-                    result = observed_result(observed_rows[0], status="reconciled", mutated=True)
-                    if result.get("ok") is True:
-                        return result
-                return fail("pr_create_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, error=str(exc), reconciliation=observed, prs=observed_rows, mutated=True)
+                reconciled = _observe_open_pr_after_create(
+                    repo=repo,
+                    issue=issue,
+                    branch=branch,
+                    base=base,
+                    gh=gh,
+                    identity=identity,
+                    observed_result=observed_result,
+                    status="reconciled",
+                )
+                if reconciled is not None and reconciled.get("ok") is True:
+                    return reconciled
+                return fail(
+                    "pr_create_failed",
+                    failure_class="reconcile_then_retry",
+                    retry_safe=False,
+                    operation="create_pull_request",
+                    repo=repo,
+                    issue=issue,
+                    board=identity["board"],
+                    task_id=identity["task_id"],
+                    branch=branch,
+                    base=base,
+                    error=str(exc),
+                    reconciliation=reconciled,
+                    mutated=True,
+                )
 
-            observed = _read_open_prs_for_issue(repo, issue, gh, operation="create_pull_request")
-            if observed.get("ok") is not True:
-                return fail("pr_create_reconciliation_failed", failure_class="retryable_read", retry_safe=True, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, upstream=observed, mutated=True)
-            observed_rows = observed.get("prs") or []
-            if len(observed_rows) != 1:
-                return fail("pr_create_reconciliation_ambiguous" if observed_rows else "pr_create_reconciliation_missing", failure_class="terminal", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, prs=observed_rows, mutated=True)
-            result = observed_result(observed_rows[0], status="created", mutated=True)
-            if result.get("ok") is True:
-                result["stdout"] = (proc.stdout or "")[-400:]
-            return result
+            reconciled = _observe_open_pr_after_create(
+                repo=repo,
+                issue=issue,
+                branch=branch,
+                base=base,
+                gh=gh,
+                identity=identity,
+                observed_result=observed_result,
+                status="created",
+            )
+            if reconciled is not None:
+                if reconciled.get("ok") is True:
+                    reconciled["stdout"] = (proc.stdout or "")[-400:]
+                return reconciled
+            return fail(
+                "pr_create_reconciliation_missing",
+                failure_class="terminal",
+                retry_safe=False,
+                operation="create_pull_request",
+                repo=repo,
+                issue=issue,
+                board=identity["board"],
+                task_id=identity["task_id"],
+                branch=branch,
+                base=base,
+                prs=[],
+                mutated=True,
+            )
     except (OSError, ValueError) as exc:
         return fail(str(exc) if isinstance(exc, ValueError) else "pr_creation_lock_failed", failure_class="terminal", retry_safe=False, operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, error=str(exc), mutated=False)
 
