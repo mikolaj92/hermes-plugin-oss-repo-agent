@@ -379,7 +379,7 @@ _DISPATCH_TAIL_ANCESTRY = (
     "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt",
     "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label",
     "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr",
-    "read_open_pr_for_branch", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head",
+    "read_open_pr_for_branch", "verify_updated_branch_local_oid", "update_branch_local_oid", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head",
     "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp",
     "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch",
     "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions",
@@ -840,7 +840,7 @@ def _reconcile_kanban_marker(request: Request, operation: str, peer: str, prefix
 def read_task_for_completion(request: Request) -> Result:
     terminal = _atomic_terminal(request, "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt", "invoke_omp", "verify_omp_postconditions")
     if terminal: return terminal
-    idle = upstream_noop(request, "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
+    idle = upstream_noop(request, "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_updated_branch_local_oid", "update_branch_local_oid", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_task_for_completion")
     board, task_id = _atomic_board(request), str(input_of(request).get("task_id") or cond_get(request, "task_id", "select_dispatch_task") or "")
@@ -865,7 +865,7 @@ def decide_task_completion(request: Request) -> Result:
 def complete_task(request: Request) -> Result:
     terminal = _atomic_terminal(request, "complete_task", "decide_task_completion", "read_task_for_completion", "select_dispatch_task", "invoke_omp", "verify_omp_postconditions")
     if terminal: return terminal
-    idle = upstream_noop(request, "decide_task_completion", "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
+    idle = upstream_noop(request, "decide_task_completion", "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_updated_branch_local_oid", "update_branch_local_oid", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="complete_task")
     data, cfg = input_of(request), cfg_of(request); board = _atomic_board(request); tid = str(data.get("task_id") or cond_get(request, "task_id", "read_task_for_completion", "select_dispatch_task") or ""); text = str(data.get("result") or "completed")
@@ -1404,6 +1404,127 @@ def verify_push_oid(request: Request) -> Result:
     if not local or not remote: return fail("missing_push_oids", failure_class="terminal", retry_safe=False, operation="verify_push_oid")
     if local != remote: return fail("push_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_push_oid", local_oid=local, remote_oid=remote, mutated=True)
     return ok(status="verified", operation="verify_push_oid", local_oid=local, remote_oid=remote, repo=pushed.get("repo") or read.get("repo"), issue=pushed.get("issue") or read.get("issue"), board=pushed.get("board") or read.get("board"), task_id=pushed.get("task_id") or read.get("task_id"), branch=pushed.get("branch") or read.get("branch"))
+
+
+def update_branch_local_oid(request: Request) -> Result:
+    """Re-authorize lokay-local-oid to the verified post-push tip for cleanup."""
+    terminal = _atomic_terminal(request, "update_branch_local_oid", "verify_push_oid")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "verify_push_oid")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="update_branch_local_oid")
+    data = input_of(request)
+    verified = cond_blob(request, "verify_push_oid")
+    written = cond_blob(request, "write_branch_provenance")
+    created = cond_blob(request, "create_local_branch")
+    repo, issue, board, context = _fix_identity(request)
+    clone = str(
+        data.get("clone_path")
+        or written.get("clone_path")
+        or created.get("clone_path")
+        or context.get("clone_path")
+        or ""
+    ).strip()
+    branch = str(
+        data.get("branch")
+        or verified.get("branch")
+        or written.get("branch")
+        or created.get("branch")
+        or context.get("branch")
+        or ""
+    ).strip()
+    local_oid = str(verified.get("local_oid") or verified.get("remote_oid") or data.get("local_oid") or "").strip()
+    if not clone or not branch or not local_oid:
+        return fail(
+            "missing_branch_local_oid_context",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="update_branch_local_oid",
+            clone_path=clone,
+            branch=branch,
+            local_oid=local_oid,
+        )
+    values = {
+        "operation": "update_branch_local_oid",
+        "clone_path": clone,
+        "branch": branch,
+        "local_oid": local_oid,
+        "repo": repo or verified.get("repo"),
+        "issue": issue if issue not in (None, "") else verified.get("issue"),
+        "board": board or verified.get("board"),
+        "task_id": verified.get("task_id") or context.get("task_id"),
+    }
+    if dry_run_flag(request):
+        return planned(**values)
+    try:
+        branch_config_set(clone, branch, "lokay-local-oid", local_oid)
+    except CommandError as exc:
+        return fail(
+            "branch_local_oid_update_failed",
+            failure_class="retryable",
+            retry_safe=True,
+            operation="update_branch_local_oid",
+            error=str(exc),
+            mutated=True,
+            **values,
+        )
+    return ok(status="updated", mutated=True, **values)
+
+
+def verify_updated_branch_local_oid(request: Request) -> Result:
+    """Verify lokay-local-oid read-back matches the verified post-push tip."""
+    terminal = _atomic_terminal(request, "verify_updated_branch_local_oid", "update_branch_local_oid")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "update_branch_local_oid")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_updated_branch_local_oid")
+    updated = cond_blob(request, "update_branch_local_oid")
+    clone = str(updated.get("clone_path") or input_of(request).get("clone_path") or "").strip()
+    branch = str(updated.get("branch") or input_of(request).get("branch") or "").strip()
+    expected = str(updated.get("local_oid") or "").strip()
+    values = {
+        "operation": "verify_updated_branch_local_oid",
+        "clone_path": clone,
+        "branch": branch,
+        "local_oid": expected,
+        "repo": updated.get("repo"),
+        "issue": updated.get("issue"),
+        "board": updated.get("board"),
+        "task_id": updated.get("task_id"),
+    }
+    if not clone or not branch or not expected:
+        return fail(
+            "missing_branch_local_oid_context",
+            failure_class="terminal",
+            retry_safe=False,
+            **values,
+        )
+    if dry_run_flag(request):
+        return planned(**values)
+    try:
+        actual = branch_config_get(clone, branch, "lokay-local-oid").strip()
+    except CommandError as exc:
+        return fail(
+            "branch_local_oid_readback_failed",
+            failure_class="retryable_read",
+            retry_safe=True,
+            error=str(exc),
+            **values,
+        )
+    if actual != expected:
+        return fail(
+            "branch_local_oid_readback_mismatch",
+            failure_class="terminal",
+            retry_safe=False,
+            expected=expected,
+            actual=actual,
+            **values,
+        )
+    return ok(status="verified", mutated=False, **values)
+
+
 def _read_open_prs(repo: str, branch: str, base: str, gh: str, *, operation: str, identity: dict[str, Any]) -> Result:
     if not repo or not branch:
         return fail("missing_repo_or_branch", failure_class="terminal", retry_safe=False, operation=operation)
@@ -1436,9 +1557,9 @@ def _read_open_prs_for_issue(repo: str, issue: int, gh: str, *, operation: str) 
 
 
 def read_open_pr_for_branch(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "read_open_pr_for_branch", "verify_push_oid")
+    terminal = _atomic_terminal(request, "read_open_pr_for_branch", "verify_updated_branch_local_oid", "update_branch_local_oid", "verify_push_oid")
     if terminal: return terminal
-    idle = upstream_noop(request, "verify_push_oid")
+    idle = upstream_noop(request, "verify_updated_branch_local_oid", "update_branch_local_oid", "verify_push_oid")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_open_pr_for_branch")
     data, cfg = input_of(request), cfg_of(request)

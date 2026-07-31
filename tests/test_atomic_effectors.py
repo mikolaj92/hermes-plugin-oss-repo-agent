@@ -1104,6 +1104,72 @@ class IssueToPrTests(unittest.TestCase):
             self.assertEqual(published["status"], "published")
             self.assertEqual(verified["status"], "verified")
 
+    @mock.patch("lokay.steps.issue_to_pr.branch_config_get")
+    @mock.patch("lokay.steps.issue_to_pr.branch_config_set")
+    def test_pushed_head_refreshes_local_oid_for_cleanup(self, set_config, get_config) -> None:
+        tip = "71d4027717c759b256ee2dc131d6d4f286aa1ea4"
+        verified = {
+            "ok": True,
+            "status": "verified",
+            "local_oid": tip,
+            "remote_oid": tip,
+            "repo": "owner/repo",
+            "issue": 3722,
+            "board": "owner-repo",
+            "task_id": "t_test",
+            "branch": "ai/fix/3722",
+        }
+        written = {
+            "ok": True,
+            "status": "written",
+            "clone_path": "/clone",
+            "branch": "ai/fix/3722",
+        }
+        updated = issue_to_pr.update_branch_local_oid(
+            req(
+                {
+                    "clone_path": "/clone",
+                    "branch": "ai/fix/3722",
+                    "dry_run": False,
+                    "conduction": {
+                        "verify_push_oid": verified,
+                        "write_branch_provenance": written,
+                    },
+                }
+            )
+        )
+        self.assertTrue(updated["ok"])
+        self.assertEqual(updated["status"], "updated")
+        self.assertEqual(updated["local_oid"], tip)
+        set_config.assert_called_once_with("/clone", "ai/fix/3722", "lokay-local-oid", tip)
+
+        get_config.return_value = tip
+        checked = issue_to_pr.verify_updated_branch_local_oid(
+            req(
+                {
+                    "dry_run": False,
+                    "conduction": {"update_branch_local_oid": updated},
+                }
+            )
+        )
+        self.assertTrue(checked["ok"])
+        self.assertEqual(checked["status"], "verified")
+        self.assertEqual(checked["local_oid"], tip)
+        get_config.assert_called_once_with("/clone", "ai/fix/3722", "lokay-local-oid")
+
+        planned = issue_to_pr.update_branch_local_oid(
+            req(
+                {
+                    "clone_path": "/clone",
+                    "branch": "ai/fix/3722",
+                    "dry_run": True,
+                    "conduction": {"verify_push_oid": verified},
+                }
+            )
+        )
+        self.assertEqual(planned["status"], "planned")
+        set_config.assert_called_once()
+
     def test_create_pull_request_serializes_recheck_create_and_reconcile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = {"created": False, "creates": 0, "branch": ""}

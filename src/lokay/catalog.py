@@ -99,6 +99,8 @@ EFFECTORS: tuple[EffectorEntry, ...] = (
     EffectorEntry("push_branch", "issue_to_pr", "lokay.steps.issue_to_pr.push_branch", "Push one branch to origin.", True),
     EffectorEntry("read_pushed_ref", "issue_to_pr", "lokay.steps.issue_to_pr.read_pushed_ref", "Read the pushed remote ref.", False),
     EffectorEntry("verify_push_oid", "issue_to_pr", "lokay.steps.issue_to_pr.verify_push_oid", "Verify local and remote push OIDs match.", False),
+    EffectorEntry("update_branch_local_oid", "issue_to_pr", "lokay.steps.issue_to_pr.update_branch_local_oid", "Re-authorize lokay-local-oid to the verified pushed tip.", True),
+    EffectorEntry("verify_updated_branch_local_oid", "issue_to_pr", "lokay.steps.issue_to_pr.verify_updated_branch_local_oid", "Verify post-push lokay-local-oid read-back.", False),
     EffectorEntry("read_open_pr_for_branch", "issue_to_pr", "lokay.steps.issue_to_pr.read_open_pr_for_branch", "Read open PRs for one branch.", False),
     EffectorEntry("decide_existing_pr", "issue_to_pr", "lokay.steps.issue_to_pr.decide_existing_pr", "Decide whether an existing PR can be reused.", False),
     EffectorEntry("create_pull_request", "issue_to_pr", "lokay.steps.issue_to_pr.create_pull_request", "Create one pull request.", True),

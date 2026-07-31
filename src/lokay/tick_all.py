@@ -184,7 +184,7 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
         "dispatch_write_branch_provenance": {"receipt_path": receipt}, "dispatch_add_worktree": {"worktree_root": cfg.paths.worktree_root},
         "dispatch_verify_worktree_head": {}, "dispatch_read_omp_preconditions": {}, "dispatch_invoke_omp": {}, "dispatch_verify_omp_postconditions": {},
         "dispatch_read_worktree_head": {}, "dispatch_read_base_head": {}, "dispatch_decide_branch_has_commits": {}, "dispatch_read_push_head": {},
-        "dispatch_push_branch": {}, "dispatch_read_pushed_ref": {}, "dispatch_verify_push_oid": {}, "dispatch_read_open_pr_for_branch": {},
+        "dispatch_push_branch": {}, "dispatch_read_pushed_ref": {}, "dispatch_verify_push_oid": {}, "dispatch_update_branch_local_oid": {}, "dispatch_verify_updated_branch_local_oid": {}, "dispatch_read_open_pr_for_branch": {},
         "dispatch_decide_existing_pr": {}, "dispatch_create_pull_request": {"base_branch": cfg.base_branch, "task_receipts": task_root}, "dispatch_reconcile_pull_request": {},
         "dispatch_normalize_pr_labels": {}, "dispatch_add_pr_label": {}, "dispatch_aggregate_pr_label_results": {}, "dispatch_add_issue_label": {},
         "dispatch_aggregate_issue_label_results": {}, "dispatch_build_dispatch_receipt": {"receipt_path": receipt},

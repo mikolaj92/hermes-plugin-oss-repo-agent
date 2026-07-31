@@ -526,9 +526,23 @@ adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], 
 config = { handler = "lokay.steps.issue_to_pr.verify_push_oid" }
 
 [[correlation_paths.effectors]]
-id = "read_open_pr_for_branch"
+id = "update_branch_local_oid"
 capability = "lokay_step"
 conduction = ["verify_push_oid"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.issue_to_pr.update_branch_local_oid" }
+
+[[correlation_paths.effectors]]
+id = "verify_updated_branch_local_oid"
+capability = "lokay_step"
+conduction = ["update_branch_local_oid"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.issue_to_pr.verify_updated_branch_local_oid" }
+
+[[correlation_paths.effectors]]
+id = "read_open_pr_for_branch"
+capability = "lokay_step"
+conduction = ["verify_updated_branch_local_oid"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_open_pr_for_branch" }
 
@@ -2068,9 +2082,23 @@ adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], 
 config = { handler = "lokay.steps.issue_to_pr.verify_push_oid" }
 
 [[correlation_paths.effectors]]
-id = "dispatch_read_open_pr_for_branch"
+id = "dispatch_update_branch_local_oid"
 capability = "lokay_step"
 conduction = ["dispatch_verify_push_oid"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.issue_to_pr.update_branch_local_oid" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_verify_updated_branch_local_oid"
+capability = "lokay_step"
+conduction = ["dispatch_update_branch_local_oid"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.issue_to_pr.verify_updated_branch_local_oid" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_read_open_pr_for_branch"
+capability = "lokay_step"
+conduction = ["dispatch_verify_updated_branch_local_oid"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_open_pr_for_branch" }
 

@@ -257,6 +257,9 @@ class PackageStructureTests(unittest.TestCase):
                     by_id["read_task_for_completion"]["conduction"],
                     ["select_dispatch_task", "verify_dispatch_receipt", "invoke_omp", "verify_omp_postconditions"],
                 )
+                self.assertEqual(by_id["update_branch_local_oid"]["conduction"], ["verify_push_oid"])
+                self.assertEqual(by_id["verify_updated_branch_local_oid"]["conduction"], ["update_branch_local_oid"])
+                self.assertEqual(by_id["read_open_pr_for_branch"]["conduction"], ["verify_updated_branch_local_oid"])
 
             if path["id"] == "auto_worker":
                 by_id = {effector["id"]: effector for effector in effectors}
@@ -280,6 +283,9 @@ class PackageStructureTests(unittest.TestCase):
                         "dispatch_verify_omp_postconditions",
                     ],
                 )
+                self.assertEqual(by_id["dispatch_update_branch_local_oid"]["conduction"], ["dispatch_verify_push_oid"])
+                self.assertEqual(by_id["dispatch_verify_updated_branch_local_oid"]["conduction"], ["dispatch_update_branch_local_oid"])
+                self.assertEqual(by_id["dispatch_read_open_pr_for_branch"]["conduction"], ["dispatch_verify_updated_branch_local_oid"])
 
             if path["id"] == "auto_worker":
                 self.assertLess(positions["triage_decide_triage_action"], positions["intake_decide_issue_priority"])
