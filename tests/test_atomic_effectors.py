@@ -4582,6 +4582,22 @@ class TriageTests(unittest.TestCase):
             "require_test_evidence": True,
         }))
         self.assertTrue(comment_hit["pass_"])
+        commit_hit = triage.evaluate_test_evidence(req({
+            "pr": {
+                "body": "Closes #3650.\n\nAutomated fix via lokay.",
+                "comments": [{"body": "You have reached your Codex usage limits for code reviews."}],
+                "commits": [{
+                    "messageHeadline": "#3650 preserve client job route id",
+                    "messageBody": (
+                        "Use the route run_id for client job status polling.\n\n"
+                        "Evidence: uv run pytest tests/test_fala_pilot_web.py -q"
+                    ),
+                }],
+            },
+            "require_test_evidence": True,
+        }))
+        self.assertTrue(commit_hit["pass_"])
+        self.assertIn("pytest", commit_hit["hits"])
         automated_comment = triage.evaluate_test_evidence(req({
             "pr": {"body": "", "comments": [{
                 "body": "Please add test evidence or address blockers.\n\n<!-- lokay:o/r:5:triage -->",

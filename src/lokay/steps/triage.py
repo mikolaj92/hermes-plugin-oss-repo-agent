@@ -754,7 +754,7 @@ def evaluate_checks(request: Request) -> Result:
 
 
 def evaluate_test_evidence(request: Request) -> Result:
-    """Pure: does PR body contain test evidence markers?"""
+    """Pure: does PR body, comments, or commits contain test evidence markers?"""
     data = input_of(request)
     pr = data.get("pr") or cond_get(request, "pr", "load_pr_fields", "triage_load_pr_fields") or {}
     upstream = upstream_noop(request, "load_pr_fields", "triage_load_pr_fields")
@@ -772,7 +772,21 @@ def evaluate_test_evidence(request: Request) -> Result:
         for item in comments
         if "<!-- lokay:" not in str(item.get("body") or "")
     ]
-    evidence = "\n".join([body, *comment_bodies])
+    commits = pr.get("commits") or []
+    if not isinstance(commits, list) or any(not isinstance(item, dict) for item in commits):
+        return fail("invalid_test_evidence", failure_class="terminal", retry_safe=False)
+    commit_texts = [
+        "\n".join(
+            part
+            for part in (
+                str(item.get("messageHeadline") or item.get("message_headline") or ""),
+                str(item.get("messageBody") or item.get("message_body") or ""),
+            )
+            if part
+        )
+        for item in commits
+    ]
+    evidence = "\n".join([body, *comment_bodies, *commit_texts])
     markers = data.get("markers") or [
         "Test plan",
         "test evidence",
@@ -780,6 +794,7 @@ def evaluate_test_evidence(request: Request) -> Result:
         "pytest",
         "unittest",
         "Verified",
+        "Evidence:",
     ]
     hits = [m for m in markers if m.lower() in evidence.lower()]
     present = bool(hits)
