@@ -1289,6 +1289,7 @@ class RepairTests(unittest.TestCase):
     def test_build_repair_prompt_uses_exact_linked_issue_and_lane_context(self) -> None:
         out = repair.build_repair_prompt(req({
             "issue": 10, "failures": ["ci"], "reason": "checks_failed",
+            "worktree_root": "/wt-root",
             "conduction": {"load_pr_fields": {
                 "status": "loaded", "repo": "owner/repo", "number": 11,
                 "board": "board", "clone_path": "/clone", "priority": 2,
@@ -1298,14 +1299,21 @@ class RepairTests(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["issue"], 10)
         self.assertEqual(out["pr_number"], 11)
-        for value in ("owner/repo", "#10", "ai/fix/11", "/clone", "board", "priority 2"):
+        local_branch = repair._repair_local_branch("owner/repo", "11", "ai/fix/11")
+        worktree_path = f"/wt-root/{local_branch}"
+        for value in ("owner/repo", "#10", "ai/fix/11", "/clone", "board", "priority 2", local_branch, worktree_path):
             self.assertIn(value, out["prompt"])
         self.assertIn("Commit the changes locally so HEAD advances.", out["prompt"])
         self.assertIn("Do not push, force-push, or merge.", out["prompt"])
+        self.assertIn("Stay in this cwd", out["prompt"])
+        self.assertIn("Do not cd into Clone", out["prompt"])
+        self.assertEqual(out.get("worktree_path"), worktree_path)
+        self.assertEqual(out.get("local_branch"), local_branch)
 
     def test_build_repair_prompt_requires_nonempty_evidence_change(self) -> None:
         out = repair.build_repair_prompt(req({
             "issue": 10, "failures": [], "reason": "missing_test_evidence",
+            "worktree_root": "/wt-root",
             "conduction": {"load_pr_fields": {
                 "status": "loaded", "repo": "owner/repo", "number": 11,
                 "board": "board", "clone_path": "/clone", "priority": 2,
@@ -1323,6 +1331,44 @@ class RepairTests(unittest.TestCase):
         self.assertIn("Evidence:", out["prompt"])
         self.assertIn("empty commits", out["prompt"])
         self.assertIn("Do not push, force-push, or merge.", out["prompt"])
+        local_branch = repair._repair_local_branch("owner/repo", "11", "ai/fix/11")
+        self.assertIn(f"/wt-root/{local_branch}", out["prompt"])
+        self.assertIn("Stay in this cwd", out["prompt"])
+
+    def test_build_repair_prompt_soft_omits_worktree_without_root(self) -> None:
+        out = repair.build_repair_prompt(req({
+            "issue": 10, "failures": ["ci"], "reason": "checks_failed",
+            "conduction": {"load_pr_fields": {
+                "status": "loaded", "repo": "owner/repo", "number": 11,
+                "board": "board", "clone_path": "/clone", "priority": 2,
+                "pr": {"number": 11, "title": "fix", "headRefName": "ai/fix/11", "closingIssuesReferences": [{"number": 10}]},
+            }},
+        }))
+        self.assertTrue(out["ok"])
+        local_branch = repair._repair_local_branch("owner/repo", "11", "ai/fix/11")
+        self.assertNotIn("Work only inside Worktree", out["prompt"])
+        self.assertIn("Stay in the provided cwd worktree", out["prompt"])
+        self.assertIn(f"Local branch: {local_branch}", out["prompt"])
+        self.assertIn("Worktree: n/a", out["prompt"])
+        self.assertNotIn("worktree_path", out)
+        self.assertEqual(out.get("local_branch"), local_branch)
+
+    def test_build_repair_prompt_reads_cfg_worktree_root(self) -> None:
+        out = repair.build_repair_prompt(req(
+            {
+                "issue": 10, "failures": ["ci"], "reason": "checks_failed",
+                "conduction": {"load_pr_fields": {
+                    "status": "loaded", "repo": "owner/repo", "number": 11,
+                    "board": "board", "clone_path": "/clone", "priority": 2,
+                    "pr": {"number": 11, "title": "fix", "headRefName": "ai/fix/11", "closingIssuesReferences": [{"number": 10}]},
+                }},
+            },
+            config={"paths": {"worktree_root": "/cfg-wt"}},
+        ))
+        self.assertTrue(out["ok"])
+        local_branch = repair._repair_local_branch("owner/repo", "11", "ai/fix/11")
+        self.assertEqual(out.get("worktree_path"), f"/cfg-wt/{local_branch}")
+        self.assertIn("Work only inside Worktree", out["prompt"])
 
     def test_build_repair_prompt_rejects_invalid_linked_issue_identity(self) -> None:
         base = {"number": 11, "title": "fix", "headRefName": "ai/fix/11"}

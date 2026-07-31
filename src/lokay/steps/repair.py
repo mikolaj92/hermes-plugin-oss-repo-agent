@@ -1862,6 +1862,7 @@ def build_repair_prompt(request: Request) -> Result:
     if upstream:
         return upstream
     data = input_of(request)
+    cfg = cfg_of(request)
     decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
     checks = cond_blob(request, "evaluate_checks", "checks", "triage_evaluate_checks")
     loaded = cond_blob(request, "load_pr_fields", "triage_load_pr_fields")
@@ -1881,6 +1882,26 @@ def build_repair_prompt(request: Request) -> Result:
     clone_path = loaded.get("clone_path") or data.get("clone_path")
     priority = loaded.get("priority", data.get("priority"))
     branch = pr.get("headRefName") or loaded.get("branch") or data.get("branch")
+    worktree_root = (
+        data.get("worktree_root")
+        or (data.get("paths") or {}).get("worktree_root")
+        or cfg.get("worktree_root")
+        or (cfg.get("paths") or {}).get("worktree_root")
+        or loaded.get("worktree_root")
+        or ""
+    )
+    repo_text = str(repo or "").strip()
+    pr_text = str(number or "").strip()
+    branch_text = str(branch or "").strip()
+    root_text = str(worktree_root or "").strip()
+    local_branch = (
+        _repair_local_branch(repo_text, pr_text, branch_text)
+        if repo_text and pr_text and branch_text
+        else ""
+    )
+    worktree_path = (
+        str(Path(root_text) / local_branch) if root_text and local_branch else ""
+    )
     if reason == "missing_test_evidence":
         guidance = (
             "The PR is missing required test evidence markers for merge.\n"
@@ -1898,15 +1919,29 @@ def build_repair_prompt(request: Request) -> Result:
             "Update the branch to fix CI/merge issues. Keep scope minimal.\n"
             "Commit the changes locally so HEAD advances. Do not push, force-push, or merge.\n"
         )
+    confinement = (
+        f"Work only inside Worktree `{worktree_path}` (local branch `{local_branch}`).\n"
+        "Stay in this cwd. Do not cd into Clone, do not check out the remote Branch name, "
+        "and do not edit any other worktree. Commit on the current HEAD of this worktree only; "
+        "the Branch line is the remote PR identity, not a path to open.\n"
+        if worktree_path and local_branch
+        else (
+            "Stay in the provided cwd worktree. Do not cd into Clone or any other worktree. "
+            "Commit on the current HEAD of this worktree only.\n"
+        )
+    )
     body = (
         f"Repair PR #{number}: {title}\n"
         f"Repository: {repo or 'n/a'}\n"
         f"Issue: #{issue}\n"
         f"Branch: {branch or 'n/a'}\n"
+        f"Local branch: {local_branch or 'n/a'}\n"
+        f"Worktree: {worktree_path or 'n/a'}\n"
         f"Clone: {clone_path or 'n/a'}\n"
         f"Board: {board or 'n/a'} (priority {priority if priority is not None else 'n/a'})\n"
         f"Reason: {reason}\n"
         f"Failing checks: {', '.join(str(item) for item in failures) if failures else 'n/a'}\n"
+        f"{confinement}"
         f"{guidance}"
     )
     task_id = created.get("task_id") or data.get("task_id")
@@ -1917,6 +1952,9 @@ def build_repair_prompt(request: Request) -> Result:
         **({"board": board} if board else {}),
         **({"clone_path": clone_path} if clone_path else {}),
         **({"priority": priority} if priority is not None else {}),
+        **({"local_branch": local_branch} if local_branch else {}),
+        **({"worktree_path": worktree_path} if worktree_path else {}),
+        **({"worktree_root": root_text} if root_text else {}),
     )
 
 
