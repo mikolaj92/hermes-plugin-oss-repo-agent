@@ -2486,7 +2486,23 @@ def verify_repair_omp_postconditions(request: Request) -> Result:
         return fail("repair_omp_head_unchanged", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head)
     if before and not changed:
         return fail("repair_omp_no_changes", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head)
-    return ok(status="verified", operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head, changed_paths=changed.splitlines(), omp=cond_blob(request, "invoke_repair_omp").get("omp"), omp_process_id=cond_blob(request, "invoke_repair_omp").get("omp_process_id"), mutated=False)
+    identity = {
+        key: str(source.get(key) or "")
+        for key in ("repo", "issue", "pr_number", "branch", "local_branch", "clone_path", "worktree_root", "remote", "task_id", "receipt")
+        if source.get(key)
+    }
+    return ok(
+        status="verified",
+        operation="verify_repair_omp_postconditions",
+        before_oid=before,
+        after_oid=head,
+        changed_paths=changed.splitlines(),
+        worktree_path=path,
+        omp=cond_blob(request, "invoke_repair_omp").get("omp"),
+        omp_process_id=cond_blob(request, "invoke_repair_omp").get("omp_process_id"),
+        mutated=False,
+        **identity,
+    )
 
 
 def read_repair_worktree_head(request: Request) -> Result:
@@ -2496,12 +2512,37 @@ def read_repair_worktree_head(request: Request) -> Result:
     upstream = _repair_upstream(request, "read_repair_worktree_head", "verify_repair_omp_postconditions")
     if upstream:
         return upstream
-    path = str(input_of(request).get("worktree_path") or cond_blob(request, "verify_repair_omp_postconditions").get("worktree_path") or _repair_context(request)["worktree_path"])
+    path = str(
+        input_of(request).get("worktree_path")
+        or cond_blob(request, "verify_repair_omp_postconditions").get("worktree_path")
+        or _repair_context(request)["worktree_path"]
+        or ""
+    )
+    if not path:
+        return fail(
+            "missing_repair_worktree_path",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_repair_worktree_head",
+        )
     try:
         head = rev_parse(path)
-    except CommandError as exc:
-        return fail("repair_worktree_head_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_worktree_head", error=str(exc))
-    return ok(status="read", operation="read_repair_worktree_head", local_oid=head, after_oid=head, worktree_path=path)
+    except (CommandError, OSError) as exc:
+        return fail(
+            "repair_worktree_head_read_failed",
+            failure_class="retryable_read",
+            retry_safe=True,
+            operation="read_repair_worktree_head",
+            error=str(exc),
+            worktree_path=path,
+        )
+    return ok(
+        status="read",
+        operation="read_repair_worktree_head",
+        local_oid=head,
+        after_oid=head,
+        worktree_path=path,
+    )
 
 
 def decide_repair_push(request: Request) -> Result:
@@ -2511,13 +2552,25 @@ def decide_repair_push(request: Request) -> Result:
     upstream = _repair_upstream(request, "decide_repair_push", "read_repair_worktree_head", "verify_repair_omp_postconditions")
     if upstream:
         return upstream
-    local = str(cond_blob(request, "read_repair_worktree_head").get("local_oid") or input_of(request).get("local_oid") or "")
-    before = str(input_of(request).get("before_oid") or cond_blob(request, "verify_repair_omp_postconditions").get("before_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
+    head = cond_blob(request, "read_repair_worktree_head")
+    post = cond_blob(request, "verify_repair_omp_postconditions")
+    local = str(head.get("local_oid") or input_of(request).get("local_oid") or "")
+    before = str(input_of(request).get("before_oid") or post.get("before_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
     if not local or not before:
         return fail("missing_repair_push_oids", failure_class="terminal", retry_safe=False, operation="decide_repair_push")
     if local == before:
         return fail("repair_head_unchanged", failure_class="terminal", retry_safe=False, operation="decide_repair_push", before_oid=before, local_oid=local)
-    return ok(status="push", operation="decide_repair_push", should_push=True, before_oid=before, local_oid=local, branch=_repair_context(request)["branch"])
+    context = _repair_context(request)
+    return ok(
+        status="push",
+        operation="decide_repair_push",
+        should_push=True,
+        before_oid=before,
+        local_oid=local,
+        branch=str(post.get("branch") or context["branch"] or ""),
+        worktree_path=str(head.get("worktree_path") or post.get("worktree_path") or context["worktree_path"] or ""),
+        remote=str(post.get("remote") or context["remote"] or "origin"),
+    )
 
 
 def push_repair_branch(request: Request) -> Result:
@@ -2531,11 +2584,41 @@ def push_repair_branch(request: Request) -> Result:
     if decision.get("should_push") is not True:
         return noop("repair_push_not_authorized", operation="push_repair_branch")
     context = _repair_context(request)
+    path = str(decision.get("worktree_path") or context["worktree_path"] or "")
+    branch = str(decision.get("branch") or context["branch"] or "")
+    remote = str(decision.get("remote") or context["remote"] or "origin")
+    if not path or not branch:
+        return fail(
+            "missing_repair_push_target",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="push_repair_branch",
+            worktree_path=path,
+            branch=branch,
+        )
     try:
-        out = git_push_branch(context["worktree_path"], context["branch"], remote=context["remote"], set_upstream=False)
+        out = git_push_branch(path, branch, remote=remote, set_upstream=False)
     except CommandError as exc:
-        return fail("repair_push_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="push_repair_branch", error=str(exc), mutated=True, **context)
-    return ok(status="pushed", operation="push_repair_branch", stdout_tail=out[-400:], mutated=True, **context)
+        return fail(
+            "repair_push_failed",
+            failure_class="reconcile_then_retry",
+            retry_safe=False,
+            operation="push_repair_branch",
+            error=str(exc),
+            mutated=True,
+            worktree_path=path,
+            branch=branch,
+            remote=remote,
+        )
+    return ok(
+        status="pushed",
+        operation="push_repair_branch",
+        stdout_tail=out[-400:],
+        mutated=True,
+        worktree_path=path,
+        branch=branch,
+        remote=remote,
+    )
 
 
 def read_repair_pushed_ref(request: Request) -> Result:

@@ -1746,6 +1746,109 @@ class RepairTests(unittest.TestCase):
         self.assertFalse(missing["ok"])
         self.assertEqual(missing["reason"], "missing_repair_push_oids")
 
+    def test_verify_repair_omp_postconditions_emits_worktree_path(self) -> None:
+        data = {
+            "repo": "owner/repo",
+            "issue": 10,
+            "pr_number": 11,
+            "branch": "ai/fix/10",
+            "clone_path": "/clone",
+            "worktree_root": "/worktrees",
+            "repair_state_root": "/state",
+            "live": True,
+            "enabled": True,
+            "dry_run": False,
+        }
+        context = repair._repair_context(req(data))
+        before = "a" * 40
+        after = "b" * 40
+        preconditions = {
+            "ok": True,
+            "status": "ready",
+            "worktree_path": context["worktree_path"],
+            "pre_head": before,
+            "repo": context["repo"],
+            "issue": context["issue"],
+            "pr_number": context["pr_number"],
+            "branch": context["branch"],
+            "local_branch": context["local_branch"],
+            "clone_path": context["clone_path"],
+            "worktree_root": context["worktree_root"],
+            "remote": "origin",
+        }
+        with mock.patch("lokay.steps.repair.git", side_effect=[context["worktree_path"], "changed.py"]), mock.patch(
+            "lokay.steps.repair.rev_parse",
+            return_value=after,
+        ):
+            out = repair.verify_repair_omp_postconditions(req({
+                **data,
+                "conduction": {
+                    "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True},
+                    "invoke_repair_omp": {"ok": True, "status": "invoked", "mutated": True, "omp": {"status": "completed"}},
+                    "read_repair_omp_preconditions": preconditions,
+                },
+            }))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "verified")
+        self.assertEqual(out["worktree_path"], context["worktree_path"])
+        self.assertEqual(out["before_oid"], before)
+        self.assertEqual(out["after_oid"], after)
+        self.assertEqual(out["branch"], context["branch"])
+
+    def test_read_repair_worktree_head_uses_postconditions_path(self) -> None:
+        path = "/worktrees/lokay/repair/deadbeef"
+        after = "c" * 40
+        with mock.patch("lokay.steps.repair.rev_parse", return_value=after) as rev:
+            out = repair.read_repair_worktree_head(req({
+                "live": True,
+                "enabled": True,
+                "dry_run": False,
+                "worktree_root": "/worktrees",
+                "conduction": {
+                    "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True},
+                    "verify_repair_omp_postconditions": {
+                        "ok": True,
+                        "status": "verified",
+                        "before_oid": "a" * 40,
+                        "after_oid": after,
+                        "worktree_path": path,
+                    },
+                },
+            }))
+        rev.assert_called_once_with(path)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["local_oid"], after)
+        self.assertEqual(out["worktree_path"], path)
+
+    def test_push_repair_branch_uses_decide_target_fields(self) -> None:
+        path = "/worktrees/lokay/repair/deadbeef"
+        branch = "ai/fix/10"
+        with mock.patch("lokay.steps.repair.git_push_branch", return_value="pushed") as push:
+            out = repair.push_repair_branch(req({
+                "live": True,
+                "enabled": True,
+                "dry_run": False,
+                "worktree_root": "/worktrees",
+                "conduction": {
+                    "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True},
+                    "decide_repair_push": {
+                        "ok": True,
+                        "status": "push",
+                        "should_push": True,
+                        "before_oid": "a" * 40,
+                        "local_oid": "b" * 40,
+                        "worktree_path": path,
+                        "branch": branch,
+                        "remote": "origin",
+                    },
+                },
+            }))
+        push.assert_called_once_with(path, branch, remote="origin", set_upstream=False)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "pushed")
+        self.assertEqual(out["worktree_path"], path)
+        self.assertEqual(out["branch"], branch)
+
     def test_foreign_selected_branch_does_not_conflict_with_owned_local_ref(self) -> None:
         data = {"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10", "clone_path": "/clone", "worktree_root": "/worktrees", "repair_state_root": "/state", "task_id": ""}
         context = repair._repair_context(req(data))
