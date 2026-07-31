@@ -3636,6 +3636,7 @@ CREATE TABLE runs (
             self.assertEqual(out["reason"], "repair_attempt_reconciliation_legacy_missing_baseline")
 
     def test_reconciliation_with_mutated_invoke_evidence_fails_closed(self) -> None:
+        """Unchanged + recovery mutation evidence stays reinvoke-blocked."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base = {"repo": "o/r", "pr_number": 1, "branch": "ai/fix/1", "worktree_root": str(root / "worktrees")}
@@ -3644,14 +3645,91 @@ CREATE TABLE runs (
             res_path.write_text("{}\n")
             process_id = "run:auto_worker:triage_invoke_repair_omp"
             started = {"kind": "repair_invoke_evidence", "process_id": process_id, "status": "started", "pre_head": "head-a", "pre_status": "", "mutated": None}
-            terminal = {**started, "status": "succeeded", "post_head": "head-a", "post_status": " M changed.py", "mutated": True}
+            terminal = {**started, "status": "succeeded", "post_head": "head-a", "post_status": "", "mutated": True}
             repair._repair_invoke_evidence_path(res_path, process_id).parent.mkdir(parents=True, exist_ok=True)
             repair._repair_invoke_evidence_path(res_path, process_id).write_text(json.dumps(started) + "\n", encoding="utf-8")
             repair._repair_invoke_terminal_evidence_path(res_path, process_id).write_text(json.dumps(terminal) + "\n", encoding="utf-8")
-            request = req({**base, "attempt_recovery": {"run_id": "run", "path_id": "auto_worker", "candidate": "cand"}, "conduction": {"read_repair_completed_receipt": {"ok": True, "status": "absent"}, "read_repair_attempt_state": {"ok": True, "status": "found", "reservation_path": str(res_path), "attempt_state": {"repo": "o/r", "pr_number": 1, "verified_head": "head-a", "pre_head": "head-a", "pre_status": "", "repo_branch": "ai/fix/1", "local_branch": ctx["local_branch"], "worktree_path": ctx["worktree_path"], "candidate": "cand", "run_id": "run"}}}})
-            out = repair.read_repair_attempt_reconciliation(request)
+            request = req({
+                **base,
+                "attempt_recovery": {"run_id": "run", "path_id": "auto_worker", "candidate": "cand"},
+                "conduction": {
+                    "read_repair_completed_receipt": {"ok": True, "status": "absent"},
+                    "read_repair_attempt_state": {
+                        "ok": True, "status": "found", "reservation_path": str(res_path),
+                        "attempt_state": {
+                            "repo": "o/r", "pr_number": 1, "verified_head": "head-a",
+                            "pre_head": "head-a", "pre_status": "",
+                            "repo_branch": "ai/fix/1", "local_branch": ctx["local_branch"],
+                            "worktree_path": ctx["worktree_path"], "candidate": "cand", "run_id": "run",
+                        },
+                    },
+                    "read_repair_remote_head": {"ok": True, "remote_oid": "head-a"},
+                    "read_repair_worktree_inventory": {
+                        "ok": True, "worktrees": [{"path": ctx["worktree_path"], "branch": ctx["local_branch"]}],
+                    },
+                    "read_repair_branch_provenance": {
+                        "ok": True, "exists": True, "branch_head": "head-a",
+                        "provenance": {"repo": "o/r", "pr": "1", "remote_oid": "head-a", "target_branch": "ai/fix/1"},
+                    },
+                },
+            })
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="head-a"),
+                mock.patch("lokay.steps.repair.git", return_value=""),
+            ):
+                out = repair.read_repair_attempt_reconciliation(request)
             self.assertEqual(out["status"], "failed")
             self.assertEqual(out["reason"], "repair_attempt_reconciliation_mutated_blocked")
+
+    def test_reconciliation_committed_ignores_global_recovery_mutation_gate(self) -> None:
+        """Post-OMP clean advance is resume, even when stale global attempt_recovery is set."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = {"repo": "o/r", "pr_number": 1, "branch": "ai/fix/1", "worktree_root": str(root / "worktrees")}
+            ctx = repair._repair_context(req(base))
+            res_path = root / "reservation.json"
+            res_path.write_text("{}\n")
+            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            started = {"kind": "repair_invoke_evidence", "process_id": process_id, "status": "started", "pre_head": "head-a", "pre_status": "", "mutated": None}
+            terminal = {**started, "status": "succeeded", "post_head": "head-committed-new", "post_status": "", "mutated": True}
+            repair._repair_invoke_evidence_path(res_path, process_id).parent.mkdir(parents=True, exist_ok=True)
+            repair._repair_invoke_evidence_path(res_path, process_id).write_text(json.dumps(started) + "\n", encoding="utf-8")
+            repair._repair_invoke_terminal_evidence_path(res_path, process_id).write_text(json.dumps(terminal) + "\n", encoding="utf-8")
+            request = req({
+                **base,
+                "attempt_recovery": {
+                    "run_id": "other-run", "path_id": "auto_worker", "candidate": "other",
+                    "repo": "mikolaj92/lokay", "pr_number": 11, "verified_head": "ccc",
+                },
+                "conduction": {
+                    "read_repair_completed_receipt": {"ok": True, "status": "absent"},
+                    "read_repair_attempt_state": {
+                        "ok": True, "status": "found", "reservation_path": str(res_path),
+                        "attempt_state": {
+                            "repo": "o/r", "pr_number": 1, "verified_head": "head-a",
+                            "pre_head": "head-a", "pre_status": "",
+                            "repo_branch": "ai/fix/1", "local_branch": ctx["local_branch"],
+                            "worktree_path": ctx["worktree_path"], "candidate": "cand", "run_id": "run",
+                        },
+                    },
+                    "read_repair_remote_head": {"ok": True, "remote_oid": "head-a"},
+                    "read_repair_worktree_inventory": {
+                        "ok": True, "worktrees": [{"path": ctx["worktree_path"], "branch": ctx["local_branch"]}],
+                    },
+                    "read_repair_branch_provenance": {
+                        "ok": True, "exists": True, "branch_head": "head-committed-new",
+                        "provenance": {"repo": "o/r", "pr": "1", "remote_oid": "head-a", "target_branch": "ai/fix/1"},
+                    },
+                },
+            })
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="head-committed-new"),
+                mock.patch("lokay.steps.repair.git", return_value=""),
+            ):
+                out = repair.read_repair_attempt_reconciliation(request)
+            self.assertEqual(out["status"], "committed")
+            self.assertTrue(out["resume_postconditions"])
+            self.assertFalse(out["authorize_reinvoke"])
 
     def test_read_repair_remote_ancestry_classifies_equal_behind_ahead_diverged(self) -> None:
         context = {

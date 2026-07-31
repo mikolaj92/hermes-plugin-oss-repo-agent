@@ -201,6 +201,21 @@ class PackageStructureTests(unittest.TestCase):
                 self.assertEqual(by_id[f"{prefix}read_repair_completed_receipt"]["conduction"], expected_completed)
                 self.assertIn(f"{prefix}read_repair_completed_receipt", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
                 self.assertIn(f"{prefix}decide_triage_action", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
+                self.assertIn(f"{prefix}read_repair_attempt_reconciliation", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
+                self.assertEqual(
+                    by_id[f"{prefix}decide_repair_worktree_ownership"]["conduction"],
+                    [
+                        f"{prefix}read_repair_context",
+                        f"{prefix}read_repair_remote_head",
+                        f"{prefix}read_repair_worktree_inventory",
+                        f"{prefix}read_repair_branch_provenance",
+                        f"{prefix}read_repair_creation_evidence",
+                        f"{prefix}verify_legacy_repair_pr_head",
+                        f"{prefix}read_repair_worktree_cleanliness",
+                        f"{prefix}read_repair_remote_ancestry",
+                        f"{prefix}fast_forward_repair_worktree",
+                    ],
+                )
                 self.assertEqual(by_id[f"{prefix}read_repair_attempt_reconciliation"]["conduction"], [f"{prefix}read_repair_attempt_state", f"{prefix}read_repair_completed_receipt", f"{prefix}read_repair_remote_head", f"{prefix}read_repair_worktree_inventory", f"{prefix}read_repair_branch_provenance"])
                 self.assertIn(f"{prefix}fetch_repair_remote_head", by_id)
                 self.assertIn(f"{prefix}verify_fetched_repair_remote_head", by_id)

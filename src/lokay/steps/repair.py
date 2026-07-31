@@ -997,30 +997,6 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
     if any(key not in state for key in required_baseline) or any(not isinstance(state.get(key), str) for key in required_baseline):
         return fail("repair_attempt_reconciliation_legacy_missing_baseline", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", mutated=False)
     context = _repair_context(request)
-    data, cfg = input_of(request), cfg_of(request)
-    recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
-    if isinstance(recovery, dict):
-        reservation_path = str(state_read.get("reservation_path") or "").strip()
-        if not reservation_path:
-            return fail("repair_attempt_reconciliation_state_required", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation")
-        identity = _repair_recovery_identity(request, state, recovery)
-        if identity is None:
-            return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke identity unknown")
-        path_id = identity[1]
-        invoke_process_id = f"{identity[0]}:{path_id}:{'triage_invoke_repair_omp' if path_id == 'auto_worker' else 'invoke_repair_omp'}"
-        invoke_evidence = _read_repair_invoke_evidence(Path(reservation_path), invoke_process_id)
-        if isinstance(invoke_evidence, dict) and not invoke_evidence.get("ok", True):
-            return invoke_evidence
-        if invoke_evidence is None:
-            journal = _read_repair_journal_pre_omp_evidence(request, state, Path(reservation_path), identity)
-            if isinstance(journal, dict):
-                return journal
-            if journal is not True:
-                return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke mutation unknown")
-        elif invoke_evidence.get("mutated") is True:
-            return fail("repair_attempt_reconciliation_mutated_blocked", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="explicit invoke mutated blocks recovery")
-        elif invoke_evidence.get("status") != "failed" or invoke_evidence.get("mutated") is not False:
-            return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke mutation unknown")
     remote = cond_blob(request, "read_repair_remote_head")
     inventory = cond_blob(request, "read_repair_worktree_inventory")
     provenance_read = cond_blob(request, "read_repair_branch_provenance")
@@ -1057,10 +1033,36 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
     except (CommandError, OSError) as exc:
         return fail("repair_attempt_reconciliation_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_attempt_reconciliation", error=str(exc), mutated=False)
     snapshot = {"pre_head": expected["pre_head"], "pre_status": expected["pre_status"], "actual_head": actual_head, "actual_status": actual_status, "remote_oid": str(remote.get("remote_oid") or ""), "worktree_path": expected["worktree_path"], "local_branch": expected["local_branch"], "repo_branch": expected["repo_branch"]}
-    if actual_head == expected["pre_head"] and actual_status == expected["pre_status"]:
-        return ok(status="unchanged", operation="read_repair_attempt_reconciliation", reconciliation_required=True, authorize_reinvoke=True, snapshot=snapshot, mutated=False)
+    # Committed resume: OMP mutation is expected. Global attempt_recovery is only for the
+    # reinvoke (unchanged) arm — never block post-OMP push resume on mutated evidence.
     if actual_head != expected["pre_head"] and actual_status == "":
         return ok(status="committed", operation="read_repair_attempt_reconciliation", reconciliation_required=True, authorize_reinvoke=False, resume_postconditions=True, snapshot=snapshot, mutated=False)
+    if actual_head == expected["pre_head"] and actual_status == expected["pre_status"]:
+        data, cfg = input_of(request), cfg_of(request)
+        recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
+        if isinstance(recovery, dict):
+            reservation_path = str(state_read.get("reservation_path") or "").strip()
+            if not reservation_path:
+                return fail("repair_attempt_reconciliation_state_required", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation")
+            identity = _repair_recovery_identity(request, state, recovery)
+            if identity is None:
+                return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke identity unknown")
+            path_id = identity[1]
+            invoke_process_id = f"{identity[0]}:{path_id}:{'triage_invoke_repair_omp' if path_id == 'auto_worker' else 'invoke_repair_omp'}"
+            invoke_evidence = _read_repair_invoke_evidence(Path(reservation_path), invoke_process_id)
+            if isinstance(invoke_evidence, dict) and not invoke_evidence.get("ok", True):
+                return invoke_evidence
+            if invoke_evidence is None:
+                journal = _read_repair_journal_pre_omp_evidence(request, state, Path(reservation_path), identity)
+                if isinstance(journal, dict):
+                    return journal
+                if journal is not True:
+                    return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke mutation unknown")
+            elif invoke_evidence.get("mutated") is True:
+                return fail("repair_attempt_reconciliation_mutated_blocked", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="explicit invoke mutated blocks recovery")
+            elif invoke_evidence.get("status") != "failed" or invoke_evidence.get("mutated") is not False:
+                return fail("repair_attempt_reconciliation_mutation_unknown", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", conflict="invoke mutation unknown")
+        return ok(status="unchanged", operation="read_repair_attempt_reconciliation", reconciliation_required=True, authorize_reinvoke=True, snapshot=snapshot, mutated=False)
     return fail("repair_attempt_reconciliation_dirty", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", snapshot=snapshot, mutated=False)
 
 
