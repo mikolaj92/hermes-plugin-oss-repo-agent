@@ -1318,9 +1318,10 @@ class RepairTests(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["reason"], "missing_test_evidence")
         self.assertIn("missing required test evidence", out["prompt"])
+        self.assertIn("PR body, non-lokay comments, and commit messages", out["prompt"])
         self.assertIn("real non-empty tree change", out["prompt"])
         self.assertIn("Evidence:", out["prompt"])
-        self.assertIn("Empty commits", out["prompt"])
+        self.assertIn("empty commits", out["prompt"])
         self.assertIn("Do not push, force-push, or merge.", out["prompt"])
 
     def test_build_repair_prompt_rejects_invalid_linked_issue_identity(self) -> None:

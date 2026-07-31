@@ -1662,12 +1662,14 @@ def build_repair_prompt(request: Request) -> Result:
     if reason == "missing_test_evidence":
         guidance = (
             "The PR is missing required test evidence markers for merge.\n"
-            "Make a real non-empty tree change that records evidence using at least one of: "
+            "Evidence is scanned only from the PR body, non-lokay comments, and commit messages "
+            "(not file contents). Put at least one marker there: "
             "`Evidence:`, `Test plan`, `pytest`, `unittest`, or `Verified` "
-            "(for example add/adjust a test, or update a tracked test plan file with the command and result).\n"
-            "Empty commits (message-only / identical tree) are rejected and will not push.\n"
-            "Keep scope minimal. Commit locally so HEAD advances with a real tree delta. "
-            "Do not push, force-push, or merge.\n"
+            "(for example commit message `Evidence: uv run pytest … Result: N passed`, "
+            "or a PR body/comment line with the same form).\n"
+            "Also make a real non-empty tree change so HEAD advances; "
+            "empty commits (message-only / identical tree) are rejected and will not push.\n"
+            "Keep scope minimal. Commit locally. Do not push, force-push, or merge.\n"
         )
     else:
         guidance = (
