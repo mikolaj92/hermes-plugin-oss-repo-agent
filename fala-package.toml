@@ -1358,7 +1358,7 @@ config = { handler = "lokay.steps.cleanup.verify_local_branch_absent" }
 [[correlation_paths.effectors]]
 id = "verify_claim_release_evidence"
 capability = "lokay_step"
-conduction = ["verify_cleanup_guards", "verify_local_branch_absent", "verify_worktree_absent"]
+conduction = ["verify_cleanup_guards", "verify_local_branch_absent", "verify_worktree_absent", "remove_worktree", "delete_local_branch", "check_issue_closed", "check_no_open_pr_for_branch"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.cleanup.verify_claim_release_evidence" }
 
@@ -1386,7 +1386,7 @@ config = { handler = "lokay.steps.cleanup.verify_claim_absent" }
 [[correlation_paths.effectors]]
 id = "collect_cleanup_receipt_evidence"
 capability = "lokay_step"
-conduction = ["verify_claim_absent"]
+conduction = ["verify_claim_absent", "parse_cleanup_issue_number", "check_issue_closed", "check_no_open_pr_for_branch", "remove_worktree", "delete_local_branch", "release_claim_file"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.cleanup.collect_cleanup_receipt_evidence" }
 
@@ -2904,7 +2904,7 @@ config = { handler = "lokay.steps.cleanup.verify_local_branch_absent" }
 [[correlation_paths.effectors]]
 id = "cleanup_verify_claim_release_evidence"
 capability = "lokay_step"
-conduction = ["aggregate_lane_results", "cleanup_verify_cleanup_guards", "cleanup_verify_local_branch_absent", "cleanup_verify_worktree_absent"]
+conduction = ["aggregate_lane_results", "cleanup_verify_cleanup_guards", "cleanup_verify_local_branch_absent", "cleanup_verify_worktree_absent", "cleanup_remove_worktree", "cleanup_delete_local_branch", "cleanup_check_issue_closed", "cleanup_check_no_open_pr_for_branch"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.cleanup.verify_claim_release_evidence" }
 
@@ -2932,7 +2932,7 @@ config = { handler = "lokay.steps.cleanup.verify_claim_absent" }
 [[correlation_paths.effectors]]
 id = "cleanup_collect_cleanup_receipt_evidence"
 capability = "lokay_step"
-conduction = ["aggregate_lane_results", "cleanup_verify_claim_absent"]
+conduction = ["aggregate_lane_results", "cleanup_verify_claim_absent", "cleanup_parse_cleanup_issue_number", "cleanup_check_issue_closed", "cleanup_check_no_open_pr_for_branch", "cleanup_remove_worktree", "cleanup_delete_local_branch", "cleanup_release_claim_file"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.cleanup.collect_cleanup_receipt_evidence" }
 

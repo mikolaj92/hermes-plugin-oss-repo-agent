@@ -261,6 +261,33 @@ class PackageStructureTests(unittest.TestCase):
                 self.assertEqual(by_id["verify_updated_branch_local_oid"]["conduction"], ["update_branch_local_oid"])
                 self.assertEqual(by_id["read_open_pr_for_branch"]["conduction"], ["verify_updated_branch_local_oid"])
 
+            if path["id"] == "cleanup":
+                by_id = {effector["id"]: effector for effector in effectors}
+                self.assertEqual(
+                    by_id["verify_claim_release_evidence"]["conduction"],
+                    [
+                        "verify_cleanup_guards",
+                        "verify_local_branch_absent",
+                        "verify_worktree_absent",
+                        "remove_worktree",
+                        "delete_local_branch",
+                        "check_issue_closed",
+                        "check_no_open_pr_for_branch",
+                    ],
+                )
+                self.assertEqual(
+                    by_id["collect_cleanup_receipt_evidence"]["conduction"],
+                    [
+                        "verify_claim_absent",
+                        "parse_cleanup_issue_number",
+                        "check_issue_closed",
+                        "check_no_open_pr_for_branch",
+                        "remove_worktree",
+                        "delete_local_branch",
+                        "release_claim_file",
+                    ],
+                )
+
             if path["id"] == "auto_worker":
                 by_id = {effector["id"]: effector for effector in effectors}
                 self.assertGreater(by_id["dispatch_invoke_omp"]["adapter"]["timeout_seconds"], 7200)
@@ -286,6 +313,33 @@ class PackageStructureTests(unittest.TestCase):
                 self.assertEqual(by_id["dispatch_update_branch_local_oid"]["conduction"], ["dispatch_verify_push_oid"])
                 self.assertEqual(by_id["dispatch_verify_updated_branch_local_oid"]["conduction"], ["dispatch_update_branch_local_oid"])
                 self.assertEqual(by_id["dispatch_read_open_pr_for_branch"]["conduction"], ["dispatch_verify_updated_branch_local_oid"])
+                self.assertEqual(
+                    by_id["cleanup_verify_claim_release_evidence"]["conduction"],
+                    [
+                        "aggregate_lane_results",
+                        "cleanup_verify_cleanup_guards",
+                        "cleanup_verify_local_branch_absent",
+                        "cleanup_verify_worktree_absent",
+                        "cleanup_remove_worktree",
+                        "cleanup_delete_local_branch",
+                        "cleanup_check_issue_closed",
+                        "cleanup_check_no_open_pr_for_branch",
+                    ],
+                )
+                self.assertEqual(
+                    by_id["cleanup_collect_cleanup_receipt_evidence"]["conduction"],
+                    [
+                        "aggregate_lane_results",
+                        "cleanup_verify_claim_absent",
+                        "cleanup_parse_cleanup_issue_number",
+                        "cleanup_check_issue_closed",
+                        "cleanup_check_no_open_pr_for_branch",
+                        "cleanup_remove_worktree",
+                        "cleanup_delete_local_branch",
+                        "cleanup_release_claim_file",
+                    ],
+                )
+
 
             if path["id"] == "auto_worker":
                 self.assertLess(positions["triage_decide_triage_action"], positions["intake_decide_issue_priority"])
