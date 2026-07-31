@@ -471,6 +471,66 @@ def _repair_recovery_fields_well_formed(recovery: dict[str, object]) -> bool:
     return number is None or (type(number) is int and number > 0)
 
 
+def _journal_output_values(process_output: object) -> dict[str, object] | None:
+    """Return effector values from a Fala process output envelope when present."""
+    if not isinstance(process_output, dict):
+        return None
+    values = process_output.get("values")
+    return values if isinstance(values, dict) else None
+
+
+def _journal_adapter_failed_empty(
+    status: object,
+    process_output: object,
+    process_error: object,
+) -> bool:
+    """True boundary crash: process failed with empty output + adapter_failed."""
+    return bool(
+        status == "failed"
+        and isinstance(process_output, dict)
+        and not process_output
+        and isinstance(process_error, dict)
+        and process_error.get("code") == "adapter_failed"
+    )
+
+
+def _journal_semantic_failed_no_mutation(
+    status: object,
+    process_output: object,
+    *,
+    require_status_failed: bool = True,
+) -> bool:
+    """True semantic ok=false after exit-0: process succeeded with values.ok=false and mutated=False.
+
+    After effector exit-0 for semantic failures, Fala stores status=succeeded and preserves
+    result.json values. Recovery must accept that shape as a no-mutation terminal failure.
+    """
+    values = _journal_output_values(process_output)
+    if values is None:
+        return False
+    if status != "succeeded":
+        return False
+    if values.get("ok") is not False:
+        return False
+    if values.get("mutated") is not False:
+        return False
+    if require_status_failed and values.get("status") != "failed":
+        return False
+    return True
+
+
+def _journal_pre_omp_or_invoke_failed_no_mutation(
+    status: object,
+    process_output: object,
+    process_error: object,
+) -> bool:
+    """Accept either boundary adapter_failed or semantic ok=false no-mutation failure."""
+    return _journal_adapter_failed_empty(status, process_output, process_error) or _journal_semantic_failed_no_mutation(
+        status,
+        process_output,
+    )
+
+
 def _read_repair_journal_pre_omp_evidence(
     request: Request,
     state: dict[str, object],
@@ -512,10 +572,8 @@ def _read_repair_journal_pre_omp_evidence(
     valid = bool(
         row_run == run_id
         and row_id == process_id
-        and status == "failed"
         and isinstance(process_input, dict)
-        and isinstance(process_output, dict) and not process_output
-        and isinstance(process_error, dict) and process_error.get("code") == "adapter_failed"
+        and _journal_pre_omp_or_invoke_failed_no_mutation(status, process_output, process_error)
         and process_input.get("candidate") == state.get("candidate")
         and process_input.get("candidate_id") == state.get("candidate")
         and isinstance(reservation, dict) and reservation.get("ok") is True and reservation.get("mutated") is True
@@ -737,10 +795,7 @@ def read_repair_recovery_continuation_evidence(request: Request) -> Result:
         and reconciliation.get("actual_status") == reconciliation.get("pre_status")
     )
     if not (
-        invoke_status == "failed"
-        and not invoke_output
-        and isinstance(invoke_error, dict)
-        and invoke_error.get("code") == "adapter_failed"
+        _journal_pre_omp_or_invoke_failed_no_mutation(invoke_status, invoke_output, invoke_error)
         and invoke_no_mutation
         and push_status == "succeeded"
         and isinstance(push_values, dict)

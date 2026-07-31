@@ -3188,6 +3188,119 @@ CREATE TABLE runs (
             }))
             self.assertEqual(out["status"], "validated", out)
             self.assertEqual(out["recovery_claim"]["evidence_process_id"], process_id)
+
+    def test_repair_attempt_recovery_accepts_semantic_ok_false_no_mutation(self) -> None:
+        """Exit-0 semantic failures land as succeeded + values.ok=false, not adapter_failed."""
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "state" / "state.sqlite"
+            db.parent.mkdir(parents=True)
+            candidate = "old-candidate"
+            expected_cwd = db.resolve().parent.parent / "deployment" / "versions" / candidate / "source" / "project"
+            expected_cwd.mkdir(parents=True)
+            reservation = root / "reservation.json"
+            reservation.write_text("{}\n")
+            state = {
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": "head-a",
+                "candidate": candidate,
+                "run_id": "old-run",
+                "pre_head": "head-a",
+                "pre_status": "",
+            }
+            process_id = "old-run:auto_worker:triage_verify_repair_attempt_reservation"
+            process_input = {
+                "candidate": candidate,
+                "candidate_id": candidate,
+                "conduction": {
+                    "triage_reserve_repair_attempt": {
+                        "ok": True,
+                        "mutated": True,
+                        "reservation_path": str(reservation),
+                        "reservation": state,
+                    }
+                },
+            }
+            metadata = {
+                "effector_id": "triage_verify_repair_attempt_reservation",
+                "__correlation_conduction": [
+                    "triage_reserve_repair_attempt",
+                    "triage_verify_repair_attempt_recovery",
+                    "triage_verify_repair_recovery_continuation",
+                ],
+                "__adapter_binding": {"cwd": str(expected_cwd)},
+            }
+            semantic_output = {
+                "adapter": {"returncode": 0, "stdout": "", "stderr": "lokay effector reported failure"},
+                "values": {
+                    "ok": False,
+                    "status": "failed",
+                    "mutated": False,
+                    "reason": "repair_attempt_reservation_mismatch",
+                    "failure_class": "terminal",
+                    "retry_safe": False,
+                },
+            }
+            with sqlite3.connect(db) as connection:
+                connection.execute(
+                    "CREATE TABLE processes (run_id TEXT, id TEXT, status TEXT, input_json TEXT, output_json TEXT, error_json TEXT, metadata TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO processes VALUES (?,?,?,?,?,?,?)",
+                    (
+                        "old-run",
+                        process_id,
+                        "succeeded",
+                        json.dumps(process_input),
+                        json.dumps(semantic_output),
+                        "{}",
+                        json.dumps(metadata),
+                    ),
+                )
+            out = repair.read_repair_attempt_recovery_evidence(
+                req(
+                    {
+                        "path_id": "auto_worker",
+                        "run_id": "new-run",
+                        "candidate": "new-candidate",
+                        "repo": "o/r",
+                        "number": 1,
+                        "verified_head": "head-a",
+                        "db_path": str(db),
+                        "attempt_recovery": {
+                            "run_id": "stale-run",
+                            "process_id": "stale",
+                            "candidate": "stale-candidate",
+                            "path_id": "auto_worker",
+                            "effector_id": "triage_verify_repair_attempt_reservation",
+                            "repo": "o/r",
+                            "pr_number": 1,
+                            "verified_head": "head-a",
+                        },
+                        "conduction": {
+                            "read_repair_attempt_state": {
+                                "ok": True,
+                                "status": "found",
+                                "attempt_state": state,
+                                "reservation_path": str(reservation),
+                            },
+                            "read_repair_attempt_reconciliation": {
+                                "ok": True,
+                                "status": "unchanged",
+                                "authorize_reinvoke": True,
+                                "snapshot": {"pre_head": "head-a", "pre_status": ""},
+                            },
+                        },
+                    }
+                )
+            )
+            self.assertEqual(out["status"], "validated", out)
+            self.assertFalse(out["mutated"])
+            self.assertEqual(out["recovery_claim"]["evidence_process_id"], process_id)
+
     def test_repair_attempt_recovery_authorizes_composite_reservation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3561,6 +3674,122 @@ CREATE TABLE runs (
             }))
             self.assertEqual(evidence["status"], "failed")
             self.assertEqual(evidence["reason"], "repair_recovery_continuation_mutation_unknown")
+
+    def test_recovery_continuation_accepts_semantic_ok_false_invoke(self) -> None:
+        """Continuation must accept succeeded+values.ok=false invoke rows after exit-0."""
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reservation_path = root / "reservation.json"
+            head = "a" * 40
+            reconciliation = {
+                "pre_head": head,
+                "pre_status": "",
+                "actual_head": head,
+                "actual_status": "",
+            }
+            claim = {
+                "kind": "repair_attempt_recovery_claim",
+                "repo": "o/r",
+                "pr_number": 1,
+                "verified_head": head,
+                "reservation_run_id": "old-run",
+                "reservation_candidate": "old-candidate",
+                "evidence_process_id": "old-run:auto_worker:triage_verify_repair_attempt_reservation",
+                "recovery_run_id": "run-b",
+                "recovery_candidate": "candidate-b",
+                "reconciliation": reconciliation,
+            }
+            claim_path = root / "claim.json"
+            claim_path.write_text(json.dumps(claim, sort_keys=True) + "\n", encoding="utf-8")
+            reservation_path.write_text("{}\n", encoding="utf-8")
+            db = root / "state.sqlite"
+            invoke_process_id = "run-b:auto_worker:triage_invoke_repair_omp"
+            started = {
+                "kind": "repair_invoke_evidence",
+                "process_id": invoke_process_id,
+                "status": "started",
+                "pre_head": head,
+                "pre_status": "",
+                "mutated": None,
+            }
+            terminal = {
+                **started,
+                "status": "failed",
+                "post_head": head,
+                "post_status": "",
+                "mutated": False,
+                "error": "failed",
+            }
+            repair._repair_invoke_evidence_path(reservation_path, invoke_process_id).write_text(
+                json.dumps(started) + "\n", encoding="utf-8"
+            )
+            repair._repair_invoke_terminal_evidence_path(reservation_path, invoke_process_id).write_text(
+                json.dumps(terminal) + "\n", encoding="utf-8"
+            )
+            semantic_invoke = {
+                "adapter": {"returncode": 0, "stdout": "", "stderr": "lokay effector reported failure"},
+                "values": {
+                    "ok": False,
+                    "status": "failed",
+                    "mutated": False,
+                    "reason": "repair_omp_precondition_failed",
+                    "failure_class": "terminal",
+                    "retry_safe": False,
+                },
+            }
+            with sqlite3.connect(db) as connection:
+                connection.execute(
+                    "CREATE TABLE processes (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL, output_json TEXT NOT NULL, error_json TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO processes VALUES (?,?,?,?,?)",
+                    (
+                        "run-b:auto_worker:triage_invoke_repair_omp",
+                        "run-b",
+                        "succeeded",
+                        json.dumps(semantic_invoke, sort_keys=True),
+                        "{}",
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO processes VALUES (?,?,?,?,?)",
+                    (
+                        "run-b:auto_worker:triage_push_repair_branch",
+                        "run-b",
+                        "succeeded",
+                        json.dumps({"values": {"ok": True, "status": "noop", "mutated": False}}, sort_keys=True),
+                        "{}",
+                    ),
+                )
+            evidence = repair.read_repair_recovery_continuation_evidence(
+                req(
+                    {
+                        "run_id": "run-c",
+                        "candidate": "candidate-c",
+                        "db_path": str(db),
+                        "path_id": "auto_worker",
+                        "conduction": {
+                            "verify_repair_attempt_recovery": {
+                                "ok": True,
+                                "status": "verified",
+                                "recovery_verified": True,
+                                "recovery_claim": claim,
+                                "recovery_claim_path": str(claim_path),
+                                "reservation_path": str(reservation_path),
+                            },
+                            "read_repair_attempt_state": {
+                                "ok": True,
+                                "status": "found",
+                                "reservation_path": str(reservation_path),
+                            },
+                        },
+                    }
+                )
+            )
+            self.assertEqual(evidence["status"], "validated", evidence)
+
     def test_read_repair_attempt_baseline_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

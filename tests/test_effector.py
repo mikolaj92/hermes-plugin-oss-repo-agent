@@ -55,12 +55,13 @@ class EffectorBoundaryTests(unittest.TestCase):
                 self.assertEqual(values, payload)
                 self.assertEqual(stderr, "")
 
-    def test_semantic_failure_exits_nonzero(self) -> None:
+    def test_semantic_failure_exits_zero_with_values(self) -> None:
         code, values, stderr = self.run_effector(
             lambda request: {"status": "failed", "ok": False, "mutated": False, "reason": "denied"}
         )
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         self.assertFalse(values["ok"])
+        self.assertEqual(values["reason"], "denied")
         self.assertIn("reported failure", stderr)
 
     def test_malformed_exception_and_unknown_handler_fail_closed(self) -> None:

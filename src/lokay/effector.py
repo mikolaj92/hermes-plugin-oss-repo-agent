@@ -113,6 +113,9 @@ def main() -> int:
             raw = handler(request)
         payload = _safe(_normalize_result(raw, request))
         sdk.write_result(sdk.output(values=payload))
+        # Semantic ok=False must exit 0: Fala's subprocess adapter discards
+        # result.json on nonzero exit and stores empty values + adapter_failed.
+        # Downstream terminal_upstream / completion gates need the real payload.
         if payload.get("ok") is False or payload.get("status") == "failed":
             captured_stdout = captured.getvalue().strip()
             _write_debug_log(
@@ -121,7 +124,6 @@ def main() -> int:
                 f"Captured output:\n{captured_stdout}"
             )
             print("lokay effector reported failure", file=sys.stderr)
-            return 1
         return 0
     except Exception as exc:
         captured_stdout = ""
