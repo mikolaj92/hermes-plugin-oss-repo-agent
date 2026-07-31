@@ -124,6 +124,188 @@ class LifecycleReconcileTests(unittest.TestCase):
             "conduction": conduction, "merge_receipts": str(receipts), "claim_path": str(self.claim)}, "config": self.config})
         self.assertEqual((result["status"], result["repo"], result["issue"], result["pr_number"]),
             ("resolved", "owner/repo", 10, 11))
+    def test_lifecycle_durable_context_wins_over_residual_open_pr(self):
+        root = Path(self.temp.name)
+        claim_dir = root / "active"
+        claim_dir.mkdir()
+        claim_path = claim_dir / "claim.json"
+        claim_path.write_text(json.dumps({
+            "version": 1,
+            "repo": "owner/repo",
+            "issue": 10,
+            "board": "owner-repo",
+            "assignee": "owner",
+            "claimedAt": "2026-01-01T00:00:00Z",
+        }), encoding="utf-8")
+        claim_path.chmod(0o600)
+        receipts = root / "merges"
+        receipts.mkdir()
+        payload = {
+            "phase": "MERGED",
+            "repo": "owner/repo",
+            "pr": 11,
+            "headSha": "abc123",
+            "verified_provenance": {
+                "source": "github_pr_readback",
+                "state": "MERGED",
+                "repo": "owner/repo",
+                "number": 11,
+                "head_ref": "ai/fix/10-recover",
+                "head_oid": "abc123",
+            },
+        }
+        (receipts / "merged.json").write_text(json.dumps(payload), encoding="utf-8")
+        (receipts / "merged.json").chmod(0o600)
+        residual = {
+            "number": 99,
+            "state": "OPEN",
+            "headRefName": "ai/fix/10-residual",
+            "headRefOid": "residual-head",
+            "closingIssuesReferences": [{"number": 10}],
+        }
+        conduction = {
+            "triage_load_pr_fields": {
+                "ok": True,
+                "status": "loaded",
+                "repo": "owner/repo",
+                "pr": residual,
+                "mutated": False,
+            },
+            "triage_decide_triage_action": {
+                "ok": True,
+                "status": "decided",
+                "action": "repair",
+                "reason": "missing_test_evidence",
+                "repo": "owner/repo",
+                "pr": residual,
+                "mutated": False,
+            },
+        }
+        request = {
+            "input": {
+                "conduction": conduction,
+                "claim_root": str(claim_dir),
+                "active_issue_path": str(claim_dir),
+                "merge_receipts": str(receipts),
+            },
+            "config": {},
+        }
+        result = cleanup_reconcile._resolve_lifecycle_context(request)
+        self.assertEqual(
+            (result["status"], result["repo"], result["issue"], result["pr_number"], result["branch"], result["head_oid"]),
+            ("resolved", "owner/repo", 10, 11, "ai/fix/10-recover", "abc123"),
+        )
+        self.assertTrue(result.get("durable_merged"))
+        later_payload = {
+            "phase": "MERGED",
+            "repo": "owner/repo",
+            "pr": 99,
+            "headSha": "residual-head",
+            "mergedAt": "2026-01-02T00:00:00Z",
+            "verified_provenance": {
+                "source": "github_pr_readback",
+                "state": "MERGED",
+                "repo": "owner/repo",
+                "number": 99,
+                "head_ref": "ai/fix/10-residual",
+                "head_oid": "residual-head",
+                "merged_at": "2026-01-02T00:00:00Z",
+            },
+        }
+        payload["mergedAt"] = "2026-01-01T00:00:00Z"
+        payload["verified_provenance"]["merged_at"] = "2026-01-01T00:00:00Z"
+        (receipts / "merged.json").write_text(json.dumps(payload), encoding="utf-8")
+        (receipts / "later-residual.json").write_text(json.dumps(later_payload), encoding="utf-8")
+        result = cleanup_reconcile._resolve_lifecycle_context(request)
+        self.assertEqual((result["ok"], result["reason"], result["count"]), (False, "lifecycle_durable_context_ambiguous", 2))
+        (receipts / "later-residual.json").unlink()
+
+        responses = [
+            {"number": 10, "state": "CLOSED"},
+            {
+                "number": 11,
+                "state": "MERGED",
+                "headRefName": "ai/fix/10-recover",
+                "headRefOid": "abc123",
+                "closingIssuesReferences": [{"number": 10}],
+                "statusCheckRollup": [],
+            },
+            [],
+        ]
+        with mock.patch.object(
+            cleanup_reconcile,
+            "run_cmd",
+            side_effect=[mock.Mock(stdout=json.dumps(value)) for value in responses],
+        ):
+            github = cleanup_reconcile.read_lifecycle_github_state(request)
+            local = cleanup_reconcile.read_lifecycle_local_evidence(request)
+        self.assertEqual((github["status"], github["pr_number"]), ("read", 11))
+        self.assertEqual(str(github["pr"].get("headRefName") or ""), "ai/fix/10-recover")
+        self.assertTrue(local["claim_present"])
+        self.assertEqual([str(Path(path).resolve()) for path in local["claim_paths"]], [str(claim_path.resolve())])
+        decision = cleanup_reconcile.decide_lifecycle_transition({
+            "input": {
+                "conduction": {
+                    "read_lifecycle_github_state": github,
+                    "read_lifecycle_local_evidence": local,
+                }
+            },
+            "config": {},
+        })
+        self.assertEqual(decision["outcome"], "finalize_merged")
+        self.assertEqual(decision["identity"]["pr_number"], 11)
+
+    def test_lifecycle_local_evidence_reads_top_level_claim_root(self):
+        root = Path(self.temp.name)
+        claim_dir = root / "active-flat"
+        claim_dir.mkdir()
+        claim_path = claim_dir / "claim.json"
+        claim_path.write_text(json.dumps({
+            "version": 1,
+            "repo": "owner/repo",
+            "issue": 10,
+            "board": "owner-repo",
+            "assignee": "owner",
+            "claimedAt": "2026-01-01T00:00:00Z",
+        }), encoding="utf-8")
+        claim_path.chmod(0o600)
+        request = {
+            "input": self.data | {
+                "claim_root": str(claim_dir),
+                "claim_path": None,
+                "conduction": {
+                    "triage_load_pr_fields": {
+                        "ok": True,
+                        "status": "loaded",
+                        "repo": "owner/repo",
+                        "pr": {
+                            "number": 11,
+                            "headRefName": self.data["branch"],
+                            "headRefOid": self.data["head_oid"],
+                            "closingIssuesReferences": [{"number": 10}],
+                        },
+                    },
+                    "triage_decide_triage_action": {
+                        "ok": True,
+                        "status": "decided",
+                        "action": "merge",
+                        "repo": "owner/repo",
+                        "pr": {
+                            "number": 11,
+                            "headRefName": self.data["branch"],
+                            "headRefOid": self.data["head_oid"],
+                            "closingIssuesReferences": [{"number": 10}],
+                        },
+                    },
+                },
+            },
+            "config": {},
+        }
+        local = cleanup_reconcile.read_lifecycle_local_evidence(request)
+        self.assertEqual(local["status"], "read")
+        self.assertTrue(local["claim_present"])
+        self.assertEqual([str(Path(path).resolve()) for path in local["claim_paths"]], [str(claim_path.resolve())])
+
     def test_lifecycle_context_ignores_one_noop_when_peer_has_identity(self):
         selected = {
             "number": 11,

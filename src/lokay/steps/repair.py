@@ -3146,7 +3146,7 @@ def read_existing_repair_pr(request: Request) -> Result:
     cfg = cfg_of(request)
     gh = str(cfg.get("gh_cli") or "gh")
     try:
-        proc = run_cmd([gh, "pr", "list", "--repo", context["repo"], "--head", context["branch"], "--state", "open", "--json", "number,headRefName,headRefOid,baseRefName,repository,url"], timeout=120)
+        proc = run_cmd([gh, "pr", "list", "--repo", context["repo"], "--head", context["branch"], "--state", "open", "--json", "number,headRefName,headRefOid,baseRefName,headRepository,url"], timeout=120)
         rows = json.loads(proc.stdout or "[]")
     except (CommandError, json.JSONDecodeError, ValueError) as exc:
         return fail("repair_pr_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_existing_repair_pr", error=str(exc), **context)
@@ -3168,7 +3168,9 @@ def verify_existing_repair_pr(request: Request) -> Result:
     pr = cond_blob(request, "read_existing_repair_pr").get("pr") or {}
     expected_number = int(context["pr_number"] or 0)
     expected_oid = str(cond_blob(request, "verify_repair_push_oid").get("remote_oid") or "")
-    repo_value = pr.get("repository") if isinstance(pr, dict) else None
+    repo_value = None
+    if isinstance(pr, dict):
+        repo_value = pr.get("headRepository") or pr.get("repository")
     actual_repo = repo_value.get("nameWithOwner") if isinstance(repo_value, dict) else repo_value
     actual_number = pr.get("number") if isinstance(pr, dict) else None
     try:
@@ -3311,7 +3313,7 @@ def decide_legacy_repair_head_refresh(request: Request) -> Result:
     live_base = str(base_read.get("base_ref_oid") or "")
     if not repo or number <= 0 or not branch or not base or not old_head or not isinstance(pr, dict) or not live_base:
         return fail("legacy_repair_identity_missing", failure_class="terminal", retry_safe=False, operation="decide_legacy_repair_head_refresh", mutated=False)
-    repository = pr.get("repository")
+    repository = pr.get("headRepository") or pr.get("repository")
     loaded = cond_blob(request, "load_pr_fields", "triage_load_pr_fields")
     actual_repo = repository.get("nameWithOwner") if isinstance(repository, dict) else repository or loaded.get("repo")
     try:

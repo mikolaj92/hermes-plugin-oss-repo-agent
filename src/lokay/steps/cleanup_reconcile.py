@@ -277,7 +277,17 @@ def read_claim_process_evidence(request: Request) -> Result:
         return upstream
     data, cfg = input_of(request), cfg_of(request)
     try:
-        claim_root = Path(str(cfg.get("claim_root") or data.get("claim_path") or "")).expanduser().resolve(strict=False)
+        claim_root_value = (
+            data.get("claim_root")
+            or data.get("active_issue_path")
+            or data.get("active_issue")
+            or cfg.get("claim_root")
+            or cfg.get("active_issue_path")
+            or cfg.get("active_issue")
+            or (cfg.get("paths") if isinstance(cfg.get("paths"), dict) else {}).get("active_issue")
+            or data.get("claim_path")
+        )
+        claim_root = Path(str(claim_root_value or "")).expanduser().resolve(strict=False)
         claims = _matching_claims(claim_root, str(data["repo"]), _positive_int(data["issue"], "issue"))
         db = Path(str(data["db_path"])).expanduser().resolve(strict=True)
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0)
@@ -490,7 +500,7 @@ def _lifecycle_context_conflict(error: str, **extra: Any) -> Result:
 
 
 def _lifecycle_pr_repo(pr: dict[str, Any]) -> str:
-    value = pr.get("repo") or pr.get("repo_full_name") or pr.get("repository")
+    value = pr.get("repo") or pr.get("repo_full_name") or pr.get("headRepository") or pr.get("repository")
     if isinstance(value, dict):
         name_with_owner = value.get("nameWithOwner") or value.get("name_with_owner") or value.get("fullName")
         if name_with_owner:
@@ -531,8 +541,17 @@ def _lifecycle_linked_numbers(pr: dict[str, Any]) -> list[int] | None:
 def _durable_merged_lifecycle_context(request: Request) -> Result | None:
     """Recover one claimed merged identity; GitHub readback remains authoritative."""
     data, cfg = input_of(request), cfg_of(request)
-    claim_value = data.get("claim_path") or data.get("active_issue_path") or cfg.get("active_issue_path") or cfg.get("active_issue") or cfg.get("claim_root")
-    receipt_value = data.get("merge_receipts") or cfg.get("merge_receipts")
+    claim_value = (
+        data.get("claim_path")
+        or data.get("claim_root")
+        or data.get("active_issue_path")
+        or data.get("active_issue")
+        or cfg.get("claim_root")
+        or cfg.get("active_issue_path")
+        or cfg.get("active_issue")
+        or (cfg.get("paths") if isinstance(cfg.get("paths"), dict) else {}).get("active_issue")
+    )
+    receipt_value = data.get("merge_receipts") or cfg.get("merge_receipts") or (cfg.get("paths") if isinstance(cfg.get("paths"), dict) else {}).get("merge_receipts")
     if not claim_value or not receipt_value:
         return None
     claim_path = Path(str(claim_value)).expanduser()
@@ -606,14 +625,30 @@ def _resolve_lifecycle_context(request: Request) -> Result:
         return upstream
     load_idle = upstream_noop(request, "triage_load_pr_fields", "load_pr_fields")
     decide_idle = upstream_noop(request, "triage_decide_triage_action", "decide_triage_action")
-    durable = _durable_merged_lifecycle_context(request) if load_idle and decide_idle else None
+    durable = _durable_merged_lifecycle_context(request)
     if durable is not None and durable.get("ok") is not True:
         return durable
-    if load_idle and decide_idle and durable is None:
+    if durable is not None and durable.get("status") == "resolved":
+        return ok(
+            status="resolved",
+            repo=str(durable["repo"]),
+            issue=durable["issue"],
+            pr_number=durable["pr_number"],
+            branch=str(durable["branch"]),
+            head_oid=str(durable.get("head_oid") or ""),
+            board=str(data.get("board") or cfg.get("board") or ""),
+            clone_path=str(data.get("clone_path") or cfg.get("clone_path") or ""),
+            priority=data.get("priority") if data.get("priority") is not None else cfg.get("priority") if cfg.get("priority") is not None else 0,
+            selected_pr=None,
+            linked_issue_numbers=[durable["issue"]],
+            durable_merged=True,
+            mutated=False,
+        )
+    if load_idle and decide_idle:
         return noop(str(decide_idle.get("reason") or load_idle.get("reason") or "no_selected_pr"), operation="resolve_lifecycle_context", worked=False)
     load = cond_blob(request, "triage_load_pr_fields", "load_pr_fields")
     decide = cond_blob(request, "triage_decide_triage_action", "decide_triage_action", "decide")
-    conduction = [blob for blob in (load, decide, durable) if blob and blob.get("status") != "noop"]
+    conduction = [blob for blob in (load, decide) if blob and blob.get("status") != "noop"]
     explicit_prs = [data.get("pr")] if isinstance(data.get("pr"), dict) else []
     triage_prs: list[dict[str, Any]] = []
     for blob in conduction:
@@ -893,7 +928,16 @@ def read_lifecycle_local_evidence(request: Request) -> Result:
     issue_number = context["issue"]
     try:
         issue = _positive_int(issue_number, "issue")
-        claim_root_value = cfg.get("claim_root") or data.get("claim_path")
+        claim_root_value = (
+            data.get("claim_path")
+            or data.get("claim_root")
+            or data.get("active_issue_path")
+            or data.get("active_issue")
+            or cfg.get("claim_root")
+            or cfg.get("active_issue_path")
+            or cfg.get("active_issue")
+            or (cfg.get("paths") if isinstance(cfg.get("paths"), dict) else {}).get("active_issue")
+        )
         claim_root = Path(str(claim_root_value)).expanduser().resolve(strict=False) if claim_root_value else None
         claims = _matching_claims(claim_root, repo, issue) if claim_root is not None else []
         task_path_value = data.get("task_receipt_path")

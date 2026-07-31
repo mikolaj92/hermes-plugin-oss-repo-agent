@@ -4239,6 +4239,44 @@ CREATE TABLE runs (
         self.assertTrue(out["ok"])
         self.assertEqual(run.call_args.args[0][2], "repos/owner/repo/git/ref/heads/main")
 
+
+    def test_existing_repair_pr_uses_head_repository_field(self) -> None:
+        context = {
+            "repo": "o/r",
+            "pr_number": 7,
+            "branch": "ai/fix/1-x",
+            "issue": 1,
+        }
+        pr = {
+            "number": 7,
+            "headRefName": "ai/fix/1-x",
+            "headRefOid": "deadbeef",
+            "baseRefName": "main",
+            "headRepository": {"nameWithOwner": "o/r"},
+            "url": "https://github.com/o/r/pull/7",
+        }
+        with mock.patch("lokay.steps.repair.run_cmd", return_value=SimpleNamespace(stdout=json.dumps([pr]))) as run:
+            with mock.patch("lokay.steps.repair._repair_execution_gate", return_value=None), mock.patch(
+                "lokay.steps.repair._repair_upstream", return_value=None
+            ), mock.patch("lokay.steps.repair._repair_context", return_value=context):
+                out = repair.read_existing_repair_pr(req({}))
+        self.assertEqual(out["status"], "read")
+        self.assertEqual(out["pr"]["headRepository"]["nameWithOwner"], "o/r")
+        fields = run.call_args.args[0][-1]
+        self.assertIn("headRepository", fields)
+        self.assertNotIn(",repository,", f",{fields},")
+        with mock.patch("lokay.steps.repair._repair_execution_gate", return_value=None), mock.patch(
+            "lokay.steps.repair._repair_upstream", return_value=None
+        ), mock.patch("lokay.steps.repair._repair_context", return_value=context):
+            verified = repair.verify_existing_repair_pr(req({
+                "conduction": {
+                    "read_existing_repair_pr": {"ok": True, "status": "read", "pr": pr},
+                    "verify_repair_push_oid": {"ok": True, "status": "verified", "remote_oid": "deadbeef"},
+                }
+            }))
+        self.assertEqual(verified["status"], "verified")
+        self.assertEqual(verified["repo"], "o/r")
+
     def test_legacy_base_refresh_eligible_and_partial_fail_closed(self) -> None:
         state = {
             "repo": "mikolaj92/lokay",
