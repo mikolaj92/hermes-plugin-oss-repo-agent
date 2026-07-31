@@ -33,8 +33,45 @@ from .executor import CommandSpec, Runner, planned_command
 INTAKE_ASSIGNEE = "lokay-intake"
 FALA_PINNED_COMMIT = "b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
 FALA_PINNED_VERSION = "0.7.15"
+FALA_PINNED_TAG = f"v{FALA_PINNED_VERSION}"
+FALA_GIT_URL = "https://github.com/mikolaj92/Fala.git"
+FALA_GIT_SOURCE = f'fala = {{ git = "{FALA_GIT_URL}", tag = "{FALA_PINNED_TAG}" }}'
+FALA_BUNDLED_SOURCE = 'fala = { path = "Fala", editable = true }'
+FALA_GIT_LOCK_SOURCE = (
+    f'source = {{ git = "{FALA_GIT_URL}?tag={FALA_PINNED_TAG}#{FALA_PINNED_COMMIT}" }}'
+)
+FALA_BUNDLED_LOCK_SOURCE = 'source = { editable = "Fala" }'
+FALA_GIT_REQUIRES_DIST = f'{{ name = "fala", git = "{FALA_GIT_URL}?tag={FALA_PINNED_TAG}" }}'
+FALA_BUNDLED_REQUIRES_DIST = '{ name = "fala", editable = "Fala" }'
 FALA_EMBER_JSON_COMMIT = "882acf141301db4ee797228016982ad6acc71a6f"
 FALA_SQLITE_FIRE_COMMIT = "3d482362c863e769d018443045b27ca5db645b3c"
+
+
+def rewrite_fala_git_to_bundled_pyproject(text: str) -> str:
+    """Candidate-only rewrite: checkout git pin → vendored path dependency."""
+    if FALA_GIT_SOURCE not in text:
+        raise ConfigError("pyproject.toml missing pinned Fala git source")
+    if "../Fala" in text or 'path = "Fala"' in text:
+        raise ConfigError("pyproject.toml still references a local Fala path source")
+    rewritten = text.replace(FALA_GIT_SOURCE, FALA_BUNDLED_SOURCE, 1)
+    if FALA_GIT_SOURCE in rewritten or FALA_BUNDLED_SOURCE not in rewritten:
+        raise ConfigError("failed to rewrite Fala git source to bundled path")
+    return rewritten
+
+
+def rewrite_fala_git_to_bundled_lock(data: bytes) -> bytes:
+    """Candidate-only rewrite: lock git pin → vendored editable path."""
+    if FALA_GIT_LOCK_SOURCE.encode() not in data:
+        raise ConfigError("uv.lock missing pinned Fala git source")
+    if b'editable = "../Fala"' in data or b'editable = "Fala"' in data:
+        raise ConfigError("uv.lock still references a local Fala path source")
+    rewritten = data.replace(FALA_GIT_LOCK_SOURCE.encode(), FALA_BUNDLED_LOCK_SOURCE.encode(), 1)
+    rewritten = rewritten.replace(FALA_GIT_REQUIRES_DIST.encode(), FALA_BUNDLED_REQUIRES_DIST.encode(), 1)
+    if FALA_GIT_LOCK_SOURCE.encode() in rewritten or FALA_BUNDLED_LOCK_SOURCE.encode() not in rewritten:
+        raise ConfigError("failed to rewrite Fala git lock source to bundled path")
+    if FALA_GIT_REQUIRES_DIST.encode() in rewritten or FALA_BUNDLED_REQUIRES_DIST.encode() not in rewritten:
+        raise ConfigError("failed to rewrite Fala git requires-dist to bundled path")
+    return rewritten
 
 
 def setup_parser(parser: ArgumentParser) -> None:
@@ -774,7 +811,7 @@ def _copy_git_tree(repo: Path, revision: str, destination: Path) -> None:
 
 
 def _copy_candidate_source(project_root: Path, destination: Path, config: Path, lock: Path) -> dict[str, bytes]:
-    """Copy the runnable plugin and the complete pinned local Fala dependency."""
+    """Copy the runnable plugin and the complete pinned Fala dependency tree."""
     project = destination / "project"
     project.mkdir(parents=True)
     for relative in ("src", "templates", "fala-package.toml", "pyproject.toml", "README.md", "LICENSE"):
@@ -856,13 +893,9 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
         encoding="utf-8",
     )
     shutil.copy2(config, destination / "config.toml")
-    pyproject = (project / "pyproject.toml").read_text(encoding="utf-8")
-    pyproject = pyproject.replace(
-        'fala = { path = "../Fala", editable = true }',
-        'fala = { path = "Fala", editable = true }',
-    )
+    pyproject = rewrite_fala_git_to_bundled_pyproject((project / "pyproject.toml").read_text(encoding="utf-8"))
     (project / "pyproject.toml").write_text(pyproject, encoding="utf-8")
-    lock_data = lock.read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
+    lock_data = rewrite_fala_git_to_bundled_lock(lock.read_bytes())
     (project / "uv.lock").write_bytes(lock_data)
     return {"config.toml": config.read_bytes(), "uv.lock": lock_data}
 
@@ -942,7 +975,7 @@ def render_launchd(
     if pinned_version != FALA_PINNED_VERSION:
         raise ConfigError(f"pinned Fala commit version must be {FALA_PINNED_VERSION}")
     fala_revision = FALA_PINNED_COMMIT
-    lock_data = lock.read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
+    lock_data = rewrite_fala_git_to_bundled_lock(lock.read_bytes())
     lock_hash = _sha256_bytes(lock_data)
     policy = {
         "automerge": bool(cfg.automerge),

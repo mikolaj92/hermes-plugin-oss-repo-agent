@@ -89,7 +89,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             encoding="utf-8",
         )
         db = db_path or root / "state.sqlite"
-        lock_data = (ROOT / "uv.lock").read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
+        lock_data = self.commands.rewrite_fala_git_to_bundled_lock((ROOT / "uv.lock").read_bytes())
         identity = {
             "schema": 1,
             "mode": mode,

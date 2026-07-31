@@ -62,7 +62,7 @@ class HealthStatusScriptTests(unittest.TestCase):
         cls.config.write_text("mode = 'dry-run'\n[automation]\nautomerge = true\nrequire_human_approval = false\nrequire_checks = false\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
         cls.base_db = cls.root / "base.sqlite"
         cls._write_db(cls.base_db, mode="dry-run")
-        lock_data = (ROOT / "uv.lock").read_bytes().replace(b'editable = "../Fala"', b'editable = "Fala"')
+        lock_data = cls.commands.rewrite_fala_git_to_bundled_lock((ROOT / "uv.lock").read_bytes())
         identity = {
             "schema": 1,
             "mode": "dry-run",

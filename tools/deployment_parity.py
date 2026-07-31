@@ -15,6 +15,8 @@ from typing import Iterable
 
 
 FALA_PINNED_COMMIT = "b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
+FALA_TAG = "0.7.15"
+FALA_GIT_URL = "https://github.com/mikolaj92/Fala.git"
 POLICY_KEYS = frozenset({"automerge", "require_human_approval", "require_checks", "require_test_evidence", "executor_enabled"})
 PROMOTION_POLICY = {
     "automerge": True,
@@ -458,10 +460,6 @@ def _relative_candidate_path(candidate: Path, value: object, label: str, errors:
     return path
 
 
-FALA_TAG = "0.7.15"
-
-
-
 
 def _validate_args(
     args: object,
@@ -763,8 +761,15 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
             pyproject = fala_project = lock_text = ""
         if 'name = "fala"' not in fala_project or f'version = "{FALA_TAG}"' not in fala_project:
             errors.append(f"bundled Fala metadata is not pinned to {FALA_TAG}")
-        if 'fala = { path = "Fala", editable = true }' not in pyproject or "../Fala" in pyproject or 'editable = "Fala"' not in lock_text or "../Fala" in lock_text:
-            errors.append("bundled Fala dependency path or lock provenance is invalid")
+        expected_git = f'fala = {{ git = "{FALA_GIT_URL}", tag = "v{FALA_TAG}" }}'
+        if expected_git in pyproject or "../Fala" in pyproject:
+            errors.append("bundled pyproject still references git/local Fala source")
+        if 'fala = { path = "Fala", editable = true }' not in pyproject:
+            errors.append("bundled Fala dependency path is invalid")
+        if f'git = "{FALA_GIT_URL}' in lock_text or "../Fala" in lock_text:
+            errors.append("bundled Fala lock still references git/local path")
+        if 'editable = "Fala"' not in lock_text:
+            errors.append("bundled Fala lock provenance is invalid")
     for required_relative in ("fala-package.toml", "src/lokay/effector.py"):
         required_file = project / required_relative
         if not _regular_file(required_file):
