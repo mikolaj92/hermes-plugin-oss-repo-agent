@@ -2512,7 +2512,7 @@ def decide_repair_push(request: Request) -> Result:
     if upstream:
         return upstream
     local = str(cond_blob(request, "read_repair_worktree_head").get("local_oid") or input_of(request).get("local_oid") or "")
-    before = str(input_of(request).get("before_oid") or cond_blob(request, "read_repair_omp_postconditions").get("before_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
+    before = str(input_of(request).get("before_oid") or cond_blob(request, "verify_repair_omp_postconditions").get("before_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
     if not local or not before:
         return fail("missing_repair_push_oids", failure_class="terminal", retry_safe=False, operation="decide_repair_push")
     if local == before:

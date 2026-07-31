@@ -1683,6 +1683,69 @@ class RepairTests(unittest.TestCase):
         context = repair._repair_context(req(data))
         push.assert_called_once_with(context["worktree_path"], "ai/fix/10", remote="upstream", set_upstream=False)
 
+    def test_decide_repair_push_reads_before_oid_from_postconditions(self) -> None:
+        data = {
+            "repo": "owner/repo",
+            "issue": 10,
+            "pr_number": 11,
+            "branch": "ai/fix/10",
+            "clone_path": "/clone",
+            "worktree_root": "/worktrees",
+            "repair_state_root": "/state",
+            "remote": "upstream",
+            "live": True,
+            "enabled": True,
+            "dry_run": False,
+        }
+        before = "a" * 40
+        after = "b" * 40
+        authorized = {"ok": True, "status": "invoke", "authorize": True, "decision": "invoke"}
+        result = repair.decide_repair_push(req({
+            **data,
+            "conduction": {
+                "decide_repair_attempt": authorized,
+                "read_repair_worktree_head": {
+                    "ok": True,
+                    "status": "read",
+                    "local_oid": after,
+                    "after_oid": after,
+                },
+                "verify_repair_omp_postconditions": {
+                    "ok": True,
+                    "status": "verified",
+                    "before_oid": before,
+                    "after_oid": after,
+                },
+            },
+        }))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "push")
+        self.assertTrue(result["should_push"])
+        self.assertEqual(result["before_oid"], before)
+        self.assertEqual(result["local_oid"], after)
+
+        missing = repair.decide_repair_push(req({
+            **data,
+            "conduction": {
+                "decide_repair_attempt": authorized,
+                "read_repair_worktree_head": {
+                    "ok": True,
+                    "status": "read",
+                    "local_oid": after,
+                    "after_oid": after,
+                },
+                # typo name must not be required; without verify/remote before_oid this fails closed
+                "read_repair_omp_postconditions": {
+                    "ok": True,
+                    "status": "verified",
+                    "before_oid": before,
+                    "after_oid": after,
+                },
+            },
+        }))
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["reason"], "missing_repair_push_oids")
+
     def test_foreign_selected_branch_does_not_conflict_with_owned_local_ref(self) -> None:
         data = {"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10", "clone_path": "/clone", "worktree_root": "/worktrees", "repair_state_root": "/state", "task_id": ""}
         context = repair._repair_context(req(data))
