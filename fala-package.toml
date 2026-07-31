@@ -1037,7 +1037,7 @@ config = { handler = "lokay.steps.repair.verify_repair_worktree" }
 [[correlation_paths.effectors]]
 id = "read_repair_attempt_baseline"
 capability = "lokay_step"
-conduction = ["verify_repair_worktree"]
+conduction = ["verify_repair_worktree", "decide_repair_worktree_ownership", "read_repair_attempt_state", "read_repair_remote_head"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_attempt_baseline" }
 
@@ -1116,7 +1116,7 @@ config = { handler = "lokay.steps.repair.reserve_repair_attempt" }
 [[correlation_paths.effectors]]
 id = "verify_repair_attempt_reservation"
 capability = "lokay_step"
-conduction = ["reserve_repair_attempt", "read_repair_context", "verify_repair_attempt_recovery", "verify_repair_recovery_continuation"]
+conduction = ["decide_repair_attempt", "reserve_repair_attempt", "read_repair_context", "verify_repair_attempt_recovery", "verify_repair_recovery_continuation"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.verify_repair_attempt_reservation" }
 
@@ -2564,7 +2564,7 @@ config = { handler = "lokay.steps.repair.verify_repair_worktree" }
 [[correlation_paths.effectors]]
 id = "triage_read_repair_attempt_baseline"
 capability = "lokay_step"
-conduction = ["triage_verify_repair_worktree"]
+conduction = ["triage_verify_repair_worktree", "triage_decide_repair_worktree_ownership", "triage_read_repair_attempt_state", "triage_read_repair_remote_head"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.read_repair_attempt_baseline" }
 
@@ -2643,7 +2643,7 @@ config = { handler = "lokay.steps.repair.reserve_repair_attempt" }
 [[correlation_paths.effectors]]
 id = "triage_verify_repair_attempt_reservation"
 capability = "lokay_step"
-conduction = ["triage_reserve_repair_attempt", "triage_read_repair_context", "triage_verify_repair_attempt_recovery", "triage_verify_repair_recovery_continuation"]
+conduction = ["triage_decide_repair_attempt", "triage_reserve_repair_attempt", "triage_read_repair_context", "triage_verify_repair_attempt_recovery", "triage_verify_repair_recovery_continuation"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.repair.verify_repair_attempt_reservation" }
 
