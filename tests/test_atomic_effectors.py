@@ -1303,6 +1303,26 @@ class RepairTests(unittest.TestCase):
         self.assertIn("Commit the changes locally so HEAD advances.", out["prompt"])
         self.assertIn("Do not push, force-push, or merge.", out["prompt"])
 
+    def test_build_repair_prompt_requires_nonempty_evidence_change(self) -> None:
+        out = repair.build_repair_prompt(req({
+            "issue": 10, "failures": [], "reason": "missing_test_evidence",
+            "conduction": {"load_pr_fields": {
+                "status": "loaded", "repo": "owner/repo", "number": 11,
+                "board": "board", "clone_path": "/clone", "priority": 2,
+                "pr": {
+                    "number": 11, "title": "fix", "headRefName": "ai/fix/11",
+                    "closingIssuesReferences": [{"number": 10}],
+                },
+            }},
+        }))
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["reason"], "missing_test_evidence")
+        self.assertIn("missing required test evidence", out["prompt"])
+        self.assertIn("real non-empty tree change", out["prompt"])
+        self.assertIn("Evidence:", out["prompt"])
+        self.assertIn("Empty commits", out["prompt"])
+        self.assertIn("Do not push, force-push, or merge.", out["prompt"])
+
     def test_build_repair_prompt_rejects_invalid_linked_issue_identity(self) -> None:
         base = {"number": 11, "title": "fix", "headRefName": "ai/fix/11"}
         for refs, explicit, reason in (([], None, "expected_exactly_one_closing_issue"), ([{"number": 10}, {"number": 12}], None, "expected_exactly_one_closing_issue"), ([{"number": 10}], 12, "explicit_issue_mismatch")):
@@ -3589,7 +3609,7 @@ CREATE TABLE runs (
             })
             with (
                 mock.patch("lokay.steps.repair.rev_parse", return_value="head-committed-new"),
-                mock.patch("lokay.steps.repair.git", return_value=""),
+                mock.patch("lokay.steps.repair.git", side_effect=["", "file.py"]),
             ):
                 out = repair.read_repair_attempt_reconciliation(request)
             self.assertEqual(out["status"], "committed")
@@ -3631,7 +3651,7 @@ CREATE TABLE runs (
             })
             with (
                 mock.patch("lokay.steps.repair.rev_parse", return_value="head-committed-new"),
-                mock.patch("lokay.steps.repair.git", return_value=""),
+                mock.patch("lokay.steps.repair.git", side_effect=["", "file.py"]),
             ):
                 out = repair.read_repair_attempt_reconciliation(request)
             self.assertEqual(out["status"], "committed")
@@ -3639,6 +3659,56 @@ CREATE TABLE runs (
             self.assertTrue(out["resume_postconditions"])
             self.assertEqual(out["snapshot"]["actual_head"], "head-committed-new")
             self.assertEqual(out["snapshot"]["pre_head"], "head-a")
+
+    def test_read_repair_attempt_reconciliation_empty_tree_delta_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_req = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+            })
+            ctx = repair._repair_context(base_req)
+            local_branch = ctx["local_branch"]
+            wt_path = ctx["worktree_path"]
+            request = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+                "conduction": {
+                    "read_repair_completed_receipt": {"ok": True, "status": "absent"},
+                    "read_repair_attempt_state": {
+                        "ok": True, "status": "found",
+                        "attempt_state": {
+                            "repo": "o/r", "pr_number": 1, "verified_head": "head-a",
+                            "pre_head": "head-a", "pre_status": "",
+                            "repo_branch": "ai/fix/1", "local_branch": local_branch,
+                            "worktree_path": wt_path, "candidate": "cand", "run_id": "run",
+                        },
+                    },
+                    "read_repair_remote_head": {"ok": True, "remote_oid": "head-a"},
+                    "read_repair_worktree_inventory": {
+                        "ok": True, "worktrees": [{"path": wt_path, "branch": local_branch}],
+                    },
+                    "read_repair_branch_provenance": {
+                        "ok": True, "exists": True, "branch_head": "head-empty",
+                        "provenance": {
+                            "repo": "o/r", "pr": "1", "remote_oid": "head-a",
+                            "target_branch": "ai/fix/1",
+                        },
+                    },
+                },
+            })
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="head-empty"),
+                mock.patch("lokay.steps.repair.git", side_effect=["", ""]),
+            ):
+                out = repair.read_repair_attempt_reconciliation(request)
+            self.assertFalse(out["ok"])
+            self.assertEqual(out["reason"], "repair_attempt_empty_tree_delta")
+            self.assertEqual(out["failure_class"], "terminal")
+            self.assertFalse(out.get("authorize_reinvoke"))
+            self.assertFalse(out.get("resume_postconditions"))
+            self.assertEqual(out["before_oid"], "head-a")
+            self.assertEqual(out["after_oid"], "head-empty")
 
 
     def test_read_repair_attempt_reconciliation_dirty(self) -> None:
@@ -3827,7 +3897,7 @@ CREATE TABLE runs (
             })
             with (
                 mock.patch("lokay.steps.repair.rev_parse", return_value="head-committed-new"),
-                mock.patch("lokay.steps.repair.git", return_value=""),
+                mock.patch("lokay.steps.repair.git", side_effect=["", "file.py"]),
             ):
                 out = repair.read_repair_attempt_reconciliation(request)
             self.assertEqual(out["status"], "committed")
@@ -3961,21 +4031,40 @@ CREATE TABLE runs (
             "decide_repair_worktree_fast_forward": {"ok": True, "status": "inactive", "should_fast_forward": False, "local_ahead": True},
             "fast_forward_repair_worktree": {"ok": True, "status": "inactive"},
         }
-        ahead = repair.decide_repair_worktree_ownership(req({
-            **context,
-            "conduction": {
-                **base,
-                "read_repair_remote_ancestry": {
-                    "ok": True, "status": "read", "relation": "ahead", "local_ahead": True,
-                    "local_oid": local, "remote_oid": remote,
+        with mock.patch("lokay.steps.repair.git", return_value="file.py"):
+            ahead = repair.decide_repair_worktree_ownership(req({
+                **context,
+                "conduction": {
+                    **base,
+                    "read_repair_remote_ancestry": {
+                        "ok": True, "status": "read", "relation": "ahead", "local_ahead": True,
+                        "local_oid": local, "remote_oid": remote,
+                    },
                 },
-            },
-        }))
+            }))
         self.assertTrue(ahead["ok"])
         self.assertTrue(ahead["reuse"])
         self.assertTrue(ahead["local_ahead"])
         self.assertEqual(ahead["expected_head"], local)
         self.assertEqual(ahead["resume_local_head"], local)
+
+        with mock.patch("lokay.steps.repair.git", return_value=""):
+            empty = repair.decide_repair_worktree_ownership(req({
+                **context,
+                "conduction": {
+                    **base,
+                    "read_repair_remote_ancestry": {
+                        "ok": True, "status": "read", "relation": "ahead", "local_ahead": True,
+                        "local_oid": local, "remote_oid": remote,
+                    },
+                },
+            }))
+        self.assertFalse(empty["ok"])
+        self.assertEqual(empty["reason"], "repair_worktree_empty_tree_delta")
+        self.assertFalse(empty.get("authorize_reinvoke"))
+        self.assertFalse(empty.get("resume_postconditions"))
+        self.assertEqual(empty["local_oid"], local)
+        self.assertEqual(empty["remote_oid"], remote)
 
         # Behind without a successful FF remains stale when FF did not advance.
         stale = repair.decide_repair_worktree_ownership(req({

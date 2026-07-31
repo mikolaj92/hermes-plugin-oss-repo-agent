@@ -1033,10 +1033,45 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
     except (CommandError, OSError) as exc:
         return fail("repair_attempt_reconciliation_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_attempt_reconciliation", error=str(exc), mutated=False)
     snapshot = {"pre_head": expected["pre_head"], "pre_status": expected["pre_status"], "actual_head": actual_head, "actual_status": actual_status, "remote_oid": str(remote.get("remote_oid") or ""), "worktree_path": expected["worktree_path"], "local_branch": expected["local_branch"], "repo_branch": expected["repo_branch"]}
-    # Committed resume: OMP mutation is expected. Global attempt_recovery is only for the
-    # reinvoke (unchanged) arm — never block post-OMP push resume on mutated evidence.
+    # Committed resume requires a real tree delta. Empty (message-only) commits
+    # must never authorize resume/push; fail closed so operators can rewind the tip.
     if actual_head != expected["pre_head"] and actual_status == "":
-        return ok(status="committed", operation="read_repair_attempt_reconciliation", reconciliation_required=True, authorize_reinvoke=False, resume_postconditions=True, snapshot=snapshot, mutated=False)
+        try:
+            changed = git(
+                ["diff", "--name-only", expected["pre_head"], actual_head],
+                cwd=context["worktree_path"],
+            )
+        except (CommandError, OSError) as exc:
+            return fail(
+                "repair_attempt_reconciliation_read_failed",
+                failure_class="retryable_read",
+                retry_safe=True,
+                operation="read_repair_attempt_reconciliation",
+                error=str(exc),
+                mutated=False,
+            )
+        if not str(changed).strip():
+            return fail(
+                "repair_attempt_empty_tree_delta",
+                failure_class="terminal",
+                retry_safe=False,
+                operation="read_repair_attempt_reconciliation",
+                authorize_reinvoke=False,
+                resume_postconditions=False,
+                snapshot=snapshot,
+                before_oid=expected["pre_head"],
+                after_oid=actual_head,
+                mutated=False,
+            )
+        return ok(
+            status="committed",
+            operation="read_repair_attempt_reconciliation",
+            reconciliation_required=True,
+            authorize_reinvoke=False,
+            resume_postconditions=True,
+            snapshot=snapshot,
+            mutated=False,
+        )
     if actual_head == expected["pre_head"] and actual_status == expected["pre_status"]:
         data, cfg = input_of(request), cfg_of(request)
         recovery = data.get("attempt_recovery") or cfg.get("attempt_recovery")
@@ -1624,6 +1659,21 @@ def build_repair_prompt(request: Request) -> Result:
     clone_path = loaded.get("clone_path") or data.get("clone_path")
     priority = loaded.get("priority", data.get("priority"))
     branch = pr.get("headRefName") or loaded.get("branch") or data.get("branch")
+    if reason == "missing_test_evidence":
+        guidance = (
+            "The PR is missing required test evidence markers for merge.\n"
+            "Make a real non-empty tree change that records evidence using at least one of: "
+            "`Evidence:`, `Test plan`, `pytest`, `unittest`, or `Verified` "
+            "(for example add/adjust a test, or update a tracked test plan file with the command and result).\n"
+            "Empty commits (message-only / identical tree) are rejected and will not push.\n"
+            "Keep scope minimal. Commit locally so HEAD advances with a real tree delta. "
+            "Do not push, force-push, or merge.\n"
+        )
+    else:
+        guidance = (
+            "Update the branch to fix CI/merge issues. Keep scope minimal.\n"
+            "Commit the changes locally so HEAD advances. Do not push, force-push, or merge.\n"
+        )
     body = (
         f"Repair PR #{number}: {title}\n"
         f"Repository: {repo or 'n/a'}\n"
@@ -1633,8 +1683,7 @@ def build_repair_prompt(request: Request) -> Result:
         f"Board: {board or 'n/a'} (priority {priority if priority is not None else 'n/a'})\n"
         f"Reason: {reason}\n"
         f"Failing checks: {', '.join(str(item) for item in failures) if failures else 'n/a'}\n"
-        "Update the branch to fix CI/merge issues. Keep scope minimal.\n"
-        "Commit the changes locally so HEAD advances. Do not push, force-push, or merge.\n"
+        f"{guidance}"
     )
     task_id = created.get("task_id") or data.get("task_id")
     return ok(
@@ -2401,6 +2450,35 @@ def decide_repair_worktree_ownership(request: Request) -> Result:
         and str(ancestry.get("remote_oid") or "") == remote_oid
         and ff.get("status") in {"inactive", "planned"}
     )
+    if local_ahead:
+        try:
+            changed = git(
+                ["diff", "--name-only", remote_oid, local_head],
+                cwd=context["worktree_path"],
+            )
+        except (CommandError, OSError) as exc:
+            return fail(
+                "repair_worktree_tree_delta_read_failed",
+                failure_class="retryable_read",
+                retry_safe=True,
+                operation="decide_repair_worktree_ownership",
+                error=str(exc),
+                local_oid=local_head,
+                remote_oid=remote_oid,
+            )
+        if not str(changed).strip():
+            return fail(
+                "repair_worktree_empty_tree_delta",
+                failure_class="terminal",
+                retry_safe=False,
+                operation="decide_repair_worktree_ownership",
+                authorize_reinvoke=False,
+                resume_postconditions=False,
+                local_oid=local_head,
+                remote_oid=remote_oid,
+                expected_head=remote_oid,
+                actual_head=local_head,
+            )
     if matching and local_head != remote_oid and not local_ahead and ff.get("status") not in {"advanced", "planned"}:
         return fail("stale_repair_remote_head", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected_head=remote_oid, actual_head=matching[0].get("head"))
     if (target.exists() or target.is_symlink()) and not matching:
