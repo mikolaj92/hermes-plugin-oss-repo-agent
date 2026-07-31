@@ -3493,6 +3493,51 @@ CREATE TABLE runs (
             self.assertFalse(out["authorize_reinvoke"])
             self.assertTrue(out["resume_postconditions"])
 
+    def test_read_repair_attempt_reconciliation_committed_with_advanced_branch_head(self) -> None:
+        """Live provenance tip may advance after OMP while remote stays at pre_head."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_req = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+            })
+            ctx = repair._repair_context(base_req)
+            local_branch = ctx["local_branch"]
+            wt_path = ctx["worktree_path"]
+            request = req({
+                "repo": "o/r", "pr_number": 1, "branch": "ai/fix/1",
+                "worktree_root": str(root / "worktrees"),
+                "conduction": {
+                    "read_repair_completed_receipt": {"ok": True, "status": "absent"},
+                    "read_repair_attempt_state": {
+                        "ok": True, "status": "found",
+                        "attempt_state": {
+                            "repo": "o/r", "pr_number": 1, "verified_head": "head-a",
+                            "pre_head": "head-a", "pre_status": "",
+                            "repo_branch": "ai/fix/1", "local_branch": local_branch,
+                            "worktree_path": wt_path, "candidate": "cand", "run_id": "run"
+                        }
+                    },
+                    "read_repair_remote_head": {"ok": True, "remote_oid": "head-a"},
+                    "read_repair_worktree_inventory": {"ok": True, "worktrees": [{"path": wt_path, "branch": local_branch}]},
+                    "read_repair_branch_provenance": {
+                        "ok": True, "exists": True, "branch_head": "head-committed-new",
+                        "provenance": {"repo": "o/r", "pr": "1", "remote_oid": "head-a", "target_branch": "ai/fix/1"}
+                    }
+                }
+            })
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value="head-committed-new"),
+                mock.patch("lokay.steps.repair.git", return_value=""),
+            ):
+                out = repair.read_repair_attempt_reconciliation(request)
+            self.assertEqual(out["status"], "committed")
+            self.assertFalse(out["authorize_reinvoke"])
+            self.assertTrue(out["resume_postconditions"])
+            self.assertEqual(out["snapshot"]["actual_head"], "head-committed-new")
+            self.assertEqual(out["snapshot"]["pre_head"], "head-a")
+
+
     def test_read_repair_attempt_reconciliation_dirty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3607,6 +3652,455 @@ CREATE TABLE runs (
             out = repair.read_repair_attempt_reconciliation(request)
             self.assertEqual(out["status"], "failed")
             self.assertEqual(out["reason"], "repair_attempt_reconciliation_mutated_blocked")
+
+    def test_read_repair_remote_ancestry_classifies_equal_behind_ahead_diverged(self) -> None:
+        context = {
+            "repo": "owner/repo",
+            "issue": 10,
+            "pr_number": 11,
+            "branch": "ai/fix/10",
+            "clone_path": "/clone",
+            "worktree_root": "/worktrees",
+        }
+        resolved = repair._repair_context(req(context))
+        remote = "a" * 40
+        local = "b" * 40
+        acquired_ref = f"refs/lokay-repair/{remote}"
+        base_conduction = {
+            "read_repair_context": {"ok": True, "status": "read", **resolved},
+            "read_repair_remote_head": {"ok": True, "status": "read", "remote_oid": remote},
+            "fetch_repair_remote_head": {"ok": True, "status": "fetched", "remote_oid": remote, "acquired_oid": remote, "acquired_ref": acquired_ref},
+            "verify_fetched_repair_remote_head": {
+                "ok": True, "status": "verified", "verified": True,
+                "remote_oid": remote, "acquired_oid": remote, "acquired_ref": acquired_ref,
+            },
+            "read_repair_worktree_inventory": {
+                "ok": True, "status": "read",
+                "worktrees": [{"path": resolved["worktree_path"], "branch": resolved["local_branch"], "head": remote}],
+            },
+            "read_repair_branch_provenance": {"ok": True, "status": "read", "exists": True, "branch_head": remote},
+        }
+
+        equal = repair.read_repair_remote_ancestry(req({**context, "conduction": base_conduction}))
+        self.assertEqual(equal["relation"], "equal")
+        self.assertTrue(equal["descendant"])
+        self.assertFalse(equal["local_ahead"])
+
+        behind_conduction = {
+            **base_conduction,
+            "read_repair_worktree_inventory": {
+                "ok": True, "status": "read",
+                "worktrees": [{"path": resolved["worktree_path"], "branch": resolved["local_branch"], "head": local}],
+            },
+            "read_repair_branch_provenance": {"ok": True, "status": "read", "exists": True, "branch_head": local},
+        }
+        with mock.patch("lokay.steps.repair.run_cmd", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
+            behind = repair.read_repair_remote_ancestry(req({**context, "conduction": behind_conduction}))
+        self.assertEqual(behind["relation"], "behind")
+        self.assertTrue(behind["descendant"])
+        self.assertFalse(behind["local_ahead"])
+
+        def _ahead_side_effect(cmd, **_kwargs):
+            # first call: local ancestor of remote? no; second: remote ancestor of local? yes
+            if cmd[3] == local:
+                return SimpleNamespace(returncode=1, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch("lokay.steps.repair.run_cmd", side_effect=_ahead_side_effect):
+            ahead = repair.read_repair_remote_ancestry(req({**context, "conduction": behind_conduction}))
+        self.assertEqual(ahead["relation"], "ahead")
+        self.assertTrue(ahead["local_ahead"])
+        self.assertFalse(ahead["descendant"])
+
+        with mock.patch("lokay.steps.repair.run_cmd", return_value=SimpleNamespace(returncode=1, stdout="", stderr="")):
+            diverged = repair.read_repair_remote_ancestry(req({**context, "conduction": behind_conduction}))
+        self.assertFalse(diverged["ok"])
+        self.assertEqual(diverged["reason"], "repair_worktree_diverged")
+        self.assertEqual(diverged["relation"], "diverged")
+
+    def test_decide_repair_fast_forward_inactive_when_local_ahead(self) -> None:
+        context = {
+            "repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10",
+            "clone_path": "/clone", "worktree_root": "/worktrees", "task_id": "",
+            "repair_state_root": "/state", "run_id": "run-one",
+        }
+        resolved = repair._repair_context(req(context))
+        remote, local = "a" * 40, "b" * 40
+        provenance = {
+            "task": "", "issue": "10", "repo": "owner/repo", "pr": "11",
+            "receipt": resolved["receipt"], "remote_oid": remote, "target_branch": context["branch"],
+        }
+        out = repair.decide_repair_worktree_fast_forward(req({
+            **context,
+            "conduction": {
+                "read_repair_context": {"ok": True, "status": "read", **resolved},
+                "read_repair_remote_head": {"ok": True, "status": "read", "remote_oid": remote},
+                "read_repair_worktree_inventory": {
+                    "ok": True, "status": "read",
+                    "worktrees": [{"path": resolved["worktree_path"], "branch": resolved["local_branch"], "head": local}],
+                },
+                "read_repair_branch_provenance": {
+                    "ok": True, "status": "read", "exists": True, "branch_head": local, "provenance": provenance,
+                },
+                "read_repair_worktree_cleanliness": {"ok": True, "status": "read", "clean": True},
+                "read_repair_remote_ancestry": {
+                    "ok": True, "status": "read", "relation": "ahead", "local_ahead": True,
+                    "descendant": False, "local_oid": local, "remote_oid": remote,
+                },
+            },
+        }))
+        self.assertEqual(out["status"], "inactive")
+        self.assertFalse(out["should_fast_forward"])
+        self.assertTrue(out["local_ahead"])
+
+    def test_ownership_reuses_clean_local_ahead_and_rejects_stale_behind(self) -> None:
+        context = {
+            "repo": "owner/repo", "issue": "10", "pr_number": "11", "branch": "ai/fix/10",
+            "clone_path": "/clone", "worktree_root": "/worktrees", "task_id": "",
+            "repair_state_root": "/state", "run_id": "run-one",
+        }
+        resolved = repair._repair_context(req(context))
+        remote, local = "a" * 40, "b" * 40
+        provenance = {
+            "task": "", "issue": "10", "repo": "owner/repo", "pr": "11",
+            "receipt": resolved["receipt"], "remote_oid": remote, "target_branch": context["branch"],
+        }
+        base = {
+            "read_repair_context": {"ok": True, "status": "read", **resolved},
+            "read_repair_remote_head": {"ok": True, "status": "read", "remote_oid": remote},
+            "read_repair_worktree_inventory": {
+                "ok": True, "status": "read",
+                "worktrees": [{"path": resolved["worktree_path"], "branch": resolved["local_branch"], "head": local}],
+            },
+            "read_repair_branch_provenance": {
+                "ok": True, "status": "read", "exists": True, "branch_head": local, "provenance": provenance,
+            },
+            "read_repair_creation_evidence": {"ok": True, "status": "absent", "verified": False},
+            "read_repair_worktree_cleanliness": {"ok": True, "status": "read", "clean": True},
+            "decide_repair_worktree_fast_forward": {"ok": True, "status": "inactive", "should_fast_forward": False, "local_ahead": True},
+            "fast_forward_repair_worktree": {"ok": True, "status": "inactive"},
+        }
+        ahead = repair.decide_repair_worktree_ownership(req({
+            **context,
+            "conduction": {
+                **base,
+                "read_repair_remote_ancestry": {
+                    "ok": True, "status": "read", "relation": "ahead", "local_ahead": True,
+                    "local_oid": local, "remote_oid": remote,
+                },
+            },
+        }))
+        self.assertTrue(ahead["ok"])
+        self.assertTrue(ahead["reuse"])
+        self.assertTrue(ahead["local_ahead"])
+        self.assertEqual(ahead["expected_head"], local)
+        self.assertEqual(ahead["resume_local_head"], local)
+
+        # Behind without a successful FF remains stale when FF did not advance.
+        stale = repair.decide_repair_worktree_ownership(req({
+            **context,
+            "conduction": {
+                **base,
+                "read_repair_remote_ancestry": {
+                    "ok": True, "status": "read", "relation": "behind", "local_ahead": False,
+                    "descendant": True, "local_oid": local, "remote_oid": remote,
+                },
+                "decide_repair_worktree_fast_forward": {
+                    "ok": True, "status": "authorized", "should_fast_forward": True, "local_ahead": False,
+                },
+                "fast_forward_repair_worktree": {
+                    "ok": True, "status": "inactive", "should_fast_forward": False, "mutated": False,
+                },
+            },
+        }))
+        self.assertFalse(stale["ok"])
+        self.assertEqual(stale["reason"], "stale_repair_remote_head")
+
+
+
+    def test_verify_repair_worktree_accepts_local_ahead_expected_head(self) -> None:
+        context = {
+            "repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10",
+            "clone_path": "/clone", "worktree_root": "/worktrees",
+        }
+        resolved = repair._repair_context(req(context))
+        remote, local = "a" * 40, "b" * 40
+        with (
+            mock.patch("lokay.steps.repair.git", side_effect=[resolved["worktree_path"], resolved["local_branch"]]),
+            mock.patch("lokay.steps.repair.rev_parse", return_value=local),
+        ):
+            out = repair.verify_repair_worktree(req({
+                **context,
+                "conduction": {
+                    "add_repair_worktree": {"ok": True, "status": "reused", "worktree_path": resolved["worktree_path"]},
+                    "decide_repair_worktree_ownership": {
+                        "ok": True, "status": "reuse", "reuse": True, "local_ahead": True,
+                        "expected_head": local, "resume_local_head": local, "remote_oid": remote,
+                    },
+                },
+            }))
+        self.assertEqual(out["status"], "verified")
+        self.assertEqual(out["head"], local)
+        self.assertTrue(out["local_ahead"])
+        self.assertEqual(out["remote_oid"], remote)
+
+    def test_decide_repair_attempt_authorizes_resume_postconditions_before_already_repaired(self) -> None:
+        from lokay.steps.repair import decide_repair_attempt
+
+        pre, actual = "head-pre", "head-post"
+        out = decide_repair_attempt(req({
+            "enabled": True, "live": True, "dry_run": False,
+            "repo": "o/r", "number": 1, "verified_head": pre, "candidate": "c1", "run_id": "r1",
+            "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+            "attempt_state": {
+                "repo": "o/r", "pr_number": 1, "verified_head": pre, "candidate": "c1", "run_id": "r1",
+                "status": "reserved", "attempted": True, "pre_head": pre, "pre_status": "",
+            },
+            "conduction": {
+                "read_repair_attempt_state": {
+                    "ok": True, "status": "found", "reservation_path": "/state/res.json",
+                    "attempt_state": {
+                        "repo": "o/r", "pr_number": 1, "verified_head": pre, "candidate": "c1", "run_id": "r1",
+                        "status": "reserved", "attempted": True, "pre_head": pre, "pre_status": "",
+                    },
+                },
+                "read_repair_attempt_reconciliation": {
+                    "ok": True, "status": "committed", "authorize_reinvoke": False, "resume_postconditions": True,
+                    "snapshot": {
+                        "pre_head": pre, "pre_status": "", "actual_head": actual,
+                        "actual_status": "", "remote_oid": pre,
+                    },
+                },
+            },
+        }))
+        self.assertEqual(out["status"], "resume_postconditions")
+        self.assertEqual(out["reason"], "resume_postconditions")
+        self.assertTrue(out["authorize"])
+        self.assertTrue(out["resume_postconditions"])
+        self.assertFalse(out["authorize_reinvoke"])
+        self.assertEqual(out["attempt_state"]["pre_head"], pre)
+        self.assertEqual(out["attempt_state"]["actual_head"], actual)
+
+    def test_reserve_and_verify_resume_without_rebaseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            branch = "ai/fix/10"
+            worktree_root = str(Path(tmp) / "worktrees")
+            local_branch = repair._repair_local_branch("o/r", "11", branch)
+            worktree_path = str(Path(worktree_root) / local_branch)
+            pre = "head-pre"
+            actual = "head-post"
+            identity = {
+                "repo": "o/r", "pr_number": 11, "verified_head": pre,
+                "candidate": "a" * 64, "run_id": "run-a",
+            }
+            payload = {
+                **identity,
+                "checks": [{"identity": "ci", "conclusion": "FAILURE"}],
+                "status": "reserved",
+                "attempted": True,
+                "kind": "repair_attempt_reservation",
+                "pre_head": pre,
+                "pre_status": "",
+                "repo_branch": branch,
+                "local_branch": local_branch,
+                "worktree_path": worktree_path,
+            }
+            path = Path(tmp) / "reservation.json"
+            path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            decision = {
+                "ok": True,
+                "status": "resume_postconditions",
+                "authorize": True,
+                "reason": "resume_postconditions",
+                "resume_postconditions": True,
+                "authorize_reinvoke": False,
+                "reservation_path": str(path),
+                **identity,
+                "checks": payload["checks"],
+            }
+            reserved = repair.reserve_repair_attempt(req({
+                "enabled": True, "live": True, "dry_run": False,
+                "repair_state_root": tmp,
+                "conduction": {
+                    "decide_repair_attempt": decision,
+                    "read_repair_context": {
+                        "ok": True, "status": "read",
+                        "repo": "o/r", "pr_number": "11", "branch": branch,
+                        "local_branch": local_branch, "worktree_root": worktree_root,
+                        "worktree_path": worktree_path,
+                    },
+                    "read_repair_attempt_baseline": {
+                        "ok": True, "status": "read", "baseline_verified": True,
+                        "pre_head": pre, "pre_status": "", "local_ahead": True,
+                        "resume_local_head": actual,
+                    },
+                    "verify_repair_attempt_recovery": {"ok": True, "status": "inactive"},
+                    "verify_repair_recovery_continuation": {"ok": True, "status": "inactive"},
+                },
+            }))
+            self.assertEqual(reserved["status"], "resumed")
+            self.assertFalse(reserved["mutated"])
+            self.assertTrue(reserved["resume_postconditions"])
+            self.assertEqual(reserved["reservation"]["pre_head"], pre)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["pre_head"], pre)
+
+            verified = repair.verify_repair_attempt_reservation(req({
+                "enabled": True, "live": True, "dry_run": False,
+                "candidate": identity["candidate"], "run_id": identity["run_id"],
+                "conduction": {
+                    "decide_repair_attempt": decision,
+                    "reserve_repair_attempt": reserved,
+                    "read_repair_context": {
+                        "ok": True, "status": "read",
+                        "repo": "o/r", "pr_number": "11", "branch": branch,
+                        "local_branch": local_branch, "worktree_root": worktree_root,
+                        "worktree_path": worktree_path,
+                    },
+                    "verify_repair_attempt_recovery": {"ok": True, "status": "inactive"},
+                    "verify_repair_recovery_continuation": {"ok": True, "status": "inactive"},
+                },
+            }))
+            self.assertEqual(verified["status"], "verified")
+            self.assertTrue(verified["verified"])
+            self.assertTrue(verified["resumed"])
+            self.assertTrue(verified["resume_postconditions"])
+            self.assertEqual(verified["pre_head"], pre)
+
+    def test_invoke_repair_omp_reuses_without_running_omp_on_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            res_path = root / "reservation.json"
+            pre, actual = "head-pre", "head-post"
+            reservation = {
+                "repo": "o/r", "pr_number": 1, "verified_head": pre,
+                "candidate": "c" * 64, "run_id": "run-r",
+                "status": "reserved", "attempted": True,
+                "pre_head": pre, "pre_status": "",
+                "repo_branch": "ai/fix/1", "local_branch": "lokay/repair/x",
+                "worktree_path": str(root / "worktree"),
+            }
+            res_path.write_text(json.dumps(reservation) + "\n", encoding="utf-8")
+            process_id = "run-r:auto_worker:triage_invoke_repair_omp"
+            request = invoke_req({
+                "repo": "o/r", "number": 1, "verified_head": pre,
+                "candidate": "c" * 64, "run_id": "run-r",
+                "worktree_path": str(root / "worktree"),
+                "prompt": "must not run",
+                "conduction": {
+                    "verify_repair_attempt_reservation": {
+                        "ok": True, "status": "verified", "verified": True,
+                        "resumed": True, "resume_postconditions": True,
+                        "reservation_path": str(res_path), "reservation": reservation,
+                        "pre_head": pre,
+                    },
+                    "read_repair_omp_preconditions": {
+                        "ok": True, "status": "ready", "worktree_path": str(root / "worktree"),
+                        "pre_head": pre, "resume_local_head": actual, "resume_postconditions": True,
+                    },
+                    "decide_repair_attempt": {
+                        "ok": True, "status": "resume_postconditions", "authorize": True,
+                        "reason": "resume_postconditions", "resume_postconditions": True,
+                        "repo": "o/r", "pr_number": 1, "verified_head": pre,
+                        "candidate": "c" * 64, "run_id": "run-r",
+                    },
+                    "build_repair_prompt": {"ok": True, "status": "built", "prompt": "must not run"},
+                },
+            }, process_id=process_id)
+            with (
+                mock.patch("lokay.steps.repair.rev_parse", return_value=actual),
+                mock.patch("lokay.steps.repair.git", return_value=""),
+                mock.patch("lokay.steps.repair.run_omp") as run_omp,
+            ):
+                out = repair.invoke_repair_omp(request)
+            self.assertEqual(out["status"], "reused")
+            self.assertFalse(out["mutated"])
+            self.assertTrue(out["resume_postconditions"])
+            self.assertEqual(out["pre_head"], pre)
+            self.assertEqual(out["resume_local_head"], actual)
+            run_omp.assert_not_called()
+
+    def test_verify_repair_omp_postconditions_accepts_reused_with_delta(self) -> None:
+        path = "/worktrees/lokay/repair/resume"
+        pre, actual = "a" * 40, "b" * 40
+        with (
+            mock.patch("lokay.steps.repair.git", side_effect=[path, "file.py"]),
+            mock.patch("lokay.steps.repair.rev_parse", return_value=actual),
+        ):
+            out = repair.verify_repair_omp_postconditions(req({
+                "enabled": True, "live": True, "dry_run": False,
+                "repo": "o/r", "issue": 10, "pr_number": 11, "branch": "ai/fix/10",
+                "worktree_path": path,
+                "conduction": {
+                    "decide_repair_attempt": {
+                        "ok": True, "status": "resume_postconditions", "authorize": True,
+                        "reason": "resume_postconditions", "resume_postconditions": True,
+                    },
+                    "read_repair_omp_preconditions": {
+                        "ok": True, "status": "ready", "pre_head": pre,
+                        "worktree_path": path, "resume_postconditions": True,
+                        "repo": "o/r", "issue": "10", "pr_number": "11", "branch": "ai/fix/10",
+                    },
+                    "invoke_repair_omp": {
+                        "ok": True, "status": "reused", "mutated": False,
+                        "pre_head": pre, "resume_local_head": actual,
+                        "resume_postconditions": True, "worktree_path": path,
+                    },
+                },
+            }))
+        self.assertEqual(out["status"], "verified")
+        self.assertEqual(out["before_oid"], pre)
+        self.assertEqual(out["after_oid"], actual)
+        self.assertEqual(out["changed_paths"], ["file.py"])
+        self.assertTrue(out["resume_postconditions"])
+        self.assertEqual(out["worktree_path"], path)
+
+    def test_verify_repair_omp_postconditions_rejects_empty_resume_delta(self) -> None:
+        path = "/worktrees/lokay/repair/resume"
+        oid = "a" * 40
+        with (
+            mock.patch("lokay.steps.repair.git", side_effect=[path, ""]),
+            mock.patch("lokay.steps.repair.rev_parse", return_value=oid),
+        ):
+            out = repair.verify_repair_omp_postconditions(req({
+                "enabled": True, "live": True, "dry_run": False,
+                "worktree_path": path,
+                "conduction": {
+                    "decide_repair_attempt": {
+                        "ok": True, "status": "resume_postconditions", "authorize": True,
+                        "reason": "resume_postconditions",
+                    },
+                    "read_repair_omp_preconditions": {
+                        "ok": True, "status": "ready", "pre_head": oid,
+                        "worktree_path": path, "resume_postconditions": True,
+                    },
+                    "invoke_repair_omp": {
+                        "ok": True, "status": "reused", "mutated": False,
+                        "pre_head": oid, "resume_postconditions": True, "worktree_path": path,
+                    },
+                },
+            }))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "repair_omp_head_unchanged")
+
+    def test_missing_reservation_cannot_silently_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = repair.reserve_repair_attempt(req({
+                "enabled": True, "live": True, "dry_run": False,
+                "repair_state_root": tmp,
+                "conduction": {
+                    "decide_repair_attempt": {
+                        "ok": True, "status": "resume_postconditions", "authorize": True,
+                        "reason": "resume_postconditions", "resume_postconditions": True,
+                        "repo": "o/r", "pr_number": 11, "verified_head": "head-pre",
+                        "candidate": "a" * 64, "run_id": "run-a",
+                        "reservation_path": str(Path(tmp) / "missing.json"),
+                    },
+                    "verify_repair_attempt_recovery": {"ok": True, "status": "inactive"},
+                    "verify_repair_recovery_continuation": {"ok": True, "status": "inactive"},
+                },
+            }))
+            self.assertFalse(out["ok"])
+            self.assertEqual(out["reason"], "repair_attempt_reservation_readback_failed")
 
     def test_invoke_repair_omp_writes_started_and_success_invoke_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

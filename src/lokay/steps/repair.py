@@ -902,7 +902,11 @@ def read_repair_completed_receipt(request: Request) -> Result:
     return ok(status="found", operation="read_repair_completed_receipt", receipt=receipt, receipt_path=receipt_path, **identity)
 
 def read_repair_attempt_baseline(request: Request) -> Result:
-    """Read the exact clean worktree baseline before immutable reservation."""
+    """Read the exact clean worktree baseline before immutable reservation.
+
+    Local-ahead resume must never re-baseline ``pre_head`` at the advanced tip.
+    The immutable reservation baseline stays at the remote/pre-OMP OID.
+    """
     upstream = _repair_upstream(request, "read_repair_attempt_baseline", "verify_repair_worktree")
     if upstream:
         return upstream
@@ -920,6 +924,51 @@ def read_repair_attempt_baseline(request: Request) -> Result:
         return fail("repair_attempt_baseline_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_attempt_baseline", error=str(exc), mutated=False)
     if actual_head != expected or status:
         return fail("repair_attempt_baseline_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_baseline", expected_head=expected, actual_head=actual_head, dirty=bool(status), mutated=False)
+    ownership = cond_blob(request, "decide_repair_worktree_ownership")
+    local_ahead = bool(verified.get("local_ahead") is True or ownership.get("local_ahead") is True)
+    if local_ahead:
+        remote_oid = str(
+            ownership.get("remote_oid")
+            or verified.get("remote_oid")
+            or cond_blob(request, "read_repair_remote_head").get("remote_oid")
+            or ""
+        )
+        state_read = cond_blob(request, "read_repair_attempt_state", "triage_read_repair_attempt_state")
+        state = state_read.get("attempt_state") if isinstance(state_read.get("attempt_state"), dict) else {}
+        if not state:
+            prior = _repair_state(request)
+            state = prior if isinstance(prior, dict) else {}
+        pre_head = str(state.get("pre_head") or state.get("verified_head") or "")
+        if (
+            not remote_oid
+            or not pre_head
+            or pre_head != remote_oid
+            or pre_head == actual_head
+            or str(state.get("repo") or "") not in {"", context["repo"]}
+            or str(state.get("pr_number") or "") not in {"", str(context["pr_number"])}
+        ):
+            return fail(
+                "repair_attempt_baseline_resume_required",
+                failure_class="terminal",
+                retry_safe=False,
+                operation="read_repair_attempt_baseline",
+                expected_head=remote_oid,
+                actual_head=actual_head,
+                pre_head=pre_head,
+                mutated=False,
+            )
+        return ok(
+            status="read",
+            operation="read_repair_attempt_baseline",
+            baseline_verified=True,
+            pre_head=pre_head,
+            pre_status=str(state.get("pre_status") or ""),
+            resume_local_head=actual_head,
+            local_ahead=True,
+            remote_oid=remote_oid,
+            **context,
+            mutated=False,
+        )
     return ok(status="read", operation="read_repair_attempt_baseline", baseline_verified=True, pre_head=actual_head, pre_status=status, **context, mutated=False)
 
 
@@ -990,7 +1039,10 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
         and str(remote.get("remote_oid") or "") == expected["verified_head"]
         and provenance_read.get("ok") is True
         and provenance_read.get("exists") is True
-        and str(provenance_read.get("branch_head") or "") == expected["verified_head"]
+        # Live branch tip may equal verified_head (unchanged) or advance after OMP.
+        # Remote remaining at verified_head is enforced above; empty tip is invalid.
+        # Classification uses worktree rev_parse as actual_head — not branch_head equality.
+        and bool(str(provenance_read.get("branch_head") or ""))
         and str(provenance.get("repo") or "") == str(state.get("repo") or "")
         and str(provenance.get("pr") or "") == str(state.get("pr_number") or "")
         and str(provenance.get("target_branch") or "") == expected["repo_branch"]
@@ -1012,6 +1064,8 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
     return fail("repair_attempt_reconciliation_dirty", failure_class="terminal", retry_safe=False, operation="read_repair_attempt_reconciliation", snapshot=snapshot, mutated=False)
 
 
+
+
 def reserve_repair_attempt(request: Request) -> Result:
     """Atomically reserve the immutable head before invoking OMP."""
     peers = ("read_repair_attempt_baseline", "read_repair_context", "verify_repair_attempt_recovery", "verify_repair_recovery_continuation")
@@ -1027,6 +1081,47 @@ def reserve_repair_attempt(request: Request) -> Result:
         if recovery.get("ok") is not True or recovery.get("status") != "verified" or recovery.get("recovery_verified") is not True:
             return fail("repair_attempt_recovery_verification_required", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt")
         return ok(status="recovered", operation="reserve_repair_attempt", reservation_path=str(decision.get("reservation_path") or ""), recovery_claim=recovery.get("recovery_claim"), recovery_claim_path=recovery.get("recovery_claim_path"), mutated=False)
+    if decision.get("reason") == "resume_postconditions" or decision.get("resume_postconditions") is True:
+        identity, error = _repair_identity(request)
+        if identity is None:
+            return fail("terminal_conflict", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", conflict=error)
+        path = str(decision.get("reservation_path") or input_of(request).get("reservation_path") or "")
+        if not path:
+            if _repair_state_root(request) is None:
+                return fail("missing_repair_state_root", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", **identity)
+            path = str(_repair_reservation_path(request, identity))
+        try:
+            existing = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            return fail("repair_attempt_reservation_readback_failed", failure_class="terminal", retry_safe=False, operation="reserve_repair_attempt", error=str(exc), reservation_path=path)
+        stored = _reservation_identity(existing)
+        required_baseline = ("pre_head", "pre_status", "repo_branch", "local_branch", "worktree_path")
+        if (
+            stored is None
+            or existing.get("status") != "reserved"
+            or existing.get("attempted") is not True
+            or any(key not in existing for key in required_baseline)
+            or str(stored["repo"]) != str(identity["repo"])
+            or int(stored["pr_number"]) != int(identity["pr_number"])
+            or str(stored["verified_head"]) != str(identity["verified_head"])
+            or str(existing.get("pre_head") or "") != str(identity["verified_head"])
+        ):
+            return fail(
+                "repair_attempt_reservation_mismatch",
+                failure_class="terminal",
+                retry_safe=False,
+                operation="reserve_repair_attempt",
+                reservation_path=path,
+                conflict="resume_reservation_baseline_mismatch",
+            )
+        return ok(
+            status="resumed",
+            operation="reserve_repair_attempt",
+            reservation=existing,
+            reservation_path=path,
+            resume_postconditions=True,
+            mutated=False,
+        )
     if decision.get("authorize") is not True:
         return noop(str(decision.get("reason") or "repair_attempt_not_authorized"), operation="reserve_repair_attempt")
     identity, error = _repair_identity(request)
@@ -1083,7 +1178,7 @@ def reserve_repair_attempt(request: Request) -> Result:
 
 
 def verify_repair_attempt_reservation(request: Request) -> Result:
-    """Read the immutable reservation and bind it to a normal or recovered attempt."""
+    """Read the immutable reservation and bind it to a normal, recovered, or resumed attempt."""
     gated = _repair_decision_gate(request)
     if gated is not None:
         return gated
@@ -1096,7 +1191,7 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
     path = str(input_of(request).get("reservation_path") or source.get("reservation_path") or "")
     if not path:
         return fail("missing_repair_attempt_reservation", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation")
-    if source.get("status") != "recovered" and (context_blob.get("ok") is not True or context_blob.get("status") != "read"):
+    if source.get("status") not in {"recovered", "resumed"} and (context_blob.get("ok") is not True or context_blob.get("status") != "read"):
         return fail("repair_attempt_context_required", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -1105,12 +1200,14 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
     stored = _reservation_identity(payload)
     reserved = source.get("reservation") if isinstance(source.get("reservation"), dict) else None
     reserved_identity = _reservation_identity(reserved)
-    if stored is None or (source.get("status") != "recovered" and (reserved_identity is None or stored != reserved_identity)):
+    if stored is None or (source.get("status") not in {"recovered", "resumed"} and (reserved_identity is None or stored != reserved_identity)):
+        return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="invalid_reservation_identity")
+    if source.get("status") == "resumed" and (reserved_identity is None or stored != reserved_identity):
         return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="invalid_reservation_identity")
     required_baseline = ("pre_head", "pre_status", "repo_branch", "local_branch", "worktree_path")
     if payload.get("status") != "reserved" or payload.get("attempted") is not True or any(key not in payload for key in required_baseline):
         return fail("repair_attempt_reservation_invalid", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
-    if source.get("status") != "recovered":
+    if source.get("status") not in {"recovered", "resumed"}:
         context = {key: str(context_blob.get(key) or "") for key in ("repo", "pr_number", "branch", "local_branch", "worktree_path")}
         try:
             context_pr = int(context["pr_number"])
@@ -1127,8 +1224,45 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
             return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="reservation_context_mismatch")
     current_candidate = str(input_of(request).get("candidate") or input_of(request).get("candidate_id") or cfg_of(request).get("candidate") or "")
     current_run_id = str(input_of(request).get("run_id") or cfg_of(request).get("run_id") or "")
-    if source.get("status") != "recovered" and (not current_candidate or not current_run_id or current_candidate != str(stored["candidate"]) or current_run_id != str(stored["run_id"])):
+    if source.get("status") not in {"recovered", "resumed"} and (not current_candidate or not current_run_id or current_candidate != str(stored["candidate"]) or current_run_id != str(stored["run_id"])):
         return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="missing_repair_provenance")
+    if source.get("status") == "resumed":
+        decision = cond_blob(request, "decide_repair_attempt")
+        if (
+            (
+                decision.get("resume_postconditions") is not True
+                and decision.get("reason") != "resume_postconditions"
+            )
+            or str(payload.get("pre_head") or "") != str(stored["verified_head"])
+            or str(stored["verified_head"]) != str(decision.get("verified_head") or stored["verified_head"])
+        ):
+            return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="resume_reservation_baseline_mismatch")
+        context = {key: str(context_blob.get(key) or "") for key in ("repo", "pr_number", "branch", "local_branch", "worktree_path")}
+        try:
+            context_pr = int(context["pr_number"])
+        except (TypeError, ValueError):
+            context_pr = 0
+        if context_blob.get("ok") is True and context_blob.get("status") == "read":
+            if (
+                not context["repo"] or context_pr <= 0
+                or str(stored["repo"]) != context["repo"]
+                or int(stored["pr_number"]) != context_pr
+                or str(payload.get("repo_branch") or "") != context["branch"]
+                or str(payload.get("local_branch") or "") != context["local_branch"]
+                or Path(str(payload.get("worktree_path") or "")).resolve() != Path(context["worktree_path"]).resolve()
+            ):
+                return fail("repair_attempt_reservation_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path, conflict="reservation_context_mismatch")
+        return ok(
+            status="verified",
+            operation="verify_repair_attempt_reservation",
+            verified=True,
+            resumed=True,
+            resume_postconditions=True,
+            reservation=payload,
+            reservation_path=path,
+            pre_head=str(payload.get("pre_head") or ""),
+            mutated=False,
+        )
     if source.get("status") == "recovered":
         recovery = cond_blob(request, "verify_repair_attempt_recovery")
         continuation = cond_blob(request, "verify_repair_recovery_continuation")
@@ -1152,13 +1286,12 @@ def verify_repair_attempt_reservation(request: Request) -> Result:
             return fail("repair_attempt_recovery_claim_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_attempt_reservation", reservation_path=path)
         return ok(status="verified", operation="verify_repair_attempt_reservation", verified=True, recovered=True, reservation=payload, recovery_claim=claim, continuation=continuation.get("continuation"), reservation_path=path, mutated=False)
     return ok(status="verified", operation="verify_repair_attempt_reservation", verified=True, reservation=payload, reservation_path=path, mutated=False)
-
-
 def _repair_attempt_state(
     identity: dict[str, object], checks: list[dict[str, str]], *, status: str = "pending"
 ) -> dict[str, object]:
     """Build the immutable identity/check snapshot carried across retries."""
     return {**identity, "checks": [dict(item) for item in checks], "status": status, "attempted": True}
+
 
 
 def decide_repair_attempt(request: Request) -> Result:
@@ -1252,6 +1385,53 @@ def decide_repair_attempt(request: Request) -> Result:
         prior_status = str(state.get("status") or state.get("decision") or "").lower()
         recovery = cond_blob(request, "verify_repair_attempt_recovery")
         continuation = cond_blob(request, "verify_repair_recovery_continuation")
+        reconciliation = cond_blob(request, "read_repair_attempt_reconciliation", "triage_read_repair_attempt_reconciliation")
+        if (
+            reconciliation.get("ok") is True
+            and reconciliation.get("status") == "committed"
+            and reconciliation.get("resume_postconditions") is True
+            and reconciliation.get("authorize_reinvoke") is not True
+        ):
+            snapshot = reconciliation.get("snapshot") if isinstance(reconciliation.get("snapshot"), dict) else {}
+            if (
+                str(snapshot.get("pre_head") or state.get("pre_head") or "") != str(identity["verified_head"])
+                or str(snapshot.get("remote_oid") or "") not in {"", str(identity["verified_head"])}
+                or not str(snapshot.get("actual_head") or "")
+                or str(snapshot.get("actual_head") or "") == str(identity["verified_head"])
+            ):
+                return fail(
+                    "terminal_conflict",
+                    failure_class="terminal",
+                    retry_safe=False,
+                    decision="terminal_conflict",
+                    authorize=False,
+                    conflict="resume_postconditions_identity_mismatch",
+                    **identity,
+                )
+            reservation_path = str(
+                cond_blob(request, "read_repair_attempt_state", "triage_read_repair_attempt_state").get("reservation_path")
+                or state.get("reservation_path")
+                or ""
+            )
+            return ok(
+                status="resume_postconditions",
+                decision="resume_postconditions",
+                authorize=True,
+                reason="resume_postconditions",
+                resume_postconditions=True,
+                authorize_reinvoke=False,
+                checks=checks,
+                attempt_state={
+                    **_repair_attempt_state(identity, checks, status="reserved"),
+                    "pre_head": str(snapshot.get("pre_head") or state.get("pre_head") or identity["verified_head"]),
+                    "pre_status": str(snapshot.get("pre_status") if "pre_status" in snapshot else state.get("pre_status") or ""),
+                    "actual_head": str(snapshot.get("actual_head") or ""),
+                    "resume_postconditions": True,
+                },
+                reservation_path=reservation_path,
+                snapshot=snapshot,
+                **identity,
+            )
         if recovery.get("ok") is True and recovery.get("status") == "verified" and recovery.get("recovery_verified") is True:
             claim = recovery.get("recovery_claim")
             if not isinstance(claim, dict) or any(str(claim.get(key) or "") != str(identity[value]) for key, value in (("repo", "repo"), ("pr_number", "pr_number"), ("verified_head", "verified_head"))):
@@ -1903,7 +2083,7 @@ def read_repair_worktree_cleanliness(request: Request) -> Result:
 
 
 def read_repair_remote_ancestry(request: Request) -> Result:
-    """Read whether the existing local head is an ancestor of the verified PR head."""
+    """Read whether local and remote heads are equal, behind, ahead, or diverged."""
     upstream = _repair_upstream(
         request, "read_repair_remote_ancestry", "read_repair_context",
         "read_repair_remote_head", "fetch_repair_remote_head", "verify_fetched_repair_remote_head",
@@ -1927,19 +2107,29 @@ def read_repair_remote_ancestry(request: Request) -> Result:
         return fail("repair_remote_head_not_verified", failure_class="terminal", retry_safe=False, operation="read_repair_remote_ancestry", remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
     row = _repair_inventory_row(request)
     if row is None:
-        return ok(status="inactive", operation="read_repair_remote_ancestry", worktree_present=False, descendant=False, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+        return ok(status="inactive", operation="read_repair_remote_ancestry", worktree_present=False, descendant=False, relation="absent", local_ahead=False, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
     local_oid = str(_repair_field(request, "local_head", "branch_head") or row.get("head") or "")
     if not local_oid:
         return fail("missing_repair_ancestry_head", failure_class="terminal", retry_safe=False, operation="read_repair_remote_ancestry", remote_oid=remote_oid, local_oid=local_oid, **context)
+    if local_oid == remote_oid:
+        return ok(status="read", operation="read_repair_remote_ancestry", relation="equal", descendant=True, local_ahead=False, local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
     try:
-        proc = run_cmd(["git", "merge-base", "--is-ancestor", local_oid, acquired_ref], cwd=context["clone_path"], check=False)
+        behind = run_cmd(["git", "merge-base", "--is-ancestor", local_oid, acquired_ref], cwd=context["clone_path"], check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return fail("repair_remote_ancestry_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_remote_ancestry", error=str(exc), local_oid=local_oid, remote_oid=remote_oid, **context)
-    if proc.returncode == 0:
-        return ok(status="read", operation="read_repair_remote_ancestry", descendant=True, local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
-    if proc.returncode == 1:
-        return fail("repair_worktree_diverged", failure_class="terminal", retry_safe=False, operation="read_repair_remote_ancestry", descendant=False, local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
-    return fail("repair_remote_ancestry_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_remote_ancestry", error=(proc.stderr or proc.stdout or "").strip(), local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+    if behind.returncode == 0:
+        return ok(status="read", operation="read_repair_remote_ancestry", relation="behind", descendant=True, local_ahead=False, local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+    if behind.returncode not in {0, 1}:
+        return fail("repair_remote_ancestry_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_remote_ancestry", error=(behind.stderr or behind.stdout or "").strip(), local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+    try:
+        ahead = run_cmd(["git", "merge-base", "--is-ancestor", remote_oid, local_oid], cwd=context["clone_path"], check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return fail("repair_remote_ancestry_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_remote_ancestry", error=str(exc), local_oid=local_oid, remote_oid=remote_oid, **context)
+    if ahead.returncode == 0:
+        return ok(status="read", operation="read_repair_remote_ancestry", relation="ahead", descendant=False, local_ahead=True, local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+    if ahead.returncode == 1:
+        return fail("repair_worktree_diverged", failure_class="terminal", retry_safe=False, operation="read_repair_remote_ancestry", relation="diverged", descendant=False, local_ahead=False, local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
+    return fail("repair_remote_ancestry_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_remote_ancestry", error=(ahead.stderr or ahead.stdout or "").strip(), local_oid=local_oid, remote_oid=remote_oid, acquired_oid=acquired_oid, acquired_ref=acquired_ref, **context)
 
 
 def decide_repair_worktree_fast_forward(request: Request) -> Result:
@@ -1973,10 +2163,12 @@ def decide_repair_worktree_fast_forward(request: Request) -> Result:
     if not remote_oid or not local_oid:
         return fail("missing_repair_ancestry_head", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_fast_forward", **context)
     if local_oid == remote_oid:
-        return ok(status="inactive", operation="decide_repair_worktree_fast_forward", should_fast_forward=False, already_current=True, local_oid=local_oid, remote_oid=remote_oid, **context)
+        return ok(status="inactive", operation="decide_repair_worktree_fast_forward", should_fast_forward=False, already_current=True, local_ahead=False, local_oid=local_oid, remote_oid=remote_oid, **context)
+    if ancestry.get("local_ahead") is True or ancestry.get("relation") == "ahead":
+        return ok(status="inactive", operation="decide_repair_worktree_fast_forward", should_fast_forward=False, local_ahead=True, local_oid=local_oid, remote_oid=remote_oid, **context)
     if ancestry.get("descendant") is not True:
         return fail("repair_worktree_diverged", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_fast_forward", descendant=ancestry.get("descendant"), local_oid=local_oid, remote_oid=remote_oid, **context)
-    return ok(status="authorized", operation="decide_repair_worktree_fast_forward", should_fast_forward=True, local_oid=local_oid, remote_oid=remote_oid, **context)
+    return ok(status="authorized", operation="decide_repair_worktree_fast_forward", should_fast_forward=True, local_ahead=False, local_oid=local_oid, remote_oid=remote_oid, **context)
 
 def read_repair_worktree_branch_before_fast_forward(request: Request) -> Result:
     """Read the checked-out branch immediately before fast-forward execution."""
@@ -2166,7 +2358,6 @@ def read_repair_creation_evidence(request: Request) -> Result:
     if not valid:
         return fail("repair_creation_evidence_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_creation_evidence")
     return ok(status="verified", operation="read_repair_creation_evidence", verified=True, run_id=run_id, process_id=process_id, candidate=candidate, remote_oid=remote_oid, **context)
-
 def decide_repair_worktree_ownership(request: Request) -> Result:
     upstream = _repair_upstream(request, "decide_repair_worktree_ownership", "verify_legacy_repair_pr_head", "read_repair_context", "read_repair_remote_head", "read_repair_worktree_inventory", "read_repair_branch_provenance", "read_repair_creation_evidence", "read_repair_worktree_cleanliness", "read_repair_remote_ancestry", "decide_repair_worktree_fast_forward", "fast_forward_repair_worktree")
     if upstream:
@@ -2179,6 +2370,8 @@ def decide_repair_worktree_ownership(request: Request) -> Result:
     inventory = cond_blob(request, "read_repair_worktree_inventory")
     branch_read = cond_blob(request, "read_repair_branch_provenance")
     evidence = cond_blob(request, "read_repair_creation_evidence")
+    cleanliness = cond_blob(request, "read_repair_worktree_cleanliness")
+    ancestry = cond_blob(request, "read_repair_remote_ancestry")
     remote_oid = str(remote.get("remote_oid") or _repair_field(request, "remote_oid"))
     ff = cond_blob(request, "fast_forward_repair_worktree")
     if not remote_oid:
@@ -2195,12 +2388,36 @@ def decide_repair_worktree_ownership(request: Request) -> Result:
     matching = [row for row in rows if isinstance(row, dict) and Path(str(row.get("path") or "")).resolve() == target]
     if matching and any(str(row.get("branch") or "") != context["local_branch"] for row in matching):
         return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
-    if matching and str(matching[0].get("head") or "") != remote_oid and ff.get("status") not in {"advanced", "planned"}:
+    local_head = str(matching[0].get("head") or branch_read.get("branch_head") or "") if matching else ""
+    local_ahead = bool(
+        matching
+        and local_head
+        and local_head != remote_oid
+        and cleanliness.get("clean") is True
+        and (ancestry.get("local_ahead") is True or ancestry.get("relation") == "ahead")
+        and str(ancestry.get("local_oid") or "") == local_head
+        and str(ancestry.get("remote_oid") or "") == remote_oid
+        and ff.get("status") in {"inactive", "planned"}
+    )
+    if matching and local_head != remote_oid and not local_ahead and ff.get("status") not in {"advanced", "planned"}:
         return fail("stale_repair_remote_head", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", expected_head=remote_oid, actual_head=matching[0].get("head"))
     if (target.exists() or target.is_symlink()) and not matching:
         return fail("repair_worktree_path_collision", failure_class="terminal", retry_safe=False, operation="decide_repair_worktree_ownership", worktree_path=str(target))
     reuse = bool(branch_read.get("exists") and matching and str(matching[0].get("branch") or "") == context["local_branch"])
-    return ok(status="reuse" if reuse else "recover" if recover_branch else "create", operation="decide_repair_worktree_ownership", should_prepare=True, reuse=reuse, recover_branch=recover_branch, remote_oid=remote_oid, expected=expected, **context)
+    expected_head = local_head if local_ahead else remote_oid
+    return ok(
+        status="reuse" if reuse else "recover" if recover_branch else "create",
+        operation="decide_repair_worktree_ownership",
+        should_prepare=True,
+        reuse=reuse,
+        recover_branch=recover_branch,
+        local_ahead=local_ahead,
+        resume_local_head=local_head if local_ahead else "",
+        expected_head=expected_head,
+        remote_oid=remote_oid,
+        expected=expected,
+        **context,
+    )
 
 def create_repair_branch(request: Request) -> Result:
      upstream = _repair_upstream(request, "create_repair_branch", "decide_repair_worktree_ownership")
@@ -2270,7 +2487,6 @@ def add_repair_worktree(request: Request) -> Result:
 def prepare_repair_worktree(request: Request) -> Result:
      """Mutation atom for the already-decided exact-head worktree add."""
      return add_repair_worktree(request)
-
 def verify_repair_worktree(request: Request) -> Result:
      upstream = _repair_upstream(request, "verify_repair_worktree", "add_repair_worktree", "prepare_repair_worktree")
      if upstream:
@@ -2279,7 +2495,15 @@ def verify_repair_worktree(request: Request) -> Result:
      if dry_run_flag(request) and added.get("status") == "planned":
          return planned(operation="verify_repair_worktree", worktree_path=_repair_context(request)["worktree_path"])
      context = _repair_context(request)
-     expected = str(cond_blob(request, "decide_repair_worktree_ownership").get("remote_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or _repair_field(request, "remote_oid"))
+     ownership = cond_blob(request, "decide_repair_worktree_ownership")
+     expected = str(
+         ownership.get("expected_head")
+         or ownership.get("resume_local_head")
+         or ownership.get("remote_oid")
+         or cond_blob(request, "read_repair_remote_head").get("remote_oid")
+         or _repair_field(request, "remote_oid")
+         or ""
+     )
      path = context["worktree_path"]
      try:
          top = git(["rev-parse", "--show-toplevel"], cwd=path)
@@ -2291,7 +2515,16 @@ def verify_repair_worktree(request: Request) -> Result:
          return fail("repair_worktree_confinement_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_worktree", top_level=top, actual_branch=branch, **context)
      if not expected or head != expected:
          return fail("repair_worktree_head_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_worktree", expected_head=expected, actual_head=head, **context)
-     return ok(status="verified", operation="verify_repair_worktree", head=head, remote_oid=expected, actual_local_branch=branch, **context)
+     return ok(
+         status="verified",
+         operation="verify_repair_worktree",
+         head=head,
+         remote_oid=str(ownership.get("remote_oid") or expected),
+         expected_head=expected,
+         local_ahead=bool(ownership.get("local_ahead") is True),
+         actual_local_branch=branch,
+         **context,
+     )
 
 def verify_repair_worktree_head(request: Request):
      return verify_repair_worktree(request)
@@ -2334,6 +2567,18 @@ def read_repair_omp_preconditions(request: Request) -> Result:
         return upstream
     context = _repair_context(request)
     path = context["worktree_path"]
+    decision = cond_blob(request, "decide_repair_attempt")
+    reservation = cond_blob(request, "verify_repair_attempt_reservation")
+    ownership = cond_blob(request, "decide_repair_worktree_ownership")
+    verified = cond_blob(request, "verify_repair_worktree", "verify_repair_worktree_head")
+    resume = bool(
+        decision.get("resume_postconditions") is True
+        or decision.get("reason") == "resume_postconditions"
+        or reservation.get("resume_postconditions") is True
+        or reservation.get("resumed") is True
+        or ownership.get("local_ahead") is True
+        or verified.get("local_ahead") is True
+    )
     try:
         top = git(["rev-parse", "--show-toplevel"], cwd=path)
         branch = git(["branch", "--show-current"], cwd=path)
@@ -2344,7 +2589,52 @@ def read_repair_omp_preconditions(request: Request) -> Result:
         return fail("repair_omp_worktree_confinement", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", top_level=top, **context)
     if branch != context["local_branch"]:
         return fail("repair_omp_branch_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", expected_branch=context["local_branch"], actual_branch=branch, **context)
-    expected = str(cond_blob(request, "verify_repair_worktree", "verify_repair_worktree_head").get("head") or cond_blob(request, "decide_repair_worktree_ownership").get("remote_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
+    if resume:
+        reserved = reservation.get("reservation") if isinstance(reservation.get("reservation"), dict) else {}
+        pre_head = str(
+            reservation.get("pre_head")
+            or reserved.get("pre_head")
+            or decision.get("verified_head")
+            or ownership.get("remote_oid")
+            or cond_blob(request, "read_repair_remote_head").get("remote_oid")
+            or ""
+        )
+        remote_oid = str(
+            ownership.get("remote_oid")
+            or cond_blob(request, "read_repair_remote_head").get("remote_oid")
+            or pre_head
+            or ""
+        )
+        if not pre_head or pre_head != remote_oid or head == pre_head:
+            return fail(
+                "repair_omp_resume_precondition_failed",
+                failure_class="terminal",
+                retry_safe=False,
+                operation="read_repair_omp_preconditions",
+                expected_head=pre_head,
+                actual_head=head,
+                remote_oid=remote_oid,
+                **context,
+            )
+        try:
+            status = git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=path)
+        except (CommandError, OSError) as exc:
+            return fail("repair_omp_precondition_failed", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", error=str(exc), **context)
+        if status:
+            return fail("repair_omp_precondition_failed", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", dirty=True, **context)
+        return ok(
+            **{
+                **context,
+                "status": "ready",
+                "operation": "read_repair_omp_preconditions",
+                "pre_head": pre_head,
+                "resume_local_head": head,
+                "worktree_path": path,
+                "remote_oid": remote_oid,
+                "resume_postconditions": True,
+            }
+        )
+    expected = str(verified.get("head") or ownership.get("remote_oid") or cond_blob(request, "read_repair_remote_head").get("remote_oid") or "")
     if expected and head != expected:
         return fail("repair_omp_head_mismatch", failure_class="terminal", retry_safe=False, operation="read_repair_omp_preconditions", expected_head=expected, actual_head=head, **context)
     return ok(**{**context, "status": "ready", "operation": "read_repair_omp_preconditions", "pre_head": head, "worktree_path": path, "remote_oid": expected})
@@ -2363,7 +2653,63 @@ def invoke_repair_omp(request: Request) -> Result:
         return fail("repair_attempt_reservation_required", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp")
     data, cfg = input_of(request), cfg_of(request)
     pre = cond_blob(request, "read_repair_omp_preconditions")
+    decision = cond_blob(request, "decide_repair_attempt")
     path = str(data.get("worktree_path") or pre.get("worktree_path") or _repair_context(request)["worktree_path"])
+    resume = bool(
+        decision.get("resume_postconditions") is True
+        or decision.get("reason") == "resume_postconditions"
+        or reservation.get("resume_postconditions") is True
+        or reservation.get("resumed") is True
+        or pre.get("resume_postconditions") is True
+    )
+    if resume:
+        reserved = reservation.get("reservation") if isinstance(reservation.get("reservation"), dict) else {}
+        pre_head = str(
+            pre.get("pre_head")
+            or reservation.get("pre_head")
+            or reserved.get("pre_head")
+            or decision.get("verified_head")
+            or ""
+        )
+        try:
+            actual_head = rev_parse(path)
+            pre_status = git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=path)
+        except (CommandError, OSError) as exc:
+            return fail("repair_omp_precondition_failed", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp", error=str(exc), mutated=False)
+        if not path or not pre_head or actual_head == pre_head or pre_status:
+            return fail(
+                "repair_omp_resume_precondition_failed",
+                failure_class="terminal",
+                retry_safe=False,
+                operation="invoke_repair_omp",
+                expected_head=pre_head,
+                actual_head=actual_head,
+                dirty=bool(pre_status),
+                mutated=False,
+            )
+        attempt_state = {
+            "repo": decision.get("repo") or _repair_context(request)["repo"],
+            "pr_number": decision.get("pr_number") or _repair_context(request)["pr_number"],
+            "verified_head": decision.get("verified_head") or pre_head,
+            "pre_head": pre_head,
+            "candidate": decision.get("candidate") or data.get("candidate") or "",
+            "run_id": decision.get("run_id") or data.get("run_id") or "",
+            "checks": decision.get("checks") or data.get("checks") or [],
+            "status": "resumed",
+            "attempted": True,
+            "resume_postconditions": True,
+            "actual_head": actual_head,
+        }
+        return ok(
+            status="reused",
+            operation="invoke_repair_omp",
+            worktree_path=path,
+            pre_head=pre_head,
+            resume_local_head=actual_head,
+            resume_postconditions=True,
+            attempt_state=attempt_state,
+            mutated=False,
+        )
     prompt = str(data.get("prompt") or cond_blob(request, "build_repair_prompt").get("prompt") or "")
     if not path or not prompt:
         return fail("missing_repair_worktree_or_prompt", failure_class="terminal", retry_safe=False, operation="invoke_repair_omp")
@@ -2474,8 +2820,14 @@ def verify_repair_omp_postconditions(request: Request) -> Result:
         return upstream
     data = input_of(request)
     source = cond_blob(request, "read_repair_omp_preconditions")
-    path = str(data.get("worktree_path") or source.get("worktree_path") or _repair_context(request)["worktree_path"])
-    before = str(data.get("before_oid") or source.get("pre_head") or "")
+    invoked = cond_blob(request, "invoke_repair_omp")
+    path = str(data.get("worktree_path") or source.get("worktree_path") or invoked.get("worktree_path") or _repair_context(request)["worktree_path"])
+    before = str(
+        data.get("before_oid")
+        or source.get("pre_head")
+        or invoked.get("pre_head")
+        or ""
+    )
     try:
         top = git(["rev-parse", "--show-toplevel"], cwd=path)
         head = rev_parse(path)
@@ -2484,14 +2836,15 @@ def verify_repair_omp_postconditions(request: Request) -> Result:
         return fail("repair_omp_postcondition_failed", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", error=str(exc))
     if Path(top).resolve() != Path(path).resolve():
         return fail("repair_omp_worktree_confinement", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", top_level=top)
+    # Resume must still prove pre-OMP → advanced tip delta; empty trees never pass.
     if before and head == before:
         return fail("repair_omp_head_unchanged", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head)
     if before and not changed:
         return fail("repair_omp_no_changes", failure_class="terminal", retry_safe=False, operation="verify_repair_omp_postconditions", before_oid=before, after_oid=head)
     identity = {
-        key: str(source.get(key) or "")
+        key: str(source.get(key) or invoked.get(key) or "")
         for key in ("repo", "issue", "pr_number", "branch", "local_branch", "clone_path", "worktree_root", "remote", "task_id", "receipt")
-        if source.get(key)
+        if source.get(key) or invoked.get(key)
     }
     return ok(
         status="verified",
@@ -2500,8 +2853,9 @@ def verify_repair_omp_postconditions(request: Request) -> Result:
         after_oid=head,
         changed_paths=changed.splitlines(),
         worktree_path=path,
-        omp=cond_blob(request, "invoke_repair_omp").get("omp"),
-        omp_process_id=cond_blob(request, "invoke_repair_omp").get("omp_process_id"),
+        omp=invoked.get("omp"),
+        omp_process_id=invoked.get("omp_process_id"),
+        resume_postconditions=bool(invoked.get("resume_postconditions") is True or source.get("resume_postconditions") is True or invoked.get("status") == "reused"),
         mutated=False,
         **identity,
     )
