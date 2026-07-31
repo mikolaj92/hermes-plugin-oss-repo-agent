@@ -1849,6 +1849,38 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(out["worktree_path"], path)
         self.assertEqual(out["branch"], branch)
 
+    def test_read_repair_pushed_ref_uses_push_target_fields(self) -> None:
+        path = "/worktrees/lokay/repair/deadbeef"
+        branch = "ai/fix/10"
+        remote_oid = "d" * 40
+        with mock.patch(
+            "lokay.steps.repair.git",
+            return_value=f"{remote_oid}\trefs/heads/{branch}",
+        ) as git_cmd:
+            out = repair.read_repair_pushed_ref(req({
+                "live": True,
+                "enabled": True,
+                "dry_run": False,
+                "worktree_root": "/worktrees",
+                "conduction": {
+                    "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True},
+                    "push_repair_branch": {
+                        "ok": True,
+                        "status": "pushed",
+                        "worktree_path": path,
+                        "branch": branch,
+                        "remote": "origin",
+                        "repo": "owner/repo",
+                        "pr_number": "11",
+                    },
+                },
+            }))
+        git_cmd.assert_called_once_with(["ls-remote", "origin", f"refs/heads/{branch}"], cwd=path)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["remote_oid"], remote_oid)
+        self.assertEqual(out["worktree_path"], path)
+        self.assertEqual(out["branch"], branch)
+
     def test_foreign_selected_branch_does_not_conflict_with_owned_local_ref(self) -> None:
         data = {"repo": "owner/repo", "issue": 10, "pr_number": 11, "branch": "ai/fix/10", "clone_path": "/clone", "worktree_root": "/worktrees", "repair_state_root": "/state", "task_id": ""}
         context = repair._repair_context(req(data))

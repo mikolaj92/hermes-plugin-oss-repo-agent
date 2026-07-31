@@ -1612,6 +1612,8 @@ _REPAIR_CONTEXT_ALIASES = (
     "decide_repair_worktree_fast_forward", "read_repair_worktree_branch_before_fast_forward", "read_repair_worktree_head_before_fast_forward", "read_repair_worktree_cleanliness_before_fast_forward", "decide_repair_worktree_fast_forward_execution", "fast_forward_repair_worktree",
     "decide_repair_worktree_ownership", "create_repair_branch", "write_repair_branch_provenance", "add_repair_worktree",
     "prepare_repair_worktree", "verify_repair_worktree",
+    "verify_repair_omp_postconditions", "decide_repair_push", "push_repair_branch",
+    "read_repair_pushed_ref", "verify_repair_push_oid",
 )
 def _repair_blob(request: Request, name: str) -> dict[str, Any]:
      """Read a canonical conduction blob, including its triage-prefixed alias."""
@@ -2561,15 +2563,24 @@ def decide_repair_push(request: Request) -> Result:
     if local == before:
         return fail("repair_head_unchanged", failure_class="terminal", retry_safe=False, operation="decide_repair_push", before_oid=before, local_oid=local)
     context = _repair_context(request)
+    branch = str(post.get("branch") or context["branch"] or "")
+    remote = str(post.get("remote") or context["remote"] or "origin")
+    path = str(head.get("worktree_path") or post.get("worktree_path") or context["worktree_path"] or "")
+    identity = {
+        key: str(post.get(key) or context.get(key) or "")
+        for key in ("repo", "issue", "pr_number", "local_branch", "clone_path", "worktree_root", "task_id", "receipt")
+        if post.get(key) or context.get(key)
+    }
     return ok(
         status="push",
         operation="decide_repair_push",
         should_push=True,
         before_oid=before,
         local_oid=local,
-        branch=str(post.get("branch") or context["branch"] or ""),
-        worktree_path=str(head.get("worktree_path") or post.get("worktree_path") or context["worktree_path"] or ""),
-        remote=str(post.get("remote") or context["remote"] or "origin"),
+        branch=branch,
+        worktree_path=path,
+        remote=remote,
+        **identity,
     )
 
 
@@ -2596,6 +2607,11 @@ def push_repair_branch(request: Request) -> Result:
             worktree_path=path,
             branch=branch,
         )
+    identity = {
+        key: str(decision.get(key) or context.get(key) or "")
+        for key in ("repo", "issue", "pr_number", "local_branch", "clone_path", "worktree_root", "task_id", "receipt")
+        if decision.get(key) or context.get(key)
+    }
     try:
         out = git_push_branch(path, branch, remote=remote, set_upstream=False)
     except CommandError as exc:
@@ -2609,6 +2625,7 @@ def push_repair_branch(request: Request) -> Result:
             worktree_path=path,
             branch=branch,
             remote=remote,
+            **identity,
         )
     return ok(
         status="pushed",
@@ -2618,6 +2635,7 @@ def push_repair_branch(request: Request) -> Result:
         worktree_path=path,
         branch=branch,
         remote=remote,
+        **identity,
     )
 
 
@@ -2628,15 +2646,61 @@ def read_repair_pushed_ref(request: Request) -> Result:
     upstream = _repair_upstream(request, "read_repair_pushed_ref", "push_repair_branch")
     if upstream:
         return upstream
+    pushed = cond_blob(request, "push_repair_branch")
     context = _repair_context(request)
+    path = str(pushed.get("worktree_path") or context["worktree_path"] or "")
+    branch = str(pushed.get("branch") or context["branch"] or "")
+    remote = str(pushed.get("remote") or context["remote"] or "origin")
+    if not path or not branch:
+        return fail(
+            "missing_repair_push_target",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_repair_pushed_ref",
+            worktree_path=path,
+            branch=branch,
+        )
+    identity = {
+        key: str(pushed.get(key) or context.get(key) or "")
+        for key in ("repo", "issue", "pr_number", "local_branch", "clone_path", "worktree_root", "task_id", "receipt")
+        if pushed.get(key) or context.get(key)
+    }
     try:
-        text = git(["ls-remote", context["remote"], f"refs/heads/{context['branch']}"], cwd=context["worktree_path"])
+        text = git(["ls-remote", remote, f"refs/heads/{branch}"], cwd=path)
     except CommandError as exc:
-        return fail("repair_push_readback_failed", failure_class="retryable_read", retry_safe=True, operation="read_repair_pushed_ref", error=str(exc), **context)
+        return fail(
+            "repair_push_readback_failed",
+            failure_class="retryable_read",
+            retry_safe=True,
+            operation="read_repair_pushed_ref",
+            error=str(exc),
+            worktree_path=path,
+            branch=branch,
+            remote=remote,
+            **identity,
+        )
     rows = [line.split() for line in text.splitlines() if line.split()]
-    if len(rows) != 1 or len(rows[0]) < 2 or rows[0][1] != f"refs/heads/{context['branch']}":
-        return fail("repair_pushed_ref_missing", failure_class="terminal", retry_safe=False, operation="read_repair_pushed_ref", output=text, **context)
-    return ok(status="read", operation="read_repair_pushed_ref", remote_oid=rows[0][0], **context)
+    if len(rows) != 1 or len(rows[0]) < 2 or rows[0][1] != f"refs/heads/{branch}":
+        return fail(
+            "repair_pushed_ref_missing",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_repair_pushed_ref",
+            output=text,
+            worktree_path=path,
+            branch=branch,
+            remote=remote,
+            **identity,
+        )
+    return ok(
+        status="read",
+        operation="read_repair_pushed_ref",
+        remote_oid=rows[0][0],
+        worktree_path=path,
+        branch=branch,
+        remote=remote,
+        **identity,
+    )
 
 
 def verify_repair_push_oid(request: Request) -> Result:
@@ -2646,13 +2710,20 @@ def verify_repair_push_oid(request: Request) -> Result:
     upstream = _repair_upstream(request, "verify_repair_push_oid", "read_repair_pushed_ref", "decide_repair_push")
     if upstream:
         return upstream
-    local = str(cond_blob(request, "decide_repair_push").get("local_oid") or cond_blob(request, "read_repair_worktree_head").get("local_oid") or "")
-    remote = str(cond_blob(request, "read_repair_pushed_ref").get("remote_oid") or "")
+    decision = cond_blob(request, "decide_repair_push")
+    pushed = cond_blob(request, "read_repair_pushed_ref")
+    local = str(decision.get("local_oid") or cond_blob(request, "read_repair_worktree_head").get("local_oid") or "")
+    remote = str(pushed.get("remote_oid") or "")
     if not local or not remote:
         return fail("missing_repair_push_oids", failure_class="terminal", retry_safe=False, operation="verify_repair_push_oid")
     if local != remote:
         return fail("repair_push_readback_mismatch", failure_class="terminal", retry_safe=False, operation="verify_repair_push_oid", local_oid=local, remote_oid=remote, mutated=True)
-    return ok(status="verified", operation="verify_repair_push_oid", local_oid=local, remote_oid=remote, mutated=False)
+    identity = {
+        key: str(decision.get(key) or pushed.get(key) or "")
+        for key in ("repo", "issue", "pr_number", "branch", "local_branch", "clone_path", "worktree_root", "worktree_path", "remote", "task_id", "receipt")
+        if decision.get(key) or pushed.get(key)
+    }
+    return ok(status="verified", operation="verify_repair_push_oid", local_oid=local, remote_oid=remote, mutated=False, **identity)
 
 def update_repair_branch_provenance(request: Request) -> Result:
     peers = ("verify_repair_receipt", "verify_repair_push_oid")
