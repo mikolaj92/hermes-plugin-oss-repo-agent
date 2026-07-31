@@ -242,13 +242,17 @@ def remove_worktree(request: Request) -> Result:
     ownership = cond_blob(request, "read_worktree_ownership")
     if ownership.get("ok") is not True:
         return fail("worktree_ownership_read_failed", failure_class=str(ownership.get("failure_class") or "terminal"), retry_safe=bool(ownership.get("retry_safe", False)), evidence=ownership, idempotency_key=cleanup_key)
+    clone_path = str(data.get("clone_path") or cfg.get("clone_path") or ownership.get("clone_path") or "").strip()
+    worktree_path = str(data.get("worktree_path") or cfg.get("worktree_path") or ownership.get("worktree_path") or "").strip()
+    if ownership.get("status") == "already_absent" or ownership.get("absent") is True:
+        if not clone_path or not worktree_path:
+            return fail("missing_clone_or_worktree", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=worktree_path, idempotency_key=cleanup_key)
+        return ok(status="already_absent", clone_path=clone_path, worktree_path=worktree_path, branch=ownership.get("branch"), absent=True, idempotency_key=cleanup_key, mutated=False, retry_safe=True)
     cleanliness = cond_blob(request, "read_worktree_cleanliness")
     if cleanliness.get("ok") is not True:
         return fail("worktree_cleanliness_read_failed", failure_class=str(cleanliness.get("failure_class") or "terminal"), retry_safe=bool(cleanliness.get("retry_safe", False)), evidence=cleanliness, idempotency_key=cleanup_key)
     if cleanliness.get("dirty") is True or cleanliness.get("clean") is not True:
         return fail("worktree_dirty", failure_class="terminal", retry_safe=False, clone_path=ownership.get("clone_path"), worktree_path=ownership.get("worktree_path"), mutated=False, idempotency_key=cleanup_key)
-    clone_path = str(data.get("clone_path") or cfg.get("clone_path") or ownership.get("clone_path") or "").strip()
-    worktree_path = str(data.get("worktree_path") or cfg.get("worktree_path") or ownership.get("worktree_path") or "").strip()
     if not clone_path or not worktree_path:
         return fail("missing_clone_or_worktree", failure_class="terminal", retry_safe=False, clone_path=clone_path, worktree_path=worktree_path, idempotency_key=cleanup_key)
     if dry_run_flag(request):
@@ -743,6 +747,8 @@ def read_worktree_ownership(request: Request) -> Result:
         matches = [row for row in rows if str(Path(row.get("path") or "").resolve()) == str(Path(path).resolve())]
     except CommandError as exc:
         return fail("worktree_ownership_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, worktree_path=path, branch=branch)
+    if not matches:
+        return ok(status="already_absent", clone_path=clone, worktree_path=path, branch=branch, absent=True, matches=matches, mutated=False)
     if len(matches) != 1:
         return fail("worktree_ownership_mismatch", failure_class="terminal", retry_safe=False, clone_path=clone, worktree_path=path, branch=branch, matches=matches)
     row = matches[0]
@@ -760,7 +766,10 @@ def read_worktree_cleanliness(request: Request) -> Result:
     if idle:
         return idle
     data, cfg = input_of(request), cfg_of(request)
-    path = str(data.get("worktree_path") or cfg.get("worktree_path") or cond_get(request, "worktree_path", "read_worktree_ownership", default="")).strip()
+    ownership = cond_blob(request, "read_worktree_ownership")
+    path = str(data.get("worktree_path") or cfg.get("worktree_path") or ownership.get("worktree_path") or cond_get(request, "worktree_path", "read_worktree_ownership", default="")).strip()
+    if ownership.get("status") == "already_absent" or ownership.get("absent") is True:
+        return ok(status="already_absent", worktree_path=path, dirty=False, clean=True, absent=True, mutated=False)
     if not path:
         return fail("missing_worktree_path", failure_class="terminal", retry_safe=False)
     try:
@@ -864,7 +873,7 @@ def delete_local_branch(request: Request) -> Result:
     if not clone or not branch:
         return fail("missing_clone_or_branch", failure_class="terminal", retry_safe=False)
     if ownership.get("exists") is False:
-        return ok(status="absent", clone_path=clone, branch=branch, mutated=False)
+        return ok(status="already_absent", clone_path=clone, branch=branch, mutated=False, absent=True)
     if ownership.get("owned") is not True:
         return fail("foreign_branch_ownership", failure_class="terminal", retry_safe=False, clone_path=clone, branch=branch)
     if ownership.get("exact_head_required") is True and (not ownership.get("head") or ownership.get("head") != ownership.get("local_oid")):

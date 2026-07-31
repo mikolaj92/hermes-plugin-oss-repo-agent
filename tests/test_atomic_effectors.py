@@ -5686,6 +5686,121 @@ class CleanupTests(unittest.TestCase):
         out = cleanup.remove_worktree(req({"clone_path": "/c", "worktree_path": "/wt", "dry_run": True, "conduction": conduction}))
         self.assertEqual(out["status"], "planned")
 
+    def test_read_worktree_ownership_already_absent_when_missing(self) -> None:
+        with mock.patch("lokay.steps.cleanup.worktree_list", return_value=""), mock.patch(
+            "lokay.steps.cleanup.parse_worktree_porcelain", return_value=[]
+        ):
+            out = cleanup.read_worktree_ownership(req({
+                "clone_path": "/c",
+                "worktree_path": "/wt",
+                "branch": "ai/fix/3-x",
+                "conduction": {
+                    "verify_cleanup_guards": {"ok": True, "status": "verified"},
+                    "validate_cleanup_identity": {
+                        "ok": True,
+                        "status": "validated",
+                        "identity": {
+                            "clone_path": "/c",
+                            "worktree_path": "/wt",
+                            "local_branch": "ai/fix/3-x",
+                            "branch": "ai/fix/3-x",
+                        },
+                    },
+                },
+            }))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "already_absent")
+        self.assertTrue(out.get("absent"))
+        self.assertEqual(out["matches"], [])
+
+    def test_read_worktree_ownership_mismatch_on_ambiguous_match(self) -> None:
+        rows = [
+            {"path": "/wt", "branch": "ai/fix/3-x"},
+            {"path": "/wt", "branch": "ai/fix/3-x"},
+        ]
+        with mock.patch("lokay.steps.cleanup.worktree_list", return_value=""), mock.patch(
+            "lokay.steps.cleanup.parse_worktree_porcelain", return_value=rows
+        ):
+            out = cleanup.read_worktree_ownership(req({
+                "clone_path": "/c",
+                "worktree_path": "/wt",
+                "branch": "ai/fix/3-x",
+                "conduction": {
+                    "verify_cleanup_guards": {"ok": True, "status": "verified"},
+                    "validate_cleanup_identity": {
+                        "ok": True,
+                        "status": "validated",
+                        "identity": {
+                            "clone_path": "/c",
+                            "worktree_path": "/wt",
+                            "local_branch": "ai/fix/3-x",
+                            "branch": "ai/fix/3-x",
+                        },
+                    },
+                },
+            }))
+        self.assertFalse(out["ok"], out)
+        self.assertEqual(out["reason"], "worktree_ownership_mismatch")
+
+    def test_absent_worktree_chain_allows_claim_release_evidence(self) -> None:
+        ownership = {
+            "ok": True,
+            "status": "already_absent",
+            "clone_path": "/c",
+            "worktree_path": "/wt",
+            "branch": "ai/fix/3-x",
+            "absent": True,
+            "matches": [],
+            "mutated": False,
+        }
+        clean = cleanup.read_worktree_cleanliness(req({
+            "clone_path": "/c",
+            "worktree_path": "/wt",
+            "conduction": {"read_worktree_ownership": ownership},
+        }))
+        self.assertEqual(clean["status"], "already_absent")
+        self.assertTrue(clean["clean"])
+        removed = cleanup.remove_worktree(req({
+            "clone_path": "/c",
+            "worktree_path": "/wt",
+            "conduction": {
+                "verify_cleanup_guards": {"ok": True, "status": "verified"},
+                "read_worktree_ownership": ownership,
+                "read_worktree_cleanliness": clean,
+            },
+        }))
+        self.assertEqual(removed["status"], "already_absent")
+        self.assertFalse(removed.get("mutated"))
+        deleted = cleanup.delete_local_branch(req({
+            "clone_path": "/c",
+            "branch": "ai/fix/3-x",
+            "conduction": {
+                "verify_branch_delete_guards": {"ok": True, "status": "verified"},
+                "read_local_branch_ownership": {
+                    "ok": True,
+                    "status": "read",
+                    "clone_path": "/c",
+                    "branch": "ai/fix/3-x",
+                    "exists": False,
+                    "owned": True,
+                },
+            },
+        }))
+        self.assertEqual(deleted["status"], "already_absent")
+        evidence = cleanup.verify_claim_release_evidence(req({
+            "conduction": {
+                "verify_cleanup_guards": {"ok": True, "status": "verified"},
+                "verify_local_branch_absent": {"ok": True, "status": "verified", "absent": True},
+                "verify_worktree_absent": {"ok": True, "status": "verified", "absent": True},
+                "remove_worktree": removed,
+                "delete_local_branch": deleted,
+                "check_issue_closed": {"ok": True, "status": "checked", "closed": True},
+                "check_no_open_pr_for_branch": {"ok": True, "status": "checked", "safe_to_cleanup": True},
+            },
+        }))
+        self.assertTrue(evidence["ok"], evidence)
+        self.assertEqual(evidence["status"], "verified")
+
     def test_remove_worktree_fails_closed_on_dirty_read(self) -> None:
         out = cleanup.remove_worktree(req({"clone_path": "/c", "worktree_path": "/wt", "conduction": {
             "verify_cleanup_guards": {"ok": True, "status": "verified"},
