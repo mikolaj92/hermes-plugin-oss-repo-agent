@@ -14,11 +14,7 @@ wheels = [
 [[package]]
 name = "fala"
 version = "0.7.15"
-source = { editable = "../Fala" }
-
-[package.metadata]
-requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" }]
-provides-extras = ["dev"]
+source = { git = "https://github.com/mikolaj92/Fala.git?tag=v0.7.15#b5f9a6d500a442a1c79060a862fe4b9da87bc98f" }
 
 [[package]]
 name = "iniconfig"
@@ -44,7 +40,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fala", editable = "../Fala" },
+    { name = "fala", git = "https://github.com/mikolaj92/Fala.git?tag=v0.7.15" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "tomli", marker = "python_full_version < '3.12'", specifier = ">=2.0.1" },
 ]

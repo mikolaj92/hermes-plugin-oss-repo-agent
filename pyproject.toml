@@ -31,9 +31,7 @@ packages = ["src/lokay"]
 "src" = ""
 
 [tool.uv.sources]
-# Sibling checkout on mini-m4-0 / local OSS layout:
-#   Developer/Fala + Developer/lokay
-fala = { path = "../Fala", editable = true }
+fala = { git = "https://github.com/mikolaj92/Fala.git", tag = "v0.7.15" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

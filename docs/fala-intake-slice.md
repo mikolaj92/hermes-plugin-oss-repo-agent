@@ -12,13 +12,11 @@ diagnostic entrypoint only.
 fala == 0.7.15
 ```
 
-The local path dependency is `../Fala`; verify it is checked out at peeled commit
-`b5f9a6d500a442a1c79060a862fe4b9da87bc98f` before syncing.
+Installed from Git via `[tool.uv.sources]` (`mikolaj92/Fala` tag `v0.7.15`).
 
 ## Run diagnostic
 
 ```bash
-cd ../Fala && git fetch --tags && git checkout b5f9a6d500a442a1c79060a862fe4b9da87bc98f && cd -
 uv sync
 uv run lokay-tick-intake --dry-run
 ```
