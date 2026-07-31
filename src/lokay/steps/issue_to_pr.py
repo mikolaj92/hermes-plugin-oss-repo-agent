@@ -838,7 +838,7 @@ def _reconcile_kanban_marker(request: Request, operation: str, peer: str, prefix
     return ok(status="reconciled", operation=operation, task=row, task_id=tid, board=board, marker=marker, mutated=False, **context)
 
 def read_task_for_completion(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt")
+    terminal = _atomic_terminal(request, "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt", "invoke_omp", "verify_omp_postconditions")
     if terminal: return terminal
     idle = upstream_noop(request, "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
     if idle:
@@ -863,7 +863,7 @@ def decide_task_completion(request: Request) -> Result:
 
 
 def complete_task(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "complete_task", "decide_task_completion", "read_task_for_completion", "select_dispatch_task")
+    terminal = _atomic_terminal(request, "complete_task", "decide_task_completion", "read_task_for_completion", "select_dispatch_task", "invoke_omp", "verify_omp_postconditions")
     if terminal: return terminal
     idle = upstream_noop(request, "decide_task_completion", "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
     if idle:
@@ -1275,8 +1275,26 @@ def invoke_omp(request: Request) -> Result:
         if ancestry.returncode != 0:
             return fail("omp_branch_ancestry_read_failed", failure_class="retryable_read", retry_safe=True, operation="invoke_omp", error=ancestry.stderr.strip(), base_head=pre.get("base_head"), pre_head=pre.get("pre_head"))
         return ok(status="reused", operation="invoke_omp", worktree_path=path, branch=pre.get("branch"), pre_head=pre.get("pre_head"), base_head=pre.get("base_head"), repo=repo, issue=issue, board=board, task_id=pre.get("task_id") or context.get("task_id"), mutated=False)
-    try: out = run_omp(prompt=prompt, cwd=path, command=str(data.get("command") or cfg.get("executor_command") or "omp"), model=str(data.get("model") or cfg.get("model") or "omniroute/omp/default"), thinking=str(data.get("thinking") or cfg.get("thinking") or "medium"), timeout=float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800), dry_run=dry_run_flag(request))
-    except CommandError as exc: return fail("omp_failed", failure_class="terminal", retry_safe=False, operation="invoke_omp", error=str(exc), mutated=True)
+    try:
+        out = run_omp(
+            prompt=prompt,
+            cwd=path,
+            command=str(data.get("command") or cfg.get("executor_command") or "omp"),
+            model=str(data.get("model") or cfg.get("model") or "omniroute/omp/default"),
+            thinking=str(data.get("thinking") or cfg.get("thinking") or "medium"),
+            timeout=float(data.get("timeout_seconds") or cfg.get("timeout_seconds") or 1800),
+            dry_run=dry_run_flag(request),
+        )
+    except (CommandError, subprocess.TimeoutExpired) as exc:
+        return fail(
+            "omp_failed",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="invoke_omp",
+            error=str(exc),
+            timed_out=isinstance(exc, subprocess.TimeoutExpired),
+            mutated=True,
+        )
     return ok(status="invoked", mutated=True, omp=out, **values)
 
 

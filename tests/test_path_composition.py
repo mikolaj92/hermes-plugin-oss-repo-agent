@@ -246,6 +246,41 @@ class PackageStructureTests(unittest.TestCase):
                 self.assertEqual(by_id[f"{prefix}verify_legacy_repair_pr_head"]["conduction"], [f"{prefix}decide_legacy_repair_head_refresh", f"{prefix}update_legacy_repair_pr_branch"])
                 self.assertIn(f"{prefix}verify_legacy_repair_pr_head", by_id[f"{prefix}decide_repair_worktree_ownership"]["conduction"])
 
+            if path["id"] == "issue_to_pr":
+                by_id = {effector["id"]: effector for effector in effectors}
+                self.assertGreater(by_id["invoke_omp"]["adapter"]["timeout_seconds"], 7200)
+                self.assertEqual(
+                    by_id["complete_task"]["conduction"],
+                    ["decide_task_completion", "read_task_for_completion", "select_dispatch_task", "invoke_omp", "verify_omp_postconditions"],
+                )
+                self.assertEqual(
+                    by_id["read_task_for_completion"]["conduction"],
+                    ["select_dispatch_task", "verify_dispatch_receipt", "invoke_omp", "verify_omp_postconditions"],
+                )
+
+            if path["id"] == "auto_worker":
+                by_id = {effector["id"]: effector for effector in effectors}
+                self.assertGreater(by_id["dispatch_invoke_omp"]["adapter"]["timeout_seconds"], 7200)
+                self.assertEqual(
+                    by_id["dispatch_complete_task"]["conduction"],
+                    [
+                        "dispatch_decide_task_completion",
+                        "dispatch_read_task_for_completion",
+                        "dispatch_select_dispatch_task",
+                        "dispatch_invoke_omp",
+                        "dispatch_verify_omp_postconditions",
+                    ],
+                )
+                self.assertEqual(
+                    by_id["dispatch_read_task_for_completion"]["conduction"],
+                    [
+                        "dispatch_select_dispatch_task",
+                        "dispatch_verify_dispatch_receipt",
+                        "dispatch_invoke_omp",
+                        "dispatch_verify_omp_postconditions",
+                    ],
+                )
+
             if path["id"] == "auto_worker":
                 self.assertLess(positions["triage_decide_triage_action"], positions["intake_decide_issue_priority"])
                 self.assertLess(positions["intake_select_issue_candidate"], positions["intake_decide_issue_priority"])

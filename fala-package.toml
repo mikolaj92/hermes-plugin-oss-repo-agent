@@ -466,7 +466,7 @@ config = { handler = "lokay.steps.issue_to_pr.read_omp_preconditions" }
 id = "invoke_omp"
 capability = "lokay_step"
 conduction = ["read_omp_preconditions"]
-adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 7260 }
 config = { handler = "lokay.steps.issue_to_pr.invoke_omp" }
 
 [[correlation_paths.effectors]]
@@ -612,7 +612,7 @@ config = { handler = "lokay.steps.issue_to_pr.verify_dispatch_receipt" }
 [[correlation_paths.effectors]]
 id = "read_task_for_completion"
 capability = "lokay_step"
-conduction = ["select_dispatch_task", "verify_dispatch_receipt"]
+conduction = ["select_dispatch_task", "verify_dispatch_receipt", "invoke_omp", "verify_omp_postconditions"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_task_for_completion" }
 
@@ -626,7 +626,7 @@ config = { handler = "lokay.steps.issue_to_pr.decide_task_completion" }
 [[correlation_paths.effectors]]
 id = "complete_task"
 capability = "lokay_step"
-conduction = ["decide_task_completion", "read_task_for_completion", "select_dispatch_task"]
+conduction = ["decide_task_completion", "read_task_for_completion", "select_dispatch_task", "invoke_omp", "verify_omp_postconditions"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.complete_task" }
 
@@ -2008,7 +2008,7 @@ config = { handler = "lokay.steps.issue_to_pr.read_omp_preconditions" }
 id = "dispatch_invoke_omp"
 capability = "lokay_step"
 conduction = ["dispatch_read_omp_preconditions"]
-adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 7260 }
 config = { handler = "lokay.steps.issue_to_pr.invoke_omp" }
 
 [[correlation_paths.effectors]]
@@ -2154,7 +2154,7 @@ config = { handler = "lokay.steps.issue_to_pr.verify_dispatch_receipt" }
 [[correlation_paths.effectors]]
 id = "dispatch_read_task_for_completion"
 capability = "lokay_step"
-conduction = ["dispatch_select_dispatch_task", "dispatch_verify_dispatch_receipt"]
+conduction = ["dispatch_select_dispatch_task", "dispatch_verify_dispatch_receipt", "dispatch_invoke_omp", "dispatch_verify_omp_postconditions"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_task_for_completion" }
 
@@ -2168,7 +2168,7 @@ config = { handler = "lokay.steps.issue_to_pr.decide_task_completion" }
 [[correlation_paths.effectors]]
 id = "dispatch_complete_task"
 capability = "lokay_step"
-conduction = ["dispatch_decide_task_completion", "dispatch_read_task_for_completion", "dispatch_select_dispatch_task"]
+conduction = ["dispatch_decide_task_completion", "dispatch_read_task_for_completion", "dispatch_select_dispatch_task", "dispatch_invoke_omp", "dispatch_verify_omp_postconditions"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.complete_task" }
 

@@ -992,6 +992,69 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(blocked["reason"], "upstream_failed")
         self.assertFalse(blocked["mutated"])
 
+    def test_invoke_omp_timeout_returns_failed_result(self) -> None:
+        pre = {
+            "status": "ready",
+            "ok": True,
+            "worktree_path": "/wt",
+            "branch": "ai/fix/1",
+            "pre_head": "abc",
+            "base_head": "abc",
+            "task_id": "t1",
+        }
+        with mock.patch("lokay.steps.issue_to_pr._omp_diff_paths", return_value=[]), mock.patch(
+            "lokay.steps.issue_to_pr.run_omp",
+            side_effect=subprocess.TimeoutExpired(cmd=["omp"], timeout=7200),
+        ):
+            out = issue_to_pr.invoke_omp(
+                req(
+                    {
+                        "worktree_path": "/wt",
+                        "prompt": "fix",
+                        "timeout_seconds": 7200,
+                        "dry_run": False,
+                        "conduction": {"read_omp_preconditions": pre},
+                    }
+                )
+            )
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["reason"], "omp_failed")
+        self.assertTrue(out["timed_out"])
+        self.assertTrue(out["mutated"])
+        self.assertFalse(out["ok"])
+
+    def test_complete_task_blocks_on_failed_invoke_omp(self) -> None:
+        decision = {"status": "should_complete", "ok": True, "should_complete": True}
+        failed_invoke = {
+            "status": "failed",
+            "ok": False,
+            "reason": "omp_failed",
+            "timed_out": True,
+            "mutated": True,
+        }
+        blocked = issue_to_pr.complete_task(
+            req(
+                {
+                    "board": "b",
+                    "task_id": "t1",
+                    "conduction": {
+                        "decide_task_completion": decision,
+                        "read_task_for_completion": {
+                            "status": "read",
+                            "ok": True,
+                            "task_id": "t1",
+                            "task": {"id": "t1", "status": "ready"},
+                        },
+                        "select_dispatch_task": {"status": "selected", "ok": True, "task_id": "t1"},
+                        "invoke_omp": failed_invoke,
+                    },
+                }
+            )
+        )
+        self.assertEqual(blocked["reason"], "upstream_failed")
+        self.assertFalse(blocked["mutated"])
+        self.assertEqual(blocked["upstream_effector"], "invoke_omp")
+
     def test_worktree_and_omp_dry_chain(self) -> None:
         pre = {"status": "ready", "ok": True, "clone_path": "/clone", "base_branch": "main"}
         fetched = issue_to_pr.fetch_clone_origin(req({"clone_path": "/clone", "dry_run": True, "conduction": {"read_clone_preconditions": pre}}))
