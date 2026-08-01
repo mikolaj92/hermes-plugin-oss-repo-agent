@@ -1170,6 +1170,44 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(planned["status"], "planned")
         set_config.assert_called_once()
 
+    @mock.patch("lokay.steps.issue_to_pr.run_cmd")
+    def test_read_open_pr_for_branch_uses_updated_local_oid_peer(self, run_cmd) -> None:
+        """Package conduction only wires verify_updated_branch_local_oid after push re-auth."""
+        run_cmd.return_value = SimpleNamespace(stdout="[]")
+        verified = {
+            "ok": True,
+            "status": "verified",
+            "operation": "verify_updated_branch_local_oid",
+            "clone_path": "/clone",
+            "branch": "ai/fix/3723-fix-pr-mikolaj92-temida-3723-fix-mikola",
+            "local_oid": "f4c7412a6ba1b0334ea8d89dd5665f3ec0ad056a",
+            "repo": "mikolaj92/Temida",
+            "issue": 3723,
+            "board": "mikolaj92-temida",
+            "task_id": "t_41437db9",
+        }
+        # Live dispatch path: only this peer is conducted (not verify_push_oid).
+        result = issue_to_pr.read_open_pr_for_branch(
+            req(
+                {
+                    "dry_run": False,
+                    "base_branch": "main",
+                    "conduction": {"verify_updated_branch_local_oid": verified},
+                }
+            )
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "read")
+        self.assertEqual(result["repo"], "mikolaj92/Temida")
+        self.assertEqual(result["branch"], "ai/fix/3723-fix-pr-mikolaj92-temida-3723-fix-mikola")
+        self.assertEqual(result["issue"], 3723)
+        self.assertEqual(result["prs"], [])
+        run_cmd.assert_called_once()
+        args = run_cmd.call_args.args[0]
+        self.assertEqual(args[1:3], ["pr", "list"])
+        self.assertEqual(args[args.index("--repo") + 1], "mikolaj92/Temida")
+        self.assertEqual(args[args.index("--head") + 1], "ai/fix/3723-fix-pr-mikolaj92-temida-3723-fix-mikola")
+
     def test_create_pull_request_serializes_recheck_create_and_reconcile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = {"created": False, "creates": 0, "branch": ""}

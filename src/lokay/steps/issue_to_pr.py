@@ -1563,11 +1563,20 @@ def read_open_pr_for_branch(request: Request) -> Result:
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_open_pr_for_branch")
     data, cfg = input_of(request), cfg_of(request)
-    verified = cond_blob(request, "verify_push_oid")
+    # Prefer the conducted post-push peer. Package conduction only wires
+    # verify_updated_branch_local_oid here; verify_push_oid is not available.
+    verified = cond_blob(request, "verify_updated_branch_local_oid", "update_branch_local_oid", "verify_push_oid")
     repo = str(data.get("repo") or verified.get("repo") or "")
     branch = str(data.get("branch") or verified.get("branch") or "")
     base = str(data.get("base_branch") or cfg.get("base_branch") or "main")
-    return _read_open_prs(repo, branch, base, str(cfg.get("gh_cli") or "gh"), operation="read_open_pr_for_branch", identity={"issue": verified.get("issue"), "board": verified.get("board"), "task_id": verified.get("task_id")})
+    return _read_open_prs(
+        repo,
+        branch,
+        base,
+        str(cfg.get("gh_cli") or "gh"),
+        operation="read_open_pr_for_branch",
+        identity={"issue": verified.get("issue"), "board": verified.get("board"), "task_id": verified.get("task_id")},
+    )
 
 
 def decide_existing_pr(request: Request) -> Result:
