@@ -20,6 +20,11 @@ _SCHEMA_VERSION = 1
 _COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _STAGES = frozenset({"decision", "feedback-verified", "feedback-observed", "mutation-authorized", "mutation-verified", "close-authorized", "close-verified"})
+_STAGE_ACTIONS = frozenset({"feedback", "close", "add_ready", "remove_ready", "label"})
+_DIGEST_ACTION = re.compile(
+    r"^[0-9a-f]{64}-(?:feedback|close|add_ready|remove_ready|label)$"
+)
+
 
 
 def _component(value: Any, field: str) -> str:
@@ -92,9 +97,26 @@ def _receipt_path(root: Any, repo: Any, issue: Any, stage: Any, identity: Any) -
                 pass
             elif not re.fullmatch(r"[1-9][0-9]*-[0-9a-f]{64}", identity):
                 raise ValueError("invalid_comment_id")
-        elif not re.fullmatch(r"[0-9a-f]{64}", identity):
+        elif re.fullmatch(r"[0-9a-f]{64}", identity) or _DIGEST_ACTION.fullmatch(identity):
+            pass
+        else:
             raise ValueError("invalid_decision_digest")
     return _issue_dir(root, repo, issue) / f"{stage}-{identity}.json"
+
+def _digest_action_identity(digest: Any, action: Any) -> str:
+    """Scope mutation/close receipts by decision digest + action.
+
+    Legacy pure-digest paths remain readable. New writes use digest-action so
+    residual feedback→close re-entry can publish without clobbering audit history.
+    """
+    text = str(digest or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", text):
+        raise ValueError("invalid_decision_digest")
+    stage_action = str(action or "").strip().casefold()
+    if stage_action in _STAGE_ACTIONS:
+        return f"{text}-{stage_action}"
+    return text
+
 
 def _identity(data: Mapping[str, Any], cfg: Mapping[str, Any], request: Request | None = None, *upstream_ids: str) -> tuple[str, str, int]:
     selected: Mapping[str, Any] = {}
@@ -205,6 +227,7 @@ def _safe_existing_path(path: Path, root: Any) -> Path:
     except ValueError as exc:
         raise ValueError("receipt_path_escape") from exc
     return candidate
+
 
 
 def _publish(path: Path, payload: Mapping[str, Any], operation: str = "receipt") -> Result:
@@ -416,7 +439,11 @@ def _stage_request(request: Request, stage: str) -> Result:
                 raise ValueError("unsafe_receipt_identity")
             identity = f"{comment_id}-{digest}"
         elif stage in {"mutation-authorized", "mutation-verified", "close-authorized", "close-verified"}:
-            identity = payload.get("decision_digest") or identity
+            digest = payload.get("decision_digest") or data.get("decision_digest")
+            stage_action = str(payload.get("action") or action or "").strip().casefold()
+            if stage_action in _STAGE_ACTIONS:
+                payload.setdefault("action", stage_action)
+            identity = _digest_action_identity(digest, stage_action)
         path = _receipt_path(root, repo, issue, stage, identity)
     except (TypeError, ValueError) as exc:
         return fail("receipt_identity_invalid", error=str(exc), operation=operation)
@@ -911,7 +938,10 @@ def _publish_close_authorization(request: Request) -> Result:
     try:
         root = _receipt_root(data, cfg)
         repo, _, issue = _identity({**data, **payload}, cfg, request, *_receipt_upstream(request, "close-authorized"))
-        identity = payload.get("decision_digest") or data.get("identity") or payload.get("updated_at")
+        identity = _digest_action_identity(
+            payload.get("decision_digest") or data.get("identity") or payload.get("updated_at"),
+            payload.get("action") or action,
+        )
         path = _receipt_path(root, repo, issue, "close-authorized", identity)
     except (TypeError, ValueError) as exc:
         return fail("receipt_identity_invalid", error=str(exc), operation=operation)
@@ -972,7 +1002,11 @@ def verify_triage_receipt(request: Request) -> Result:
                     raise ValueError("unsafe_receipt_identity")
                 identity = f"{comment_id}-{digest}"
             elif stage in {"mutation-authorized", "mutation-verified", "close-authorized", "close-verified"}:
-                identity = payload.get("decision_digest") or identity
+                stage_action = str(payload.get("action") or data.get("action") or "").strip().casefold()
+                identity = _digest_action_identity(
+                    payload.get("decision_digest") or data.get("decision_digest") or identity,
+                    stage_action,
+                )
             path_value = str(_receipt_path(root, repo, issue, stage, identity))
             if expected is None and isinstance(upstream, Mapping):
                 expected = upstream

@@ -569,6 +569,49 @@ class ReceiptTests(unittest.TestCase):
         )
         self.assertFalse(pending["close_verified"])
 
+    def test_mutation_feedback_and_close_coexist_on_action_identity(self):
+        digest = "c" * 64
+        feedback = dict(
+            self.payload,
+            stage="mutation-authorized",
+            decision_digest=digest,
+            action="feedback",
+            classification="out_of_scope",
+            label="ai:needs-feedback",
+            status="mutation_decided",
+            mutated=False,
+        )
+        first = receipts.publish_triage_mutation_authorization(
+            self.req(payload=feedback, decision_digest=digest, action="feedback")
+        )
+        self.assertEqual(first["status"], "written", first)
+        self.assertTrue(first["receipt_path"].endswith(f"mutation-authorized-{digest}-feedback.json"), first)
+        close = dict(
+            feedback,
+            action="close",
+            label="ai:out-of-scope",
+        )
+        second = receipts.publish_triage_mutation_authorization(
+            self.req(payload=close, decision_digest=digest, action="close")
+        )
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(second["status"], "written", second)
+        self.assertTrue(second["receipt_path"].endswith(f"mutation-authorized-{digest}-close.json"), second)
+        self.assertNotEqual(first["receipt_path"], second["receipt_path"])
+        # Legacy pure-digest feedback receipt remains readable and untouched.
+        legacy_path = receipts._receipt_path(self.root, "owner/repo", 42, "mutation-authorized", digest)
+        legacy_payload = dict(feedback, stage="mutation-authorized")
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text(json.dumps(legacy_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        legacy_path.chmod(0o600)
+        again = receipts.publish_triage_mutation_authorization(
+            self.req(payload=close, decision_digest=digest, action="close")
+        )
+        self.assertEqual(again["status"], "exists", again)
+        self.assertEqual(json.loads(legacy_path.read_text(encoding="utf-8"))["action"], "feedback")
+        self.assertEqual(json.loads(Path(second["receipt_path"]).read_text(encoding="utf-8"))["action"], "close")
+
+
     def test_feedback_receipt_identity_scopes_by_digest(self):
         comment_id = 5117775811
         old_digest = "c" * 64
