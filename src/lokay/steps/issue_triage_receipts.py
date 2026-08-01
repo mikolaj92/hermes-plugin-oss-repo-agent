@@ -14,7 +14,7 @@ import tempfile
 from typing import Any
 
 from lokay.envelope import Request, Result, fail, noop, ok, planned, cfg_of, input_of, cond_blob, cond_get, dry_run_flag, terminal_upstream
-from lokay.steps.issue_triage import authorize_duplicate_close, authorize_out_of_scope_close, triage_gate, triage_identity, triage_selected
+from lokay.steps.issue_triage import authorize_duplicate_close, authorize_out_of_scope_close, is_triage_reconcile, triage_gate, triage_identity, triage_selected
 
 _SCHEMA_VERSION = 1
 _COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -529,6 +529,92 @@ def _reduce(receipts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+
+def load_latest_triage_decision(request: Request) -> Result:
+    """Load the latest durable decision receipt for the selected issue.
+
+    Decision filenames are content identities (sha256 of updated_at), not
+    decision_digest. Prefer the highest issue watermark so reconcile reuses the
+    same classification/action/digest without recomputing.
+    """
+    data, cfg = input_of(request), cfg_of(request)
+    selected = triage_selected(
+        request,
+        "select_triage_candidate",
+        "reserve_triage_run_budget",
+        "read_triage_issue_state",
+        "classify_triage_issue",
+    )
+    try:
+        root = _receipt_root(data, cfg)
+        repo, _, issue = _identity(
+            data,
+            cfg,
+            request,
+            "select_triage_candidate",
+            "reserve_triage_run_budget",
+            "read_triage_issue_state",
+        )
+        directory = _issue_dir(root, repo, issue)
+    except (TypeError, ValueError) as exc:
+        return fail("decision_receipt_identity_invalid", error=str(exc), mutated=False)
+    if not directory.exists() or not directory.is_dir():
+        return fail("decision_receipt_missing", mutated=False, repo=repo, issue=issue, number=issue)
+    decisions: list[dict[str, Any]] = []
+    try:
+        for path in sorted(directory.glob("decision-*.json"), key=lambda item: item.name):
+            item = _read(path)
+            if str(item.get("stage") or "decision") != "decision":
+                continue
+            classification = item.get("classification")
+            if not isinstance(classification, Mapping):
+                continue
+            digest = str(item.get("decision_digest") or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                continue
+            entry = dict(item)
+            entry["receipt_path"] = str(path)
+            decisions.append(entry)
+    except (OSError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
+        return fail("decision_receipt_read_failed", error=str(exc), mutated=False, repo=repo, issue=issue, number=issue)
+    if not decisions:
+        return fail("decision_receipt_missing", mutated=False, repo=repo, issue=issue, number=issue)
+
+    def watermark(item: Mapping[str, Any]) -> str:
+        nested = item.get("selected") if isinstance(item.get("selected"), Mapping) else {}
+        return str(
+            item.get("issue_updated_at")
+            or item.get("updated_at")
+            or item.get("issue_watermark")
+            or nested.get("updatedAt")
+            or ""
+        )
+
+    decisions.sort(key=lambda item: (watermark(item), str(item.get("receipt_path") or "")))
+    latest = decisions[-1]
+    classification = dict(latest["classification"])
+    action = str(latest.get("action") or classification.get("classification") or "")
+    question = latest.get("question")
+    if question is None:
+        question = classification.get("question") or ""
+    return ok(
+        status="decision_loaded",
+        reason="decision_reused",
+        mutated=False,
+        classification=classification,
+        action=action,
+        question=str(question or ""),
+        decision_digest=str(latest["decision_digest"]),
+        receipt_path=str(latest["receipt_path"]),
+        issue_updated_at=latest.get("issue_updated_at") or latest.get("updated_at"),
+        payload=dict(latest),
+        selected=selected or latest.get("selected"),
+        repo=repo,
+        issue=issue,
+        number=issue,
+    )
+
+
 def reserve_triage_run_budget(request: Request) -> Result:
     gate = _selected_gate(request, "reserve_triage_run_budget", "select_triage_candidate")
     if gate is not None:
@@ -554,6 +640,32 @@ def reserve_triage_run_budget(request: Request) -> Result:
     return result | payload | {"selected": dict(selected)}
 
 def publish_triage_decision_receipt(request: Request) -> Result:
+    # Reconcile must not rebuild a decision payload: residual receipts carry
+    # fields classify will not reproduce, and a rebuild races into receipt_conflict.
+    if is_triage_reconcile(request, "select_triage_candidate", "reserve_triage_run_budget", "classify_triage_issue"):
+        gate = _selected_gate(request, "publish_triage_decision_receipt", *_receipt_upstream(request, "decision"))
+        if gate is not None:
+            return gate
+        terminal = terminal_upstream(request, "publish_triage_decision_receipt", *_receipt_upstream(request, "decision"))
+        if terminal:
+            return terminal
+        loaded = load_latest_triage_decision(request)
+        if not loaded.get("ok"):
+            return loaded
+        payload = dict(loaded["payload"]) if isinstance(loaded.get("payload"), Mapping) else {}
+        selected = triage_selected(request, *_receipt_upstream(request, "decision")) or payload.get("selected")
+        return ok(
+            status="exists",
+            reason="decision_reused",
+            receipt_path=loaded.get("receipt_path"),
+            payload=payload,
+            decision_digest=loaded.get("decision_digest"),
+            selected=selected,
+            mutated=False,
+            repo=loaded.get("repo"),
+            issue=loaded.get("issue"),
+            number=loaded.get("number"),
+        )
     return _stage_request(request, "decision")
 
 
@@ -855,6 +967,7 @@ def verify_triage_receipt(request: Request) -> Result:
 
 
 __all__ = [
+    "load_latest_triage_decision",
     "read_triage_receipt_index", "reserve_triage_run_budget", "publish_triage_decision_receipt",
     "publish_triage_mutation_authorization", "publish_triage_mutation_verification", "publish_triage_feedback_receipt",
     "publish_triage_close_authorization", "publish_triage_close_verification", "verify_triage_receipt",

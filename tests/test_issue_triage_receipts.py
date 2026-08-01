@@ -688,6 +688,90 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual((terminal["ok"], terminal["reason"]), (False, "upstream_failed"))
         self.assertFalse(list(self.root.rglob("*.json")))
 
+    def test_reconcile_publish_reuses_existing_decision_without_rewrite(self) -> None:
+        classification = {
+            "schema_version": 1,
+            "classification": "needs_feedback",
+            "reason": "Need maintainer intent",
+            "question": "What should happen?",
+            "canonical_issue": 0,
+            "evidence": [{"kind": "issue", "identity": "issue:42", "quote": "local worker"}],
+        }
+        digest = "e" * 64
+        selected = {
+            "repo": "owner/repo",
+            "number": 42,
+            "candidate_class": "reconcile_decision",
+            "updatedAt": "2026-07-28T10:00:00Z",
+        }
+        payload = {
+            "schema_version": 1,
+            "stage": "decision",
+            "repo": "owner/repo",
+            "issue": 42,
+            "number": 42,
+            "action": "needs_feedback",
+            "classification": classification,
+            "decision_digest": digest,
+            "issue_updated_at": "2026-07-28T10:00:00Z",
+            "question": "What should happen?",
+            "status": "classified",
+            "stdout_sha256": "f" * 64,
+            "candidate_class": "untriaged",
+            "selected": dict(selected),
+            "extra_residual_field": "must-not-rebuild",
+        }
+        issue_dir = self.root / "owner__repo" / "42"
+        issue_dir.mkdir(parents=True)
+        path = issue_dir / ("decision-" + "a" * 64 + ".json")
+        path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        path.chmod(0o600)
+        before = path.read_text(encoding="utf-8")
+        req = self.req(
+            selected=selected,
+            candidate_class="reconcile_decision",
+            conduction={
+                "select_triage_candidate": {
+                    "ok": True,
+                    "status": "selected",
+                    "selected": selected,
+                    "candidate_class": "reconcile_decision",
+                    "repo": "owner/repo",
+                    "number": 42,
+                },
+                "reserve_triage_run_budget": {
+                    "ok": True,
+                    "status": "exists",
+                    "selected": selected,
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "issue": 42,
+                },
+                "classify_triage_issue": {
+                    "ok": True,
+                    "status": "classified",
+                    "reason": "decision_reused",
+                    "selected": selected,
+                    "classification": classification,
+                    "action": "needs_feedback",
+                    "decision_digest": digest,
+                    "question": "What should happen?",
+                },
+            },
+        )
+        out = receipts.publish_triage_decision_receipt(req)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "exists")
+        self.assertEqual(out["reason"], "decision_reused")
+        self.assertEqual(out["decision_digest"], digest)
+        self.assertEqual(Path(out["receipt_path"]), path)
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+        loaded = receipts.load_latest_triage_decision(req)
+        self.assertTrue(loaded["ok"], loaded)
+        self.assertEqual(loaded["decision_digest"], digest)
+        self.assertEqual(loaded["action"], "needs_feedback")
+
+
 
 if __name__ == "__main__":
     unittest.main()

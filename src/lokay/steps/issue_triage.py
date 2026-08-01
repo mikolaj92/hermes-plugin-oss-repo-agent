@@ -91,6 +91,30 @@ def triage_identity(request: Request, *upstream_ids: str) -> dict[str, Any]:
     return {"selected": selected or None, "repo": repo, "number": number, "clone_path": clone_path}
 
 
+def triage_candidate_class(request: Request, *upstream_ids: str) -> str:
+    """Return the selected triage candidate_class from input or conduction."""
+    data = input_of(request)
+    selected = triage_selected(request, *upstream_ids)
+    if isinstance(selected, Mapping) and selected.get("candidate_class") not in (None, ""):
+        return str(selected["candidate_class"])
+    for upstream_id in ("select_triage_candidate", "reserve_triage_run_budget", *upstream_ids):
+        blob = cond_blob(request, upstream_id)
+        if not blob:
+            continue
+        if blob.get("candidate_class") not in (None, ""):
+            return str(blob["candidate_class"])
+        nested = blob.get("selected")
+        if isinstance(nested, Mapping) and nested.get("candidate_class") not in (None, ""):
+            return str(nested["candidate_class"])
+    return str(data.get("candidate_class") or "")
+
+
+def is_triage_reconcile(request: Request, *upstream_ids: str) -> bool:
+    """True when the candidate only needs label/decision reconciliation."""
+    return triage_candidate_class(request, *upstream_ids) in {"reconcile_decision", "reconcile_pending"}
+
+
+
 _CLASSIFICATIONS = frozenset({"ready", "needs_feedback", "duplicate", "out_of_scope", "ambiguous"})
 _EVIDENCE_KINDS = frozenset({"issue", "comment", "repository_context"})
 _KEYS = frozenset({"schema_version", "classification", "reason", "question", "canonical_issue", "evidence"})

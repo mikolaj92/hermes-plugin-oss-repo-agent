@@ -91,6 +91,202 @@ class ClassifierSandboxTests(unittest.TestCase):
         self.assertEqual(out["status"], "classified", out)
         self.assertIn('"repository_context":{"README.md":"Reliable issue automation"}', run_omp.call_args.kwargs["prompt"])
 
+    @mock.patch("lokay.steps.issue_triage_classifier.run_omp")
+    def test_reconcile_reuses_durable_decision_without_omp(self, run_omp) -> None:
+        classification = {
+            "schema_version": 1,
+            "classification": "out_of_scope",
+            "reason": "Already shipped",
+            "question": "",
+            "canonical_issue": 0,
+            "evidence": [{"kind": "issue", "identity": "issue:42", "quote": "local worker"}],
+        }
+        digest = "c" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            issue_dir = root / "owner__repo" / "42"
+            issue_dir.mkdir(parents=True)
+            payload = {
+                "schema_version": 1,
+                "stage": "decision",
+                "repo": "owner/repo",
+                "issue": 42,
+                "number": 42,
+                "action": "out_of_scope",
+                "classification": classification,
+                "decision_digest": digest,
+                "issue_updated_at": "2026-07-28T10:00:00Z",
+                "question": "",
+                "status": "classified",
+                "selected": {"repo": "owner/repo", "number": 42, "candidate_class": "reconcile_decision"},
+            }
+            path = issue_dir / ("decision-" + "d" * 64 + ".json")
+            path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            path.chmod(0o600)
+            selected = {
+                "repo": "owner/repo",
+                "number": 42,
+                "candidate_class": "reconcile_decision",
+                "updatedAt": "2026-07-28T10:00:00Z",
+            }
+            req = {
+                "input": {
+                    "selected": selected,
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "triage_receipts": str(root),
+                    "candidate_class": "reconcile_decision",
+                    "conduction": {
+                        "select_triage_candidate": {
+                            "ok": True,
+                            "status": "selected",
+                            "selected": selected,
+                            "candidate_class": "reconcile_decision",
+                            "repo": "owner/repo",
+                            "number": 42,
+                        },
+                        "reserve_triage_run_budget": {
+                            "ok": True,
+                            "status": "exists",
+                            "selected": selected,
+                            "repo": "owner/repo",
+                            "number": 42,
+                            "issue": 42,
+                        },
+                        "read_triage_issue_state": {
+                            "ok": True,
+                            "status": "issue_read",
+                            "issue": selected,
+                            "selected": selected,
+                            "repo": "owner/repo",
+                            "number": 42,
+                        },
+                        "read_triage_comments": {
+                            "ok": True,
+                            "status": "comments_read",
+                            "comments": [],
+                            "selected": selected,
+                        },
+                        "build_triage_context": {
+                            "ok": True,
+                            "status": "context_packet",
+                            "reason": "decision_reused",
+                            "selected": selected,
+                            "packet": {"context": []},
+                            "pre_snapshot": {},
+                            "post_snapshot": {},
+                        },
+                    },
+                },
+                "config": {"dry_run": False, "triage_receipts": str(root)},
+            }
+            out = issue_triage_classifier.classify_triage_issue(req)
+            self.assertEqual(out["status"], "classified", out)
+            self.assertEqual(out["reason"], "decision_reused")
+            self.assertEqual(out["action"], "out_of_scope")
+            self.assertEqual(out["decision_digest"], digest)
+            self.assertEqual(out["classification"], classification)
+            run_omp.assert_not_called()
+
+    @mock.patch("lokay.steps.issue_triage_classifier.run_omp")
+    def test_reconcile_reuses_durable_decision_under_dry_run(self, run_omp) -> None:
+        classification = {
+            "schema_version": 1,
+            "classification": "needs_feedback",
+            "reason": "Need maintainer intent",
+            "question": "What should happen?",
+            "canonical_issue": 0,
+            "evidence": [{"kind": "issue", "identity": "issue:42", "quote": "local worker"}],
+        }
+        digest = "a" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            issue_dir = root / "owner__repo" / "42"
+            issue_dir.mkdir(parents=True)
+            payload = {
+                "schema_version": 1,
+                "stage": "decision",
+                "repo": "owner/repo",
+                "issue": 42,
+                "number": 42,
+                "action": "needs_feedback",
+                "classification": classification,
+                "decision_digest": digest,
+                "issue_updated_at": "2026-07-28T10:00:00Z",
+                "question": "What should happen?",
+                "status": "classified",
+                "selected": {"repo": "owner/repo", "number": 42, "candidate_class": "reconcile_decision"},
+            }
+            path = issue_dir / ("decision-" + "b" * 64 + ".json")
+            path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            path.chmod(0o600)
+            selected = {
+                "repo": "owner/repo",
+                "number": 42,
+                "candidate_class": "reconcile_decision",
+                "updatedAt": "2026-07-28T10:00:00Z",
+            }
+            req = {
+                "input": {
+                    "selected": selected,
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "triage_receipts": str(root),
+                    "candidate_class": "reconcile_decision",
+                    "conduction": {
+                        "select_triage_candidate": {
+                            "ok": True,
+                            "status": "selected",
+                            "selected": selected,
+                            "candidate_class": "reconcile_decision",
+                            "repo": "owner/repo",
+                            "number": 42,
+                        },
+                        "reserve_triage_run_budget": {
+                            "ok": True,
+                            "status": "exists",
+                            "selected": selected,
+                            "repo": "owner/repo",
+                            "number": 42,
+                            "issue": 42,
+                        },
+                        "read_triage_issue_state": {
+                            "ok": True,
+                            "status": "issue_read",
+                            "issue": selected,
+                            "selected": selected,
+                            "repo": "owner/repo",
+                            "number": 42,
+                        },
+                        "read_triage_comments": {
+                            "ok": True,
+                            "status": "comments_read",
+                            "comments": [],
+                            "selected": selected,
+                        },
+                        "build_triage_context": {
+                            "ok": True,
+                            "status": "context_packet",
+                            "reason": "decision_reused",
+                            "selected": selected,
+                            "packet": {"context": []},
+                            "pre_snapshot": {},
+                            "post_snapshot": {},
+                        },
+                    },
+                },
+                # Default dry_run is True; reuse must still return classification/action.
+                "config": {"triage_receipts": str(root)},
+            }
+            out = issue_triage_classifier.classify_triage_issue(req)
+            self.assertEqual(out["status"], "classified", out)
+            self.assertEqual(out["reason"], "decision_reused")
+            self.assertEqual(out["action"], "needs_feedback")
+            self.assertEqual(out["decision_digest"], digest)
+            self.assertEqual(out["classification"], classification)
+            run_omp.assert_not_called()
+
+
 
 if __name__ == "__main__":
     unittest.main()

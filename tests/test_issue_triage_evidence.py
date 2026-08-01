@@ -209,6 +209,60 @@ class PinnedContextTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "missing_pre_snapshot")
 
+    def test_reconcile_skips_local_snapshot(self):
+        # Detached / missing clone must not fail reconcile; reuse only needs labels.
+        selected = {
+            "repo": "o/r",
+            "number": 7,
+            "candidate_class": "reconcile_decision",
+            "clone_path": str(self.root / "missing-clone"),
+        }
+        request = {
+            "input": {
+                "selected": selected,
+                "repo": "o/r",
+                "number": 7,
+                "clone_path": selected["clone_path"],
+                "candidate_class": "reconcile_decision",
+                "conduction": {
+                    "select_triage_candidate": {
+                        "ok": True,
+                        "status": "selected",
+                        "selected": selected,
+                        "candidate_class": "reconcile_decision",
+                        "repo": "o/r",
+                        "number": 7,
+                    },
+                    "reserve_triage_run_budget": {
+                        "ok": True,
+                        "status": "exists",
+                        "selected": selected,
+                        "repo": "o/r",
+                        "number": 7,
+                        "issue": 7,
+                    },
+                    "read_triage_repository_state": {
+                        "ok": True,
+                        "status": "repository_read",
+                        "repo": "o/r",
+                        "selected": selected,
+                    },
+                },
+            },
+            "config": {},
+        }
+        built = evidence.build_triage_context(request)
+        self.assertTrue(built["ok"], built)
+        self.assertEqual(built["status"], "context_packet")
+        self.assertEqual(built["reason"], "decision_reused")
+        self.assertEqual(built["packet"]["context"], [])
+        request["input"]["conduction"]["build_triage_context"] = built
+        verified = evidence.verify_triage_repository_unchanged(request)
+        self.assertTrue(verified["ok"], verified)
+        self.assertEqual(verified["status"], "snapshot_unchanged")
+        self.assertEqual(verified["reason"], "decision_reused")
+
+
 
 if __name__ == "__main__":
     unittest.main()
