@@ -668,6 +668,63 @@ def _has_fix_task(rows: list[dict[str, Any]], marker: str) -> bool:
     return any(_task_has_prefixed_marker(row, "fix-pr", marker) for row in rows)
 
 
+def _held_claim_has_merged_receipt(request: Request, *, repo: str, issue: int | str) -> bool:
+    """True when a durable MERGED receipt matches the held claim identity."""
+    data, cfg = input_of(request), cfg_of(request)
+    receipt_value = (
+        data.get("merge_receipts")
+        or cfg.get("merge_receipts")
+        or (cfg.get("paths") if isinstance(cfg.get("paths"), dict) else {}).get("merge_receipts")
+    )
+    if not receipt_value:
+        return False
+    receipt_root = Path(str(receipt_value)).expanduser()
+    if not receipt_root.is_dir():
+        return False
+    try:
+        issue_num = int(issue)
+    except (TypeError, ValueError):
+        return False
+    wanted = str(repo or "").strip()
+    if not wanted or issue_num <= 0:
+        return False
+    try:
+        paths = sorted(receipt_root.glob("*.json"))
+    except OSError:
+        return False
+    if len(paths) > 256:
+        return False
+    for path in paths:
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(receipt, dict) or receipt.get("phase") != "MERGED":
+            continue
+        provenance = receipt.get("verified_provenance")
+        if not isinstance(provenance, dict):
+            continue
+        if provenance.get("source") != "github_pr_readback" or provenance.get("state") != "MERGED":
+            continue
+        receipt_repo = str(receipt.get("repo") or provenance.get("repo") or "").strip()
+        if receipt_repo != wanted:
+            continue
+        branch = str(provenance.get("head_ref") or "").strip()
+        branch_match = re.fullmatch(r"ai/fix/([1-9][0-9]*)(?:-[A-Za-z0-9._-]+)?", branch)
+        receipt_issue = int(branch_match.group(1)) if branch_match else 0
+        if receipt_issue != issue_num:
+            continue
+        number = provenance.get("number")
+        if receipt.get("pr") != number:
+            continue
+        head = str(provenance.get("head_oid") or "").strip()
+        if not head or receipt.get("headSha") != head:
+            continue
+        return True
+    return False
+
+
+
 def select_dispatch_task(request: Request) -> Result:
     """Select ready dispatch work, constrained to an active claim when held."""
     terminal = _atomic_terminal(request, "select_dispatch_task", "read_dispatch_tasks")
@@ -707,6 +764,15 @@ def select_dispatch_task(request: Request) -> Result:
     if not ready:
         reason = "held_claim_task_unavailable" if held_repo and held_issue not in (None, "") else "no_ready_task"
         return noop(reason, operation="select_dispatch_task", repo=held_repo or None, issue=held_issue)
+    if held_repo and held_issue not in (None, "") and _held_claim_has_merged_receipt(
+        request, repo=held_repo, issue=held_issue
+    ):
+        return noop(
+            "held_claim_task_unavailable",
+            operation="select_dispatch_task",
+            repo=held_repo,
+            issue=held_issue,
+        )
     row = ready[0]
     tid = str(row.get("id") or row.get("task_id") or "")
     context = {k: row[k] for k in ("repo", "clone_path", "priority", "board") if row.get(k) not in (None, "")}
@@ -1734,7 +1800,53 @@ def create_pull_request(request: Request) -> Result:
             if linked_rows:
                 existing = linked_rows[0]
                 if str(existing.get("headRefName") or "") != branch or str(existing.get("baseRefName") or "") != base:
-                    return noop("issue_pr_already_open", operation="create_pull_request", repo=repo, issue=issue, board=identity["board"], task_id=identity["task_id"], branch=branch, base=base, number=existing.get("number"), url=existing.get("url"), existing=existing)
+                    number = existing.get("number")
+                    if not isinstance(number, int) or number <= 0:
+                        return fail(
+                            "invalid_pr_number",
+                            failure_class="terminal",
+                            retry_safe=False,
+                            operation="create_pull_request",
+                            repo=repo,
+                            issue=issue,
+                            board=identity["board"],
+                            task_id=identity["task_id"],
+                            pr=existing,
+                            mutated=False,
+                        )
+                    existing_branch = str(existing.get("headRefName") or "").strip()
+                    existing_base = str(existing.get("baseRefName") or "").strip() or base
+                    if not existing_branch:
+                        return fail(
+                            "pr_identity_mismatch",
+                            failure_class="terminal",
+                            retry_safe=False,
+                            operation="create_pull_request",
+                            repo=repo,
+                            issue=issue,
+                            board=identity["board"],
+                            task_id=identity["task_id"],
+                            branch=branch,
+                            base=base,
+                            pr=existing,
+                            mutated=False,
+                        )
+                    # Existing issue PR owns completion identity; do not idle on the
+                    # fix-pr branch mismatch or complete_task will never finish.
+                    return ok(
+                        status="already_open",
+                        operation="create_pull_request",
+                        repo=repo,
+                        issue=issue,
+                        board=identity["board"],
+                        task_id=identity["task_id"],
+                        branch=existing_branch,
+                        base=existing_base,
+                        number=number,
+                        url=existing.get("url"),
+                        existing=existing,
+                        mutated=False,
+                    )
                 return observed_result(existing, status="exists", mutated=False)
 
             current = _read_open_prs(repo, branch, base, gh, operation="create_pull_request", identity=identity)
@@ -1817,6 +1929,28 @@ def reconcile_pull_request(request: Request) -> Result:
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="reconcile_pull_request")
     created = cond_blob(request, "create_pull_request")
+    # Reuse create identity when the PR already exists for the issue so a later
+    # closed/merged state cannot fail open-PR recon on the fix-pr branch.
+    if created.get("ok") is True and created.get("status") in {"already_open", "exists"}:
+        number = created.get("number")
+        repo = str(created.get("repo") or "")
+        branch = str(created.get("branch") or "")
+        base = str(created.get("base") or cfg_of(request).get("base_branch") or "main")
+        if isinstance(number, int) and number > 0 and repo and branch:
+            return ok(
+                status="reconciled",
+                operation="reconcile_pull_request",
+                repo=repo,
+                branch=branch,
+                base=base,
+                number=number,
+                url=created.get("url"),
+                issue=created.get("issue"),
+                board=created.get("board"),
+                task_id=created.get("task_id"),
+                prs=[{"number": number, "url": created.get("url"), "headRefName": branch, "baseRefName": base}],
+                mutated=False,
+            )
     data = input_of(request)
     repo = str(data.get("repo") or created.get("repo") or "")
     branch = str(data.get("branch") or created.get("branch") or "")

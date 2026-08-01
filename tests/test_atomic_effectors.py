@@ -742,6 +742,61 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(out["status"], "noop")
         self.assertEqual(out["reason"], "held_claim_task_unavailable")
 
+    def test_held_claim_with_merged_receipt_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            claim_root = Path(tmp) / "claim"
+            receipt_root = Path(tmp) / "merge"
+            claim_root.mkdir()
+            receipt_root.mkdir()
+            (claim_root / "claim.json").write_text(json.dumps({
+                "version": 1,
+                "repo": "o/r",
+                "issue": 9,
+                "board": "b",
+                "assignee": "mikolaj92",
+                "claimedAt": "2026-07-29T12:18:17Z",
+            }))
+            (receipt_root / "merge.json").write_text(json.dumps({
+                "phase": "MERGED",
+                "repo": "o/r",
+                "pr": 42,
+                "headSha": "abc123",
+                "mergeSha": "def456",
+                "mergedAt": "2026-08-01T09:14:30Z",
+                "verified_provenance": {
+                    "source": "github_pr_readback",
+                    "state": "MERGED",
+                    "repo": "o/r",
+                    "number": 42,
+                    "head_ref": "ai/fix/9-issue-o-r-9",
+                    "head_oid": "abc123",
+                    "merge_oid": "def456",
+                    "merged_at": "2026-08-01T09:14:30Z",
+                },
+            }))
+            ready_fix = {
+                "id": "fix-1",
+                "title": "[fix-pr] o/r#9: leftover",
+                "body": "Repository: o/r\nIssue: #9\nIdempotency-Key: fix-pr:o/r:9\n",
+                "status": "ready",
+            }
+            out = issue_to_pr.select_dispatch_task(req({
+                "active_issue_path": str(claim_root),
+                "merge_receipts": str(receipt_root),
+                "conduction": {
+                    "read_dispatch_tasks": {
+                        "status": "read",
+                        "ok": True,
+                        "tasks": [ready_fix],
+                    }
+                },
+            }))
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "held_claim_task_unavailable")
+        self.assertEqual(out["repo"], "o/r")
+        self.assertEqual(out["issue"], 9)
+
+
     def test_next_dispatch_selects_fix_task_after_handoff(self) -> None:
         issue_task = {
             "id": "issue-1",
@@ -1346,6 +1401,121 @@ class IssueToPrTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["status"], "created")
             self.assertEqual(result["number"], 9)
+
+    def test_create_pull_request_already_open_uses_existing_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = {
+                "ok": True,
+                "status": "create",
+                "should_create": True,
+                "repo": "o/r",
+                "issue": 1,
+                "board": "b",
+                "task_id": "fix-1",
+                "branch": "ai/fix/1-fix-pr-o-r-1",
+                "base": "main",
+            }
+            existing = {
+                "number": 77,
+                "url": "https://example.test/pr/77",
+                "baseRefName": "main",
+                "headRefName": "ai/fix/1-issue-o-r-1",
+                "closingIssuesReferences": [{"number": 1}],
+            }
+
+            def gh(args, **kwargs):
+                if args[1:3] == ["pr", "list"]:
+                    if "closingIssuesReferences" in args[args.index("--json") + 1]:
+                        return SimpleNamespace(stdout=json.dumps([existing]))
+                    return SimpleNamespace(stdout=json.dumps([]))
+                raise AssertionError(args)
+
+            with mock.patch("lokay.steps.issue_to_pr.run_cmd", side_effect=gh):
+                created = issue_to_pr.create_pull_request(
+                    req(
+                        {
+                            "repo": "o/r",
+                            "branch": "ai/fix/1-fix-pr-o-r-1",
+                            "issue": 1,
+                            "dry_run": False,
+                            "conduction": {"decide_existing_pr": decision},
+                        },
+                        {"task_receipts": tmp},
+                    )
+                )
+            self.assertTrue(created["ok"])
+            self.assertEqual(created["status"], "already_open")
+            self.assertEqual(created["number"], 77)
+            self.assertEqual(created["branch"], "ai/fix/1-issue-o-r-1")
+            self.assertEqual(created["base"], "main")
+            self.assertFalse(created["mutated"])
+
+            # Reconcile must not re-query by the fix-pr branch.
+            with mock.patch("lokay.steps.issue_to_pr.run_cmd", side_effect=AssertionError("gh should not run")):
+                reconciled = issue_to_pr.reconcile_pull_request(
+                    req(
+                        {
+                            "repo": "o/r",
+                            "branch": "ai/fix/1-fix-pr-o-r-1",
+                            "conduction": {"create_pull_request": created},
+                        }
+                    )
+                )
+            self.assertTrue(reconciled["ok"])
+            self.assertEqual(reconciled["status"], "reconciled")
+            self.assertEqual(reconciled["number"], 77)
+            self.assertEqual(reconciled["branch"], "ai/fix/1-issue-o-r-1")
+
+            task_row = {"id": "fix-1", "title": "[fix-pr] o/r#1", "status": "ready"}
+            with mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json", return_value=[task_row]):
+                read = issue_to_pr.read_task_for_completion(
+                    req(
+                        {
+                            "board": "b",
+                            "task_id": "fix-1",
+                            "conduction": {
+                                "select_dispatch_task": {
+                                    "status": "selected",
+                                    "ok": True,
+                                    "task_id": "fix-1",
+                                    "task": task_row,
+                                },
+                                "create_pull_request": created,
+                                "reconcile_pull_request": reconciled,
+                            },
+                        }
+                    )
+                )
+            self.assertEqual(read["status"], "read")
+            self.assertEqual(read["task_id"], "fix-1")
+
+            decision = issue_to_pr.decide_task_completion(
+                req({"conduction": {"read_task_for_completion": read}})
+            )
+            self.assertTrue(decision["should_complete"])
+            completed = issue_to_pr.complete_task(
+                req(
+                    {
+                        "board": "b",
+                        "task_id": "fix-1",
+                        "dry_run": True,
+                        "conduction": {
+                            "decide_task_completion": decision,
+                            "read_task_for_completion": read,
+                            "select_dispatch_task": {
+                                "status": "selected",
+                                "ok": True,
+                                "task_id": "fix-1",
+                            },
+                            "create_pull_request": created,
+                            "reconcile_pull_request": reconciled,
+                        },
+                    }
+                )
+            )
+            self.assertEqual(completed["status"], "planned")
+            self.assertNotEqual(completed.get("reason"), "issue_pr_already_open")
+
 
     def test_live_shaped_labels_and_receipt_preserve_identity(self) -> None:
         reconciled = {"status": "reconciled", "ok": True, "repo": "o/r", "number": 2, "issue": 1, "board": "b", "task_id": "t1"}
