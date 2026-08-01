@@ -492,6 +492,7 @@ def _reduce(receipts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     entries.sort(key=lambda item: str(item.get("receipt_path") or ""))
     pending: list[dict[str, Any]] = []
     terminal_digests: set[str] = set()
+    close_digests: set[str] = set()
     latest_feedback_watermark: str | None = None
     latest_decision_watermark: str | None = None
     latest_decision_digest: str | None = None
@@ -514,6 +515,9 @@ def _reduce(receipts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         if stage in {"mutation-verified", "feedback-verified", "close-verified"} or verified in {"verified", "succeeded", "closed"}:
             if digest:
                 terminal_digests.add(digest)
+        if stage == "close-verified" or verified in {"closed"}:
+            if digest:
+                close_digests.add(digest)
         if stage in {"feedback-observed", "feedback-verified", "mutation-verified"}:
             if watermark is not None and (latest_feedback_watermark is None or str(watermark) > latest_feedback_watermark):
                 latest_feedback_watermark = str(watermark)
@@ -532,6 +536,7 @@ def _reduce(receipts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "decision_recorded": bool(decision_digests),
         "decision_watermark": latest_decision_watermark,
         "triage_verified": bool(decision_digests.intersection(terminal_digests)),
+        "close_verified": bool(close_digests),
     }
 
 
@@ -756,11 +761,22 @@ def _fresh_close_state(request: Request, classification: Mapping[str, Any], kind
         or data.get("issue_updated_at")
         or selected.get("updatedAt")
     )
+    # Prefer post-stamp mutate watermark so same-tick close sees equality after
+    # class-label stamp without pinning a pre-stamp decision watermark.
+    mut_blob = cond_blob(request, "mutate_triage_issue_labels")
+    mut_stamp = None
+    if mut_blob.get("ok") is True and mut_blob.get("status") in {"labels_verified", "planned"}:
+        candidate = mut_blob.get("issue_updated_at") or mut_blob.get("updatedAt") or mut_blob.get("updated_at")
+        if isinstance(candidate, str) and candidate:
+            mut_stamp = candidate
+            if not updated_at or str(mut_stamp) >= str(updated_at):
+                updated_at = mut_stamp
     classified_updated = (
         data.get("classified_updatedAt")
         or issue_blob.get("classified_updatedAt")
         or labels_blob.get("classified_updatedAt")
         or selected.get("classified_updatedAt")
+        or mut_stamp
         or updated_at
     )
     preexisting = data.get("preexisting_labels")
@@ -834,7 +850,7 @@ def _publish_close_authorization(request: Request) -> Result:
         )
     elif kind == "out_of_scope":
         auto_close = _bool_flag(
-            data.get("auto_close_out_of_scope", selected.get("auto_close_out_of_scope", cfg.get("auto_close_out_of_scope", False))),
+            data.get("auto_close_out_of_scope", selected.get("auto_close_out_of_scope", cfg.get("auto_close_out_of_scope", True))),
             False,
         )
         goal = str(

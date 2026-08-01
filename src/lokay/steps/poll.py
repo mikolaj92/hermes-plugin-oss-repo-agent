@@ -72,7 +72,7 @@ def _repo_context(entry: dict[str, Any], data: dict[str, Any], cfg: dict[str, An
         "triage_goal": str(entry.get("triage_goal") or data.get("triage_goal") or cfg.get("repo_goal") or ""),
         "triage_context_paths": entry.get("triage_context_paths", data.get("triage_context_paths", cfg.get("triage_context_paths", ()))),
         "auto_close_duplicates": entry.get("auto_close_duplicates", data.get("auto_close_duplicates", cfg.get("auto_close_duplicates", False))),
-        "auto_close_out_of_scope": entry.get("auto_close_out_of_scope", data.get("auto_close_out_of_scope", cfg.get("auto_close_out_of_scope", False))),
+        "auto_close_out_of_scope": entry.get("auto_close_out_of_scope", data.get("auto_close_out_of_scope", cfg.get("auto_close_out_of_scope", True))),
     }
 
 
@@ -151,7 +151,7 @@ def normalize_issue_rows(request: Request) -> Result:
                 "triage_goal": str(issue.get("triage_goal") or source.get("triage_goal") or data.get("triage_goal") or ""),
                 "triage_context_paths": issue.get("triage_context_paths", source.get("triage_context_paths", data.get("triage_context_paths", ()))),
                 "auto_close_duplicates": issue.get("auto_close_duplicates", source.get("auto_close_duplicates", data.get("auto_close_duplicates", False))),
-                "auto_close_out_of_scope": issue.get("auto_close_out_of_scope", source.get("auto_close_out_of_scope", data.get("auto_close_out_of_scope", False))),
+                "auto_close_out_of_scope": issue.get("auto_close_out_of_scope", source.get("auto_close_out_of_scope", data.get("auto_close_out_of_scope", True))),
                 "number": int(issue.get("number") or 0),
                 "title": str(issue.get("title") or ""),
                 "body": str(issue.get("body") or ""),
@@ -270,9 +270,21 @@ def select_triage_candidate(request: Request) -> Result:
             if type(decision_recorded) is not bool or type(triage_verified) is not bool:
                 raise ValueError("malformed_receipt_index")
             terminal_labels = {value.casefold() for value in (ready, duplicate, out_of_scope, frozen, blocked, in_progress, pr_opened)}
-            if not pending and not ({frozen.casefold(), ready.casefold()} <= labels) and needs_feedback.casefold() not in labels and labels.intersection(terminal_labels):
+            auto_close_out = bool(row.get("auto_close_out_of_scope", data.get("auto_close_out_of_scope", cfg.get("auto_close_out_of_scope", True))))
+            close_verified = bool(summary.get("close_verified", False))
+            if (
+                not pending
+                and auto_close_out
+                and not close_verified
+                and out_of_scope.casefold() in labels
+                and needs_feedback.casefold() not in labels
+                and not ({frozen.casefold(), ready.casefold()} <= labels)
+            ):
+                # Residual OPEN + class label still needs authorized close.
+                candidate_class, rank = "reconcile_decision", 0
+            elif not pending and not ({frozen.casefold(), ready.casefold()} <= labels) and needs_feedback.casefold() not in labels and labels.intersection(terminal_labels):
                 continue
-            if pending:
+            elif pending:
                 candidate_class, rank = "reconcile_pending", 0
             elif frozen.casefold() in labels and ready.casefold() in labels:
                 candidate_class, rank = "frozen_ready_conflict", 1

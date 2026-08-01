@@ -523,6 +523,52 @@ class ReceiptTests(unittest.TestCase):
         self.assertTrue(index["triage_verified"])
         self.assertEqual(index["feedback_watermark"], "2026-08-01T17:52:37Z")
 
+    def test_index_exposes_close_verified_from_close_stage(self):
+        summary = receipts._reduce(
+            [
+                {
+                    "stage": "decision",
+                    "decision_digest": "a" * 64,
+                    "issue_updated_at": "2026-07-28T10:00:00Z",
+                    "receipt_path": "decision-a.json",
+                },
+                {
+                    "stage": "mutation-verified",
+                    "decision_digest": "a" * 64,
+                    "verified_readback_state": "verified",
+                    "issue_updated_at": "2026-08-01T17:52:37Z",
+                    "receipt_path": "mutation-verified-a.json",
+                },
+                {
+                    "stage": "close-verified",
+                    "decision_digest": "a" * 64,
+                    "verified_readback_state": "closed",
+                    "issue_updated_at": "2026-08-01T18:00:00Z",
+                    "receipt_path": "close-verified-a.json",
+                },
+            ]
+        )
+        self.assertTrue(summary["close_verified"])
+        self.assertTrue(summary["triage_verified"])
+        pending = receipts._reduce(
+            [
+                {
+                    "stage": "decision",
+                    "decision_digest": "b" * 64,
+                    "issue_updated_at": "2026-07-28T10:00:00Z",
+                    "receipt_path": "decision-b.json",
+                },
+                {
+                    "stage": "mutation-verified",
+                    "decision_digest": "b" * 64,
+                    "verified_readback_state": "verified",
+                    "issue_updated_at": "2026-08-01T17:52:37Z",
+                    "receipt_path": "mutation-verified-b.json",
+                },
+            ]
+        )
+        self.assertFalse(pending["close_verified"])
+
     def test_feedback_receipt_identity_scopes_by_digest(self):
         comment_id = 5117775811
         old_digest = "c" * 64

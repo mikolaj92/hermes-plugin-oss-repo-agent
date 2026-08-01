@@ -40,7 +40,7 @@ enabled = true
 context_paths = ["README.md"]
 context_max_bytes = 131072
 auto_close_duplicates = false
-auto_close_out_of_scope = false
+auto_close_out_of_scope = true
 
 [executor]
 enabled = true
@@ -65,4 +65,4 @@ priority = 100
 # triage_goal = ""
 # triage_context_paths = ["README.md"]
 # auto_close_duplicates = false
-# auto_close_out_of_scope = false
+# auto_close_out_of_scope = true

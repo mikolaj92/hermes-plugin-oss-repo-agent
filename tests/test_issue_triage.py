@@ -123,16 +123,74 @@ class CloseGateTests(unittest.TestCase):
             result = issue_triage.authorize_duplicate_close(classification, args["state"], args["comments"], auto_close=args["auto_close"])
             self.assertFalse(result["authorized"])
 
-    def test_out_of_scope_requires_goal_policy_and_independent_evidence(self) -> None:
+    def test_out_of_scope_authorizes_on_classification_when_auto_close(self) -> None:
         classification = payload("out_of_scope")
-        state = {"repo": "owner/repo", "number": 42, "state": "OPEN", "updatedAt": "2026-07-28T10:00:00Z", "classified_updatedAt": "2026-07-28T10:00:00Z", "labels": ["wontfix"], "preexisting_labels": ["wontfix"]}
-        result = issue_triage.authorize_out_of_scope_close(classification, state, [], auto_close=True, triage_goal="Automate issue triage", reject_labels=("wontfix",))
+        state = {
+            "repo": "owner/repo",
+            "number": 42,
+            "state": "OPEN",
+            "updatedAt": "2026-07-28T10:00:00Z",
+            "classified_updatedAt": "2026-07-28T10:00:00Z",
+            "labels": [],
+            "preexisting_labels": [],
+        }
+        # Empty goal / labels still authorize: evidence is the durable classification.
+        result = issue_triage.authorize_out_of_scope_close(
+            classification,
+            state,
+            [],
+            auto_close=True,
+            triage_goal="",
+            reject_labels=("wontfix",),
+        )
         self.assertTrue(result["authorized"])
-        self.assertEqual(result["evidence"]["label"], "wontfix")
-        for auto_close, goal, labels in ((False, "goal", ["wontfix"]), (True, "", ["wontfix"]), (True, "goal", [])):
-            changed = {**state, "labels": labels, "preexisting_labels": labels}
-            result = issue_triage.authorize_out_of_scope_close(classification, changed, [], auto_close=auto_close, triage_goal=goal, reject_labels=("wontfix",))
-            self.assertFalse(result["authorized"])
+        self.assertEqual(result["reason"], "classified_out_of_scope")
+        # Preexisting reject label remains optional enrichment.
+        labeled = {**state, "labels": ["wontfix"], "preexisting_labels": ["wontfix"]}
+        enriched = issue_triage.authorize_out_of_scope_close(
+            classification,
+            labeled,
+            [],
+            auto_close=True,
+            triage_goal="Automate issue triage",
+            reject_labels=("wontfix",),
+        )
+        self.assertTrue(enriched["authorized"])
+        self.assertEqual(enriched["reason"], "preexisting_out_of_scope_label")
+        # issue_changed is not a gate for classification-only out_of_scope.
+        drifted = {**state, "updatedAt": "2026-07-28T10:01:00Z"}
+        still = issue_triage.authorize_out_of_scope_close(
+            classification,
+            drifted,
+            [],
+            auto_close=True,
+            triage_goal="",
+            reject_labels=("wontfix",),
+        )
+        self.assertTrue(still["authorized"])
+        for change in (
+            {"auto_close": False},
+            {"state": {**state, "state": "CLOSED"}},
+            {"state": {**state, "labels": ["frozen"]}},
+            {"classification": payload("needs_feedback")},
+        ):
+            args = {
+                "auto_close": True,
+                "state": state,
+                "classification": classification,
+                "triage_goal": "",
+                "reject_labels": ("wontfix",),
+                **change,
+            }
+            denied = issue_triage.authorize_out_of_scope_close(
+                args["classification"],
+                args["state"],
+                [],
+                auto_close=args["auto_close"],
+                triage_goal=args["triage_goal"],
+                reject_labels=args["reject_labels"],
+            )
+            self.assertFalse(denied["authorized"], change)
 
     def test_trusted_actor_and_verified_precedence(self) -> None:
         self.assertTrue(issue_triage.is_trusted_maintainer({"authorAssociation": "OWNER", "author": {"login": "alice"}}))
@@ -235,7 +293,7 @@ class MutationAtomTests(unittest.TestCase):
         self.assertEqual(result.get("reason"), "already_labeled")
         self.assertEqual(result["issue_updated_at"], "2026-08-01T17:52:37Z")
 
-    def test_out_of_scope_feedback_stamps_class_label(self):
+    def test_out_of_scope_auto_close_decides_close_and_stamps_class_label(self):
         from lokay.steps import issue_triage_mutations as m
         from unittest import mock
 
@@ -269,10 +327,11 @@ class MutationAtomTests(unittest.TestCase):
                 "needs_feedback_label": "ai:needs-feedback",
                 "out_of_scope_label": "ai:out-of-scope",
                 "duplicate_label": "duplicate",
+                "auto_close_out_of_scope": True,
             },
         }
         decided = m.decide_triage_mutation(request)
-        self.assertEqual(decided["action"], "feedback")
+        self.assertEqual(decided["action"], "close")
         self.assertEqual(decided["classification"], "out_of_scope")
         self.assertEqual(decided["label"], "ai:out-of-scope")
         ensured_request = {
@@ -292,6 +351,46 @@ class MutationAtomTests(unittest.TestCase):
         mutated = m.mutate_triage_issue_labels(ensured_request)
         self.assertEqual(mutated["status"], "planned")
         self.assertEqual(mutated["label"], "ai:out-of-scope")
+
+    def test_out_of_scope_feedback_when_auto_close_disabled(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        decided = m.decide_triage_mutation(
+            {
+                "input": {
+                    "repo": "owner/repo",
+                    "number": 3736,
+                    "dry_run": True,
+                    "auto_close_out_of_scope": False,
+                    "conduction": {
+                        "read_triage_labels": {
+                            "ok": True,
+                            "status": "triage_labels_read",
+                            "labels": [],
+                        },
+                        "classify_triage_issue": {
+                            "ok": True,
+                            "status": "classified",
+                            "classification": {
+                                "classification": "out_of_scope",
+                                "reason": "Already shipped",
+                                "question": "",
+                                "canonical_issue": 0,
+                            },
+                            "action": "out_of_scope",
+                            "decision_digest": "c" * 64,
+                        },
+                    },
+                },
+                "config": {
+                    "needs_feedback_label": "ai:needs-feedback",
+                    "out_of_scope_label": "ai:out-of-scope",
+                    "auto_close_out_of_scope": False,
+                },
+            }
+        )
+        self.assertEqual(decided["action"], "feedback")
+        self.assertEqual(decided["label"], "ai:out-of-scope")
 
     def test_duplicate_feedback_stamps_class_label(self):
         from lokay.steps import issue_triage_mutations as m

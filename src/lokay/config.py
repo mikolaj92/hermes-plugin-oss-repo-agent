@@ -72,7 +72,7 @@ class TriageConfig:
     context_paths: tuple[str, ...] = ("README.md",)
     context_max_bytes: int = 131_072
     auto_close_duplicates: bool = False
-    auto_close_out_of_scope: bool = False
+    auto_close_out_of_scope: bool = True
 
     def __post_init__(self) -> None:
         for name in ("enabled", "auto_close_duplicates", "auto_close_out_of_scope"):
@@ -426,7 +426,7 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
         context_paths=_context_paths(triage_data.get("context_paths"), "triage.context_paths", ("README.md",)),
         context_max_bytes=triage_data.get("context_max_bytes", 131_072),
         auto_close_duplicates=_bool(triage_data.get("auto_close_duplicates", False), "triage.auto_close_duplicates"),
-        auto_close_out_of_scope=_bool(triage_data.get("auto_close_out_of_scope", False), "triage.auto_close_out_of_scope"),
+        auto_close_out_of_scope=_bool(triage_data.get("auto_close_out_of_scope", True), "triage.auto_close_out_of_scope"),
     )
     return AgentConfig(
         mode=mode,

@@ -311,17 +311,26 @@ def authorize_out_of_scope_close(
     reject_labels: Sequence[str],
     lokay_logins: Sequence[str] = ("lokay", "lokay-intake", "lokay-fixer"),
 ) -> dict[str, Any]:
-    rejected = _base_close_gate(classification, fresh_state, "out_of_scope", auto_close)
-    if rejected:
-        return rejected
-    if not triage_goal.strip():
-        return {"authorized": False, "reason": "triage_goal_missing"}
-    labels = {str(value).casefold(): str(value) for value in fresh_state.get("labels") or ()}
+    # Classification + auto_close is sufficient: durable out_of_scope closes.
+    # issue_changed is intentionally skipped here — residual re-entry after the
+    # bot class-label stamp (and later human noise) must still close. Duplicate
+    # close keeps the stricter base gate. triage_goal kept for call-site compat.
+    _ = triage_goal
+    if classification.get("classification") != "out_of_scope":
+        return {"authorized": False, "reason": "classification_mismatch"}
+    if not auto_close:
+        return {"authorized": False, "reason": "auto_close_disabled"}
+    if str(fresh_state.get("state") or "").upper() != "OPEN":
+        return {"authorized": False, "reason": "issue_not_open"}
+    labels = {str(value).casefold() for value in fresh_state.get("labels") or ()}
+    if "frozen" in labels:
+        return {"authorized": False, "reason": "issue_frozen"}
+    labels_map = {str(value).casefold(): str(value) for value in fresh_state.get("labels") or ()}
     preexisting = {str(value).casefold() for value in fresh_state.get("preexisting_labels") or ()}
     for configured in reject_labels:
         key = str(configured).casefold()
-        if key in labels and key in preexisting:
-            return {"authorized": True, "reason": "preexisting_out_of_scope_label", "evidence": {"label": labels[key]}}
+        if key in labels_map and key in preexisting:
+            return {"authorized": True, "reason": "preexisting_out_of_scope_label", "evidence": {"label": labels_map[key]}}
     scope_terms = ("out of scope", "unrelated", "not related to this repository")
     for comment in comments:
         body = str(comment.get("body") or "")
@@ -337,7 +346,14 @@ def authorize_out_of_scope_close(
                 "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
             },
         }
-    return {"authorized": False, "reason": "trusted_out_of_scope_evidence_missing"}
+    return {
+        "authorized": True,
+        "reason": "classified_out_of_scope",
+        "evidence": {
+            "classification": "out_of_scope",
+            "reason": str(classification.get("reason") or ""),
+        },
+    }
 
 
 def triage_precedence_action(row: Mapping[str, Any]) -> dict[str, Any] | None:

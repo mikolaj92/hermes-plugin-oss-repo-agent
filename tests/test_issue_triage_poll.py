@@ -112,6 +112,65 @@ class TriageCandidateTests(unittest.TestCase):
         self.assertEqual(out["selected"]["number"], 1)
         self.assertEqual(out["candidate_class"], "reconcile_decision")
 
+    def test_open_out_of_scope_reenters_until_close_verified(self):
+        waiting = row("a/r", 1, ["ai:out-of-scope"], updated="2026-08-01T17:52:37Z")
+        residual = self.call(
+            [waiting],
+            {
+                "a/r#1": {
+                    "decision_recorded": True,
+                    "triage_verified": True,
+                    "decision_watermark": "2026-07-28T10:00:00Z",
+                    "feedback_watermark": "2026-08-01T17:52:37Z",
+                    "close_verified": False,
+                }
+            },
+        )
+        self.assertEqual(residual["candidate_class"], "reconcile_decision")
+        self.assertEqual(residual["selected"]["number"], 1)
+        frozen = self.call(
+            [waiting],
+            {
+                "a/r#1": {
+                    "decision_recorded": True,
+                    "triage_verified": True,
+                    "decision_watermark": "2026-07-28T10:00:00Z",
+                    "feedback_watermark": "2026-08-01T17:52:37Z",
+                    "close_verified": True,
+                }
+            },
+        )
+        self.assertIsNone(frozen["selected"])
+        disabled = poll.select_triage_candidate(
+            {
+                "input": {
+                    "rows": [waiting],
+                    "receipt_index": {
+                        "a/r#1": {
+                            "decision_recorded": True,
+                            "triage_verified": True,
+                            "decision_watermark": "2026-07-28T10:00:00Z",
+                            "close_verified": False,
+                        }
+                    },
+                    "auto_close_out_of_scope": False,
+                    "dry_run": False,
+                },
+                "config": {
+                    "ready_label": "ai:ready",
+                    "needs_feedback_label": "ai:needs-feedback",
+                    "duplicate_label": "duplicate",
+                    "out_of_scope_label": "ai:out-of-scope",
+                    "frozen_label": "frozen",
+                    "blocked_label": "ai:blocked",
+                    "in_progress_label": "ai:in-progress",
+                    "pr_opened_label": "ai:pr-opened",
+                    "auto_close_out_of_scope": False,
+                },
+            }
+        )
+        self.assertIsNone(disabled["selected"])
+
     def test_malformed_timestamp_fails_closed(self):
         out = self.call([row("a/r", 1, ["ai:needs-feedback"], updated="yesterday")], {"a/r#1": {"feedback_watermark": "2026-07-28T10:00:00Z"}})
         self.assertEqual(out["status"], "failed")

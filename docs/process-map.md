@@ -188,13 +188,16 @@ Source: `classify_triage_issue`.
 | `needs_feedback` | ask human | feedback label + question |
 | `ambiguous` | unsafe classify | **mapped to** `needs_feedback` + question |
 | `duplicate` | points at canonical | feedback → optional authorized close |
-| `out_of_scope` | not for agent | feedback → optional authorized close |
+| `out_of_scope` | not for agent | `action=close` when `auto_close_out_of_scope` (default on); stamps class label then closes |
 
 **Not a classification:** `frozen`. Frozen is **label precedence** in
 `decide_triage_mutation`: if frozen present, remove ready or noop — frozen wins
 over classifier output.
 
-Close is never “classify implies close”; it requires close authorization receipts.
+Close still requires close-authorization receipts. For `out_of_scope`, durable
+classification + `auto_close_out_of_scope` authorizes close (no goal / no
+independent label evidence required). Residual OPEN + `ai:out-of-scope` re-enters
+until close is verified.
 
 ### 6.2 Direction (`decide_issue_action`)
 

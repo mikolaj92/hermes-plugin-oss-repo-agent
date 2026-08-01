@@ -226,7 +226,7 @@ def _configured_label(data: Mapping[str, Any], cfg: Mapping[str, Any], action: s
     labels = labels if isinstance(labels, Mapping) else {}
     if not label and action in {"add_ready", "remove_ready", "ready"}:
         label = labels.get("ready") or labels.get(action) or data.get("ready_label") or cfg.get("ready_label")
-    if not label and action == "feedback":
+    if not label and action in {"feedback", "close"}:
         # Class labels are terminal for poll; stamp those instead of needs_feedback.
         if classification in {"duplicate", "out_of_scope"}:
             label = (
@@ -235,7 +235,7 @@ def _configured_label(data: Mapping[str, Any], cfg: Mapping[str, Any], action: s
                 or labels.get(classification)
                 or ("duplicate" if classification == "duplicate" else "ai:out-of-scope")
             )
-        else:
+        elif action == "feedback":
             label = (
                 data.get("needs_feedback_label")
                 or cfg.get("needs_feedback_label")
@@ -245,6 +245,17 @@ def _configured_label(data: Mapping[str, Any], cfg: Mapping[str, Any], action: s
     if not label and action:
         label = labels.get(action) or data.get(f"{action}_label") or cfg.get(f"{action}_label")
     return str(label or "").strip()
+
+
+def _auto_close_out_of_scope(request: Mapping[str, Any]) -> bool:
+    data, cfg = input_of(request), cfg_of(request)
+    selected = _selected(request)
+    value = data.get("auto_close_out_of_scope", selected.get("auto_close_out_of_scope", cfg.get("auto_close_out_of_scope", True)))
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 
@@ -288,13 +299,15 @@ def decide_triage_mutation(request: Mapping[str, Any]) -> dict[str, Any]:
         action = str(data["action"])
     elif classification == "ready":
         action = "add_ready"
-    elif classification in {"needs_feedback", "duplicate", "out_of_scope", "ambiguous"}:
+    elif classification == "out_of_scope":
+        action = "close" if _auto_close_out_of_scope(request) else "feedback"
+    elif classification in {"needs_feedback", "duplicate", "ambiguous"}:
         action = "feedback"
     elif classification in {"close", "closed"}:
         action = "close"
     else:
         return fail("unknown_triage_action", failure_class="terminal", retry_safe=False, **_identity(request))
-    label = _configured_label(data, cfg, action, classification) if action in {"add_ready", "feedback", "label"} else None
+    label = _configured_label(data, cfg, action, classification) if action in {"add_ready", "feedback", "label", "close"} else None
     result = ok(
         status="mutation_decided",
         action=action,
@@ -321,7 +334,7 @@ def ensure_triage_label(request: Mapping[str, Any]) -> dict[str, Any]:
     bad = _invalid(repo, number)
     if _frozen_state(request):
         return noop("frozen", **_identity(request))
-    gate = _gate(request, "add_ready", "remove_ready", "label", "feedback")
+    gate = _gate(request, "add_ready", "remove_ready", "label", "feedback", "close")
     if gate is not None:
         return gate
     if bad:
@@ -365,7 +378,7 @@ def ensure_triage_label(request: Mapping[str, Any]) -> dict[str, Any]:
 
 def mutate_triage_issue_labels(request: Mapping[str, Any]) -> dict[str, Any]:
     """Add/remove a classification label, then verify with a fresh issue read."""
-    gate = _gate(request, "add_ready", "remove_ready", "label", "feedback")
+    gate = _gate(request, "add_ready", "remove_ready", "label", "feedback", "close")
     if gate is not None:
         return gate
     data, cfg, repo, number, gh = _values(request)
@@ -397,7 +410,7 @@ def mutate_triage_issue_labels(request: Mapping[str, Any]) -> dict[str, Any]:
         if not label:
             names = cfg.get("labels") if isinstance(cfg.get("labels"), Mapping) else {}
             # Terminal class labels win over needs_feedback for poll freeze.
-            if action == "feedback" and classification in {"duplicate", "out_of_scope"}:
+            if action in {"feedback", "close"} and classification in {"duplicate", "out_of_scope"}:
                 kind = classification
             elif action == "feedback" or classification in {"", "ambiguous"}:
                 kind = "needs_feedback"
