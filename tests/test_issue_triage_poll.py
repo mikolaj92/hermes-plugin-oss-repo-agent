@@ -63,7 +63,7 @@ class TriageCandidateTests(unittest.TestCase):
         fresh = self.call([waiting], {"a/r#1": {"feedback_watermark": "2026-07-28T10:00:00Z"}})
         self.assertEqual(fresh["candidate_class"], "feedback_updated")
 
-    def test_verified_receipt_freezes_unchanged_unlabelled_issue(self):
+    def test_verified_receipt_reenters_unlabelled_issue(self):
         waiting = row("a/r", 1, updated="2026-07-28T10:01:00Z")
         summary = {
             "decision_recorded": True,
@@ -71,7 +71,8 @@ class TriageCandidateTests(unittest.TestCase):
             "decision_watermark": "2026-07-28T10:01:00Z",
             "feedback_watermark": "2026-07-28T10:01:00Z",
         }
-        self.assertIsNone(self.call([waiting], {"a/r#1": summary})["selected"])
+        out = self.call([waiting], {"a/r#1": summary})
+        self.assertEqual(out["candidate_class"], "reconcile_decision")
         waiting["updatedAt"] = "2026-07-28T10:02:00Z"
         fresh = self.call([waiting], {"a/r#1": summary})
         self.assertEqual(fresh["candidate_class"], "feedback_updated")
@@ -86,7 +87,7 @@ class TriageCandidateTests(unittest.TestCase):
         out = self.call([waiting], {"a/r#1": summary})
         self.assertEqual(out["candidate_class"], "reconcile_decision")
 
-    def test_decision_and_feedback_verified_without_labels_is_frozen(self):
+    def test_decision_and_feedback_verified_without_labels_reenters(self):
         waiting = row("a/r", 1, updated="2026-07-29T10:27:00Z")
         summary = {
             "decision_recorded": True,
@@ -95,8 +96,8 @@ class TriageCandidateTests(unittest.TestCase):
             "feedback_watermark": "2026-07-29T10:27:00Z",
         }
         out = self.call([waiting], {"a/r#1": summary})
-        self.assertIsNone(out["selected"])
-        self.assertEqual(out["candidate_count"], 0)
+        self.assertEqual(out["selected"]["number"], 1)
+        self.assertEqual(out["candidate_class"], "reconcile_decision")
 
     def test_malformed_timestamp_fails_closed(self):
         out = self.call([row("a/r", 1, ["ai:needs-feedback"], updated="yesterday")], {"a/r#1": {"feedback_watermark": "2026-07-28T10:00:00Z"}})

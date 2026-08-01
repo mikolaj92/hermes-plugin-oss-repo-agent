@@ -283,9 +283,12 @@ def select_triage_candidate(request: Request) -> Result:
                     if not isinstance(watermark, str):
                         raise ValueError("missing_triage_watermark")
                     _parse_updated_at(watermark, required=True)
-                    if triage_verified and _updated_at_key(updated_at) <= _updated_at_key(watermark):
-                        continue
-                    candidate_class, rank = ("feedback_updated", 3) if triage_verified else ("reconcile_decision", 0)
+                    if triage_verified and _updated_at_key(updated_at) > _updated_at_key(watermark):
+                        candidate_class, rank = "feedback_updated", 3
+                    else:
+                        # Verified feedback without a triage label is incomplete;
+                        # keep reconciling until needs_feedback/ready/etc. lands.
+                        candidate_class, rank = "reconcile_decision", 0
                 else:
                     candidate_class, rank = "untriaged", 2
             elif needs_feedback.casefold() in labels:
