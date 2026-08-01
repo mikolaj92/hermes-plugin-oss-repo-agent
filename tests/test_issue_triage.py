@@ -154,6 +154,143 @@ class MutationAtomTests(unittest.TestCase):
         self.assertEqual(result["status"], "planned")
         self.assertEqual(result["label"], "AI:READY")
 
+    def test_out_of_scope_feedback_stamps_class_label(self):
+        from lokay.steps import issue_triage_mutations as m
+        from unittest import mock
+
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 3736,
+                "dry_run": True,
+                "conduction": {
+                    "read_triage_labels": {
+                        "ok": True,
+                        "status": "triage_labels_read",
+                        "labels": [],
+                        "comments": [],
+                    },
+                    "classify_triage_issue": {
+                        "ok": True,
+                        "status": "classified",
+                        "classification": {
+                            "classification": "out_of_scope",
+                            "reason": "Already shipped",
+                            "question": "",
+                            "canonical_issue": 0,
+                        },
+                        "action": "out_of_scope",
+                        "decision_digest": "c" * 64,
+                    },
+                },
+            },
+            "config": {
+                "needs_feedback_label": "ai:needs-feedback",
+                "out_of_scope_label": "ai:out-of-scope",
+                "duplicate_label": "duplicate",
+            },
+        }
+        decided = m.decide_triage_mutation(request)
+        self.assertEqual(decided["action"], "feedback")
+        self.assertEqual(decided["classification"], "out_of_scope")
+        self.assertEqual(decided["label"], "ai:out-of-scope")
+        ensured_request = {
+            "input": {
+                **request["input"],
+                "conduction": {
+                    **request["input"]["conduction"],
+                    "decide_triage_mutation": decided,
+                },
+            },
+            "config": request["config"],
+        }
+        with mock.patch.object(m, "_repo_labels", return_value=[{"name": "ai:out-of-scope", "color": "B60205", "description": ""}]):
+            ensured = m.ensure_triage_label(ensured_request)
+        self.assertEqual(ensured["status"], "label_resolved")
+        self.assertEqual(ensured["label"], "ai:out-of-scope")
+        mutated = m.mutate_triage_issue_labels(ensured_request)
+        self.assertEqual(mutated["status"], "planned")
+        self.assertEqual(mutated["label"], "ai:out-of-scope")
+
+    def test_duplicate_feedback_stamps_class_label(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        decided = m.decide_triage_mutation(
+            {
+                "input": {
+                    "repo": "owner/repo",
+                    "number": 9,
+                    "dry_run": True,
+                    "conduction": {
+                        "read_triage_labels": {
+                            "ok": True,
+                            "status": "triage_labels_read",
+                            "labels": [],
+                        },
+                        "classify_triage_issue": {
+                            "ok": True,
+                            "status": "classified",
+                            "classification": {
+                                "classification": "duplicate",
+                                "reason": "Same as #1",
+                                "question": "",
+                                "canonical_issue": 1,
+                            },
+                            "action": "duplicate",
+                            "decision_digest": "d" * 64,
+                        },
+                    },
+                },
+                "config": {
+                    "needs_feedback_label": "ai:needs-feedback",
+                    "duplicate_label": "duplicate",
+                    "out_of_scope_label": "ai:out-of-scope",
+                },
+            }
+        )
+        self.assertEqual(decided["action"], "feedback")
+        self.assertEqual(decided["classification"], "duplicate")
+        self.assertEqual(decided["label"], "duplicate")
+
+    def test_needs_feedback_still_stamps_needs_feedback(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        decided = m.decide_triage_mutation(
+            {
+                "input": {
+                    "repo": "owner/repo",
+                    "number": 12,
+                    "dry_run": True,
+                    "conduction": {
+                        "read_triage_labels": {
+                            "ok": True,
+                            "status": "triage_labels_read",
+                            "labels": [],
+                        },
+                        "classify_triage_issue": {
+                            "ok": True,
+                            "status": "classified",
+                            "classification": {
+                                "classification": "needs_feedback",
+                                "reason": "Need intent",
+                                "question": "What next?",
+                                "canonical_issue": 0,
+                            },
+                            "action": "needs_feedback",
+                            "decision_digest": "e" * 64,
+                        },
+                    },
+                },
+                "config": {
+                    "needs_feedback_label": "ai:needs-feedback",
+                    "out_of_scope_label": "ai:out-of-scope",
+                },
+            }
+        )
+        self.assertEqual(decided["action"], "feedback")
+        self.assertEqual(decided["classification"], "needs_feedback")
+        self.assertEqual(decided["label"], "ai:needs-feedback")
+
     def test_verified_triage_precedes_legacy_direction_heuristic(self):
         from lokay.steps import issue_direction
 

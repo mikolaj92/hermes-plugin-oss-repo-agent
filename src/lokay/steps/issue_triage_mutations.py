@@ -227,13 +227,21 @@ def _configured_label(data: Mapping[str, Any], cfg: Mapping[str, Any], action: s
     if not label and action in {"add_ready", "remove_ready", "ready"}:
         label = labels.get("ready") or labels.get(action) or data.get("ready_label") or cfg.get("ready_label")
     if not label and action == "feedback":
-        # Poll re-entry keys only on needs_feedback; class labels are terminal.
-        label = (
-            data.get("needs_feedback_label")
-            or cfg.get("needs_feedback_label")
-            or labels.get("needs_feedback")
-            or "ai:needs-feedback"
-        )
+        # Class labels are terminal for poll; stamp those instead of needs_feedback.
+        if classification in {"duplicate", "out_of_scope"}:
+            label = (
+                data.get(f"{classification}_label")
+                or cfg.get(f"{classification}_label")
+                or labels.get(classification)
+                or ("duplicate" if classification == "duplicate" else "ai:out-of-scope")
+            )
+        else:
+            label = (
+                data.get("needs_feedback_label")
+                or cfg.get("needs_feedback_label")
+                or labels.get("needs_feedback")
+                or "ai:needs-feedback"
+            )
     if not label and action:
         label = labels.get(action) or data.get(f"{action}_label") or cfg.get(f"{action}_label")
     return str(label or "").strip()
@@ -384,12 +392,17 @@ def mutate_triage_issue_labels(request: Mapping[str, Any]) -> dict[str, Any]:
             return noop("ready_absent", action=action, decision_digest=digest or None, **_identity(request))
         verb = "--remove-label"
     else:
-        classification = str(data.get("classification") or decision.get("classification") or _classification(request) or "")
+        classification = str(data.get("classification") or decision.get("classification") or _classification(request) or "").strip().casefold()
         label = str(data.get("label") or decision.get("label") or _configured_label(data, cfg, action, classification)).strip()
         if not label:
             names = cfg.get("labels") if isinstance(cfg.get("labels"), Mapping) else {}
-            # Feedback always stamps needs_feedback so poll can re-enter.
-            kind = "needs_feedback" if action == "feedback" else (classification if classification not in {"", "ambiguous"} else "needs_feedback")
+            # Terminal class labels win over needs_feedback for poll freeze.
+            if action == "feedback" and classification in {"duplicate", "out_of_scope"}:
+                kind = classification
+            elif action == "feedback" or classification in {"", "ambiguous"}:
+                kind = "needs_feedback"
+            else:
+                kind = classification
             label = str(data.get(f"{kind}_label") or names.get(kind) or "").strip()
         if action == "add_ready" and not label:
             label = ready
