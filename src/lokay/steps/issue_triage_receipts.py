@@ -404,7 +404,16 @@ def _stage_request(request: Request, stage: str) -> Result:
     data, cfg = input_of(request), cfg_of(request)
     payload = _payload(request, stage)
     if stage in {"mutation-authorized", "mutation-verified", "close-authorized", "close-verified"} and not payload.get("decision_digest"):
-        for name in ("decide_triage_mutation", "publish_triage_mutation_authorization", "mutate_triage_issue_labels", "verify_triage_feedback"):
+        for name in (
+            "decide_triage_mutation",
+            "publish_triage_close_authorization",
+            "close_triage_issue",
+            "verify_triage_issue_closed",
+            "publish_triage_mutation_authorization",
+            "publish_triage_mutation_verification",
+            "mutate_triage_issue_labels",
+            "verify_triage_feedback",
+        ):
             blob = cond_blob(request, name)
             if isinstance(blob, Mapping) and blob.get("decision_digest"):
                 payload["decision_digest"] = blob["decision_digest"]
@@ -413,6 +422,12 @@ def _stage_request(request: Request, stage: str) -> Result:
             if isinstance(nested, Mapping) and nested.get("decision_digest"):
                 payload["decision_digest"] = nested["decision_digest"]
                 break
+    if stage == "close-verified":
+        closed = cond_blob(request, "verify_triage_issue_closed")
+        if closed.get("ok") is True and closed.get("status") in {"triage_issue_closed_verified", "already_closed", "planned"}:
+            payload.setdefault("verified_readback_state", "verified")
+            payload.setdefault("verified", True)
+            payload.setdefault("action", action or "close")
     if stage == "mutation-verified":
         labels = cond_blob(request, "mutate_triage_issue_labels")
         if labels.get("ok") is True and labels.get("status") in {"labels_verified", "planned"}:

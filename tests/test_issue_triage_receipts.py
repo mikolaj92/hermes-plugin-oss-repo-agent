@@ -611,6 +611,51 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(json.loads(legacy_path.read_text(encoding="utf-8"))["action"], "feedback")
         self.assertEqual(json.loads(Path(second["receipt_path"]).read_text(encoding="utf-8"))["action"], "close")
 
+    def test_close_verified_loads_digest_from_close_authorization(self):
+        digest = "a" * 64
+        out = receipts.publish_triage_close_verification(
+            self.req(
+                action="close",
+                selected={"repo": "owner/repo", "number": 42},
+                conduction={
+                    "publish_triage_close_authorization": {
+                        "ok": True,
+                        "status": "written",
+                        "decision_digest": digest,
+                        "action": "close",
+                        "payload": {
+                            "decision_digest": digest,
+                            "action": "close",
+                            "authorized": True,
+                            "repo": "owner/repo",
+                            "issue": 42,
+                            "number": 42,
+                        },
+                    },
+                    "verify_triage_issue_closed": {
+                        "ok": True,
+                        "status": "triage_issue_closed_verified",
+                        "repo": "owner/repo",
+                        "number": 42,
+                    },
+                    "select_triage_candidate": {
+                        "ok": True,
+                        "status": "selected",
+                        "selected": {"repo": "owner/repo", "number": 42},
+                    },
+                },
+            )
+        )
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "written", out)
+        self.assertTrue(
+            out["receipt_path"].endswith(f"close-verified-{digest}-close.json"),
+            out,
+        )
+        payload = out.get("payload") or {}
+        self.assertEqual(payload.get("decision_digest"), digest, payload)
+        self.assertEqual(payload.get("action"), "close", payload)
+
 
     def test_feedback_receipt_identity_scopes_by_digest(self):
         comment_id = 5117775811
