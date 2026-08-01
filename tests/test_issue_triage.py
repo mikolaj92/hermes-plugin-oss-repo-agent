@@ -154,6 +154,87 @@ class MutationAtomTests(unittest.TestCase):
         self.assertEqual(result["status"], "planned")
         self.assertEqual(result["label"], "AI:READY")
 
+    def test_mutate_returns_post_stamp_updated_at(self):
+        from lokay.steps import issue_triage_mutations as m
+        from unittest import mock
+
+        after = {
+            "labels": ["ai:needs-feedback"],
+            "state": "OPEN",
+            "stateReason": "",
+            "updatedAt": "2026-08-01T17:52:37Z",
+            "comments": [],
+        }
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 12,
+                "dry_run": False,
+                "action": "feedback",
+                "decision_digest": "a" * 64,
+                "conduction": {
+                    "read_triage_labels": {
+                        "ok": True,
+                        "status": "triage_labels_read",
+                        "labels": [],
+                        "updatedAt": "2026-07-29T14:23:58Z",
+                        "state": "OPEN",
+                        "comments": [],
+                    },
+                    "decide_triage_mutation": {
+                        "ok": True,
+                        "status": "mutation_decided",
+                        "action": "feedback",
+                        "label": "ai:needs-feedback",
+                        "classification": "needs_feedback",
+                        "decision_digest": "a" * 64,
+                    },
+                },
+            },
+            "config": {},
+        }
+        with mock.patch.object(m, "run_cmd", return_value=mock.Mock(stdout="", stderr="", returncode=0)), mock.patch.object(
+            m, "_read_issue", return_value=after
+        ):
+            result = m.mutate_triage_issue_labels(request)
+        self.assertEqual(result["status"], "labels_verified", result)
+        self.assertEqual(result["issue_updated_at"], "2026-08-01T17:52:37Z")
+        self.assertEqual(result["updatedAt"], "2026-08-01T17:52:37Z")
+
+        already = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 12,
+                "dry_run": False,
+                "action": "feedback",
+                "decision_digest": "a" * 64,
+                "conduction": {
+                    "read_triage_labels": {
+                        "ok": True,
+                        "status": "triage_labels_read",
+                        "labels": ["ai:needs-feedback"],
+                        "updatedAt": "2026-08-01T17:52:37Z",
+                        "state": "OPEN",
+                        "comments": [],
+                    },
+                    "decide_triage_mutation": {
+                        "ok": True,
+                        "status": "mutation_decided",
+                        "action": "feedback",
+                        "label": "ai:needs-feedback",
+                        "classification": "needs_feedback",
+                        "decision_digest": "a" * 64,
+                    },
+                },
+            },
+            "config": {},
+        }
+        with mock.patch.object(m, "run_cmd", side_effect=AssertionError("already labeled must not mutate")):
+            result = m.mutate_triage_issue_labels(already)
+        self.assertEqual(result["status"], "labels_verified", result)
+        self.assertEqual(result.get("reason"), "already_labeled")
+        self.assertEqual(result["issue_updated_at"], "2026-08-01T17:52:37Z")
+
     def test_out_of_scope_feedback_stamps_class_label(self):
         from lokay.steps import issue_triage_mutations as m
         from unittest import mock

@@ -442,6 +442,87 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(out["payload"]["verified_readback_state"], "verified")
         self.assertEqual(out["payload"]["label"], "ai:ready")
 
+    def test_mutation_verification_overwrites_pre_stamp_watermark(self):
+        digest = "c" * 64
+        post_stamp = "2026-08-01T17:52:37Z"
+        request = {
+            "input": {
+                "triage_receipts": str(self.root),
+                "dry_run": False,
+                "issue_updated_at": "2026-07-29T14:23:58Z",
+                "updated_at": "2026-07-29T14:23:58Z",
+                "conduction": {
+                    "intake_decide_triage_mutation": {
+                        "ok": True,
+                        "status": "mutation_decided",
+                        "repo": "owner/repo",
+                        "number": 42,
+                        "action": "feedback",
+                        "classification": "needs_feedback",
+                        "decision_digest": digest,
+                        "issue_updated_at": "2026-07-29T14:23:58Z",
+                    },
+                    "intake_mutate_triage_issue_labels": {
+                        "ok": True,
+                        "status": "labels_verified",
+                        "repo": "owner/repo",
+                        "number": 42,
+                        "label": "ai:needs-feedback",
+                        "verified": True,
+                        "mutated": True,
+                        "action": "feedback",
+                        "decision_digest": digest,
+                        "issue_updated_at": post_stamp,
+                        "updatedAt": post_stamp,
+                    },
+                    "intake_verify_triage_feedback": {
+                        "ok": True,
+                        "status": "noop",
+                        "reason": "action_not_selected",
+                    },
+                },
+            },
+            "config": {},
+        }
+        out = receipts.publish_triage_mutation_verification(request)
+        self.assertTrue(out["ok"], out)
+        payload = out["payload"]
+        self.assertEqual(payload["issue_updated_at"], post_stamp)
+        self.assertEqual(payload["updated_at"], post_stamp)
+        index = receipts.read_triage_receipt_index(self.req())["index"]
+        self.assertEqual(index["feedback_watermark"], post_stamp)
+
+    def test_index_advances_feedback_watermark_from_mutation_verified(self):
+        decision = dict(
+            self.payload,
+            stage="decision",
+            decision_digest="d" * 64,
+            issue_updated_at="2026-07-29T14:23:58Z",
+            selected={"repo": "owner/repo", "number": 42, "updatedAt": "2026-07-29T14:23:58Z"},
+        )
+        receipts.publish_triage_decision_receipt(self.req(payload=decision, updated_at="2026-07-29T14:23:58Z"))
+        feedback = dict(
+            decision,
+            stage="feedback-verified",
+            comment_id=5119067049,
+            verified_readback_state="verified",
+            issue_updated_at="2026-07-29T14:23:58Z",
+        )
+        receipts.publish_triage_feedback_receipt(self.req(payload=feedback, database_id=5119067049))
+        mutation = dict(
+            decision,
+            stage="mutation-verified",
+            verified_readback_state="verified",
+            action="feedback",
+            label="ai:needs-feedback",
+            issue_updated_at="2026-08-01T17:52:37Z",
+            updated_at="2026-08-01T17:52:37Z",
+        )
+        receipts.publish_triage_mutation_verification(self.req(payload=mutation, decision_digest="d" * 64))
+        index = receipts.read_triage_receipt_index(self.req())["index"]
+        self.assertTrue(index["triage_verified"])
+        self.assertEqual(index["feedback_watermark"], "2026-08-01T17:52:37Z")
+
     def test_feedback_receipt_identity_scopes_by_digest(self):
         comment_id = 5117775811
         old_digest = "c" * 64

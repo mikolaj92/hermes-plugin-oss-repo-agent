@@ -399,6 +399,12 @@ def _stage_request(request: Request, stage: str) -> Result:
                 payload.setdefault("label", labels.get("label"))
             if labels.get("action"):
                 payload.setdefault("action", labels.get("action"))
+            # Force post-mutation stamp; decision payloads carry the pre-stamp
+            # timestamp and setdefault would leave the self-reentry loop intact.
+            stamp = labels.get("issue_updated_at") or labels.get("updated_at") or labels.get("updatedAt")
+            if isinstance(stamp, str) and stamp:
+                payload["issue_updated_at"] = stamp
+                payload["updated_at"] = stamp
     try:
         root = _receipt_root(data, cfg)
         repo, _, issue = _identity({**data, **payload}, cfg, request, *_receipt_upstream(request, stage))
@@ -508,7 +514,7 @@ def _reduce(receipts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         if stage in {"mutation-verified", "feedback-verified", "close-verified"} or verified in {"verified", "succeeded", "closed"}:
             if digest:
                 terminal_digests.add(digest)
-        if stage in {"feedback-observed", "feedback-verified"}:
+        if stage in {"feedback-observed", "feedback-verified", "mutation-verified"}:
             if watermark is not None and (latest_feedback_watermark is None or str(watermark) > latest_feedback_watermark):
                 latest_feedback_watermark = str(watermark)
         if stage in {"mutation-authorized", "close-authorized"} or attempted in {"planned", "attempted", "uncertain", "started"}:

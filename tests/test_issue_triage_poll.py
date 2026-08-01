@@ -63,6 +63,19 @@ class TriageCandidateTests(unittest.TestCase):
         fresh = self.call([waiting], {"a/r#1": {"feedback_watermark": "2026-07-28T10:00:00Z"}})
         self.assertEqual(fresh["candidate_class"], "feedback_updated")
 
+    def test_mutation_verified_watermark_freezes_needs_feedback(self):
+        waiting = row("a/r", 1, ["ai:needs-feedback"], updated="2026-08-01T17:52:37Z")
+        summary = {
+            "decision_recorded": True,
+            "triage_verified": True,
+            "decision_watermark": "2026-07-29T14:23:58Z",
+            "feedback_watermark": "2026-08-01T17:52:37Z",
+        }
+        out = self.call([waiting], {"a/r#1": summary})
+        self.assertIsNone(out["selected"])
+        stale = self.call([waiting], {"a/r#1": {**summary, "feedback_watermark": "2026-07-29T14:23:58Z"}})
+        self.assertEqual(stale["candidate_class"], "feedback_updated")
+
     def test_verified_receipt_reenters_unlabelled_issue(self):
         waiting = row("a/r", 1, updated="2026-07-28T10:01:00Z")
         summary = {

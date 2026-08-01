@@ -418,6 +418,8 @@ def mutate_triage_issue_labels(request: Mapping[str, Any]) -> dict[str, Any]:
                 labels=labels,
                 label=label,
                 decision_digest=digest or None,
+                updatedAt=state.get("updatedAt"),
+                issue_updated_at=state.get("updatedAt"),
                 **_identity(request),
             )
         verb = "--add-label"
@@ -434,7 +436,18 @@ def mutate_triage_issue_labels(request: Mapping[str, Any]) -> dict[str, Any]:
         return fail("label_mutation_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, action=action, label=label, decision_digest=digest or None, **_identity(request))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         return fail("label_mutation_readback_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, action=action, label=label, decision_digest=digest or None, **_identity(request))
-    return ok(status="labels_verified", verified=True, mutated=True, action=action, labels=after["labels"], label=label, decision_digest=digest or None, **_identity(request))
+    return ok(
+        status="labels_verified",
+        verified=True,
+        mutated=True,
+        action=action,
+        labels=after["labels"],
+        label=label,
+        decision_digest=digest or None,
+        updatedAt=after.get("updatedAt"),
+        issue_updated_at=after.get("updatedAt"),
+        **_identity(request),
+    )
 
 
 def _marker(repo: str, number: int, digest: str) -> str:
