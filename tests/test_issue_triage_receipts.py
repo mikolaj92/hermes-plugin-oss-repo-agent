@@ -811,7 +811,7 @@ class ReceiptTests(unittest.TestCase):
         request = {
             "input": {
                 "triage_receipts": str(self.root),
-                "receipt_path": "/Users/mini-m4-main/.hermes/state/lokay-dispatch-live/auto-worker-dispatch-example.json",
+                "receipt_path": str(self.root / "dispatch-receipt.json"),
                 "paths": {"triage_receipts": str(self.root)},
                 "dry_run": False,
                 "conduction": {
@@ -854,7 +854,7 @@ class ReceiptTests(unittest.TestCase):
         request = {
             "input": {
                 "triage_receipts": str(self.root),
-                "receipt_path": "/Users/mini-m4-main/.hermes/state/lokay-dispatch-live/auto-worker-dispatch-example.json",
+                "receipt_path": str(self.root / "dispatch-receipt.json"),
                 "paths": {"triage_receipts": str(self.root)},
                 "dry_run": False,
                 "conduction": {

@@ -1303,9 +1303,12 @@ class IssueToPrTests(unittest.TestCase):
     def test_clone_handlers_reject_missing_clone_before_git_reads_or_fetch(self) -> None:
         missing = "/definitely/missing/lokay-clone"
         with mock.patch("lokay.steps.issue_to_pr.git") as git_mock, mock.patch(
+            "lokay.steps.issue_to_pr.status_porcelain"
+        ) as status_mock, mock.patch("lokay.steps.issue_to_pr.remote_url") as origin_mock, mock.patch(
             "lokay.steps.issue_to_pr.worktree_list"
         ) as worktree_mock, mock.patch("lokay.steps.issue_to_pr.remote_ref") as ref_mock:
             cases = (
+                (issue_to_pr.read_clone_preconditions, {"reconcile_fix_task": {"status": "ready", "ok": True}}),
                 (issue_to_pr.fetch_clone_origin, {"read_clone_preconditions": {"status": "ready", "ok": True}}),
                 (issue_to_pr.read_base_ref, {"fetch_clone_origin": {"status": "fetched", "ok": True}}),
                 (issue_to_pr.read_worktree_inventory, {"read_base_ref": {"status": "read", "ok": True}}),
@@ -1315,6 +1318,8 @@ class IssueToPrTests(unittest.TestCase):
                     out = handler(req({"clone_path": missing, "dry_run": False, "conduction": conduction}))
                     self.assertEqual(out["reason"], "clone_missing")
             git_mock.assert_not_called()
+            status_mock.assert_not_called()
+            origin_mock.assert_not_called()
             worktree_mock.assert_not_called()
             ref_mock.assert_not_called()
 
