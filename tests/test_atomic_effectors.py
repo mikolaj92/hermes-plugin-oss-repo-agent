@@ -793,6 +793,9 @@ class IssueToPrTests(unittest.TestCase):
             }))
         self.assertEqual(out["status"], "noop")
         self.assertEqual(out["reason"], "held_claim_task_unavailable")
+        self.assertTrue(out["already_merged"])
+        self.assertEqual(out["task_id"], "fix-1")
+        self.assertEqual(out["task"], ready_fix)
         self.assertEqual(out["repo"], "o/r")
         self.assertEqual(out["issue"], 9)
 
@@ -800,6 +803,7 @@ class IssueToPrTests(unittest.TestCase):
         read = {
             "status": "read",
             "ok": True,
+            "mutated": False,
             "repo": "o/r",
             "issue": 9,
             "board": "b",
@@ -832,79 +836,174 @@ class IssueToPrTests(unittest.TestCase):
 
     def test_already_merged_completion_bypasses_decide_noop(self) -> None:
         decide = {
+            "status": "noop", "ok": True, "mutated": False,
+            "reason": "held_claim_task_unavailable", "already_merged": True,
+            "operation": "decide_held_issue_already_merged", "repo": "o/r", "issue": 9,
+            "pr_number": 42, "number": 42, "branch": "3791-emp-suggested-edit",
+            "head_oid": "abc123", "board": "b", "task_id": "t1",
+        }
+        select = {"status": "selected", "ok": True, "mutated": False, "task_id": "t1", "board": "b", "repo": "o/r", "issue": 9}
+        task = {"id": "t1", "status": "ready", "title": "[issue] o/r#9: bug"}
+        read = {"status": "read", "ok": True, "mutated": False, "operation": "read_merged_closing_prs", "repo": "o/r", "issue": 9, "task_id": "t1", "prs": [{"number": 42, "headRefName": "3791-emp-suggested-edit", "headRefOid": "abc123", "closingIssuesReferences": [{"number": 9}]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            claim_root, receipt_root = Path(tmp) / "claim", Path(tmp) / "merge"
+            claim_root.mkdir(); receipt_root.mkdir()
+            (claim_root / "claim.json").write_text(json.dumps({"version": 1, "repo": "o/r", "issue": 9, "board": "b", "assignee": "mikolaj92", "claimedAt": "2026-07-29T12:18:17Z"}))
+            (receipt_root / "merge.json").write_text(json.dumps({"phase": "MERGED", "repo": "o/r", "issue": 9, "pr": 42, "headSha": "abc123", "verified_provenance": {"source": "github_pr_readback", "state": "MERGED", "repo": "o/r", "number": 42, "head_ref": "3791-emp-suggested-edit", "head_oid": "abc123"}}))
+            request = {"board": "b", "task_id": "t1", "active_issue_path": str(claim_root), "merge_receipts": str(receipt_root), "conduction": {"select_dispatch_task": select, "decide_held_issue_already_merged": decide, "read_merged_closing_prs": read}}
+            with mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json", return_value=[task]):
+                read_task = issue_to_pr.read_task_for_completion(req(request))
+            self.assertEqual(read_task["status"], "read")
+            with mock.patch("lokay.steps.issue_to_pr.run_cmd") as run:
+                run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+                completed = issue_to_pr.complete_task(req({**request, "result": "already merged", "dry_run": False, "conduction": {**request["conduction"], "read_task_for_completion": read_task, "decide_task_completion": {"status": "should_complete", "ok": True, "should_complete": True, "task_id": "t1"}}}))
+            self.assertEqual(completed["status"], "completed")
+            run.assert_called_once()
+            forged = {**decide, "head_oid": "forged"}
+            blocked = issue_to_pr.read_task_for_completion(req({
+                **request,
+                "conduction": {**request["conduction"], "decide_held_issue_already_merged": forged},
+            }))
+            self.assertEqual(blocked["status"], "noop")
+            self.assertEqual(blocked["reason"], "held_claim_task_unavailable")
+
+    def test_tagged_selector_noop_bypasses_completion_gate(self) -> None:
+        selector = {
             "status": "noop",
             "ok": True,
             "mutated": False,
             "reason": "held_claim_task_unavailable",
             "already_merged": True,
-            "operation": "decide_held_issue_already_merged",
+            "operation": "select_dispatch_task",
             "repo": "o/r",
             "issue": 9,
-            "pr_number": 42,
-            "number": 42,
-            "branch": "3791-emp-suggested-edit",
-            "head_oid": "abc123",
-            "board": "b",
             "task_id": "t1",
+            "task": {"id": "t1", "status": "ready", "title": "[fix-pr] o/r#9: leftover"},
         }
-        select = {
-            "status": "selected",
+        task = {"id": "t1", "status": "ready", "title": "[fix-pr] o/r#9: leftover"}
+        with tempfile.TemporaryDirectory() as tmp:
+            claim_root = Path(tmp) / "claim"
+            receipt_root = Path(tmp) / "merge"
+            claim_root.mkdir()
+            receipt_root.mkdir()
+            (claim_root / "claim.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "repo": "o/r",
+                        "issue": 9,
+                        "board": "b",
+                        "assignee": "lokay",
+                        "claimedAt": "2026-07-30T00:00:00Z",
+                    }
+                )
+            )
+            (receipt_root / "merge.json").write_text(
+                json.dumps(
+                    {
+                        "phase": "MERGED",
+                        "repo": "o/r",
+                        "pr": 42,
+                        "headSha": "abc123",
+                        "verified_provenance": {
+                            "source": "github_pr_readback",
+                            "state": "MERGED",
+                            "repo": "o/r",
+                            "number": 42,
+                            "head_ref": "ai/fix/9-leftover",
+                            "head_oid": "abc123",
+                        },
+                    }
+                )
+            )
+            request = {
+                "board": "b",
+                "task_id": "t1",
+                "active_issue_path": str(claim_root),
+                "merge_receipts": str(receipt_root),
+            }
+            with mock.patch("lokay.steps.issue_to_pr.hermes_kanban_json", return_value=[task]):
+                read = issue_to_pr.read_task_for_completion(
+                    req({**request, "conduction": {"select_dispatch_task": selector}})
+                )
+            self.assertEqual(read["status"], "read")
+            self.assertEqual(read["task_id"], "t1")
+            with mock.patch("lokay.steps.issue_to_pr.run_cmd") as run:
+                run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+                completed = issue_to_pr.complete_task(
+                    req(
+                        {
+                            **request,
+                            "dry_run": False,
+                            "conduction": {
+                                "select_dispatch_task": selector,
+                                "read_task_for_completion": read,
+                                "decide_task_completion": {
+                                    "status": "should_complete",
+                                    "ok": True,
+                                    "should_complete": True,
+                                },
+                            },
+                        }
+                    )
+                )
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["task_id"], "t1")
+            run.assert_called_once()
+
+    def test_invalid_claim_cannot_authorize_selector_noop(self) -> None:
+        selector = {
+            "status": "noop",
             "ok": True,
             "mutated": False,
-            "task_id": "t1",
-            "board": "b",
+            "reason": "held_claim_task_unavailable",
+            "already_merged": True,
+            "operation": "select_dispatch_task",
             "repo": "o/r",
             "issue": 9,
-        }
-        task = {"id": "t1", "status": "ready", "title": "[issue] o/r#9: bug"}
-        with mock.patch(
-            "lokay.steps.issue_to_pr.hermes_kanban_json",
-            return_value=[task],
-        ):
-            read = issue_to_pr.read_task_for_completion(
-                req(
-                    {
-                        "board": "b",
-                        "task_id": "t1",
-                        "conduction": {
-                            "select_dispatch_task": select,
-                            "decide_held_issue_already_merged": decide,
-                        },
-                    }
-                )
-            )
-        self.assertEqual(read["status"], "read")
-        self.assertEqual(read["task_id"], "t1")
-
-        decision = {
-            "status": "should_complete",
-            "ok": True,
-            "should_complete": True,
             "task_id": "t1",
+            "task": {"id": "t1", "status": "ready"},
         }
-        with mock.patch("lokay.steps.issue_to_pr.run_cmd") as run:
-            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
-            completed = issue_to_pr.complete_task(
-                req(
-                    {
-                        "board": "b",
-                        "task_id": "t1",
-                        "result": "already merged",
-                        "dry_run": False,
-                        "conduction": {
-                            "decide_task_completion": decision,
-                            "read_task_for_completion": read,
-                            "select_dispatch_task": select,
-                            "decide_held_issue_already_merged": decide,
-                        },
-                    }
-                )
-            )
-        self.assertEqual(completed["status"], "completed")
-        self.assertEqual(completed["task_id"], "t1")
-        self.assertTrue(completed["mutated"])
-        run.assert_called_once()
+        with tempfile.TemporaryDirectory() as tmp:
+            claim_root, receipt_root = Path(tmp) / "claim", Path(tmp) / "merge"
+            claim_root.mkdir()
+            receipt_root.mkdir()
+            (claim_root / "claim.json").write_text(json.dumps({"repo": "o/r", "issue": 9}))
+            (receipt_root / "merge.json").write_text(json.dumps({
+                "phase": "MERGED", "repo": "o/r", "pr": 42, "headSha": "abc123",
+                "verified_provenance": {
+                    "source": "github_pr_readback", "state": "MERGED", "repo": "o/r",
+                    "number": 42, "head_ref": "ai/fix/9-leftover", "head_oid": "abc123",
+                },
+            }))
+            out = issue_to_pr.read_task_for_completion(req({
+                "board": "b", "task_id": "t1", "active_issue_path": str(claim_root),
+                "merge_receipts": str(receipt_root), "conduction": {"select_dispatch_task": selector},
+            }))
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "held_claim_task_unavailable")
 
+    def test_malformed_already_merged_envelopes_do_not_bypass(self) -> None:
+        base = {
+            "status": "noop", "ok": True, "mutated": False,
+            "reason": "held_claim_task_unavailable", "already_merged": True,
+            "operation": "decide_held_issue_already_merged", "repo": "o/r", "issue": 9,
+            "pr_number": 42, "branch": "feature", "head_oid": "abc123",
+        }
+        for key, value in (("ok", False), ("reason", "not_authorized")):
+            with self.subTest(key=key):
+                decide = {**base, key: value}
+                out = issue_to_pr.read_task_for_completion(req({
+                    "board": "b", "task_id": "t1",
+                    "conduction": {"decide_held_issue_already_merged": decide},
+                }))
+                if key == "ok":
+                    self.assertEqual(out["status"], "failed")
+                    self.assertEqual(out["reason"], "upstream_failed")
+                else:
+                    self.assertEqual(out["status"], "noop")
+                    self.assertEqual(out["reason"], "not_authorized")
+                self.assertFalse(issue_to_pr._already_merged_held_issue(decide))
     def test_already_merged_completion_keeps_other_upstream_noop(self) -> None:
         decide = {
             "status": "noop",

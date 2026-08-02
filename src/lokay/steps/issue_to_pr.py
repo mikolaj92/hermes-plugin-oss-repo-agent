@@ -150,8 +150,10 @@ def _already_merged_held_issue(blob: Mapping[str, Any] | None) -> bool:
     return (
         blob.get("status") == "noop"
         and blob.get("ok") is True
+        and blob.get("mutated") is False
         and blob.get("already_merged") is True
         and blob.get("reason") == "held_claim_task_unavailable"
+        and blob.get("operation") == "decide_held_issue_already_merged"
         and all(
             blob.get(k) not in (None, "", 0)
             for k in ("repo", "issue", "pr_number", "branch", "head_oid")
@@ -159,7 +161,92 @@ def _already_merged_held_issue(blob: Mapping[str, Any] | None) -> bool:
     )
 
 
+def _already_merged_selector_noop(blob: Mapping[str, Any] | None) -> bool:
+    if not isinstance(blob, Mapping):
+        return False
+    task = blob.get("task")
+    task_id = str(blob.get("task_id") or "")
+    return (
+        blob.get("status") == "noop"
+        and blob.get("ok") is True
+        and blob.get("mutated") is False
+        and blob.get("already_merged") is True
+        and blob.get("reason") == "held_claim_task_unavailable"
+        and blob.get("operation") == "select_dispatch_task"
+        and blob.get("repo") not in (None, "")
+        and blob.get("issue") not in (None, "", 0)
+        and bool(task_id)
+        and isinstance(task, Mapping)
+        and str(task.get("id") or task.get("task_id") or "") == task_id
+    )
 
+
+def _decide_evidence_matches(request: Request, blob: Mapping[str, Any], task_id: str) -> bool:
+    read = cond_blob(request, "read_merged_closing_prs")
+    if (
+        read.get("status") != "read"
+        or read.get("ok") is not True
+        or read.get("mutated") is not False
+        or read.get("operation") != "read_merged_closing_prs"
+        or str(read.get("repo") or "").strip() != str(blob.get("repo") or "").strip()
+        or str(read.get("issue")) != str(blob.get("issue"))
+        or str(blob.get("task_id") or "") != task_id
+    ):
+        return False
+    prs = read.get("prs")
+    if not isinstance(prs, list):
+        return False
+    for pr in prs:
+        if not isinstance(pr, Mapping):
+            continue
+        refs = pr.get("closingIssuesReferences")
+        if not isinstance(refs, list):
+            continue
+        if (
+            str(pr.get("number")) == str(blob.get("pr_number"))
+            and str(pr.get("headRefName") or "").strip() == str(blob.get("branch") or "").strip()
+            and str(pr.get("headRefOid") or "").strip() == str(blob.get("head_oid") or "").strip()
+            and any(isinstance(ref, Mapping) and str(ref.get("number")) == str(blob.get("issue")) for ref in refs)
+        ):
+            return True
+    return False
+
+
+def _completion_noop_is_authorized(
+    request: Request, source: str, blob: Mapping[str, Any], task_id: str
+) -> bool:
+    if not task_id:
+        return False
+    if source == "select_dispatch_task":
+        held = _held_claim_identity(request) or {}
+        held_repo = str(held.get("repo") or "").strip()
+        held_issue = held.get("issue")
+        if (
+            not held_repo
+            or str(blob.get("repo") or "").strip() != held_repo
+            or held_issue in (None, "")
+            or str(blob.get("issue")) != str(held_issue)
+        ):
+            return False
+        return (
+            _already_merged_selector_noop(blob)
+            and str(blob.get("task_id") or "") == task_id
+            and _held_claim_has_merged_receipt(request, repo=held_repo, issue=held_issue)
+        )
+    if source == "decide_held_issue_already_merged":
+        held = _held_claim_identity(request) or {}
+        held_repo = str(held.get("repo") or "").strip()
+        held_issue = held.get("issue")
+        return (
+            _already_merged_held_issue(blob)
+            and held_repo == str(blob.get("repo") or "").strip()
+            and held_issue not in (None, "")
+            and str(held_issue) == str(blob.get("issue"))
+            and str(blob.get("task_id") or "") == task_id
+            and _decide_evidence_matches(request, blob, task_id)
+            and _held_claim_has_merged_receipt(request, repo=held_repo, issue=held_issue)
+        )
+    return False
 
 def read_merged_closing_prs(request: Request) -> Result:
     """Read merged PRs whose closingIssuesReferences include the held issue."""
@@ -249,6 +336,7 @@ def read_merged_closing_prs(request: Request) -> Result:
         prs=matches,
         repo=repo,
         issue=issue,
+        mutated=False,
         **identity,
     )
 
@@ -969,12 +1057,19 @@ def select_dispatch_task(request: Request) -> Result:
     if not ready:
         reason = "held_claim_task_unavailable" if held_repo and held_issue not in (None, "") else "no_ready_task"
         return noop(reason, operation="select_dispatch_task", repo=held_repo or None, issue=held_issue)
-    if held_repo and held_issue not in (None, "") and _held_claim_has_merged_receipt(
-        request, repo=held_repo, issue=held_issue
+    if (
+        held_repo
+        and held_issue not in (None, "")
+        and _held_claim_has_merged_receipt(request, repo=held_repo, issue=held_issue)
     ):
+        row = ready[0]
+        tid = str(row.get("id") or row.get("task_id") or "")
         return noop(
             "held_claim_task_unavailable",
             operation="select_dispatch_task",
+            already_merged=True,
+            task_id=tid,
+            task=row,
             repo=held_repo,
             issue=held_issue,
         )
@@ -1188,11 +1283,7 @@ def read_task_for_completion(request: Request) -> Result:
         or ""
     )
     if idle:
-        if not (
-            source == "decide_held_issue_already_merged"
-            and _already_merged_held_issue(idle)
-            and task_id
-        ):
+        if not _completion_noop_is_authorized(request, source, idle, task_id):
             return noop(
                 str(idle.get("reason") or "no_ready_task"),
                 operation="read_task_for_completion",
@@ -1324,11 +1415,7 @@ def complete_task(request: Request) -> Result:
         or ""
     )
     if idle:
-        if not (
-            source == "decide_held_issue_already_merged"
-            and _already_merged_held_issue(idle)
-            and tid
-        ):
+        if not _completion_noop_is_authorized(request, source, idle, tid):
             return noop(
                 str(idle.get("reason") or "no_ready_task"),
                 operation="complete_task",
@@ -1393,11 +1480,62 @@ def complete_task(request: Request) -> Result:
 
 def verify_task_completed(request: Request) -> Result:
     terminal = _atomic_terminal(request, "verify_task_completed", "complete_task")
-    if terminal: return terminal
+    if terminal:
+        return terminal
     idle = upstream_noop(request, "complete_task")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_task_completed")
     completed = cond_blob(request, "complete_task")
+    board = str(completed.get("board") or _atomic_board(request) or "")
+    task_id = str(completed.get("task_id") or cond_get(request, "task_id", "complete_task") or "")
+    if not board or not task_id:
+        return fail(
+            "missing_board_or_task_id",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="verify_task_completed",
+        )
+    try:
+        rows = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
+    except CommandError as exc:
+        return fail(
+            "kanban_list_failed",
+            failure_class="retryable_read",
+            retry_safe=True,
+            operation="verify_task_completed",
+            error=str(exc),
+            board=board,
+            task_id=task_id,
+        )
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return fail(
+            "invalid_kanban_json",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="verify_task_completed",
+        )
+    found = [row for row in rows if str(row.get("id") or row.get("task_id") or "") == task_id]
+    if len(found) != 1:
+        return fail(
+            "task_not_found" if not found else "ambiguous_task",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="verify_task_completed",
+            task_id=task_id,
+        )
+    state = str(found[0].get("status") or found[0].get("state") or "").lower()
+    if state not in {"done", "completed", "archived"}:
+        return fail(
+            "task_not_completed",
+            failure_class="reconcile_then_retry",
+            retry_safe=False,
+            operation="verify_task_completed",
+            task_id=task_id,
+            state=state,
+        )
+    return ok(status="verified", operation="verify_task_completed", task_id=task_id)
+
+
 def read_branch_provenance(request: Request) -> Result:
     idle = upstream_noop(request, "read_worktree_inventory")
     if idle:
