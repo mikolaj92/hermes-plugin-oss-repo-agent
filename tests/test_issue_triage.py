@@ -466,6 +466,149 @@ class MutationAtomTests(unittest.TestCase):
         self.assertEqual(len(result["children"]), 3)
         self.assertEqual([child["kind"] for child in result["children"]], ["ready", "ready", "needs_feedback"])
 
+    def test_mixed_split_creates_verifies_and_reconciles(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        digest = "d" * 64
+        mixed = payload(
+            "mixed",
+            portions=[
+                {"kind": "ready", "summary": "Implement retry", "question": ""},
+                {"kind": "needs_feedback", "summary": "Choose limit", "question": "What is the retry limit?"},
+            ],
+        )
+        markers = [
+            f"<!-- lokay:issue-triage-split:owner/repo:42:{digest}:1 -->",
+            f"<!-- lokay:issue-triage-split:owner/repo:42:{digest}:2 -->",
+        ]
+        parent_marker = f"<!-- lokay:issue-triage-split:owner/repo:42:{digest} -->"
+        labels = [
+            {"name": "ai:ready", "color": "B60205", "description": ""},
+            {"name": "ai:needs-feedback", "color": "B60205", "description": ""},
+        ]
+        created: dict[str, dict] = {}
+        comments: list[dict] = []
+        state = {
+            "creates": 0,
+            "comments": 0,
+            "label_creates": 0,
+            "parent_linked": False,
+        }
+
+        def gh(args, **kwargs):
+            if args[1:3] == ["label", "list"]:
+                return unittest.mock.Mock(stdout=json.dumps(labels))
+            if args[1:3] == ["label", "create"]:
+                state["label_creates"] += 1
+                labels.append({"name": args[3], "color": "B60205", "description": "Lokay mixed triage child"})
+                return unittest.mock.Mock(stdout="")
+            if args[1:3] == ["issue", "list"]:
+                search = args[args.index("--search") + 1]
+                rows = []
+                for marker, row in created.items():
+                    if f'"{marker}"' in search or marker in search:
+                        rows.append({"number": row["number"], "url": row["url"], "body": row["body"]})
+                return unittest.mock.Mock(stdout=json.dumps(rows))
+            if args[1:3] == ["issue", "create"]:
+                state["creates"] += 1
+                body = args[args.index("--body") + 1]
+                label = args[args.index("--label") + 1]
+                marker = next(m for m in markers if m in body)
+                number = 100 + len(created)
+                row = {
+                    "number": number,
+                    "url": f"https://github.com/owner/repo/issues/{number}",
+                    "body": body,
+                    "labels": [{"name": label}],
+                }
+                created[marker] = row
+                return unittest.mock.Mock(stdout=row["url"] + "\n")
+            if args[1:3] == ["issue", "view"]:
+                number = int(args[3])
+                if number == 42:
+                    return unittest.mock.Mock(
+                        stdout=json.dumps(
+                            {
+                                "labels": [],
+                                "state": "OPEN",
+                                "stateReason": "",
+                                "updatedAt": "2026-08-01T12:00:00Z",
+                                "comments": list(comments),
+                            }
+                        )
+                    )
+                row = next(item for item in created.values() if item["number"] == number)
+                return unittest.mock.Mock(
+                    stdout=json.dumps(
+                        {
+                            "number": row["number"],
+                            "url": row["url"],
+                            "body": row["body"],
+                            "labels": row["labels"],
+                        }
+                    )
+                )
+            if args[1:3] == ["issue", "comment"]:
+                state["comments"] += 1
+                body = args[args.index("--body") + 1]
+                self.assertIn(parent_marker, body)
+                comments.append(
+                    {
+                        "id": "IC_parent",
+                        "databaseId": 1,
+                        "body": body,
+                        "createdAt": "2026-08-01T12:01:00Z",
+                    }
+                )
+                state["parent_linked"] = True
+                return unittest.mock.Mock(stdout="")
+            raise AssertionError(args)
+
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 42,
+                "dry_run": False,
+                "conduction": {
+                    "read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": []},
+                    "classify_triage_issue": {
+                        "ok": True,
+                        "status": "classified",
+                        "classification": mixed,
+                        "decision_digest": digest,
+                    },
+                    "decide_triage_mutation": {
+                        "ok": True,
+                        "status": "decided",
+                        "action": "split",
+                        "decision_digest": digest,
+                        "classification": mixed,
+                    },
+                },
+            },
+            "config": {},
+        }
+        with unittest.mock.patch("lokay.steps.issue_triage_mutations.run_cmd", side_effect=gh):
+            first = m.split_mixed_triage_issue(request)
+            second = m.split_mixed_triage_issue(request)
+
+        self.assertEqual(first["status"], "split_verified", first)
+        self.assertTrue(first["verified"])
+        self.assertTrue(first["mutated"])
+        self.assertEqual([child["number"] for child in first["children"]], [100, 101])
+        self.assertEqual([child["kind"] for child in first["children"]], ["ready", "needs_feedback"])
+        self.assertEqual([child["marker"] for child in first["children"]], markers)
+        self.assertEqual(first["parent_marker"], parent_marker)
+        self.assertEqual(state["creates"], 2)
+        self.assertEqual(state["comments"], 1)
+        self.assertTrue(state["parent_linked"])
+
+        self.assertEqual(second["status"], "split_verified", second)
+        self.assertEqual([child["number"] for child in second["children"]], [100, 101])
+        self.assertEqual(state["creates"], 2, "rerun must not create more children")
+        self.assertEqual(state["comments"], 1, "rerun must not post another parent link")
+
+
     def test_mixed_close_requires_verified_complete_split(self):
         classification = payload(
             "mixed",
