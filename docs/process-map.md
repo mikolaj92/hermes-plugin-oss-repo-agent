@@ -200,6 +200,19 @@ classification + `auto_close_out_of_scope` authorizes close (no goal / no
 independent label evidence required). Residual OPEN + `ai:out-of-scope` re-enters
 until close is verified.
 
+**Evidence contract** (`validate_classification` + `classify_triage_issue`):
+
+- Sources are flat keys only: `issue:<number>`, `comment:<databaseId>`,
+  `repository_context:<path>`.
+- Prompt packet includes `evidence_source_identities` = `sorted(sources)` inside
+  the untrusted JSON block so the model sees exact keys, not nested shapes.
+- Each evidence item must use the full prefixed identity; bare forms
+  (`3791`, `README.md`, `issue`) are rejected (`invalid_evidence_identity`).
+- `kind` must match identity prefix (`issue`↔`issue:`, `comment`↔`comment:`,
+  `repository_context`↔`repository_context:`).
+- `quote` must be an exact contiguous substring of `sources[identity]`
+  (`unverifiable_evidence_quote` otherwise). No auto-correction / aliasing.
+
 ### 6.2 Direction (`decide_issue_action`)
 
 First match after empty/noop checks (matches `issue_direction.py`):
