@@ -85,7 +85,7 @@ class DeploymentCandidateTests(unittest.TestCase):
         config = config_path or root / "config.toml"
         top_level = "automerge = true\n" if top_level_precedence else ""
         config.write_text(
-            f"mode = '{mode}'\n{top_level}[automation]\nautomerge = {str(autonomous or top_level_precedence).lower()}\nrequire_human_approval = {str(not autonomous).lower()}\nrequire_checks = false\nrequire_test_evidence = true\n[executor]\nenabled = {str(autonomous).lower()}\n",
+            f"mode = '{mode}'\n{top_level}[automation]\nautomerge = {str(autonomous or top_level_precedence).lower()}\nrequire_human_approval = {str(not autonomous).lower()}\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = {str(autonomous).lower()}\n",
             encoding="utf-8",
         )
         db = db_path or root / "state.sqlite"
@@ -107,7 +107,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             "policy": {
                 "automerge": autonomous,
                 "require_human_approval": not autonomous,
-                "require_checks": False,
+                "require_checks": True,
                 "require_test_evidence": True,
                 "executor_enabled": autonomous,
             },
@@ -124,7 +124,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 "automation": {
                     "automerge": autonomous,
                     "require_human_approval": not autonomous,
-                    "require_checks": False,
+                    "require_checks": True,
                     "require_test_evidence": True,
                 },
                 "executor": {"enabled": autonomous},
@@ -1173,7 +1173,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 {
                     "automerge": True,
                     "require_human_approval": False,
-                    "require_checks": False,
+                    "require_checks": True,
                     "require_test_evidence": True,
                     "executor_enabled": True,
                 },

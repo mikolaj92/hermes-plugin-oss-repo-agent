@@ -5,27 +5,21 @@
 
 lokay_default_repos() {
   cat <<'REPOS'
-mikolaj92/Fala|mikolaj92-fala|/Users/mini-m4-main/Developer/hermes-repos/Fala|100
-mikolaj92/datasource-kit|mikolaj92-datasource-kit|/Users/mini-m4-main/Developer/hermes-repos/datasource-kit|90
-mikolaj92/reviewkit|mikolaj92-reviewkit|/Users/mini-m4-main/Developer/hermes-repos/reviewkit|80
-mikolaj92/anonimizator3000|mikolaj92-anonimizator3000|/Users/mini-m4-main/Developer/hermes-repos/anonimizator3000|70
-mikolaj92/splot|mikolaj92-splot|/Users/mini-m4-main/Developer/hermes-repos/splot|60
-mikolaj92/msds-portal|mikolaj92-msds-portal|/Users/mini-m4-main/Developer/hermes-repos/msds-portal|50
-mikolaj92/OpenAPITransportKit|mikolaj92-openapi-transport-kit|/Users/mini-m4-main/Developer/hermes-repos/OpenAPITransportKit|45
-mikolaj92/swift-openapi-dynamic|mikolaj92-swift-openapi-dynamic|/Users/mini-m4-main/Developer/hermes-repos/swift-openapi-dynamic|40
-mikolaj92/my-auth|mikolaj92-my-auth|/Users/mini-m4-main/Developer/hermes-repos/my-auth|30
-mikolaj92/my-usermanager|mikolaj92-my-usermanager|/Users/mini-m4-main/Developer/hermes-repos/my-usermanager|30
-mikolaj92/Posejdon|mikolaj92-posejdon|/Users/mini-m4-main/Developer/hermes-repos/Posejdon|25
-mikolaj92/jaskiniowiec|mikolaj92-jaskiniowiec|/Users/mini-m4-main/Developer/hermes-repos/jaskiniowiec|25
-mikolaj92/lokay|mikolaj92-lokay|/Users/mini-m4-main/Developer/hermes-repos/lokay|20
-mikolaj92/influenzer|mikolaj92-influenzer|/Users/mini-m4-main/Developer/hermes-repos/influenzer|20
-mikolaj92/VibeFront|mikolaj92-vibe-front|/Users/mini-m4-main/Developer/hermes-repos/VibeFront|20
-mikolaj92/hermetic-alchemy|mikolaj92-hermetic-alchemy|/Users/mini-m4-main/Developer/hermes-repos/hermetic-alchemy|20
-mikolaj92/Temida|mikolaj92-temida|/Users/mini-m4-main/Developer/hermes-repos/Temida|15
-mikolaj92/rnkstr|mikolaj92-rnkstr|/Users/mini-m4-main/Developer/hermes-repos/rnkstr|15
-mikolaj92/emitype|mikolaj92-emitype|/Users/mini-m4-main/Developer/hermes-repos/emitype|15
-mikolaj92/MikoDukcja|mikolaj92-miko-dukcja|/Users/mini-m4-main/Developer/hermes-repos/MikoDukcja|15
-mikolaj92/dotfiles|mikolaj92-dotfiles|/Users/mini-m4-main/Developer/hermes-repos/dotfiles|5
+mikolaj92/Fala|mikolaj92-fala|/Users/mini-m4-main/Developer/hermes-repos/Fala-live|100
+mikolaj92/datasource-kit|mikolaj92-datasource-kit|/Users/mini-m4-main/Developer/hermes-repos/datasource-kit-live|90
+mikolaj92/reviewkit|mikolaj92-reviewkit|/Users/mini-m4-main/Developer/hermes-repos/reviewkit-live|80
+mikolaj92/msds-portal|mikolaj92-msds-portal|/Users/mini-m4-main/Developer/hermes-repos/msds-portal-live|50
+mikolaj92/app-factory|mikolaj92-app-factory|/Users/mini-m4-main/Developer/hermes-repos/app-factory-live|45
+mikolaj92/basecoat-factory|mikolaj92-basecoat-factory|/Users/mini-m4-main/Developer/hermes-repos/basecoat-factory-live|40
+mikolaj92/my-auth|mikolaj92-my-auth|/Users/mini-m4-main/Developer/hermes-repos/my-auth-live|30
+mikolaj92/my-usermanager|mikolaj92-my-usermanager|/Users/mini-m4-main/Developer/hermes-repos/my-usermanager-live|30
+mikolaj92/Posejdon|mikolaj92-posejdon|/Users/mini-m4-main/Developer/hermes-repos/Posejdon-live|25
+mikolaj92/lokay|mikolaj92-lokay|/Users/mini-m4-main/Developer/hermes-repos/lokay-live|20
+mikolaj92/influenzer|mikolaj92-influenzer|/Users/mini-m4-main/Developer/hermes-repos/influenzer-live|20
+mikolaj92/wolnyrolnik|mikolaj92-wolnyrolnik|/Users/mini-m4-main/Developer/hermes-repos/wolnyrolnik-live|18
+mikolaj92/Temida|mikolaj92-temida|/Users/mini-m4-main/Developer/hermes-repos/Temida-repo-agent-live|15
+mikolaj92/emitype|mikolaj92-emitype|/Users/mini-m4-main/Developer/hermes-repos/emitype-live|15
+mikolaj92/rnkstr|mikolaj92-rnkstr|/Users/mini-m4-main/Developer/hermes-repos/rnkstr-live|15
 REPOS
 }
 

@@ -49,8 +49,7 @@ class HealthStatusScriptTests(unittest.TestCase):
                 "automation": {
                     "automerge": True,
                     "require_human_approval": False,
-                    "require_checks": False,
-                    "require_test_evidence": True,
+                    "require_checks": True,
                 },
                 "executor": {"enabled": True},
                 "repos": [],
@@ -59,7 +58,7 @@ class HealthStatusScriptTests(unittest.TestCase):
         cls.holder = tempfile.TemporaryDirectory()
         cls.root = Path(cls.holder.name)
         cls.config = cls.root / "config.toml"
-        cls.config.write_text("mode = 'dry-run'\n[automation]\nautomerge = true\nrequire_human_approval = false\nrequire_checks = false\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
+        cls.config.write_text("mode = 'dry-run'\n[automation]\nautomerge = true\nrequire_human_approval = false\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = true\n", encoding="utf-8")
         cls.base_db = cls.root / "base.sqlite"
         cls._write_db(cls.base_db, mode="dry-run")
         lock_data = cls.commands.rewrite_fala_git_to_bundled_lock((ROOT / "uv.lock").read_bytes())
@@ -80,7 +79,7 @@ class HealthStatusScriptTests(unittest.TestCase):
             "policy": {
                 "automerge": True,
                 "require_human_approval": False,
-                "require_checks": False,
+                "require_checks": True,
                 "require_test_evidence": True,
                 "executor_enabled": True,
             },
