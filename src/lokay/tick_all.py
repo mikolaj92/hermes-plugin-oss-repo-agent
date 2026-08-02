@@ -169,7 +169,7 @@ def _prefixed_inputs(cfg: Any, *, dry_run: bool, limit: int, run_id: str = "", d
         "intake_ensure_triage_label": {}, "intake_publish_triage_mutation_authorization": {}, "intake_mutate_triage_issue_labels": {},
         "intake_post_triage_feedback": {}, "intake_verify_triage_feedback": {}, "intake_observe_triage_feedback": {},
         "intake_publish_triage_feedback_receipt": {}, "intake_publish_triage_mutation_verification": {},
-        "intake_publish_triage_close_authorization": {}, "intake_close_triage_issue": {}, "intake_verify_triage_issue_closed": {},
+        "intake_split_mixed_triage_issue": {}, "intake_publish_triage_close_authorization": {}, "intake_close_triage_issue": {}, "intake_verify_triage_issue_closed": {},
         "intake_publish_triage_close_verification": {}, "intake_verify_triage_receipt": {}, "intake_build_triage_terminal": {},
         "intake_decide_issue_priority": {}, "intake_decide_issue_action": {}, "intake_read_issue_comments": {}, "intake_decide_issue_comment": {},
         "intake_post_issue_comment": {}, "intake_verify_issue_comment": {},

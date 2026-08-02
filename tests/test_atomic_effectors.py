@@ -1296,7 +1296,7 @@ class IssueToPrTests(unittest.TestCase):
                     results = list(pool.map(issue_to_pr.create_pull_request, requests))
 
         self.assertEqual(state["creates"], 1)
-        self.assertEqual({result["status"] for result in results}, {"created", "noop"})
+        self.assertEqual({result["status"] for result in results}, {"created", "already_open"})
         self.assertTrue(all(result.get("number") == 2 for result in results))
 
     def test_create_pull_request_lock_root_reads_live_inputs(self) -> None:

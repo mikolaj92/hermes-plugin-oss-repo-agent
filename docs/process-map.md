@@ -189,6 +189,7 @@ Source: `classify_triage_issue`.
 | `ambiguous` | unsafe classify | **mapped to** `needs_feedback` + question |
 | `duplicate` | points at canonical | feedback → optional authorized close |
 | `out_of_scope` | not for agent | `action=close` when `auto_close_out_of_scope` (default on); stamps class label then closes |
+| `mixed` | separable ready and clarification-needed concerns | P15 creates one labeled child per portion, then verified split authorizes parent close |
 
 **Not a classification:** `frozen`. Frozen is **label precedence** in
 `decide_triage_mutation`: if frozen present, remove ready or noop — frozen wins
@@ -323,6 +324,7 @@ Work one row at a time. Do not expand a row into a second SoT.
 | P12 | Standalone no-target reconcile | `cleanup_reconcile.py` | `cleanup_reconcile` | `live`/`diag` | Not a sixth auto_worker lane |
 | P13 | Full-lifecycle formal SM | — | — | `scaffold`/`gap` | Only if we later want TLA beyond handoff |
 | P14 | Doc/package parity | `docs/auto-worker.md`, `docs/process-map.md`, package | — | `live` | path table matches package; composition + §6.4/§6.5 decision order match code |
+| P15 | Mixed issue split | `issue_triage.py`, `issue_triage_mutations.py`, `issue_triage_receipts.py` | `issue_intake` | `live` | One idempotent child per validated portion; existing close atom owns parent close |
 
 ---
 

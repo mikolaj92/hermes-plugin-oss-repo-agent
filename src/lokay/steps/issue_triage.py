@@ -139,10 +139,12 @@ def frozen_ready_decision_digest(
 
 
 
-_CLASSIFICATIONS = frozenset({"ready", "needs_feedback", "duplicate", "out_of_scope", "ambiguous"})
+_CLASSIFICATIONS = frozenset({"ready", "needs_feedback", "duplicate", "out_of_scope", "ambiguous", "mixed"})
 _EVIDENCE_KINDS = frozenset({"issue", "comment", "repository_context"})
 _KEYS = frozenset({"schema_version", "classification", "reason", "question", "canonical_issue", "evidence"})
 _EVIDENCE_KEYS = frozenset({"kind", "identity", "quote"})
+_PORTION_KEYS = frozenset({"kind", "summary", "question"})
+_PORTION_KINDS = frozenset({"ready", "needs_feedback"})
 _TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 _LOKAY_MARKER = "<!-- lokay:"
 _UNTRUSTED_BEGIN = "--- BEGIN UNTRUSTED_GITHUB_CONTENT ---"
@@ -186,17 +188,47 @@ def parse_classification_output(
     return validate_classification(value, sources=sources, issue_number=issue_number)
 
 
+def authorize_mixed_close(
+    classification: Mapping[str, Any],
+    fresh_state: Mapping[str, Any],
+    split: Mapping[str, Any],
+) -> dict[str, Any]:
+    if classification.get("classification") != "mixed":
+        return {"authorized": False, "reason": "classification_mismatch"}
+    if str(fresh_state.get("state") or "").upper() != "OPEN":
+        return {"authorized": False, "reason": "issue_not_open"}
+    labels = {str(value).casefold() for value in fresh_state.get("labels") or ()}
+    if "frozen" in labels:
+        return {"authorized": False, "reason": "issue_frozen"}
+    children = split.get("children")
+    portions = classification.get("portions")
+    if split.get("ok") is not True or split.get("verified") is not True:
+        return {"authorized": False, "reason": "split_not_verified"}
+    if not isinstance(children, list) or not isinstance(portions, list) or len(children) != len(portions):
+        return {"authorized": False, "reason": "split_children_incomplete"}
+    if any(not isinstance(child, Mapping) or not isinstance(child.get("number"), int) or child["number"] <= 0 or not child.get("marker") for child in children):
+        return {"authorized": False, "reason": "split_children_invalid"}
+    return {
+        "authorized": True,
+        "reason": "mixed_split_verified",
+        "evidence": {"children": [int(child["number"]) for child in children], "markers": [str(child["marker"]) for child in children]},
+    }
+
+
 def validate_classification(
     payload: Any,
     *,
     sources: Mapping[str, str] | None = None,
     issue_number: int | None = None,
 ) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) != _KEYS:
+    if not isinstance(payload, dict):
+        raise ValueError("invalid_classifier_keys")
+    classification = payload.get("classification")
+    expected_keys = _KEYS | ({"portions"} if classification == "mixed" else set())
+    if set(payload) != expected_keys:
         raise ValueError("invalid_classifier_keys")
     if payload.get("schema_version") != 1 or isinstance(payload.get("schema_version"), bool):
         raise ValueError("invalid_schema_version")
-    classification = payload.get("classification")
     if not isinstance(classification, str) or classification not in _CLASSIFICATIONS:
         raise ValueError("invalid_classification")
     reason = payload.get("reason")
@@ -219,6 +251,30 @@ def validate_classification(
             raise ValueError("invalid_canonical_issue")
     elif canonical != 0:
         raise ValueError("unexpected_canonical_issue")
+    portions = payload.get("portions")
+    normalized_portions: list[dict[str, str]] = []
+    if classification == "mixed":
+        if not isinstance(portions, list) or not portions:
+            raise ValueError("invalid_portions")
+        kinds: set[str] = set()
+        for portion in portions:
+            if not isinstance(portion, dict) or set(portion) != _PORTION_KEYS:
+                raise ValueError("invalid_portion_keys")
+            kind = portion.get("kind")
+            summary = portion.get("summary")
+            portion_question = portion.get("question")
+            if kind not in _PORTION_KINDS or not isinstance(summary, str) or not summary.strip():
+                raise ValueError("invalid_portion")
+            if not isinstance(portion_question, str):
+                raise ValueError("invalid_portion_question")
+            if kind == "needs_feedback" and not portion_question.strip():
+                raise ValueError("missing_portion_question")
+            if kind == "ready" and portion_question:
+                raise ValueError("unexpected_portion_question")
+            kinds.add(kind)
+            normalized_portions.append({"kind": kind, "summary": summary.strip(), "question": portion_question.strip()})
+        if kinds != _PORTION_KINDS:
+            raise ValueError("incomplete_mixed_portions")
     if not isinstance(evidence, list) or not evidence:
         raise ValueError("invalid_evidence")
     normalized_evidence: list[dict[str, str]] = []
@@ -237,7 +293,7 @@ def validate_classification(
             if not isinstance(source, str) or quote not in source:
                 raise ValueError("unverifiable_evidence_quote")
         normalized_evidence.append({"kind": kind, "identity": identity, "quote": quote})
-    return {
+    normalized = {
         "schema_version": 1,
         "classification": classification,
         "reason": reason.strip(),
@@ -245,6 +301,9 @@ def validate_classification(
         "canonical_issue": canonical,
         "evidence": normalized_evidence,
     }
+    if classification == "mixed":
+        normalized["portions"] = normalized_portions
+    return normalized
 
 
 def decision_digest(payload: Mapping[str, Any]) -> str:

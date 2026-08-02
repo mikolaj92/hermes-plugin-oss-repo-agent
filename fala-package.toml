@@ -173,9 +173,16 @@ adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], 
 config = { handler = "lokay.steps.issue_triage_receipts.publish_triage_mutation_verification" }
 
 [[correlation_paths.effectors]]
+id = "split_mixed_triage_issue"
+capability = "lokay_step"
+conduction = ["decide_triage_mutation", "classify_triage_issue", "read_triage_labels"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.issue_triage_mutations.split_mixed_triage_issue" }
+
+[[correlation_paths.effectors]]
 id = "publish_triage_close_authorization"
 capability = "lokay_step"
-conduction = ["decide_triage_mutation", "read_triage_issue_state", "read_triage_comments", "read_triage_canonical_issue", "read_triage_labels", "classify_triage_issue", "publish_triage_mutation_verification", "publish_triage_feedback_receipt"]
+conduction = ["decide_triage_mutation", "read_triage_issue_state", "read_triage_comments", "read_triage_canonical_issue", "read_triage_labels", "classify_triage_issue", "publish_triage_mutation_verification", "publish_triage_feedback_receipt", "split_mixed_triage_issue"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_triage_receipts.publish_triage_close_authorization" }
 
@@ -1684,9 +1691,16 @@ adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"] ,
 config = { handler = "lokay.steps.issue_triage_receipts.publish_triage_mutation_verification" }
 
 [[correlation_paths.effectors]]
+id = "intake_split_mixed_triage_issue"
+capability = "lokay_step"
+conduction = ["intake_decide_triage_mutation", "intake_classify_triage_issue", "intake_read_triage_labels"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.issue_triage_mutations.split_mixed_triage_issue" }
+
+[[correlation_paths.effectors]]
 id = "intake_publish_triage_close_authorization"
 capability = "lokay_step"
-conduction = ["intake_decide_triage_mutation", "intake_read_triage_issue_state", "intake_read_triage_comments", "intake_read_triage_canonical_issue", "intake_read_triage_labels", "intake_classify_triage_issue", "intake_publish_triage_mutation_verification", "intake_publish_triage_feedback_receipt"]
+conduction = ["intake_decide_triage_mutation", "intake_read_triage_issue_state", "intake_read_triage_comments", "intake_read_triage_canonical_issue", "intake_read_triage_labels", "intake_classify_triage_issue", "intake_publish_triage_mutation_verification", "intake_publish_triage_feedback_receipt", "intake_split_mixed_triage_issue"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_triage_receipts.publish_triage_close_authorization" }
 

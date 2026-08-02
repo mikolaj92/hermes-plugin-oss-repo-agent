@@ -314,6 +314,8 @@ def decide_triage_mutation(request: Mapping[str, Any]) -> dict[str, Any]:
         action = str(data["action"])
     elif classification == "ready":
         action = "add_ready"
+    elif classification == "mixed":
+        action = "split"
     elif classification == "out_of_scope":
         action = "close" if _auto_close_out_of_scope(request) else "feedback"
     elif classification in {"needs_feedback", "duplicate", "ambiguous"}:
@@ -689,6 +691,99 @@ def observe_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
     if not candidates:
         return noop("no_human_response", watermark=state.get("updatedAt"), **_identity(request))
     return ok(status="feedback_observed", response=candidates[0], watermark=candidates[0].get("createdAt"), **_identity(request))
+
+
+def _split_marker(repo: str, number: int, digest: str, index: int) -> str:
+    return f"<!-- lokay:issue-triage-split:{repo}:{number}:{digest}:{index} -->"
+
+
+def _mixed_decision(request: Mapping[str, Any]) -> Mapping[str, Any]:
+    data = input_of(request)
+    direct = data.get("decision") or data.get("classification")
+    if isinstance(direct, Mapping) and direct.get("classification") == "mixed":
+        return direct
+    classified = cond_blob(request, "classify_triage_issue")
+    value = classified.get("classification")
+    return value if isinstance(value, Mapping) and value.get("classification") == "mixed" else {}
+
+
+def split_mixed_triage_issue(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Create one idempotent child issue per mixed-classification portion."""
+    idle = _idle(request)
+    if idle is not None:
+        return idle
+    decision = cond_blob(request, "decide_triage_mutation")
+    if str(decision.get("action") or _action(request)) != "split":
+        return noop("action_not_selected", action=decision.get("action"), **_identity(request))
+    data, cfg, repo, number, gh = _values(request)
+    bad = _invalid(repo, number)
+    if bad:
+        return bad
+    if _frozen_state(request):
+        return noop("frozen", **_identity(request))
+    classification = _mixed_decision(request)
+    portions = classification.get("portions")
+    digest = _digest(request) or str(decision.get("decision_digest") or "")
+    if not digest or not isinstance(portions, list) or not portions:
+        return fail("invalid_mixed_split", failure_class="terminal", retry_safe=False, **_identity(request))
+    labels = cfg.get("labels") if isinstance(cfg.get("labels"), Mapping) else {}
+    ready_label = str(data.get("ready_label") or cfg.get("ready_label") or labels.get("ready") or "ai:ready")
+    feedback_label = str(data.get("needs_feedback_label") or cfg.get("needs_feedback_label") or labels.get("needs_feedback") or "ai:needs-feedback")
+    plans = []
+    for index, portion in enumerate(portions, 1):
+        marker = _split_marker(repo, number, digest, index)
+        kind = str(portion.get("kind") or "")
+        summary = str(portion.get("summary") or "").strip()
+        question = str(portion.get("question") or "").strip()
+        label = ready_label if kind == "ready" else feedback_label
+        body = f"Split from #{number}.\n\n{summary}"
+        if question:
+            body += f"\n\nClarification needed: {question}"
+        plans.append({"index": index, "kind": kind, "summary": summary, "question": question, "label": label, "marker": marker, "body": f"{body}\n\n{marker}"})
+    if dry_run_flag(request):
+        return planned(action="split", decision_digest=digest, children=plans, **_identity(request))
+    children: list[dict[str, Any]] = []
+    try:
+        available = _repo_labels(gh, repo)
+        available_names = {str(item.get("name") or "").casefold() for item in available}
+        for label in {plan["label"] for plan in plans}:
+            if label.casefold() not in available_names:
+                run_cmd([gh, "label", "create", label, "--repo", repo, "--color", "B60205", "--description", "Lokay mixed triage child"], timeout=60)
+        available_names = {str(item.get("name") or "").casefold() for item in _repo_labels(gh, repo)}
+        if any(plan["label"].casefold() not in available_names for plan in plans):
+            return fail("split_child_label_unverified", failure_class="reconcile_then_retry", retry_safe=False, **_identity(request))
+        for plan in plans:
+            found = _json(run_cmd([gh, "issue", "list", "--repo", repo, "--state", "all", "--search", f'"{plan["marker"]}" in:body', "--limit", "10", "--json", "number,url,body"], timeout=60))
+            matches = [row for row in found if isinstance(row, Mapping) and plan["marker"] in str(row.get("body") or "")]
+            if len(matches) > 1:
+                return fail("split_child_ambiguous", failure_class="terminal", retry_safe=False, marker=plan["marker"], **_identity(request))
+            if matches:
+                row = matches[0]
+            else:
+                created = run_cmd([gh, "issue", "create", "--repo", repo, "--title", plan["summary"], "--body", plan["body"], "--label", plan["label"]], timeout=60)
+                url = str(created.stdout or "").strip().splitlines()[-1]
+                match = re.search(r"/issues/(\d+)(?:\D|$)", url)
+                if not match:
+                    return fail("split_child_create_unverified", failure_class="reconcile_then_retry", retry_safe=False, marker=plan["marker"], mutated=True, **_identity(request))
+                row = {"number": int(match.group(1)), "url": url, "body": plan["body"]}
+            verified = _json(run_cmd([gh, "issue", "view", str(row["number"]), "--repo", repo, "--json", "number,url,body,labels"], timeout=60))
+            verified_labels = {str(item.get("name") or "").casefold() for item in verified.get("labels") or [] if isinstance(item, Mapping)}
+            if plan["marker"] not in str(verified.get("body") or "") or plan["label"].casefold() not in verified_labels:
+                return fail("split_child_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, marker=plan["marker"], mutated=True, **_identity(request))
+            children.append({"number": int(verified["number"]), "url": str(verified.get("url") or ""), "kind": plan["kind"], "marker": plan["marker"]})
+        parent_marker = f"<!-- lokay:issue-triage-split:{repo}:{number}:{digest} -->"
+        state = _read_issue(gh, repo, number)
+        existing = [comment for comment in state["comments"] if parent_marker in str(comment.get("body") or "")]
+        if not existing:
+            links = "\n".join(f'- #{child["number"]} ({child["kind"]})' for child in children)
+            run_cmd([gh, "issue", "comment", str(number), "--repo", repo, "--body", f"Split into:\n{links}\n\n{parent_marker}"], timeout=60)
+            state = _read_issue(gh, repo, number)
+            existing = [comment for comment in state["comments"] if parent_marker in str(comment.get("body") or "")]
+        if len(existing) != 1:
+            return fail("split_parent_link_unverified", failure_class="reconcile_then_retry", retry_safe=False, mutated=True, children=children, **_identity(request))
+    except (CommandError, subprocess.TimeoutExpired, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail("split_issue_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, children=children, **_identity(request))
+    return ok(status="split_verified", action="split", verified=True, mutated=True, children=children, parent_marker=parent_marker, decision_digest=digest, **_identity(request))
 
 
 def close_triage_issue(request: Mapping[str, Any]) -> dict[str, Any]:

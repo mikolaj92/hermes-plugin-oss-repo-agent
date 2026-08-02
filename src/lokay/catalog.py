@@ -44,6 +44,7 @@ EFFECTORS: tuple[EffectorEntry, ...] = (
     EffectorEntry("observe_triage_feedback", "intake", "lokay.steps.issue_triage_mutations.observe_triage_feedback", "Observe a later human triage response.", False),
     EffectorEntry("publish_triage_feedback_receipt", "intake", "lokay.steps.issue_triage_receipts.publish_triage_feedback_receipt", "Publish a verified feedback receipt.", True),
     EffectorEntry("publish_triage_mutation_verification", "intake", "lokay.steps.issue_triage_receipts.publish_triage_mutation_verification", "Publish verified triage mutation evidence.", True),
+    EffectorEntry("split_mixed_triage_issue", "intake", "lokay.steps.issue_triage_mutations.split_mixed_triage_issue", "Create one verified child issue per mixed-classification portion.", True),
     EffectorEntry("publish_triage_close_authorization", "intake", "lokay.steps.issue_triage_receipts.publish_triage_close_authorization", "Publish immutable close authorization.", True),
     EffectorEntry("close_triage_issue", "intake", "lokay.steps.issue_triage_mutations.close_triage_issue", "Close an independently authorized issue.", True),
     EffectorEntry("verify_triage_issue_closed", "intake", "lokay.steps.issue_triage_mutations.verify_triage_issue_closed", "Verify issue closure and reason.", False),

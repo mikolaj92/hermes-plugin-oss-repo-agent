@@ -16,6 +16,7 @@ from typing import Any
 from lokay.envelope import Request, Result, fail, noop, ok, planned, cfg_of, input_of, cond_blob, cond_get, dry_run_flag, terminal_upstream
 from lokay.steps.issue_triage import (
     authorize_duplicate_close,
+    authorize_mixed_close,
     authorize_out_of_scope_close,
     is_frozen_ready_conflict,
     is_triage_reconcile,
@@ -28,9 +29,9 @@ _SCHEMA_VERSION = 1
 _COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _STAGES = frozenset({"decision", "feedback-verified", "feedback-observed", "mutation-authorized", "mutation-verified", "close-authorized", "close-verified"})
-_STAGE_ACTIONS = frozenset({"feedback", "close", "add_ready", "remove_ready", "label"})
+_STAGE_ACTIONS = frozenset({"feedback", "close", "split", "add_ready", "remove_ready", "label"})
 _DIGEST_ACTION = re.compile(
-    r"^[0-9a-f]{64}-(?:feedback|close|add_ready|remove_ready|label)$"
+    r"^[0-9a-f]{64}-(?:feedback|close|split|add_ready|remove_ready|label)$"
 )
 
 
@@ -143,7 +144,7 @@ _RECEIPT_UPSTREAMS = (
     "select_triage_candidate", "reserve_triage_run_budget", "classify_triage_issue",
     "build_triage_context", "verify_triage_repository_unchanged", "decide_triage_mutation",
     "mutate_triage_issue_labels", "verify_triage_feedback", "observe_triage_feedback",
-    "close_triage_issue", "verify_triage_issue_closed", "publish_triage_decision_receipt",
+    "split_mixed_triage_issue", "close_triage_issue", "verify_triage_issue_closed", "publish_triage_decision_receipt",
     "publish_triage_mutation_authorization", "publish_triage_mutation_verification",
     "publish_triage_feedback_receipt", "publish_triage_close_authorization",
     "publish_triage_close_verification",
@@ -156,7 +157,7 @@ def _receipt_upstream(request: Request, stage: str) -> tuple[str, ...]:
         "mutation-authorized": ("decide_triage_mutation",),
         "mutation-verified": ("decide_triage_mutation", "mutate_triage_issue_labels", "verify_triage_feedback"),
         "feedback-verified": ("verify_triage_feedback", "observe_triage_feedback"),
-        "close-authorized": ("decide_triage_mutation", "close_triage_issue"),
+        "close-authorized": ("decide_triage_mutation", "split_mixed_triage_issue", "close_triage_issue"),
         "close-verified": ("verify_triage_issue_closed",),
     }
     return tuple(dict.fromkeys((*specific.get(stage, ()), *_RECEIPT_UPSTREAMS)))
@@ -361,6 +362,7 @@ def _stage_action(request: Request) -> str:
         "ensure_triage_label",
         "post_triage_feedback",
         "verify_triage_feedback",
+        "split_mixed_triage_issue",
     ):
         blob = cond_blob(request, name)
         if not isinstance(blob, Mapping) or not blob:
@@ -383,12 +385,12 @@ def _stage_request(request: Request, stage: str) -> Result:
     if terminal:
         return terminal
     action = _stage_action(request)
-    if stage in {"close-authorized", "close-verified"} and action and action not in {"close", "feedback"}:
+    if stage in {"close-authorized", "close-verified"} and action and action not in {"close", "feedback", "split"}:
         return noop("action_not_selected", action=action, operation=operation)
-    if stage == "mutation-authorized" and action and action not in {"add_ready", "remove_ready", "label", "close", "feedback"}:
+    if stage == "mutation-authorized" and action and action not in {"add_ready", "remove_ready", "label", "close", "feedback", "split"}:
         return noop("action_not_selected", action=action, operation=operation)
     if stage == "mutation-verified":
-        if action and action not in {"add_ready", "remove_ready", "label", "close", "feedback"}:
+        if action and action not in {"add_ready", "remove_ready", "label", "close", "feedback", "split"}:
             return noop("action_not_selected", action=action, operation=operation)
         if not action:
             labels = cond_blob(request, "mutate_triage_issue_labels")
@@ -906,9 +908,11 @@ def _publish_close_authorization(request: Request) -> Result:
         return terminal
     action = _stage_action(request)
     kind, classification = _close_classification(request)
-    if action and action not in {"close", "feedback"}:
+    if action and action not in {"close", "feedback", "split"}:
         return noop("action_not_selected", action=action, operation=operation)
     if action == "feedback" and kind not in {"duplicate", "out_of_scope"}:
+        return noop("action_not_selected", action=action, classification=kind or None, operation=operation)
+    if action == "split" and kind != "mixed":
         return noop("action_not_selected", action=action, classification=kind or None, operation=operation)
 
     data, cfg = input_of(request), cfg_of(request)
@@ -960,6 +964,12 @@ def _publish_close_authorization(request: Request) -> Result:
             triage_goal=goal,
             reject_labels=reject_labels,
         )
+    elif kind == "mixed":
+        decision = authorize_mixed_close(
+            classification if isinstance(classification, Mapping) else {"classification": kind},
+            state,
+            cond_blob(request, "split_mixed_triage_issue"),
+        )
     elif action == "close":
         # Explicit close without a closeable classification never authorizes.
         decision = {"authorized": False, "reason": "classification_not_closeable"}
@@ -969,7 +979,7 @@ def _publish_close_authorization(request: Request) -> Result:
 
     payload = _payload(request, "close-authorized")
     if not payload.get("decision_digest"):
-        for name in ("decide_triage_mutation", "classify_triage_issue", "mutate_triage_issue_labels", "verify_triage_feedback"):
+        for name in ("decide_triage_mutation", "classify_triage_issue", "mutate_triage_issue_labels", "split_mixed_triage_issue", "verify_triage_feedback"):
             blob = cond_blob(request, name)
             if isinstance(blob, Mapping) and blob.get("decision_digest"):
                 payload["decision_digest"] = blob["decision_digest"]

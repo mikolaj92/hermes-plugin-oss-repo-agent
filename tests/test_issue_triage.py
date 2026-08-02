@@ -54,6 +54,27 @@ class ClassificationContractTests(unittest.TestCase):
         spaced = json.dumps(payload()) + "\n  \t"
         self.assertEqual(issue_triage.parse_classification_output(spaced, sources=SOURCES)["classification"], "ready")
 
+    def test_mixed_requires_ready_and_feedback_portions(self) -> None:
+        mixed = payload(
+            "mixed",
+            portions=[
+                {"kind": "ready", "summary": "Implement bounded retry", "question": ""},
+                {"kind": "needs_feedback", "summary": "Choose retention policy", "question": "How long should data be retained?"},
+            ],
+        )
+        parsed = issue_triage.validate_classification(mixed, sources=SOURCES)
+        self.assertEqual([portion["kind"] for portion in parsed["portions"]], ["ready", "needs_feedback"])
+        invalid = [
+            payload(portions=[]),
+            payload("mixed", portions=[]),
+            payload("mixed", portions=[{"kind": "ready", "summary": "Only ready", "question": ""}]),
+            payload("mixed", portions=[{"kind": "needs_feedback", "summary": "Question", "question": ""}, {"kind": "ready", "summary": "Ready", "question": ""}]),
+        ]
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    issue_triage.validate_classification(value, sources=SOURCES)
+
     def test_requires_exactly_one_closed_json_object(self) -> None:
         good = json.dumps(payload())
         invalid = [
@@ -413,6 +434,57 @@ class MutationAtomTests(unittest.TestCase):
         mutated = m.mutate_triage_issue_labels(ensured_request)
         self.assertEqual(mutated["status"], "planned")
         self.assertEqual(mutated["label"], "ai:out-of-scope")
+
+    def test_mixed_decides_split_and_plans_one_child_per_portion(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        mixed = payload(
+            "mixed",
+            portions=[
+                {"kind": "ready", "summary": "Implement retry", "question": ""},
+                {"kind": "ready", "summary": "Add retry metrics", "question": ""},
+                {"kind": "needs_feedback", "summary": "Choose limit", "question": "What is the retry limit?"},
+            ],
+        )
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 42,
+                "dry_run": True,
+                "conduction": {
+                    "read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": []},
+                    "classify_triage_issue": {"ok": True, "status": "classified", "classification": mixed, "decision_digest": "d" * 64},
+                },
+            },
+            "config": {},
+        }
+        decided = m.decide_triage_mutation(request)
+        self.assertEqual(decided["action"], "split")
+        request["input"]["conduction"]["decide_triage_mutation"] = decided
+        result = m.split_mixed_triage_issue(request)
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(len(result["children"]), 3)
+        self.assertEqual([child["kind"] for child in result["children"]], ["ready", "ready", "needs_feedback"])
+
+    def test_mixed_close_requires_verified_complete_split(self):
+        classification = payload(
+            "mixed",
+            portions=[
+                {"kind": "ready", "summary": "Ready", "question": ""},
+                {"kind": "needs_feedback", "summary": "Question", "question": "Which?"},
+            ],
+        )
+        state = {"state": "OPEN", "labels": []}
+        denied = issue_triage.authorize_mixed_close(classification, state, {"ok": True, "verified": False, "children": []})
+        self.assertFalse(denied["authorized"])
+        allowed = issue_triage.authorize_mixed_close(
+            classification,
+            state,
+            {"ok": True, "verified": True, "children": [{"number": 101, "marker": "m1"}, {"number": 102, "marker": "m2"}]},
+        )
+        self.assertTrue(allowed["authorized"])
+        self.assertEqual(allowed["evidence"]["children"], [101, 102])
+
 
     def test_out_of_scope_feedback_when_auto_close_disabled(self):
         from lokay.steps import issue_triage_mutations as m

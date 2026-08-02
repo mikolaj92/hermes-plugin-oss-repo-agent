@@ -95,7 +95,8 @@ class PackageStructureTests(unittest.TestCase):
                     "observe_triage_feedback": ["verify_triage_feedback", "read_triage_labels", "decide_triage_mutation"],
                     "publish_triage_feedback_receipt": ["observe_triage_feedback", "verify_triage_feedback"],
                     "publish_triage_mutation_verification": ["mutate_triage_issue_labels", "verify_triage_feedback", "decide_triage_mutation"],
-                    "publish_triage_close_authorization": ["decide_triage_mutation", "read_triage_issue_state", "read_triage_comments", "read_triage_canonical_issue", "read_triage_labels", "classify_triage_issue", "publish_triage_mutation_verification", "publish_triage_feedback_receipt"],
+                    "split_mixed_triage_issue": ["decide_triage_mutation", "classify_triage_issue", "read_triage_labels"],
+                    "publish_triage_close_authorization": ["decide_triage_mutation", "read_triage_issue_state", "read_triage_comments", "read_triage_canonical_issue", "read_triage_labels", "classify_triage_issue", "publish_triage_mutation_verification", "publish_triage_feedback_receipt", "split_mixed_triage_issue"],
                     "close_triage_issue": ["publish_triage_close_authorization", "read_triage_labels", "decide_triage_mutation"],
                     "verify_triage_issue_closed": ["close_triage_issue", "read_triage_labels", "decide_triage_mutation"],
                     "publish_triage_close_verification": ["verify_triage_issue_closed"],
@@ -126,6 +127,7 @@ class PackageStructureTests(unittest.TestCase):
                 self.assertLess(positions["classify_triage_issue"], positions["publish_triage_mutation_authorization"])
                 self.assertLess(positions["publish_triage_mutation_authorization"], positions["mutate_triage_issue_labels"])
                 self.assertLess(positions["publish_triage_mutation_verification"], positions["publish_triage_close_authorization"])
+                self.assertLess(positions["split_mixed_triage_issue"], positions["publish_triage_close_authorization"])
                 self.assertLess(positions["publish_triage_close_authorization"], positions["close_triage_issue"])
                 self.assertLess(positions["close_triage_issue"], positions["verify_triage_issue_closed"])
                 self.assertLess(positions["verify_triage_issue_closed"], positions["publish_triage_close_verification"])
