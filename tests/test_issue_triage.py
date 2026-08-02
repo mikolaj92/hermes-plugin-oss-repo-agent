@@ -768,6 +768,99 @@ class MutationAtomTests(unittest.TestCase):
 
 
 
+    def test_mixed_split_requires_lock_root(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        digest = "f" * 64
+        mixed = payload(
+            "mixed",
+            portions=[
+                {"kind": "ready", "summary": "Implement retry", "question": ""},
+                {"kind": "needs_feedback", "summary": "Choose limit", "question": "What is the retry limit?"},
+            ],
+        )
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 42,
+                "dry_run": False,
+                "conduction": {
+                    "read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": []},
+                    "classify_triage_issue": {
+                        "ok": True,
+                        "status": "classified",
+                        "classification": mixed,
+                        "decision_digest": digest,
+                    },
+                    "decide_triage_mutation": {
+                        "ok": True,
+                        "status": "decided",
+                        "action": "split",
+                        "decision_digest": digest,
+                        "classification": mixed,
+                    },
+                },
+            },
+            "config": {},
+        }
+        with unittest.mock.patch("lokay.steps.issue_triage_mutations.run_cmd") as run_cmd:
+            result = m.split_mixed_triage_issue(request)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "missing_split_lock_root")
+        self.assertEqual(result["failure_class"], "terminal")
+        run_cmd.assert_not_called()
+
+    def test_mixed_split_lock_io_failure_is_terminal(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        digest = "a" * 64
+        mixed = payload(
+            "mixed",
+            portions=[
+                {"kind": "ready", "summary": "Implement retry", "question": ""},
+                {"kind": "needs_feedback", "summary": "Choose limit", "question": "What is the retry limit?"},
+            ],
+        )
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 42,
+                "dry_run": False,
+                "task_receipts": "/tmp/unused-split-lock-root",
+                "conduction": {
+                    "read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": []},
+                    "classify_triage_issue": {
+                        "ok": True,
+                        "status": "classified",
+                        "classification": mixed,
+                        "decision_digest": digest,
+                    },
+                    "decide_triage_mutation": {
+                        "ok": True,
+                        "status": "decided",
+                        "action": "split",
+                        "decision_digest": digest,
+                        "classification": mixed,
+                    },
+                },
+            },
+            "config": {},
+        }
+        with (
+            unittest.mock.patch(
+                "lokay.steps.issue_triage_mutations._split_lock_path",
+                side_effect=OSError("permission denied"),
+            ),
+            unittest.mock.patch("lokay.steps.issue_triage_mutations.run_cmd") as run_cmd,
+        ):
+            result = m.split_mixed_triage_issue(request)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "split_lock_failed")
+        self.assertEqual(result["failure_class"], "terminal")
+        self.assertFalse(result.get("mutated", True))
+        self.assertEqual(result["error"], "permission denied")
+        run_cmd.assert_not_called()
+
     def test_mixed_close_requires_verified_complete_split(self):
         classification = payload(
             "mixed",

@@ -809,6 +809,8 @@ def split_mixed_triage_issue(request: Mapping[str, Any]) -> dict[str, Any]:
         if str(exc) == "missing_split_lock_root":
             return fail("missing_split_lock_root", failure_class="terminal", retry_safe=False, **_identity(request))
         return fail("split_issue_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, children=children, **_identity(request))
+    except OSError as exc:
+        return fail("split_lock_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False, **_identity(request))
     except (CommandError, subprocess.TimeoutExpired, TypeError, json.JSONDecodeError) as exc:
         return fail("split_issue_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, children=children, **_identity(request))
     return ok(status="split_verified", action="split", verified=True, mutated=True, children=children, parent_marker=parent_marker, decision_digest=digest, **_identity(request))
