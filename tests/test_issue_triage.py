@@ -123,6 +123,20 @@ class ClassificationContractTests(unittest.TestCase):
                 sources=SOURCES,
             )
 
+    def test_rejects_bare_or_mismatched_evidence_identities(self) -> None:
+        invalid = [
+            payload(evidence=[{"kind": "issue", "identity": "42", "quote": "dropped responses"}]),
+            payload(evidence=[{"kind": "issue", "identity": "issue", "quote": "dropped responses"}]),
+            payload(evidence=[{"kind": "repository_context", "identity": "README.md", "quote": "Lokay"}]),
+            payload(evidence=[{"kind": "comment", "identity": "7", "quote": "duplicate"}]),
+            payload(evidence=[{"kind": "issue", "identity": "repository_context:README.md", "quote": "Lokay"}]),
+            payload(evidence=[{"kind": "comment", "identity": "issue:42", "quote": "dropped responses"}]),
+        ]
+        for value in invalid:
+            with self.subTest(identity=value["evidence"][0]["identity"], kind=value["evidence"][0]["kind"]):
+                with self.assertRaises(ValueError):
+                    issue_triage.validate_classification(value, sources=SOURCES, issue_number=42)
+
     def test_digest_is_stable_for_key_order(self) -> None:
         value = payload()
         reversed_value = dict(reversed(list(value.items())))

@@ -288,6 +288,12 @@ def validate_classification(
             raise ValueError("invalid_evidence_identity")
         if not isinstance(quote, str) or not quote.strip() or len(quote) > 2_000:
             raise ValueError("invalid_evidence_quote")
+        if kind == "issue" and not identity.startswith("issue:"):
+            raise ValueError("invalid_evidence_identity")
+        if kind == "comment" and not identity.startswith("comment:"):
+            raise ValueError("invalid_evidence_identity")
+        if kind == "repository_context" and not identity.startswith("repository_context:"):
+            raise ValueError("invalid_evidence_identity")
         if sources is not None:
             source = sources.get(identity)
             if not isinstance(source, str) or quote not in source:

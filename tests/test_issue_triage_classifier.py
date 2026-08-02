@@ -46,6 +46,55 @@ class ClassifierSandboxTests(unittest.TestCase):
             self.assertIn('"schema_version":1', kwargs["prompt"])
             self.assertIn("integer 1", kwargs["prompt"])
             self.assertEqual(out["stdout_sha256"], __import__("hashlib").sha256(json.dumps(value).encode()).hexdigest())
+            self.assertIn("issue:<number>", kwargs["prompt"])
+            self.assertIn("comment:<databaseId>", kwargs["prompt"])
+            self.assertIn("repository_context:<path>", kwargs["prompt"])
+            self.assertIn('"evidence_source_identities":["issue:42","repository_context:README.md"]', kwargs["prompt"])
+
+    @mock.patch("lokay.steps.issue_triage_classifier.run_omp")
+    def test_prompt_lists_exact_source_identities(self, run_omp) -> None:
+        value = {
+            "schema_version": 1,
+            "classification": "ready",
+            "reason": "Matches goal",
+            "question": "",
+            "canonical_issue": 0,
+            "evidence": [{"kind": "issue", "identity": "issue:42", "quote": "local worker"}],
+        }
+        run_omp.return_value = {"status": "completed", "stdout": json.dumps(value)}
+        with tempfile.TemporaryDirectory() as tmp:
+            req = request(tmp)
+            req["input"]["comments"] = [{"databaseId": 7, "body": "This is a duplicate of #12."}]
+            req["input"]["sources"] = {
+                "issue:42": "Dropped response\nThe local worker drops a response.",
+                "comment:7": "This is a duplicate of #12.",
+                "repository_context:README.md": "Reliable issue automation for local workers.",
+            }
+            out = issue_triage_classifier.classify_triage_issue(req)
+        self.assertEqual(out["status"], "classified", out)
+        prompt = run_omp.call_args.kwargs["prompt"]
+        self.assertIn(
+            '"evidence_source_identities":["comment:7","issue:42","repository_context:README.md"]',
+            prompt,
+        )
+        self.assertIn("Bare numbers, bare paths, or unprefixed labels are invalid", prompt)
+
+    @mock.patch("lokay.steps.issue_triage_classifier.run_omp")
+    def test_rejects_bare_identity_stdout(self, run_omp) -> None:
+        value = {
+            "schema_version": 1,
+            "classification": "ready",
+            "reason": "Matches goal",
+            "question": "",
+            "canonical_issue": 0,
+            "evidence": [{"kind": "issue", "identity": "42", "quote": "local worker"}],
+        }
+        run_omp.return_value = {"status": "completed", "stdout": json.dumps(value)}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = issue_triage_classifier.classify_triage_issue(request(tmp))
+        self.assertEqual(out["status"], "failed")
+        self.assertIn("classifier_failed:invalid_evidence_identity", out["reason"])
+        self.assertTrue(out["retry_safe"])
 
     @mock.patch("lokay.steps.issue_triage_classifier.run_omp")
     def test_rejects_tail_only_or_wrapped_output(self, run_omp) -> None:
@@ -90,6 +139,8 @@ class ClassifierSandboxTests(unittest.TestCase):
             out = issue_triage_classifier.classify_triage_issue(req)
         self.assertEqual(out["status"], "classified", out)
         self.assertIn('"repository_context":{"README.md":"Reliable issue automation"}', run_omp.call_args.kwargs["prompt"])
+        prompt = run_omp.call_args.kwargs["prompt"]
+        self.assertIn('"evidence_source_identities":["issue:42","repository_context:README.md"]', prompt)
 
     @mock.patch("lokay.steps.issue_triage_classifier.run_omp")
     def test_reconcile_reuses_durable_decision_without_omp(self, run_omp) -> None:
