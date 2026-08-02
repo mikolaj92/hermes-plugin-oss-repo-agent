@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import tempfile
+import threading
 import unittest
 import unittest.mock
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from lokay.steps import issue_triage
 
@@ -564,33 +568,36 @@ class MutationAtomTests(unittest.TestCase):
                 return unittest.mock.Mock(stdout="")
             raise AssertionError(args)
 
-        request = {
-            "input": {
-                "repo": "owner/repo",
-                "number": 42,
-                "dry_run": False,
-                "conduction": {
-                    "read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": []},
-                    "classify_triage_issue": {
-                        "ok": True,
-                        "status": "classified",
-                        "classification": mixed,
-                        "decision_digest": digest,
-                    },
-                    "decide_triage_mutation": {
-                        "ok": True,
-                        "status": "decided",
-                        "action": "split",
-                        "decision_digest": digest,
-                        "classification": mixed,
+        with tempfile.TemporaryDirectory() as tmp:
+            request = {
+                "input": {
+                    "repo": "owner/repo",
+                    "number": 42,
+                    "dry_run": False,
+                    "task_receipts": tmp,
+                    "conduction": {
+                        "read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": []},
+                        "classify_triage_issue": {
+                            "ok": True,
+                            "status": "classified",
+                            "classification": mixed,
+                            "decision_digest": digest,
+                        },
+                        "decide_triage_mutation": {
+                            "ok": True,
+                            "status": "decided",
+                            "action": "split",
+                            "decision_digest": digest,
+                            "classification": mixed,
+                        },
                     },
                 },
-            },
-            "config": {},
-        }
-        with unittest.mock.patch("lokay.steps.issue_triage_mutations.run_cmd", side_effect=gh):
-            first = m.split_mixed_triage_issue(request)
-            second = m.split_mixed_triage_issue(request)
+                "config": {},
+            }
+            with unittest.mock.patch("lokay.steps.issue_triage_mutations.run_cmd", side_effect=gh):
+                first = m.split_mixed_triage_issue(request)
+                second = m.split_mixed_triage_issue(request)
+            self.assertTrue((Path(tmp) / "split-locks").is_dir())
 
         self.assertEqual(first["status"], "split_verified", first)
         self.assertTrue(first["verified"])
@@ -607,6 +614,158 @@ class MutationAtomTests(unittest.TestCase):
         self.assertEqual([child["number"] for child in second["children"]], [100, 101])
         self.assertEqual(state["creates"], 2, "rerun must not create more children")
         self.assertEqual(state["comments"], 1, "rerun must not post another parent link")
+
+    def test_mixed_split_serializes_concurrent_ticks(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        digest = "e" * 64
+        mixed = payload(
+            "mixed",
+            portions=[
+                {"kind": "ready", "summary": "Implement retry", "question": ""},
+                {"kind": "needs_feedback", "summary": "Choose limit", "question": "What is the retry limit?"},
+            ],
+        )
+        markers = [
+            f"<!-- lokay:issue-triage-split:owner/repo:42:{digest}:1 -->",
+            f"<!-- lokay:issue-triage-split:owner/repo:42:{digest}:2 -->",
+        ]
+        parent_marker = f"<!-- lokay:issue-triage-split:owner/repo:42:{digest} -->"
+        labels = [
+            {"name": "ai:ready", "color": "B60205", "description": ""},
+            {"name": "ai:needs-feedback", "color": "B60205", "description": ""},
+        ]
+        created: dict[str, dict] = {}
+        comments: list[dict] = []
+        state = {"creates": 0, "comments": 0}
+        lock = threading.Lock()
+        gate = threading.Barrier(2)
+
+        def gh(args, **kwargs):
+            if args[1:3] == ["label", "list"]:
+                return unittest.mock.Mock(stdout=json.dumps(labels))
+            if args[1:3] == ["issue", "list"]:
+                search = args[args.index("--search") + 1]
+                with lock:
+                    rows = [
+                        {"number": row["number"], "url": row["url"], "body": row["body"]}
+                        for marker, row in created.items()
+                        if f'"{marker}"' in search or marker in search
+                    ]
+                return unittest.mock.Mock(stdout=json.dumps(rows))
+            if args[1:3] == ["issue", "create"]:
+                with lock:
+                    state["creates"] += 1
+                    body = args[args.index("--body") + 1]
+                    label = args[args.index("--label") + 1]
+                    marker = next(item for item in markers if item in body)
+                    if marker in created:
+                        raise AssertionError(f"duplicate create for {marker}")
+                    number = 200 + len(created)
+                    row = {
+                        "number": number,
+                        "url": f"https://github.com/owner/repo/issues/{number}",
+                        "body": body,
+                        "labels": [{"name": label}],
+                    }
+                    created[marker] = row
+                return unittest.mock.Mock(stdout=row["url"] + "\n")
+            if args[1:3] == ["issue", "view"]:
+                number = int(args[3])
+                if number == 42:
+                    with lock:
+                        payload_comments = list(comments)
+                    return unittest.mock.Mock(
+                        stdout=json.dumps(
+                            {
+                                "labels": [],
+                                "state": "OPEN",
+                                "stateReason": "",
+                                "updatedAt": "2026-08-01T12:00:00Z",
+                                "comments": payload_comments,
+                            }
+                        )
+                    )
+                with lock:
+                    row = next(item for item in created.values() if item["number"] == number)
+                return unittest.mock.Mock(
+                    stdout=json.dumps(
+                        {
+                            "number": row["number"],
+                            "url": row["url"],
+                            "body": row["body"],
+                            "labels": row["labels"],
+                        }
+                    )
+                )
+            if args[1:3] == ["issue", "comment"]:
+                with lock:
+                    state["comments"] += 1
+                    body = args[args.index("--body") + 1]
+                    comments.append(
+                        {
+                            "id": "IC_parent",
+                            "databaseId": 1,
+                            "body": body,
+                            "createdAt": "2026-08-01T12:01:00Z",
+                        }
+                    )
+                return unittest.mock.Mock(stdout="")
+            raise AssertionError(args)
+
+        original_lock_path = m._split_lock_path
+
+        def synchronized_lock_path(request, repo, number, digest):
+            gate.wait(timeout=2)
+            return original_lock_path(request, repo, number, digest)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            requests = [
+                {
+                    "input": {
+                        "repo": "owner/repo",
+                        "number": 42,
+                        "dry_run": False,
+                        "task_receipts": tmp,
+                        "conduction": {
+                            "read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": []},
+                            "classify_triage_issue": {
+                                "ok": True,
+                                "status": "classified",
+                                "classification": mixed,
+                                "decision_digest": digest,
+                            },
+                            "decide_triage_mutation": {
+                                "ok": True,
+                                "status": "decided",
+                                "action": "split",
+                                "decision_digest": digest,
+                                "classification": mixed,
+                            },
+                        },
+                    },
+                    "config": {},
+                }
+                for _ in range(2)
+            ]
+            with (
+                unittest.mock.patch("lokay.steps.issue_triage_mutations.run_cmd", side_effect=gh),
+                unittest.mock.patch(
+                    "lokay.steps.issue_triage_mutations._split_lock_path",
+                    side_effect=synchronized_lock_path,
+                ),
+            ):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(m.split_mixed_triage_issue, requests))
+            self.assertTrue((Path(tmp) / "split-locks").is_dir())
+
+        self.assertEqual({result["status"] for result in results}, {"split_verified"})
+        self.assertEqual(state["creates"], 2)
+        self.assertEqual(state["comments"], 1)
+        self.assertEqual(len(created), 2)
+        self.assertTrue(all(len(result["children"]) == 2 for result in results))
+        self.assertTrue(all(result.get("parent_marker") == parent_marker for result in results))
+
 
 
     def test_mixed_close_requires_verified_complete_split(self):

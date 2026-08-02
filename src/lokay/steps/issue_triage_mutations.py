@@ -6,10 +6,13 @@ reported as safely retryable.
 """
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import re
 import subprocess
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from lokay.adapters_cli import CommandError, run_cmd
@@ -696,6 +699,24 @@ def observe_triage_feedback(request: Mapping[str, Any]) -> dict[str, Any]:
 def _split_marker(repo: str, number: int, digest: str, index: int) -> str:
     return f"<!-- lokay:issue-triage-split:{repo}:{number}:{digest}:{index} -->"
 
+def _split_lock_path(request: Mapping[str, Any], repo: str, number: int, digest: str) -> Path:
+    data, cfg = input_of(request), cfg_of(request)
+    root = str(
+        data.get("task_receipts")
+        or cfg.get("task_receipts")
+        or (data.get("paths") if isinstance(data.get("paths"), Mapping) else {}).get("task_receipts")
+        or (cfg.get("paths") if isinstance(cfg.get("paths"), Mapping) else {}).get("task_receipts")
+        or data.get("triage_receipts")
+        or cfg.get("triage_receipts")
+        or ""
+    ).strip()
+    if not root:
+        raise ValueError("missing_split_lock_root")
+    key = hashlib.sha256(f"{repo}\0{number}\0{digest}".encode()).hexdigest()
+    directory = Path(root) / "split-locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{key}.lock"
+
 
 def _mixed_decision(request: Mapping[str, Any]) -> Mapping[str, Any]:
     data = input_of(request)
@@ -743,45 +764,52 @@ def split_mixed_triage_issue(request: Mapping[str, Any]) -> dict[str, Any]:
     if dry_run_flag(request):
         return planned(action="split", decision_digest=digest, children=plans, **_identity(request))
     children: list[dict[str, Any]] = []
+    parent_marker = f"<!-- lokay:issue-triage-split:{repo}:{number}:{digest} -->"
     try:
-        available = _repo_labels(gh, repo)
-        available_names = {str(item.get("name") or "").casefold() for item in available}
-        for label in {plan["label"] for plan in plans}:
-            if label.casefold() not in available_names:
-                run_cmd([gh, "label", "create", label, "--repo", repo, "--color", "B60205", "--description", "Lokay mixed triage child"], timeout=60)
-        available_names = {str(item.get("name") or "").casefold() for item in _repo_labels(gh, repo)}
-        if any(plan["label"].casefold() not in available_names for plan in plans):
-            return fail("split_child_label_unverified", failure_class="reconcile_then_retry", retry_safe=False, **_identity(request))
-        for plan in plans:
-            found = _json(run_cmd([gh, "issue", "list", "--repo", repo, "--state", "all", "--search", f'"{plan["marker"]}" in:body', "--limit", "10", "--json", "number,url,body"], timeout=60))
-            matches = [row for row in found if isinstance(row, Mapping) and plan["marker"] in str(row.get("body") or "")]
-            if len(matches) > 1:
-                return fail("split_child_ambiguous", failure_class="terminal", retry_safe=False, marker=plan["marker"], **_identity(request))
-            if matches:
-                row = matches[0]
-            else:
-                created = run_cmd([gh, "issue", "create", "--repo", repo, "--title", plan["summary"], "--body", plan["body"], "--label", plan["label"]], timeout=60)
-                url = str(created.stdout or "").strip().splitlines()[-1]
-                match = re.search(r"/issues/(\d+)(?:\D|$)", url)
-                if not match:
-                    return fail("split_child_create_unverified", failure_class="reconcile_then_retry", retry_safe=False, marker=plan["marker"], mutated=True, **_identity(request))
-                row = {"number": int(match.group(1)), "url": url, "body": plan["body"]}
-            verified = _json(run_cmd([gh, "issue", "view", str(row["number"]), "--repo", repo, "--json", "number,url,body,labels"], timeout=60))
-            verified_labels = {str(item.get("name") or "").casefold() for item in verified.get("labels") or [] if isinstance(item, Mapping)}
-            if plan["marker"] not in str(verified.get("body") or "") or plan["label"].casefold() not in verified_labels:
-                return fail("split_child_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, marker=plan["marker"], mutated=True, **_identity(request))
-            children.append({"number": int(verified["number"]), "url": str(verified.get("url") or ""), "kind": plan["kind"], "marker": plan["marker"]})
-        parent_marker = f"<!-- lokay:issue-triage-split:{repo}:{number}:{digest} -->"
-        state = _read_issue(gh, repo, number)
-        existing = [comment for comment in state["comments"] if parent_marker in str(comment.get("body") or "")]
-        if not existing:
-            links = "\n".join(f'- #{child["number"]} ({child["kind"]})' for child in children)
-            run_cmd([gh, "issue", "comment", str(number), "--repo", repo, "--body", f"Split into:\n{links}\n\n{parent_marker}"], timeout=60)
+        lock_path = _split_lock_path(request, repo, number, digest)
+        with lock_path.open("a+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            available = _repo_labels(gh, repo)
+            available_names = {str(item.get("name") or "").casefold() for item in available}
+            for label in {plan["label"] for plan in plans}:
+                if label.casefold() not in available_names:
+                    run_cmd([gh, "label", "create", label, "--repo", repo, "--color", "B60205", "--description", "Lokay mixed triage child"], timeout=60)
+            available_names = {str(item.get("name") or "").casefold() for item in _repo_labels(gh, repo)}
+            if any(plan["label"].casefold() not in available_names for plan in plans):
+                return fail("split_child_label_unverified", failure_class="reconcile_then_retry", retry_safe=False, **_identity(request))
+            for plan in plans:
+                found = _json(run_cmd([gh, "issue", "list", "--repo", repo, "--state", "all", "--search", f'"{plan["marker"]}" in:body', "--limit", "10", "--json", "number,url,body"], timeout=60))
+                matches = [row for row in found if isinstance(row, Mapping) and plan["marker"] in str(row.get("body") or "")]
+                if len(matches) > 1:
+                    return fail("split_child_ambiguous", failure_class="terminal", retry_safe=False, marker=plan["marker"], **_identity(request))
+                if matches:
+                    row = matches[0]
+                else:
+                    created = run_cmd([gh, "issue", "create", "--repo", repo, "--title", plan["summary"], "--body", plan["body"], "--label", plan["label"]], timeout=60)
+                    url = str(created.stdout or "").strip().splitlines()[-1]
+                    match = re.search(r"/issues/(\d+)(?:\D|$)", url)
+                    if not match:
+                        return fail("split_child_create_unverified", failure_class="reconcile_then_retry", retry_safe=False, marker=plan["marker"], mutated=True, **_identity(request))
+                    row = {"number": int(match.group(1)), "url": url, "body": plan["body"]}
+                verified = _json(run_cmd([gh, "issue", "view", str(row["number"]), "--repo", repo, "--json", "number,url,body,labels"], timeout=60))
+                verified_labels = {str(item.get("name") or "").casefold() for item in verified.get("labels") or [] if isinstance(item, Mapping)}
+                if plan["marker"] not in str(verified.get("body") or "") or plan["label"].casefold() not in verified_labels:
+                    return fail("split_child_readback_mismatch", failure_class="reconcile_then_retry", retry_safe=False, marker=plan["marker"], mutated=True, **_identity(request))
+                children.append({"number": int(verified["number"]), "url": str(verified.get("url") or ""), "kind": plan["kind"], "marker": plan["marker"]})
             state = _read_issue(gh, repo, number)
             existing = [comment for comment in state["comments"] if parent_marker in str(comment.get("body") or "")]
-        if len(existing) != 1:
-            return fail("split_parent_link_unverified", failure_class="reconcile_then_retry", retry_safe=False, mutated=True, children=children, **_identity(request))
-    except (CommandError, subprocess.TimeoutExpired, TypeError, ValueError, json.JSONDecodeError) as exc:
+            if not existing:
+                links = "\n".join(f'- #{child["number"]} ({child["kind"]})' for child in children)
+                run_cmd([gh, "issue", "comment", str(number), "--repo", repo, "--body", f"Split into:\n{links}\n\n{parent_marker}"], timeout=60)
+                state = _read_issue(gh, repo, number)
+                existing = [comment for comment in state["comments"] if parent_marker in str(comment.get("body") or "")]
+            if len(existing) != 1:
+                return fail("split_parent_link_unverified", failure_class="reconcile_then_retry", retry_safe=False, mutated=True, children=children, **_identity(request))
+    except ValueError as exc:
+        if str(exc) == "missing_split_lock_root":
+            return fail("missing_split_lock_root", failure_class="terminal", retry_safe=False, **_identity(request))
+        return fail("split_issue_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, children=children, **_identity(request))
+    except (CommandError, subprocess.TimeoutExpired, TypeError, json.JSONDecodeError) as exc:
         return fail("split_issue_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, children=children, **_identity(request))
     return ok(status="split_verified", action="split", verified=True, mutated=True, children=children, parent_marker=parent_marker, decision_digest=digest, **_identity(request))
 
