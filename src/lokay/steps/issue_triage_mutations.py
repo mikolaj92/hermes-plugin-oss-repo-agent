@@ -765,10 +765,12 @@ def split_mixed_triage_issue(request: Mapping[str, Any]) -> dict[str, Any]:
         return planned(action="split", decision_digest=digest, children=plans, **_identity(request))
     children: list[dict[str, Any]] = []
     parent_marker = f"<!-- lokay:issue-triage-split:{repo}:{number}:{digest} -->"
+    lock_acquired = False
     try:
         lock_path = _split_lock_path(request, repo, number, digest)
         with lock_path.open("a+b") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            lock_acquired = True
             available = _repo_labels(gh, repo)
             available_names = {str(item.get("name") or "").casefold() for item in available}
             for label in {plan["label"] for plan in plans}:
@@ -810,7 +812,9 @@ def split_mixed_triage_issue(request: Mapping[str, Any]) -> dict[str, Any]:
             return fail("missing_split_lock_root", failure_class="terminal", retry_safe=False, **_identity(request))
         return fail("split_issue_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, children=children, **_identity(request))
     except OSError as exc:
-        return fail("split_lock_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False, **_identity(request))
+        if not lock_acquired:
+            return fail("split_lock_failed", failure_class="terminal", retry_safe=False, error=str(exc), mutated=False, **_identity(request))
+        return fail("split_issue_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, children=children, **_identity(request))
     except (CommandError, subprocess.TimeoutExpired, TypeError, json.JSONDecodeError) as exc:
         return fail("split_issue_failed", failure_class="reconcile_then_retry", retry_safe=False, error=str(exc), mutated=True, children=children, **_identity(request))
     return ok(status="split_verified", action="split", verified=True, mutated=True, children=children, parent_marker=parent_marker, decision_digest=digest, **_identity(request))

@@ -861,6 +861,56 @@ class MutationAtomTests(unittest.TestCase):
         self.assertEqual(result["error"], "permission denied")
         run_cmd.assert_not_called()
 
+    def test_mixed_split_post_lock_oserror_is_mutation_failure(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        digest = "b" * 64
+        mixed = payload(
+            "mixed",
+            portions=[
+                {"kind": "ready", "summary": "Implement retry", "question": ""},
+                {"kind": "needs_feedback", "summary": "Choose limit", "question": "What is the retry limit?"},
+            ],
+        )
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 42,
+                "dry_run": False,
+                "task_receipts": "",  # filled below
+                "conduction": {
+                    "read_triage_labels": {"ok": True, "status": "triage_labels_read", "labels": []},
+                    "classify_triage_issue": {
+                        "ok": True,
+                        "status": "classified",
+                        "classification": mixed,
+                        "decision_digest": digest,
+                    },
+                    "decide_triage_mutation": {
+                        "ok": True,
+                        "status": "decided",
+                        "action": "split",
+                        "decision_digest": digest,
+                        "classification": mixed,
+                    },
+                },
+            },
+            "config": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            request["input"]["task_receipts"] = tmp
+            with unittest.mock.patch(
+                "lokay.steps.issue_triage_mutations.run_cmd",
+                side_effect=OSError("broken pipe after flock"),
+            ):
+                result = m.split_mixed_triage_issue(request)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "split_issue_failed")
+        self.assertEqual(result["failure_class"], "reconcile_then_retry")
+        self.assertTrue(result.get("mutated"))
+        self.assertEqual(result["error"], "broken pipe after flock")
+
+
     def test_mixed_close_requires_verified_complete_split(self):
         classification = payload(
             "mixed",
