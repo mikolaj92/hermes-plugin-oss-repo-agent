@@ -114,6 +114,30 @@ def is_triage_reconcile(request: Request, *upstream_ids: str) -> bool:
     return triage_candidate_class(request, *upstream_ids) in {"reconcile_decision", "reconcile_pending"}
 
 
+def is_frozen_ready_conflict(request: Request, *upstream_ids: str) -> bool:
+    """True when triage only needs to drop ready under a frozen label."""
+    return triage_candidate_class(request, *upstream_ids) == "frozen_ready_conflict"
+
+
+def frozen_ready_decision_digest(
+    *,
+    repo: str,
+    number: int,
+    labels: Sequence[str] | None = None,
+    action: str = "remove_ready",
+) -> str:
+    """Stable 64-hex identity for label-only frozen+ready reconciliation."""
+    payload = {
+        "schema_version": 1,
+        "kind": "frozen_ready_conflict",
+        "repo": str(repo or ""),
+        "number": int(number or 0),
+        "action": str(action or "remove_ready"),
+        "labels": sorted({str(value) for value in (labels or []) if str(value)}),
+    }
+    return decision_digest(payload)
+
+
 
 _CLASSIFICATIONS = frozenset({"ready", "needs_feedback", "duplicate", "out_of_scope", "ambiguous"})
 _EVIDENCE_KINDS = frozenset({"issue", "comment", "repository_context"})

@@ -986,6 +986,61 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(loaded["decision_digest"], digest)
         self.assertEqual(loaded["action"], "needs_feedback")
 
+    def test_frozen_ready_publish_skips_durable_decision(self) -> None:
+        selected = {
+            "repo": "owner/repo",
+            "number": 31,
+            "candidate_class": "frozen_ready_conflict",
+            "labels": ["frozen", "ai:ready"],
+        }
+        digest = "b" * 64
+        classification = {
+            "schema_version": 1,
+            "classification": "ready",
+            "reason": "frozen_ready_reconciliation",
+            "question": "",
+            "canonical_issue": 0,
+            "evidence": [{"kind": "issue", "identity": "issue:31", "quote": "frozen+ready"}],
+        }
+        req = self.req(
+            selected=selected,
+            candidate_class="frozen_ready_conflict",
+            conduction={
+                "select_triage_candidate": {
+                    "ok": True,
+                    "status": "selected",
+                    "selected": selected,
+                    "candidate_class": "frozen_ready_conflict",
+                    "repo": "owner/repo",
+                    "number": 31,
+                },
+                "reserve_triage_run_budget": {
+                    "ok": True,
+                    "status": "exists",
+                    "selected": selected,
+                    "repo": "owner/repo",
+                    "number": 31,
+                    "issue": 31,
+                },
+                "classify_triage_issue": {
+                    "ok": True,
+                    "status": "classified",
+                    "reason": "frozen_ready_reconciliation",
+                    "selected": selected,
+                    "classification": classification,
+                    "action": "remove_ready",
+                    "decision_digest": digest,
+                },
+            },
+        )
+        out = receipts.publish_triage_decision_receipt(req)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "exists")
+        self.assertEqual(out["reason"], "frozen_ready_reconciliation")
+        self.assertIsNone(out.get("receipt_path"))
+        self.assertEqual(out["decision_digest"], digest)
+        self.assertFalse(list(self.root.rglob("*.json")))
+
 
 
 if __name__ == "__main__":

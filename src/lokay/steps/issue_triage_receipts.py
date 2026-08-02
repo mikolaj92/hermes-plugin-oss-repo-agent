@@ -14,7 +14,15 @@ import tempfile
 from typing import Any
 
 from lokay.envelope import Request, Result, fail, noop, ok, planned, cfg_of, input_of, cond_blob, cond_get, dry_run_flag, terminal_upstream
-from lokay.steps.issue_triage import authorize_duplicate_close, authorize_out_of_scope_close, is_triage_reconcile, triage_gate, triage_identity, triage_selected
+from lokay.steps.issue_triage import (
+    authorize_duplicate_close,
+    authorize_out_of_scope_close,
+    is_frozen_ready_conflict,
+    is_triage_reconcile,
+    triage_gate,
+    triage_identity,
+    triage_selected,
+)
 
 _SCHEMA_VERSION = 1
 _COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -718,6 +726,36 @@ def publish_triage_decision_receipt(request: Request) -> Result:
             repo=loaded.get("repo"),
             issue=loaded.get("issue"),
             number=loaded.get("number"),
+        )
+    # Frozen+ready is label-only: keep synthetic digest for mutation, never mint a durable decision.
+    if is_frozen_ready_conflict(request, "select_triage_candidate", "reserve_triage_run_budget", "classify_triage_issue"):
+        gate = _selected_gate(request, "publish_triage_decision_receipt", *_receipt_upstream(request, "decision"))
+        if gate is not None:
+            return gate
+        terminal = terminal_upstream(request, "publish_triage_decision_receipt", *_receipt_upstream(request, "decision"))
+        if terminal:
+            return terminal
+        classified = cond_blob(request, "classify_triage_issue")
+        selected = triage_selected(request, *_receipt_upstream(request, "decision"))
+        ident = triage_identity(request, *_receipt_upstream(request, "decision"))
+        return ok(
+            status="exists",
+            reason="frozen_ready_reconciliation",
+            receipt_path=None,
+            payload={
+                "schema_version": _SCHEMA_VERSION,
+                "stage": "decision",
+                "action": "remove_ready",
+                "classification": classified.get("classification"),
+                "decision_digest": classified.get("decision_digest"),
+                "selected": selected,
+            },
+            decision_digest=classified.get("decision_digest"),
+            selected=selected,
+            mutated=False,
+            repo=ident.get("repo") or classified.get("repo"),
+            issue=ident.get("number") or classified.get("number"),
+            number=ident.get("number") or classified.get("number"),
         )
     return _stage_request(request, "decision")
 

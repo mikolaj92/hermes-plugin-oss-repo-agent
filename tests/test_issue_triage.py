@@ -212,6 +212,68 @@ class MutationAtomTests(unittest.TestCase):
         self.assertEqual(result["status"], "planned")
         self.assertEqual(result["label"], "AI:READY")
 
+    def test_frozen_ready_wins_before_classify_fail(self):
+        from lokay.steps import issue_triage_mutations as m
+
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 31,
+                "candidate_class": "frozen_ready_conflict",
+                "conduction": {
+                    "read_triage_labels": {
+                        "ok": True,
+                        "status": "triage_labels_read",
+                        "labels": ["frozen", "ai:ready"],
+                    },
+                    "classify_triage_issue": {
+                        "ok": False,
+                        "status": "failed",
+                        "reason": "stale_repository_context",
+                    },
+                },
+            },
+            "config": {},
+        }
+        decided = m.decide_triage_mutation(request)
+        self.assertTrue(decided["ok"], decided)
+        self.assertEqual(decided["action"], "remove_ready")
+        self.assertEqual(decided["reason"], "frozen_ready_reconciliation")
+        self.assertEqual(decided["label"], "ai:ready")
+        self.assertRegex(str(decided["decision_digest"]), r"^[0-9a-f]{64}$")
+
+    def test_ensure_allows_remove_ready_when_frozen(self):
+        from lokay.steps import issue_triage_mutations as m
+        from unittest import mock
+
+        request = {
+            "input": {
+                "repo": "owner/repo",
+                "number": 31,
+                "action": "remove_ready",
+                "conduction": {
+                    "read_triage_labels": {
+                        "ok": True,
+                        "status": "triage_labels_read",
+                        "labels": ["frozen", "ai:ready"],
+                    },
+                    "decide_triage_mutation": {
+                        "ok": True,
+                        "status": "mutation_decided",
+                        "action": "remove_ready",
+                        "label": "ai:ready",
+                        "decision_digest": "a" * 64,
+                    },
+                },
+            },
+            "config": {},
+        }
+        with mock.patch.object(m, "_repo_labels", return_value=[{"name": "ai:ready", "color": "B60205", "description": ""}]):
+            ensured = m.ensure_triage_label(request)
+        self.assertTrue(ensured["ok"], ensured)
+        self.assertEqual(ensured["status"], "label_resolved")
+        self.assertEqual(ensured["label"], "ai:ready")
+
     def test_mutate_returns_post_stamp_updated_at(self):
         from lokay.steps import issue_triage_mutations as m
         from unittest import mock

@@ -11,7 +11,7 @@ from typing import Any, Mapping, Sequence
 
 from lokay.adapters_cli import CommandError, run_cmd
 from lokay.envelope import Request, Result, cfg_of, cond_get, fail, input_of, ok
-from lokay.steps.issue_triage import is_triage_reconcile, triage_gate, triage_identity
+from lokay.steps.issue_triage import is_frozen_ready_conflict, is_triage_reconcile, triage_gate, triage_identity
 
 _OID = re.compile(r"^[0-9a-fA-F]{40}$")
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$")
@@ -319,12 +319,19 @@ def build_triage_context(request: Request) -> Result:
     gate = _gate(request, "build_triage_context", "read_triage_repository_state", "select_triage_candidate", "reserve_triage_run_budget")
     if gate:
         return gate
-    # Reconcile reuses a durable decision; do not require a healthy local clone.
-    if is_triage_reconcile(request, "select_triage_candidate", "reserve_triage_run_budget", "read_triage_repository_state"):
+    # Label-only paths must not require a healthy local clone.
+    if is_triage_reconcile(request, "select_triage_candidate", "reserve_triage_run_budget", "read_triage_repository_state") or is_frozen_ready_conflict(
+        request, "select_triage_candidate", "reserve_triage_run_budget", "read_triage_repository_state"
+    ):
         ident = _identity(request, "read_triage_repository_state", "select_triage_candidate", "reserve_triage_run_budget")
+        reason = (
+            "frozen_ready_reconciliation"
+            if is_frozen_ready_conflict(request, "select_triage_candidate", "reserve_triage_run_budget", "read_triage_repository_state")
+            else "decision_reused"
+        )
         return ok(
             status="context_packet",
-            reason="decision_reused",
+            reason=reason,
             packet={"repo": ident["repo"], "context": [], "context_paths": [], "total_bytes": 0},
             pre_snapshot={},
             post_snapshot={},
@@ -359,9 +366,16 @@ def verify_triage_repository_unchanged(request: Request) -> Result:
     gate = _gate(request, "verify_triage_repository_unchanged", "build_triage_context", "select_triage_candidate", "reserve_triage_run_budget")
     if gate and "pre_snapshot" not in input_of(request) and "snapshot" not in input_of(request):
         return gate
-    if is_triage_reconcile(request, "build_triage_context", "select_triage_candidate", "reserve_triage_run_budget"):
+    if is_triage_reconcile(request, "build_triage_context", "select_triage_candidate", "reserve_triage_run_budget") or is_frozen_ready_conflict(
+        request, "build_triage_context", "select_triage_candidate", "reserve_triage_run_budget"
+    ):
         ident = _identity(request, "build_triage_context", "select_triage_candidate", "reserve_triage_run_budget")
-        return ok(status="snapshot_unchanged", reason="decision_reused", snapshot={}, mutated=False, **ident)
+        reason = (
+            "frozen_ready_reconciliation"
+            if is_frozen_ready_conflict(request, "build_triage_context", "select_triage_candidate", "reserve_triage_run_budget")
+            else "decision_reused"
+        )
+        return ok(status="snapshot_unchanged", reason=reason, snapshot={}, mutated=False, **ident)
     data = input_of(request)
     ident = _identity(request, "build_triage_context", "select_triage_candidate", "reserve_triage_run_budget")
     expected = data.get("pre_snapshot") or data.get("snapshot") or cond_get(request, "pre_snapshot", "build_triage_context", default=None)

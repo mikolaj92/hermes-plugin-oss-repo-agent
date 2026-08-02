@@ -262,6 +262,59 @@ class PinnedContextTests(unittest.TestCase):
         self.assertEqual(verified["status"], "snapshot_unchanged")
         self.assertEqual(verified["reason"], "decision_reused")
 
+    def test_frozen_ready_conflict_skips_local_snapshot(self):
+        selected = {
+            "repo": "o/r",
+            "number": 31,
+            "candidate_class": "frozen_ready_conflict",
+            "clone_path": str(self.root / "missing-clone"),
+            "labels": ["frozen", "ai:ready"],
+        }
+        request = {
+            "input": {
+                "selected": selected,
+                "repo": "o/r",
+                "number": 31,
+                "clone_path": selected["clone_path"],
+                "candidate_class": "frozen_ready_conflict",
+                "conduction": {
+                    "select_triage_candidate": {
+                        "ok": True,
+                        "status": "selected",
+                        "selected": selected,
+                        "candidate_class": "frozen_ready_conflict",
+                        "repo": "o/r",
+                        "number": 31,
+                    },
+                    "reserve_triage_run_budget": {
+                        "ok": True,
+                        "status": "exists",
+                        "selected": selected,
+                        "repo": "o/r",
+                        "number": 31,
+                        "issue": 31,
+                    },
+                    "read_triage_repository_state": {
+                        "ok": True,
+                        "status": "repository_read",
+                        "repo": "o/r",
+                        "selected": selected,
+                    },
+                },
+            },
+            "config": {},
+        }
+        built = evidence.build_triage_context(request)
+        self.assertTrue(built["ok"], built)
+        self.assertEqual(built["status"], "context_packet")
+        self.assertEqual(built["reason"], "frozen_ready_reconciliation")
+        self.assertEqual(built["packet"]["context"], [])
+        request["input"]["conduction"]["build_triage_context"] = built
+        verified = evidence.verify_triage_repository_unchanged(request)
+        self.assertTrue(verified["ok"], verified)
+        self.assertEqual(verified["status"], "snapshot_unchanged")
+        self.assertEqual(verified["reason"], "frozen_ready_reconciliation")
+
 
 
 if __name__ == "__main__":

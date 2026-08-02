@@ -14,6 +14,7 @@ from typing import Any
 
 from lokay.adapters_cli import CommandError, run_cmd
 from lokay.envelope import cfg_of, cond_blob, cond_get, dry_run_flag, fail, input_of, noop, ok, planned, terminal_upstream
+from lokay.steps.issue_triage import frozen_ready_decision_digest
 
 
 def _conduction(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -272,6 +273,31 @@ def decide_triage_mutation(request: Mapping[str, Any]) -> dict[str, Any]:
     folded = {str(x).casefold() for x in labels}
     frozen = str(data.get("frozen_label") or cfg.get("frozen_label") or (cfg.get("labels") or {}).get("frozen") or "frozen").casefold()
     ready = str(data.get("ready_label") or cfg.get("ready_label") or (cfg.get("labels") or {}).get("ready") or "ai:ready").casefold()
+    folded_labels = labels
+    # Frozen+ready is label-only and must win even when classify failed upstream.
+    if frozen in folded:
+        if ready in folded:
+            digest = _digest(request)
+            conducted = cond_blob(request, "classify_triage_issue")
+            if not digest:
+                digest = str(conducted.get("decision_digest") or "")
+            if not digest:
+                digest = frozen_ready_decision_digest(
+                    repo=str(repo or ""),
+                    number=int(number or 0),
+                    labels=labels,
+                    action="remove_ready",
+                )
+            return ok(
+                status="mutation_decided",
+                action="remove_ready",
+                label=next(x for x in folded_labels if x.casefold() == ready),
+                reason="frozen_ready_reconciliation",
+                decision_digest=digest,
+                classification="ready",
+                **_identity(request),
+            )
+        return noop("frozen", **_identity(request))
     conducted = cond_blob(request, "classify_triage_issue")
     if conducted.get("status") == "failed" or conducted.get("ok") is False:
         return fail("upstream_failed", failure_class="terminal", retry_safe=False, upstream=conducted, **_identity(request))
@@ -284,17 +310,6 @@ def decide_triage_mutation(request: Mapping[str, Any]) -> dict[str, Any]:
         digest = str(decision_value.get("decision_digest") or conducted.get("decision_digest") or "")
     if not digest:
         digest = str(conducted.get("decision_digest") or "")
-    if frozen in folded:
-        if ready in folded:
-            return ok(
-                status="mutation_decided",
-                action="remove_ready",
-                label=next(x for x in labels if x.casefold() == ready),
-                reason="frozen_ready_reconciliation",
-                decision_digest=digest or None,
-                **_identity(request),
-            )
-        return noop("frozen", **_identity(request))
     if data.get("action"):
         action = str(data["action"])
     elif classification == "ready":
@@ -332,7 +347,9 @@ def ensure_triage_label(request: Mapping[str, Any]) -> dict[str, Any]:
     """Resolve/provision one label using case-folded identity and readback."""
     data, cfg, repo, number, gh = _values(request)
     bad = _invalid(repo, number)
-    if _frozen_state(request):
+    action_preview = _action(request) or str(data.get("label_kind") or data.get("action") or "")
+    # remove_ready under frozen is the only allowed frozen label mutation.
+    if _frozen_state(request) and action_preview != "remove_ready":
         return noop("frozen", **_identity(request))
     gate = _gate(request, "add_ready", "remove_ready", "label", "feedback", "close")
     if gate is not None:

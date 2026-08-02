@@ -286,6 +286,79 @@ class ClassifierSandboxTests(unittest.TestCase):
             self.assertEqual(out["classification"], classification)
             run_omp.assert_not_called()
 
+    @mock.patch("lokay.steps.issue_triage_classifier.run_omp")
+    def test_frozen_ready_conflict_classifies_without_omp(self, run_omp) -> None:
+        selected = {
+            "repo": "owner/repo",
+            "number": 31,
+            "candidate_class": "frozen_ready_conflict",
+            "labels": ["frozen", "ai:ready"],
+        }
+        req = {
+            "input": {
+                "selected": selected,
+                "repo": "owner/repo",
+                "number": 31,
+                "candidate_class": "frozen_ready_conflict",
+                "current_labels": ["frozen", "ai:ready"],
+                "conduction": {
+                    "select_triage_candidate": {
+                        "ok": True,
+                        "status": "selected",
+                        "selected": selected,
+                        "candidate_class": "frozen_ready_conflict",
+                        "repo": "owner/repo",
+                        "number": 31,
+                    },
+                    "reserve_triage_run_budget": {
+                        "ok": True,
+                        "status": "exists",
+                        "selected": selected,
+                        "repo": "owner/repo",
+                        "number": 31,
+                        "issue": 31,
+                    },
+                    "read_triage_issue_state": {
+                        "ok": True,
+                        "status": "issue_read",
+                        "issue": selected,
+                        "selected": selected,
+                        "repo": "owner/repo",
+                        "number": 31,
+                    },
+                    "read_triage_comments": {
+                        "ok": True,
+                        "status": "comments_read",
+                        "comments": [],
+                        "selected": selected,
+                    },
+                    "build_triage_context": {
+                        "ok": True,
+                        "status": "context_packet",
+                        "reason": "frozen_ready_reconciliation",
+                        "selected": selected,
+                        "packet": {"context": []},
+                        "pre_snapshot": {},
+                        "post_snapshot": {},
+                    },
+                    "read_triage_labels": {
+                        "ok": True,
+                        "status": "triage_labels_read",
+                        "labels": ["frozen", "ai:ready"],
+                        "selected": selected,
+                    },
+                },
+            },
+            "config": {"dry_run": False},
+        }
+        out = issue_triage_classifier.classify_triage_issue(req)
+        self.assertEqual(out["status"], "classified", out)
+        self.assertEqual(out["reason"], "frozen_ready_reconciliation")
+        self.assertEqual(out["action"], "remove_ready")
+        self.assertEqual(out["classification"]["classification"], "ready")
+        self.assertRegex(str(out["decision_digest"]), r"^[0-9a-f]{64}$")
+        run_omp.assert_not_called()
+
 
 
 if __name__ == "__main__":
