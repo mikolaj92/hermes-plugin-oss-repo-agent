@@ -242,12 +242,24 @@ def read_triage_repository_state(request: Request) -> Result:
 
 def _snapshot(clone: str) -> dict[str, Any]:
     head = (run_cmd(["git", "rev-parse", "HEAD"], cwd=clone, timeout=60).stdout or "").strip()
-    upstream = (run_cmd(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cwd=clone, timeout=60).stdout or "").strip()
-    upstream_oid = (run_cmd(["git", "rev-parse", "@{upstream}"], cwd=clone, timeout=60).stdout or "").strip()
-    porcelain = run_cmd(["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=clone, timeout=60).stdout or ""
-    if not _OID.fullmatch(head) or not _OID.fullmatch(upstream_oid) or not upstream or "\x00" in porcelain:
+    if not _OID.fullmatch(head):
         raise ValueError("stale_or_missing_upstream")
-    return {"head_oid": head.lower(), "upstream": upstream, "upstream_oid": upstream_oid.lower(), "porcelain": porcelain, "status_hash": hashlib.sha256(porcelain.encode()).hexdigest()}
+    head = head.lower()
+    # Detached clones (and branches without @{upstream}) are valid when HEAD
+    # itself matches the authoritative default-branch OID later in build.
+    try:
+        upstream = (run_cmd(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cwd=clone, timeout=60).stdout or "").strip()
+        upstream_oid = (run_cmd(["git", "rev-parse", "@{upstream}"], cwd=clone, timeout=60).stdout or "").strip()
+        if not upstream or not _OID.fullmatch(upstream_oid):
+            raise ValueError("stale_or_missing_upstream")
+        upstream_oid = upstream_oid.lower()
+    except (CommandError, subprocess.TimeoutExpired, ValueError):
+        upstream = "HEAD"
+        upstream_oid = head
+    porcelain = run_cmd(["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=clone, timeout=60).stdout or ""
+    if "\x00" in porcelain:
+        raise ValueError("stale_or_missing_upstream")
+    return {"head_oid": head, "upstream": upstream, "upstream_oid": upstream_oid, "porcelain": porcelain, "status_hash": hashlib.sha256(porcelain.encode()).hexdigest()}
 
 
 def _local_snapshot(request: Request) -> Result:
@@ -302,8 +314,9 @@ def _committed_context(request: Request, head: str) -> Result:
     files: list[dict[str, Any]] = []; total = 0
     try:
         for path in valid:
-            # The explicit HEAD:path form is intentional: never read dirty bytes.
-            proc = run_cmd(["git", "show", f"HEAD:{path}"], cwd=clone, timeout=60)
+            # Pin every read to the pre-snapshot OID — never dirty working-tree bytes,
+            # and never live HEAD if it moves between pre and post snapshots.
+            proc = run_cmd(["git", "show", f"{head}:{path}"], cwd=clone, timeout=60)
             content = proc.stdout or ""
             encoded = content.encode("utf-8"); total += len(encoded)
             if total > cap:

@@ -315,6 +315,72 @@ class PinnedContextTests(unittest.TestCase):
         self.assertEqual(verified["status"], "snapshot_unchanged")
         self.assertEqual(verified["reason"], "frozen_ready_reconciliation")
 
+    def test_detached_head_matching_default_oid_builds_context(self):
+        # Live Temida clones are often detached; accept when HEAD OID matches remote.
+        self._git("checkout", "--detach", "HEAD", cwd=self.repo)
+        with mock.patch.object(evidence, "read_triage_repository_state", return_value=self.remote_state()):
+            result = evidence.build_triage_context(self.request())
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "context_packet")
+        self.assertEqual(result["packet"]["head_oid"], self.head)
+        self.assertEqual(result["packet"]["upstream"], "HEAD")
+        self.assertEqual(result["pre_snapshot"]["upstream_oid"], self.head)
+        self.assertEqual(result["packet"]["context"][0]["content"], "committed\n")
+        verified = evidence.verify_triage_repository_unchanged(
+            {"input": {"clone_path": str(self.repo), "pre_snapshot": result["pre_snapshot"]}}
+        )
+        self.assertTrue(verified["ok"], verified)
+        self.assertEqual(verified["status"], "snapshot_unchanged")
+
+    def test_committed_context_reads_pinned_oid_not_live_head(self):
+        # If HEAD moves, context bytes must still come from the pre-snapshot OID.
+        (self.repo / "README.md").write_text("moved\n")
+        self._git("add", "README.md", cwd=self.repo)
+        self._git("commit", "-m", "move-head", cwd=self.repo)
+        moved = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip()
+        self.assertNotEqual(moved, self.head)
+        result = evidence._committed_context(self.request(), self.head)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["head_oid"], self.head)
+        self.assertEqual(result["context"][0]["content"], "committed\n")
+        self.assertNotIn("moved", result["context"][0]["content"])
+
+    def test_head_change_between_snapshots_fails_closed(self):
+        snapshots = {"count": 0}
+        real_snapshot = evidence._snapshot
+
+        def flaky_snapshot(clone: str):
+            snap = real_snapshot(clone)
+            snapshots["count"] += 1
+            if snapshots["count"] == 1:
+                return snap
+            # Simulate concurrent checkout/fetch between pre and post snapshots.
+            mutated = dict(snap)
+            mutated["head_oid"] = "b" * 40
+            mutated["upstream_oid"] = "b" * 40
+            return mutated
+
+        with (
+            mock.patch.object(evidence, "_snapshot", side_effect=flaky_snapshot),
+            mock.patch.object(evidence, "read_triage_repository_state", return_value=self.remote_state()),
+            mock.patch.object(
+                evidence,
+                "_committed_context",
+                return_value={
+                    "ok": True,
+                    "status": "context_read",
+                    "head_oid": self.head,
+                    "context": [{"path": "README.md", "sha256": "x", "bytes": 1, "content": "committed\n"}],
+                    "context_paths": ["README.md"],
+                    "total_bytes": 1,
+                },
+            ),
+        ):
+            result = evidence.build_triage_context(self.request())
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "repository_changed")
+        self.assertEqual(snapshots["count"], 2)
+
 
 
 if __name__ == "__main__":
