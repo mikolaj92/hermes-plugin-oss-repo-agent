@@ -372,9 +372,23 @@ adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], 
 config = { handler = "lokay.steps.issue_to_pr.parse_issue_ref_from_task" }
 
 [[correlation_paths.effectors]]
+id = "read_merged_closing_prs"
+capability = "lokay_step"
+conduction = ["parse_issue_ref_from_task"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.issue_to_pr.read_merged_closing_prs" }
+
+[[correlation_paths.effectors]]
+id = "decide_held_issue_already_merged"
+capability = "lokay_step"
+conduction = ["read_merged_closing_prs"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.issue_to_pr.decide_held_issue_already_merged" }
+
+[[correlation_paths.effectors]]
 id = "read_fix_tasks"
 capability = "lokay_step"
-conduction = ["select_dispatch_task", "read_dispatch_tasks", "parse_issue_ref_from_task"]
+conduction = ["select_dispatch_task", "read_dispatch_tasks", "parse_issue_ref_from_task", "read_merged_closing_prs", "decide_held_issue_already_merged"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_fix_tasks" }
 
@@ -633,7 +647,7 @@ config = { handler = "lokay.steps.issue_to_pr.verify_dispatch_receipt" }
 [[correlation_paths.effectors]]
 id = "read_task_for_completion"
 capability = "lokay_step"
-conduction = ["select_dispatch_task", "verify_dispatch_receipt", "invoke_omp", "verify_omp_postconditions"]
+conduction = ["select_dispatch_task", "decide_held_issue_already_merged", "read_merged_closing_prs", "verify_dispatch_receipt", "invoke_omp", "verify_omp_postconditions"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_task_for_completion" }
 
@@ -647,7 +661,7 @@ config = { handler = "lokay.steps.issue_to_pr.decide_task_completion" }
 [[correlation_paths.effectors]]
 id = "complete_task"
 capability = "lokay_step"
-conduction = ["decide_task_completion", "read_task_for_completion", "select_dispatch_task", "invoke_omp", "verify_omp_postconditions"]
+conduction = ["decide_task_completion", "read_task_for_completion", "select_dispatch_task", "decide_held_issue_already_merged", "read_merged_closing_prs", "invoke_omp", "verify_omp_postconditions"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.complete_task" }
 
@@ -1935,9 +1949,23 @@ adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], 
 config = { handler = "lokay.steps.issue_to_pr.parse_issue_ref_from_task" }
 
 [[correlation_paths.effectors]]
+id = "dispatch_read_merged_closing_prs"
+capability = "lokay_step"
+conduction = ["dispatch_parse_issue_ref_from_task"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.issue_to_pr.read_merged_closing_prs" }
+
+[[correlation_paths.effectors]]
+id = "dispatch_decide_held_issue_already_merged"
+capability = "lokay_step"
+conduction = ["dispatch_read_merged_closing_prs"]
+adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
+config = { handler = "lokay.steps.issue_to_pr.decide_held_issue_already_merged" }
+
+[[correlation_paths.effectors]]
 id = "dispatch_read_fix_tasks"
 capability = "lokay_step"
-conduction = ["dispatch_select_dispatch_task", "dispatch_read_dispatch_tasks", "dispatch_parse_issue_ref_from_task"]
+conduction = ["dispatch_select_dispatch_task", "dispatch_read_dispatch_tasks", "dispatch_parse_issue_ref_from_task", "dispatch_read_merged_closing_prs", "dispatch_decide_held_issue_already_merged"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_fix_tasks" }
 
@@ -2196,7 +2224,7 @@ config = { handler = "lokay.steps.issue_to_pr.verify_dispatch_receipt" }
 [[correlation_paths.effectors]]
 id = "dispatch_read_task_for_completion"
 capability = "lokay_step"
-conduction = ["dispatch_select_dispatch_task", "dispatch_verify_dispatch_receipt", "dispatch_invoke_omp", "dispatch_verify_omp_postconditions"]
+conduction = ["dispatch_select_dispatch_task", "dispatch_decide_held_issue_already_merged", "dispatch_read_merged_closing_prs", "dispatch_verify_dispatch_receipt", "dispatch_invoke_omp", "dispatch_verify_omp_postconditions"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.read_task_for_completion" }
 
@@ -2210,7 +2238,7 @@ config = { handler = "lokay.steps.issue_to_pr.decide_task_completion" }
 [[correlation_paths.effectors]]
 id = "dispatch_complete_task"
 capability = "lokay_step"
-conduction = ["dispatch_decide_task_completion", "dispatch_read_task_for_completion", "dispatch_select_dispatch_task", "dispatch_invoke_omp", "dispatch_verify_omp_postconditions"]
+conduction = ["dispatch_decide_task_completion", "dispatch_read_task_for_completion", "dispatch_select_dispatch_task", "dispatch_decide_held_issue_already_merged", "dispatch_read_merged_closing_prs", "dispatch_invoke_omp", "dispatch_verify_omp_postconditions"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.issue_to_pr.complete_task" }
 
@@ -2401,14 +2429,14 @@ config = { handler = "lokay.steps.repair.build_repair_prompt" }
 [[correlation_paths.effectors]]
 id = "lifecycle_read_lifecycle_github_state"
 capability = "lokay_step"
-conduction = ["triage_decide_triage_action", "triage_load_pr_fields"]
+conduction = ["triage_decide_triage_action", "triage_load_pr_fields", "dispatch_decide_held_issue_already_merged"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.cleanup_reconcile.read_lifecycle_github_state" }
 
 [[correlation_paths.effectors]]
 id = "lifecycle_read_lifecycle_local_evidence"
 capability = "lokay_step"
-conduction = ["triage_decide_triage_action", "triage_load_pr_fields"]
+conduction = ["triage_decide_triage_action", "triage_load_pr_fields", "dispatch_decide_held_issue_already_merged"]
 adapter = { kind = "subprocess", command = ["python3", "-m", "lokay.effector"], cwd = ".", timeout_seconds = 900 }
 config = { handler = "lokay.steps.cleanup_reconcile.read_lifecycle_local_evidence" }
 

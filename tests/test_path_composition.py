@@ -253,11 +253,26 @@ class PackageStructureTests(unittest.TestCase):
                 self.assertGreater(by_id["invoke_omp"]["adapter"]["timeout_seconds"], 7200)
                 self.assertEqual(
                     by_id["complete_task"]["conduction"],
-                    ["decide_task_completion", "read_task_for_completion", "select_dispatch_task", "invoke_omp", "verify_omp_postconditions"],
+                    [
+                        "decide_task_completion",
+                        "read_task_for_completion",
+                        "select_dispatch_task",
+                        "decide_held_issue_already_merged",
+                        "read_merged_closing_prs",
+                        "invoke_omp",
+                        "verify_omp_postconditions",
+                    ],
                 )
                 self.assertEqual(
                     by_id["read_task_for_completion"]["conduction"],
-                    ["select_dispatch_task", "verify_dispatch_receipt", "invoke_omp", "verify_omp_postconditions"],
+                    [
+                        "select_dispatch_task",
+                        "decide_held_issue_already_merged",
+                        "read_merged_closing_prs",
+                        "verify_dispatch_receipt",
+                        "invoke_omp",
+                        "verify_omp_postconditions",
+                    ],
                 )
                 self.assertEqual(by_id["update_branch_local_oid"]["conduction"], ["verify_push_oid"])
                 self.assertEqual(by_id["verify_updated_branch_local_oid"]["conduction"], ["update_branch_local_oid"])
@@ -299,6 +314,8 @@ class PackageStructureTests(unittest.TestCase):
                         "dispatch_decide_task_completion",
                         "dispatch_read_task_for_completion",
                         "dispatch_select_dispatch_task",
+                        "dispatch_decide_held_issue_already_merged",
+                        "dispatch_read_merged_closing_prs",
                         "dispatch_invoke_omp",
                         "dispatch_verify_omp_postconditions",
                     ],
@@ -307,6 +324,8 @@ class PackageStructureTests(unittest.TestCase):
                     by_id["dispatch_read_task_for_completion"]["conduction"],
                     [
                         "dispatch_select_dispatch_task",
+                        "dispatch_decide_held_issue_already_merged",
+                        "dispatch_read_merged_closing_prs",
                         "dispatch_verify_dispatch_receipt",
                         "dispatch_invoke_omp",
                         "dispatch_verify_omp_postconditions",

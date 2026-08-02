@@ -69,6 +69,8 @@ EFFECTORS: tuple[EffectorEntry, ...] = (
     EffectorEntry("reconcile_intake_task", "intake", "lokay.steps.kanban_intake.reconcile_intake_task", "Reconcile an intake task after creation.", False),
     # issue_to_pr
     EffectorEntry("parse_issue_ref_from_task", "issue_to_pr", "lokay.steps.issue_to_pr.parse_issue_ref_from_task", "Parse repository, issue, and branch from a task.", False),
+    EffectorEntry("read_merged_closing_prs", "issue_to_pr", "lokay.steps.issue_to_pr.read_merged_closing_prs", "Read merged pull requests that close the held issue.", False),
+    EffectorEntry("decide_held_issue_already_merged", "issue_to_pr", "lokay.steps.issue_to_pr.decide_held_issue_already_merged", "Skip re-implementation when a merged closing PR already exists.", False),
     EffectorEntry("issue_to_pr_add_issue_label", "issue_to_pr", "lokay.steps.issue_to_pr.add_issue_label", "Add one label to a GitHub issue.", True),
     EffectorEntry("aggregate_issue_label_results", "issue_to_pr", "lokay.steps.issue_to_pr.aggregate_issue_label_results", "Aggregate individual issue label results.", False),
     EffectorEntry("read_dispatch_tasks", "issue_to_pr", "lokay.steps.issue_to_pr.read_dispatch_tasks", "Read dispatch tasks from Kanban.", False),

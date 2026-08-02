@@ -133,11 +133,200 @@ def parse_issue_ref_from_task(request: Request) -> Result:
     return ok(status="parsed", repo=repo, issue=issue, branch=branch, task_id=task.get("id") or task.get("task_id"), task_title=title, **context)
 
 
+def _first_upstream_noop(
+    request: Request, *effector_ids: str
+) -> tuple[str, dict[str, Any]]:
+    """Return (effector_id, blob) for the first upstream noop peer."""
+    for effector_id in effector_ids:
+        blob = cond_blob(request, effector_id)
+        if blob.get("status") == "noop":
+            return effector_id, blob
+    return "", {}
+
+
+def _already_merged_held_issue(blob: Mapping[str, Any] | None) -> bool:
+    if not isinstance(blob, Mapping):
+        return False
+    return (
+        blob.get("status") == "noop"
+        and blob.get("ok") is True
+        and blob.get("already_merged") is True
+        and blob.get("reason") == "held_claim_task_unavailable"
+        and all(
+            blob.get(k) not in (None, "", 0)
+            for k in ("repo", "issue", "pr_number", "branch", "head_oid")
+        )
+    )
 
 
 
 
+def read_merged_closing_prs(request: Request) -> Result:
+    """Read merged PRs whose closingIssuesReferences include the held issue."""
+    terminal = _atomic_terminal(request, "read_merged_closing_prs", "parse_issue_ref_from_task")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "parse_issue_ref_from_task", "select_dispatch_task")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_merged_closing_prs")
+    data, cfg = input_of(request), cfg_of(request)
+    parsed = cond_blob(request, "parse_issue_ref_from_task")
+    repo = str(data.get("repo") or parsed.get("repo") or "").strip()
+    issue_raw = data.get("issue") if data.get("issue") not in (None, "") else parsed.get("issue")
+    try:
+        issue = int(issue_raw)
+    except (TypeError, ValueError):
+        issue = 0
+    if not repo or issue <= 0:
+        return fail(
+            "missing_repo_or_issue",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_merged_closing_prs",
+            repo=repo or None,
+            issue=issue_raw,
+        )
+    gh = str(data.get("gh_cli") or cfg.get("gh_cli") or "gh")
+    try:
+        proc = run_cmd(
+            [
+                gh,
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "merged",
+                "--limit",
+                "100",
+                "--json",
+                "number,url,baseRefName,headRefName,headRefOid,mergedAt,mergeCommit,closingIssuesReferences",
+            ]
+        )
+        rows = json.loads(proc.stdout or "[]")
+    except (CommandError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+        return fail(
+            "merged_pr_list_failed",
+            failure_class="retryable_read",
+            retry_safe=True,
+            operation="read_merged_closing_prs",
+            error=str(exc),
+            repo=repo,
+            issue=issue,
+        )
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return fail(
+            "invalid_merged_pr_list",
+            failure_class="retryable_read",
+            retry_safe=True,
+            operation="read_merged_closing_prs",
+            repo=repo,
+            issue=issue,
+        )
+    matches: list[dict[str, Any]] = []
+    for row in rows:
+        references = row.get("closingIssuesReferences")
+        if not isinstance(references, list) or any(not isinstance(ref, dict) for ref in references):
+            return fail(
+                "invalid_merged_pr_links",
+                failure_class="retryable_read",
+                retry_safe=True,
+                operation="read_merged_closing_prs",
+                repo=repo,
+                issue=issue,
+                pr=row,
+            )
+        if any(ref.get("number") == issue for ref in references):
+            matches.append(row)
+    identity = {
+        key: parsed.get(key)
+        for key in ("board", "task_id", "clone_path", "branch", "priority")
+        if parsed.get(key) not in (None, "")
+    }
+    return ok(
+        status="read",
+        operation="read_merged_closing_prs",
+        prs=matches,
+        repo=repo,
+        issue=issue,
+        **identity,
+    )
 
+
+def decide_held_issue_already_merged(request: Request) -> Result:
+    """Pure: when a merged closing PR exists, emit identity and skip re-implementation."""
+    terminal = _atomic_terminal(request, "decide_held_issue_already_merged", "read_merged_closing_prs")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "read_merged_closing_prs", "parse_issue_ref_from_task", "select_dispatch_task")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="decide_held_issue_already_merged")
+    read = cond_blob(request, "read_merged_closing_prs")
+    rows = read.get("prs") if isinstance(read.get("prs"), list) else None
+    if rows is None:
+        return fail(
+            "missing_merged_pr_rows",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="decide_held_issue_already_merged",
+        )
+    repo = str(read.get("repo") or "").strip()
+    issue = read.get("issue")
+    base = {
+        "operation": "decide_held_issue_already_merged",
+        "repo": repo or None,
+        "issue": issue,
+        "board": read.get("board"),
+        "task_id": read.get("task_id"),
+        "clone_path": read.get("clone_path"),
+    }
+    if not rows:
+        return ok(status="absent", already_merged=False, **base)
+
+    def _sort_key(row: Mapping[str, Any]) -> tuple[str, int]:
+        try:
+            number = int(row.get("number"))
+        except (TypeError, ValueError):
+            number = 0
+        return (str(row.get("mergedAt") or ""), number)
+
+    chosen = sorted(rows, key=_sort_key)[-1]
+    try:
+        pr_number = int(chosen.get("number"))
+    except (TypeError, ValueError):
+        pr_number = 0
+    branch = str(chosen.get("headRefName") or "").strip()
+    head = str(chosen.get("headRefOid") or "").strip()
+    merge_commit = chosen.get("mergeCommit")
+    if isinstance(merge_commit, Mapping):
+        merge_oid = str(merge_commit.get("oid") or "").strip()
+    else:
+        merge_oid = str(merge_commit or "").strip()
+    if pr_number <= 0 or not branch or not head:
+        return fail(
+            "merged_pr_identity_incomplete",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="decide_held_issue_already_merged",
+            pr=chosen,
+            **base,
+        )
+    return noop(
+        "held_claim_task_unavailable",
+        already_merged=True,
+        pr_number=pr_number,
+        number=pr_number,
+        branch=branch,
+        head_ref=branch,
+        headRefName=branch,
+        head_oid=head,
+        headRefOid=head,
+        merge_oid=merge_oid,
+        merged_at=str(chosen.get("mergedAt") or ""),
+        pr=chosen,
+        merged_prs=rows,
+        **base,
+    )
 
 
 def _identity_values(
@@ -383,7 +572,8 @@ _DISPATCH_TAIL_ANCESTRY = (
     "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp",
     "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch",
     "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions",
-    "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks",
+    "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks",
+    "decide_held_issue_already_merged", "read_merged_closing_prs", "parse_issue_ref_from_task", "read_dispatch_tasks",
     "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result",
 )
 def _atomic_board(request: Request) -> str:
@@ -573,6 +763,8 @@ def _fix_identity(request: Request) -> tuple[str, int | str, str, dict[str, Any]
     sources = (
         held,
         data,
+        cond_blob(request, "decide_held_issue_already_merged"),
+        cond_blob(request, "read_merged_closing_prs"),
         cond_blob(request, "reconcile_fix_task"),
         cond_blob(request, "create_fix_task"),
         cond_blob(request, "find_fix_task_marker"),
@@ -668,6 +860,20 @@ def _has_fix_task(rows: list[dict[str, Any]], marker: str) -> bool:
     return any(_task_has_prefixed_marker(row, "fix-pr", marker) for row in rows)
 
 
+def _receipt_issue_number(receipt: Mapping[str, Any], provenance: Mapping[str, Any]) -> int:
+    """Issue identity from explicit receipt.issue or ai/fix/<n> branch prefix."""
+    raw = receipt.get("issue")
+    if raw not in (None, ""):
+        try:
+            number = int(raw)
+        except (TypeError, ValueError):
+            return 0
+        return number if number > 0 else 0
+    branch = str(provenance.get("head_ref") or "").strip()
+    branch_match = re.fullmatch(r"ai/fix/([1-9][0-9]*)(?:-[A-Za-z0-9._-]+)?", branch)
+    return int(branch_match.group(1)) if branch_match else 0
+
+
 def _held_claim_has_merged_receipt(request: Request, *, repo: str, issue: int | str) -> bool:
     """True when a durable MERGED receipt matches the held claim identity."""
     data, cfg = input_of(request), cfg_of(request)
@@ -709,10 +915,7 @@ def _held_claim_has_merged_receipt(request: Request, *, repo: str, issue: int | 
         receipt_repo = str(receipt.get("repo") or provenance.get("repo") or "").strip()
         if receipt_repo != wanted:
             continue
-        branch = str(provenance.get("head_ref") or "").strip()
-        branch_match = re.fullmatch(r"ai/fix/([1-9][0-9]*)(?:-[A-Za-z0-9._-]+)?", branch)
-        receipt_issue = int(branch_match.group(1)) if branch_match else 0
-        if receipt_issue != issue_num:
+        if _receipt_issue_number(receipt, provenance) != issue_num:
             continue
         number = provenance.get("number")
         if receipt.get("pr") != number:
@@ -722,6 +925,8 @@ def _held_claim_has_merged_receipt(request: Request, *, repo: str, issue: int | 
             continue
         return True
     return False
+
+
 
 
 
@@ -784,10 +989,23 @@ def select_dispatch_task(request: Request) -> Result:
 
 
 def read_fix_tasks(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "read_fix_tasks", "select_dispatch_task", "read_dispatch_tasks")
+    terminal = _atomic_terminal(
+        request,
+        "read_fix_tasks",
+        "decide_held_issue_already_merged",
+        "read_merged_closing_prs",
+        "select_dispatch_task",
+        "read_dispatch_tasks",
+    )
     if terminal:
         return terminal
-    idle = upstream_noop(request, "select_dispatch_task", "read_dispatch_tasks")
+    idle = upstream_noop(
+        request,
+        "decide_held_issue_already_merged",
+        "read_merged_closing_prs",
+        "select_dispatch_task",
+        "read_dispatch_tasks",
+    )
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_fix_tasks")
     board = _atomic_board(request)
@@ -811,7 +1029,7 @@ def find_fix_task_marker(request: Request) -> Result:
     rows = data.get("tasks") if isinstance(data.get("tasks"), list) else _atomic_rows(request, "read_fix_tasks")
     repo, issue, board, context = _fix_identity(request)
     marker = str(data.get("idempotency_key") or f"fix-pr:{repo}:{issue}")
-    idle = upstream_noop(request, "read_fix_tasks", "select_dispatch_task")
+    idle = upstream_noop(request, "read_fix_tasks", "decide_held_issue_already_merged", "select_dispatch_task")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="find_fix_task_marker")
     if not repo or issue in (None, ""):
@@ -840,7 +1058,7 @@ def create_fix_task(request: Request) -> Result:
     if terminal:
         return terminal
     data, cfg = input_of(request), cfg_of(request)
-    idle = upstream_noop(request, "find_fix_task_marker", "select_dispatch_task")
+    idle = upstream_noop(request, "find_fix_task_marker", "decide_held_issue_already_merged", "select_dispatch_task")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="create_fix_task")
     found = cond_blob(request, "find_fix_task_marker")
@@ -887,7 +1105,7 @@ def _reconcile_kanban_marker(request: Request, operation: str, peer: str, prefix
     terminal = _atomic_terminal(request, operation, peer)
     if terminal:
         return terminal
-    idle = upstream_noop(request, "create_fix_task", "find_fix_task_marker", "select_dispatch_task")
+    idle = upstream_noop(request, "create_fix_task", "find_fix_task_marker", "decide_held_issue_already_merged", "select_dispatch_task")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation=operation)
     data = input_of(request); created = cond_blob(request, peer); board = str(data.get("board") or created.get("board") or _atomic_board(request)); marker = str(data.get("idempotency_key") or created.get("idempotency_key") or created.get("marker") or "")
@@ -904,19 +1122,127 @@ def _reconcile_kanban_marker(request: Request, operation: str, peer: str, prefix
     return ok(status="reconciled", operation=operation, task=row, task_id=tid, board=board, marker=marker, mutated=False, **context)
 
 def read_task_for_completion(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt", "invoke_omp", "verify_omp_postconditions")
-    if terminal: return terminal
-    idle = upstream_noop(request, "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_updated_branch_local_oid", "update_branch_local_oid", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
+    terminal = _atomic_terminal(
+        request,
+        "read_task_for_completion",
+        "select_dispatch_task",
+        "decide_held_issue_already_merged",
+        "read_merged_closing_prs",
+        "verify_dispatch_receipt",
+        "invoke_omp",
+        "verify_omp_postconditions",
+    )
+    if terminal:
+        return terminal
+    source, idle = _first_upstream_noop(
+        request,
+        "select_dispatch_task",
+        "decide_held_issue_already_merged",
+        "read_merged_closing_prs",
+        "verify_dispatch_receipt",
+        "publish_dispatch_receipt",
+        "build_dispatch_receipt",
+        "aggregate_issue_label_results",
+        "issue_to_pr_add_issue_label",
+        "aggregate_pr_label_results",
+        "add_pr_label",
+        "normalize_pr_labels",
+        "reconcile_pull_request",
+        "create_pull_request",
+        "decide_existing_pr",
+        "read_open_pr_for_branch",
+        "verify_updated_branch_local_oid",
+        "update_branch_local_oid",
+        "verify_push_oid",
+        "read_pushed_ref",
+        "push_branch",
+        "read_push_head",
+        "decide_branch_has_commits",
+        "read_base_head",
+        "read_worktree_head",
+        "verify_omp_postconditions",
+        "invoke_omp",
+        "read_omp_preconditions",
+        "verify_worktree_head",
+        "add_worktree",
+        "write_branch_provenance",
+        "create_local_branch",
+        "read_branch_provenance",
+        "read_worktree_inventory",
+        "read_base_ref",
+        "fetch_clone_origin",
+        "read_clone_preconditions",
+        "reconcile_fix_task",
+        "create_fix_task",
+        "find_fix_task_marker",
+        "read_fix_tasks",
+        "parse_issue_ref_from_task",
+        "read_dispatch_tasks",
+        "intake_reconcile_intake_task",
+        "intake_create_intake_task",
+        "intake_build_issue_claim_result",
+    )
+    task_id = str(
+        input_of(request).get("task_id")
+        or cond_get(request, "task_id", "select_dispatch_task")
+        or ""
+    )
     if idle:
-        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_task_for_completion")
-    board, task_id = _atomic_board(request), str(input_of(request).get("task_id") or cond_get(request, "task_id", "select_dispatch_task") or "")
-    if not board or not task_id: return fail("missing_board_or_task_id", failure_class="terminal", retry_safe=False, operation="read_task_for_completion")
-    try: rows = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
-    except CommandError as exc: return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_task_for_completion", error=str(exc), board=board, task_id=task_id)
-    if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows): return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="read_task_for_completion")
+        if not (
+            source == "decide_held_issue_already_merged"
+            and _already_merged_held_issue(idle)
+            and task_id
+        ):
+            return noop(
+                str(idle.get("reason") or "no_ready_task"),
+                operation="read_task_for_completion",
+            )
+    board = _atomic_board(request)
+    if not board or not task_id:
+        return fail(
+            "missing_board_or_task_id",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_task_for_completion",
+        )
+    try:
+        rows = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
+    except CommandError as exc:
+        return fail(
+            "kanban_list_failed",
+            failure_class="retryable_read",
+            retry_safe=True,
+            operation="read_task_for_completion",
+            error=str(exc),
+            board=board,
+            task_id=task_id,
+        )
+    if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+        return fail(
+            "invalid_kanban_json",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_task_for_completion",
+        )
     found = [r for r in rows if str(r.get("id") or r.get("task_id") or "") == task_id]
-    if len(found) != 1: return fail("task_not_found" if not found else "ambiguous_task", failure_class="terminal", retry_safe=False, operation="read_task_for_completion", task_id=task_id)
-    return ok(status="read", operation="read_task_for_completion", board=board, task=found[0], task_id=task_id)
+    if len(found) != 1:
+        return fail(
+            "task_not_found" if not found else "ambiguous_task",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="read_task_for_completion",
+            task_id=task_id,
+        )
+    return ok(
+        status="read",
+        operation="read_task_for_completion",
+        board=board,
+        task=found[0],
+        task_id=task_id,
+    )
+
+
+
 
 
 def decide_task_completion(request: Request) -> Result:
@@ -929,19 +1255,140 @@ def decide_task_completion(request: Request) -> Result:
 
 
 def complete_task(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "complete_task", "decide_task_completion", "read_task_for_completion", "select_dispatch_task", "invoke_omp", "verify_omp_postconditions")
-    if terminal: return terminal
-    idle = upstream_noop(request, "decide_task_completion", "read_task_for_completion", "select_dispatch_task", "verify_dispatch_receipt", "publish_dispatch_receipt", "build_dispatch_receipt", "aggregate_issue_label_results", "issue_to_pr_add_issue_label", "aggregate_pr_label_results", "add_pr_label", "normalize_pr_labels", "reconcile_pull_request", "create_pull_request", "decide_existing_pr", "read_open_pr_for_branch", "verify_updated_branch_local_oid", "update_branch_local_oid", "verify_push_oid", "read_pushed_ref", "push_branch", "read_push_head", "decide_branch_has_commits", "read_base_head", "read_worktree_head", "verify_omp_postconditions", "invoke_omp", "read_omp_preconditions", "verify_worktree_head", "add_worktree", "write_branch_provenance", "create_local_branch", "read_branch_provenance", "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "reconcile_fix_task", "create_fix_task", "find_fix_task_marker", "read_fix_tasks", "read_dispatch_tasks", "intake_reconcile_intake_task", "intake_create_intake_task", "intake_build_issue_claim_result")
+    terminal = _atomic_terminal(
+        request,
+        "complete_task",
+        "decide_task_completion",
+        "read_task_for_completion",
+        "select_dispatch_task",
+        "decide_held_issue_already_merged",
+        "read_merged_closing_prs",
+        "invoke_omp",
+        "verify_omp_postconditions",
+    )
+    if terminal:
+        return terminal
+    source, idle = _first_upstream_noop(
+        request,
+        "decide_task_completion",
+        "read_task_for_completion",
+        "select_dispatch_task",
+        "decide_held_issue_already_merged",
+        "read_merged_closing_prs",
+        "verify_dispatch_receipt",
+        "publish_dispatch_receipt",
+        "build_dispatch_receipt",
+        "aggregate_issue_label_results",
+        "issue_to_pr_add_issue_label",
+        "aggregate_pr_label_results",
+        "add_pr_label",
+        "normalize_pr_labels",
+        "reconcile_pull_request",
+        "create_pull_request",
+        "decide_existing_pr",
+        "read_open_pr_for_branch",
+        "verify_updated_branch_local_oid",
+        "update_branch_local_oid",
+        "verify_push_oid",
+        "read_pushed_ref",
+        "push_branch",
+        "read_push_head",
+        "decide_branch_has_commits",
+        "read_base_head",
+        "read_worktree_head",
+        "verify_omp_postconditions",
+        "invoke_omp",
+        "read_omp_preconditions",
+        "verify_worktree_head",
+        "add_worktree",
+        "write_branch_provenance",
+        "create_local_branch",
+        "read_branch_provenance",
+        "read_worktree_inventory",
+        "read_base_ref",
+        "fetch_clone_origin",
+        "read_clone_preconditions",
+        "reconcile_fix_task",
+        "create_fix_task",
+        "find_fix_task_marker",
+        "read_fix_tasks",
+        "parse_issue_ref_from_task",
+        "read_dispatch_tasks",
+        "intake_reconcile_intake_task",
+        "intake_create_intake_task",
+        "intake_build_issue_claim_result",
+    )
+    tid = str(
+        input_of(request).get("task_id")
+        or cond_get(request, "task_id", "read_task_for_completion", "select_dispatch_task")
+        or ""
+    )
     if idle:
-        return noop(str(idle.get("reason") or "no_ready_task"), operation="complete_task")
-    data, cfg = input_of(request), cfg_of(request); board = _atomic_board(request); tid = str(data.get("task_id") or cond_get(request, "task_id", "read_task_for_completion", "select_dispatch_task") or ""); text = str(data.get("result") or "completed")
+        if not (
+            source == "decide_held_issue_already_merged"
+            and _already_merged_held_issue(idle)
+            and tid
+        ):
+            return noop(
+                str(idle.get("reason") or "no_ready_task"),
+                operation="complete_task",
+            )
+    data = input_of(request)
+    board = _atomic_board(request)
+    text = str(data.get("result") or "completed")
     decision = cond_blob(request, "decide_task_completion")
-    if decision.get("should_complete") is False: return ok(status="already_completed", operation="complete_task", board=board, task_id=tid, mutated=False)
-    if not board or not tid: return fail("missing_board_or_task_id", failure_class="terminal", retry_safe=False, operation="complete_task")
-    if dry_run_flag(request): return planned(operation="complete_task", board=board, task_id=tid, result=text)
-    try: run_cmd(["hermes", "kanban", "--board", board, "complete", tid, "--result", text, "--summary", text], timeout=60)
-    except CommandError as exc: return fail("complete_failed", failure_class="reconcile_then_retry", retry_safe=False, operation="complete_task", error=str(exc), board=board, task_id=tid, mutated=True)
-    return ok(status="completed", operation="complete_task", board=board, task_id=tid, result=text, mutated=True)
+    if decision.get("should_complete") is False:
+        return ok(
+            status="already_completed",
+            operation="complete_task",
+            board=board,
+            task_id=tid,
+            mutated=False,
+        )
+    if not board or not tid:
+        return fail(
+            "missing_board_or_task_id",
+            failure_class="terminal",
+            retry_safe=False,
+            operation="complete_task",
+        )
+    if dry_run_flag(request):
+        return planned(operation="complete_task", board=board, task_id=tid, result=text)
+    try:
+        run_cmd(
+            [
+                "hermes",
+                "kanban",
+                "--board",
+                board,
+                "complete",
+                tid,
+                "--result",
+                text,
+                "--summary",
+                text,
+            ],
+            timeout=60,
+        )
+    except CommandError as exc:
+        return fail(
+            "complete_failed",
+            failure_class="reconcile_then_retry",
+            retry_safe=False,
+            operation="complete_task",
+            error=str(exc),
+            board=board,
+            task_id=tid,
+            mutated=True,
+        )
+    return ok(
+        status="completed",
+        operation="complete_task",
+        board=board,
+        task_id=tid,
+        result=text,
+        mutated=True,
+    )
 
 
 def verify_task_completed(request: Request) -> Result:
@@ -951,116 +1398,6 @@ def verify_task_completed(request: Request) -> Result:
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="verify_task_completed")
     completed = cond_blob(request, "complete_task")
-    board = str(completed.get("board") or _atomic_board(request) or "")
-    task_id = str(completed.get("task_id") or cond_get(request, "task_id", "complete_task") or "")
-    if not board or not task_id: return fail("missing_board_or_task_id", failure_class="terminal", retry_safe=False, operation="verify_task_completed")
-    try: rows = hermes_kanban_json(["--board", board, "list", "--json", "--sort", "created-desc"])
-    except CommandError as exc: return fail("kanban_list_failed", failure_class="retryable_read", retry_safe=True, operation="verify_task_completed", error=str(exc), board=board, task_id=task_id)
-    if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows): return fail("invalid_kanban_json", failure_class="terminal", retry_safe=False, operation="verify_task_completed")
-    found = [r for r in rows if str(r.get("id") or r.get("task_id") or "") == task_id]
-    if len(found) != 1: return fail("task_not_found" if not found else "ambiguous_task", failure_class="terminal", retry_safe=False, operation="verify_task_completed", task_id=task_id)
-    state = str(found[0].get("status") or found[0].get("state") or "").lower()
-    if state not in {"done", "completed", "archived"}:
-        return fail("task_not_completed", failure_class="reconcile_then_retry", retry_safe=False, operation="verify_task_completed", task_id=task_id, state=state)
-    return ok(status="verified", operation="verify_task_completed", task_id=task_id)
-
-
-def read_clone_preconditions(request: Request) -> Result:
-    data, cfg = input_of(request), cfg_of(request)
-    repo, issue, board, context = _fix_identity(request)
-    clone_path = str(data.get("clone_path") or cfg.get("clone_path") or context.get("clone_path") or "")
-    base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
-    idle = upstream_noop(request, "reconcile_fix_task", "select_dispatch_task")
-    if idle:
-        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_clone_preconditions")
-    if not clone_path:
-        return fail("missing_clone_path", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", repo=repo)
-    clone = Path(clone_path)
-    if not (clone / ".git").exists():
-        return fail("clone_missing", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, repo=repo)
-    try:
-        status, origin = status_porcelain(clone), remote_url(clone)
-    except CommandError as exc:
-        return fail("clone_precondition_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_clone_preconditions", error=str(exc), clone_path=clone_path, repo=repo)
-    if status.strip():
-        return fail("clone_dirty", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, clone_status=status, repo=repo)
-    if not origin.strip():
-        return fail("origin_missing", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, repo=repo)
-    return ok(status="ready", operation="read_clone_preconditions", clone_path=clone_path, base_branch=base_branch, origin=origin, repo=repo, issue=issue, board=board, branch=context.get("branch"), task_id=context.get("task_id"))
-
-
-def fetch_clone_origin(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "fetch_clone_origin", "read_clone_preconditions")
-    if terminal: return terminal
-    idle = upstream_noop(request, "read_clone_preconditions")
-    if idle:
-        return noop(str(idle.get("reason") or "no_ready_task"), operation="fetch_clone_origin")
-    clone_path = str(input_of(request).get("clone_path") or cond_get(request, "clone_path", "read_clone_preconditions") or "")
-    repo, issue, _, context = _fix_identity(request)
-    if dry_run_flag(request): return planned(operation="fetch_clone_origin", clone_path=clone_path, repo=repo, issue=issue, branch=context.get("branch"))
-    try: git(["fetch", "origin", "--prune"], cwd=clone_path)
-    except CommandError as exc: return fail("fetch_failed", failure_class="retryable", retry_safe=True, operation="fetch_clone_origin", clone_path=clone_path, error=str(exc), mutated=True)
-    return ok(status="fetched", operation="fetch_clone_origin", clone_path=clone_path, repo=repo, issue=issue, branch=context.get("branch"), task_id=context.get("task_id"), mutated=True)
-
-
-def read_base_ref(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "read_base_ref", "fetch_clone_origin", "read_clone_preconditions")
-    if terminal: return terminal
-    idle = upstream_noop(request, "fetch_clone_origin", "read_clone_preconditions")
-    if idle:
-        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_base_ref")
-    data, cfg = input_of(request), cfg_of(request)
-    clone = str(data.get("clone_path") or cond_get(request, "clone_path", "fetch_clone_origin", "read_clone_preconditions") or "")
-    base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
-    repo, issue, _, context = _fix_identity(request)
-    try:
-        head = remote_ref(clone, "origin", base_branch)
-    except CommandError as exc:
-        return fail("base_ref_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_base_ref", error=str(exc), clone_path=clone, base_branch=base_branch)
-    return ok(
-        status="read",
-        operation="read_base_ref",
-        clone_path=clone,
-        base_branch=base_branch,
-        base_head=head,
-        repo=repo,
-        issue=issue,
-        branch=context.get("branch"),
-        task_id=context.get("task_id"),
-    )
-
-
-def read_worktree_inventory(request: Request) -> Result:
-    terminal = _atomic_terminal(request, "read_worktree_inventory", "read_base_ref", "fetch_clone_origin")
-    if terminal: return terminal
-    idle = upstream_noop(request, "read_clone_preconditions")
-    if idle:
-        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_worktree_inventory")
-    repo, issue, board, context = _fix_identity(request)
-    clone = str(
-        input_of(request).get("clone_path")
-        or cond_get(request, "clone_path", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions")
-        or context.get("clone_path")
-        or ""
-    )
-    try:
-        text = worktree_list(clone)
-        rows = parse_worktree_porcelain(text)
-    except (CommandError, ValueError) as exc:
-        return fail("worktree_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_worktree_inventory", error=str(exc))
-    return ok(
-        status="read",
-        operation="read_worktree_inventory",
-        clone_path=clone,
-        worktrees=rows,
-        repo=repo,
-        issue=issue,
-        board=board,
-        branch=context.get("branch"),
-        task_id=context.get("task_id"),
-    )
-
-
 def read_branch_provenance(request: Request) -> Result:
     idle = upstream_noop(request, "read_worktree_inventory")
     if idle:

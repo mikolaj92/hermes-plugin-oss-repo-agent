@@ -591,8 +591,14 @@ def _durable_merged_lifecycle_context(request: Request) -> Result | None:
                 continue
             branch = str(provenance.get("head_ref") or "").strip()
             branch_match = re.fullmatch(r"ai/fix/([1-9][0-9]*)(?:-[A-Za-z0-9._-]+)?", branch)
-            receipt_issue = int(branch_match.group(1)) if branch_match else 0
-            if (receipt_repo, receipt_issue) not in claimed:
+            if branch_match:
+                receipt_issue = int(branch_match.group(1))
+            else:
+                try:
+                    receipt_issue = int(receipt.get("issue"))
+                except (TypeError, ValueError):
+                    receipt_issue = 0
+            if receipt_issue <= 0 or (receipt_repo, receipt_issue) not in claimed:
                 continue
             number = _positive_int(provenance.get("number"), "pr_number")
             if receipt.get("pr") != number:
@@ -644,6 +650,44 @@ def _resolve_lifecycle_context(request: Request) -> Result:
             durable_merged=True,
             mutated=False,
         )
+    already = cond_blob(
+        request,
+        "dispatch_decide_held_issue_already_merged",
+        "decide_held_issue_already_merged",
+    )
+    if (
+        already.get("status") == "noop"
+        and already.get("already_merged") is True
+        and already.get("reason") == "held_claim_task_unavailable"
+    ):
+        try:
+            issue = _positive_int(already.get("issue"), "issue")
+            pr_number = _positive_int(already.get("pr_number") or already.get("number"), "pr_number")
+        except (TypeError, ValueError):
+            issue = 0
+            pr_number = 0
+        repo = str(already.get("repo") or "").strip()
+        branch = str(already.get("branch") or already.get("head_ref") or already.get("headRefName") or "").strip()
+        head = str(already.get("head_oid") or already.get("headRefOid") or "").strip()
+        if repo and issue > 0 and pr_number > 0 and branch and head:
+            return ok(
+                status="resolved",
+                repo=repo,
+                issue=issue,
+                pr_number=pr_number,
+                branch=branch,
+                head_oid=head,
+                board=str(already.get("board") or data.get("board") or cfg.get("board") or ""),
+                clone_path=str(already.get("clone_path") or data.get("clone_path") or cfg.get("clone_path") or ""),
+                priority=already.get("priority") if already.get("priority") is not None else (
+                    data.get("priority") if data.get("priority") is not None else cfg.get("priority") if cfg.get("priority") is not None else 0
+                ),
+                selected_pr=None,
+                linked_issue_numbers=[issue],
+                durable_merged=False,
+                already_merged_gate=True,
+                mutated=False,
+            )
     if load_idle and decide_idle:
         return noop(str(decide_idle.get("reason") or load_idle.get("reason") or "no_selected_pr"), operation="resolve_lifecycle_context", worked=False)
     load = cond_blob(request, "triage_load_pr_fields", "load_pr_fields")

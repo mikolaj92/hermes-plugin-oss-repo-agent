@@ -796,6 +796,162 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(out["repo"], "o/r")
         self.assertEqual(out["issue"], 9)
 
+    def test_decide_held_issue_already_merged_emits_identity(self) -> None:
+        read = {
+            "status": "read",
+            "ok": True,
+            "repo": "o/r",
+            "issue": 9,
+            "board": "b",
+            "task_id": "t1",
+            "prs": [
+                {
+                    "number": 42,
+                    "url": "https://example.test/pr/42",
+                    "baseRefName": "main",
+                    "headRefName": "3791-emp-suggested-edit",
+                    "headRefOid": "abc123",
+                    "mergedAt": "2026-08-02T14:27:26Z",
+                    "mergeCommit": {"oid": "def456"},
+                    "closingIssuesReferences": [{"number": 9}],
+                }
+            ],
+        }
+        out = issue_to_pr.decide_held_issue_already_merged(
+            req({"conduction": {"read_merged_closing_prs": read}})
+        )
+        self.assertEqual(out["status"], "noop")
+        self.assertTrue(out["already_merged"])
+        self.assertEqual(out["reason"], "held_claim_task_unavailable")
+        self.assertEqual(out["repo"], "o/r")
+        self.assertEqual(out["issue"], 9)
+        self.assertEqual(out["pr_number"], 42)
+        self.assertEqual(out["branch"], "3791-emp-suggested-edit")
+        self.assertEqual(out["head_oid"], "abc123")
+        self.assertTrue(issue_to_pr._already_merged_held_issue(out))
+
+    def test_already_merged_completion_bypasses_decide_noop(self) -> None:
+        decide = {
+            "status": "noop",
+            "ok": True,
+            "mutated": False,
+            "reason": "held_claim_task_unavailable",
+            "already_merged": True,
+            "operation": "decide_held_issue_already_merged",
+            "repo": "o/r",
+            "issue": 9,
+            "pr_number": 42,
+            "number": 42,
+            "branch": "3791-emp-suggested-edit",
+            "head_oid": "abc123",
+            "board": "b",
+            "task_id": "t1",
+        }
+        select = {
+            "status": "selected",
+            "ok": True,
+            "mutated": False,
+            "task_id": "t1",
+            "board": "b",
+            "repo": "o/r",
+            "issue": 9,
+        }
+        task = {"id": "t1", "status": "ready", "title": "[issue] o/r#9: bug"}
+        with mock.patch(
+            "lokay.steps.issue_to_pr.hermes_kanban_json",
+            return_value=[task],
+        ):
+            read = issue_to_pr.read_task_for_completion(
+                req(
+                    {
+                        "board": "b",
+                        "task_id": "t1",
+                        "conduction": {
+                            "select_dispatch_task": select,
+                            "decide_held_issue_already_merged": decide,
+                        },
+                    }
+                )
+            )
+        self.assertEqual(read["status"], "read")
+        self.assertEqual(read["task_id"], "t1")
+
+        decision = {
+            "status": "should_complete",
+            "ok": True,
+            "should_complete": True,
+            "task_id": "t1",
+        }
+        with mock.patch("lokay.steps.issue_to_pr.run_cmd") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            completed = issue_to_pr.complete_task(
+                req(
+                    {
+                        "board": "b",
+                        "task_id": "t1",
+                        "result": "already merged",
+                        "dry_run": False,
+                        "conduction": {
+                            "decide_task_completion": decision,
+                            "read_task_for_completion": read,
+                            "select_dispatch_task": select,
+                            "decide_held_issue_already_merged": decide,
+                        },
+                    }
+                )
+            )
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["task_id"], "t1")
+        self.assertTrue(completed["mutated"])
+        run.assert_called_once()
+
+    def test_already_merged_completion_keeps_other_upstream_noop(self) -> None:
+        decide = {
+            "status": "noop",
+            "ok": True,
+            "mutated": False,
+            "reason": "held_claim_task_unavailable",
+            "already_merged": True,
+            "operation": "decide_held_issue_already_merged",
+            "repo": "o/r",
+            "issue": 9,
+            "pr_number": 42,
+            "branch": "3791-emp-suggested-edit",
+            "head_oid": "abc123",
+        }
+        select_noop = {
+            "status": "noop",
+            "ok": True,
+            "mutated": False,
+            "reason": "no_ready_task",
+        }
+        out = issue_to_pr.read_task_for_completion(
+            req(
+                {
+                    "board": "b",
+                    "conduction": {
+                        "select_dispatch_task": select_noop,
+                        "decide_held_issue_already_merged": decide,
+                    },
+                }
+            )
+        )
+        self.assertEqual(out["status"], "noop")
+        self.assertEqual(out["reason"], "no_ready_task")
+
+        blocked = issue_to_pr.complete_task(
+            req(
+                {
+                    "board": "b",
+                    "conduction": {
+                        "select_dispatch_task": select_noop,
+                        "decide_held_issue_already_merged": decide,
+                    },
+                }
+            )
+        )
+        self.assertEqual(blocked["status"], "noop")
+        self.assertEqual(blocked["reason"], "no_ready_task")
 
     def test_next_dispatch_selects_fix_task_after_handoff(self) -> None:
         issue_task = {
