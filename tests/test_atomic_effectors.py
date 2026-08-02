@@ -1267,6 +1267,57 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(Path(created["worktree_path"]).resolve(), Path(proven["worktree_path"]).resolve())
         git_mock.assert_not_called()
 
+    def test_branch_provenance_propagates_inventory_failure(self) -> None:
+        failed = {
+            "status": "failed",
+            "ok": False,
+            "reason": "worktree_list_failed",
+            "mutated": False,
+        }
+        out = issue_to_pr.read_branch_provenance(req({
+            "conduction": {"read_worktree_inventory": failed},
+        }))
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["reason"], "upstream_failed")
+        self.assertEqual(out["operation"], "read_branch_provenance")
+        self.assertEqual(out["upstream_effector"], "read_worktree_inventory")
+        self.assertEqual(out["upstream"], failed)
+        self.assertFalse(out["mutated"])
+
+    def test_clone_chain_propagates_declared_terminal_predecessors(self) -> None:
+        failed = {"status": "failed", "ok": False, "reason": "upstream_failure", "mutated": False}
+        cases = (
+            (issue_to_pr.read_clone_preconditions, "reconcile_fix_task"),
+            (issue_to_pr.fetch_clone_origin, "read_clone_preconditions"),
+            (issue_to_pr.read_base_ref, "parse_issue_ref_from_task"),
+            (issue_to_pr.read_worktree_inventory, "parse_issue_ref_from_task"),
+        )
+        for handler, predecessor in cases:
+            with self.subTest(handler=handler.__name__, predecessor=predecessor):
+                out = handler(req({"conduction": {predecessor: failed}}))
+                self.assertEqual(out["reason"], "upstream_failed")
+                self.assertEqual(out["upstream_effector"], predecessor)
+                self.assertEqual(out["upstream"], failed)
+                self.assertFalse(out["mutated"])
+
+    def test_clone_handlers_reject_missing_clone_before_git_reads_or_fetch(self) -> None:
+        missing = "/definitely/missing/lokay-clone"
+        with mock.patch("lokay.steps.issue_to_pr.git") as git_mock, mock.patch(
+            "lokay.steps.issue_to_pr.worktree_list"
+        ) as worktree_mock, mock.patch("lokay.steps.issue_to_pr.remote_ref") as ref_mock:
+            cases = (
+                (issue_to_pr.fetch_clone_origin, {"read_clone_preconditions": {"status": "ready", "ok": True}}),
+                (issue_to_pr.read_base_ref, {"fetch_clone_origin": {"status": "fetched", "ok": True}}),
+                (issue_to_pr.read_worktree_inventory, {"read_base_ref": {"status": "read", "ok": True}}),
+            )
+            for handler, conduction in cases:
+                with self.subTest(handler=handler.__name__):
+                    out = handler(req({"clone_path": missing, "dry_run": False, "conduction": conduction}))
+                    self.assertEqual(out["reason"], "clone_missing")
+            git_mock.assert_not_called()
+            worktree_mock.assert_not_called()
+            ref_mock.assert_not_called()
+
     def test_fix_chain_resolves_identity_and_clone_from_configured_repos(self) -> None:
         repos = [{"repo": "mikolaj92/Temida", "board": "mikolaj92-temida", "clone_path": "/clones/Temida"}]
         parsed = {"status": "parsed", "ok": True, "repo": "mikolaj92/Temida", "issue": 3590, "board": "mikolaj92-temida", "clone_path": "/clones/Temida"}
@@ -1366,13 +1417,16 @@ class IssueToPrTests(unittest.TestCase):
         self.assertEqual(blocked["upstream_effector"], "invoke_omp")
 
     def test_worktree_and_omp_dry_chain(self) -> None:
-        pre = {"status": "ready", "ok": True, "clone_path": "/clone", "base_branch": "main"}
-        fetched = issue_to_pr.fetch_clone_origin(req({"clone_path": "/clone", "dry_run": True, "conduction": {"read_clone_preconditions": pre}}))
-        self.assertEqual(fetched["status"], "planned")
-        omp_pre = {"status": "ready", "ok": True, "worktree_path": "/wt", "branch": "ai/fix/1", "pre_head": "abc"}
-        omp = issue_to_pr.invoke_omp(req({"worktree_path": "/wt", "prompt": "fix", "dry_run": True, "conduction": {"read_omp_preconditions": omp_pre}}))
-        self.assertEqual(omp["status"], "planned")
-        self.assertFalse(omp["mutated"])
+        with tempfile.TemporaryDirectory() as tmp:
+            clone = Path(tmp)
+            (clone / ".git").mkdir()
+            pre = {"status": "ready", "ok": True, "clone_path": str(clone), "base_branch": "main"}
+            fetched = issue_to_pr.fetch_clone_origin(req({"clone_path": str(clone), "dry_run": True, "conduction": {"read_clone_preconditions": pre}}))
+            self.assertEqual(fetched["status"], "planned")
+            omp_pre = {"status": "ready", "ok": True, "worktree_path": "/wt", "branch": "ai/fix/1", "pre_head": "abc"}
+            omp = issue_to_pr.invoke_omp(req({"worktree_path": "/wt", "prompt": "fix", "dry_run": True, "conduction": {"read_omp_preconditions": omp_pre}}))
+            self.assertEqual(omp["status"], "planned")
+            self.assertFalse(omp["mutated"])
 
     def test_omp_postcondition_read_chain_propagates_noop(self) -> None:
         no_selection = {"status": "noop", "ok": True, "mutated": False, "reason": "no_selected_issue"}

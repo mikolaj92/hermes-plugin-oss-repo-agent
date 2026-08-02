@@ -1536,7 +1536,127 @@ def verify_task_completed(request: Request) -> Result:
     return ok(status="verified", operation="verify_task_completed", task_id=task_id)
 
 
+def read_clone_preconditions(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_clone_preconditions", "reconcile_fix_task")
+    if terminal:
+        return terminal
+    data, cfg = input_of(request), cfg_of(request)
+    repo, issue, board, context = _fix_identity(request)
+    clone_path = str(data.get("clone_path") or cfg.get("clone_path") or context.get("clone_path") or "")
+    base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
+    idle = upstream_noop(request, "reconcile_fix_task")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_clone_preconditions")
+    if not clone_path:
+        return fail("missing_clone_path", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", repo=repo)
+    clone = Path(clone_path)
+    if not (clone / ".git").exists():
+        return fail("clone_missing", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, repo=repo)
+    try:
+        status, origin = status_porcelain(clone), remote_url(clone)
+    except CommandError as exc:
+        return fail("clone_precondition_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_clone_preconditions", error=str(exc), clone_path=clone_path, repo=repo)
+    if status.strip():
+        return fail("clone_dirty", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, clone_status=status, repo=repo)
+    if not origin.strip():
+        return fail("origin_missing", failure_class="terminal", retry_safe=False, operation="read_clone_preconditions", clone_path=clone_path, repo=repo)
+    return ok(status="ready", operation="read_clone_preconditions", clone_path=clone_path, base_branch=base_branch, origin=origin, repo=repo, issue=issue, board=board, branch=context.get("branch"), task_id=context.get("task_id"))
+
+
+def fetch_clone_origin(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "fetch_clone_origin", "read_clone_preconditions")
+    if terminal: return terminal
+    idle = upstream_noop(request, "read_clone_preconditions")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="fetch_clone_origin")
+    clone_path = str(input_of(request).get("clone_path") or cond_get(request, "clone_path", "read_clone_preconditions") or "")
+    repo, issue, _, context = _fix_identity(request)
+    if not clone_path:
+        return fail("missing_clone_path", failure_class="terminal", retry_safe=False, operation="fetch_clone_origin", repo=repo, issue=issue, mutated=False)
+    if dry_run_flag(request):
+        return planned(operation="fetch_clone_origin", clone_path=clone_path, repo=repo, issue=issue, branch=context.get("branch"))
+    clone = Path(clone_path)
+    if not clone.exists() or not (clone / ".git").exists():
+        return fail("clone_missing", failure_class="terminal", retry_safe=False, operation="fetch_clone_origin", clone_path=clone_path, repo=repo, issue=issue, mutated=False)
+    try: git(["fetch", "origin", "--prune"], cwd=clone_path)
+    except CommandError as exc: return fail("fetch_failed", failure_class="retryable", retry_safe=True, operation="fetch_clone_origin", clone_path=clone_path, error=str(exc), mutated=True)
+    return ok(status="fetched", operation="fetch_clone_origin", clone_path=clone_path, repo=repo, issue=issue, branch=context.get("branch"), task_id=context.get("task_id"), mutated=True)
+
+
+def read_base_ref(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "parse_issue_ref_from_task")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "fetch_clone_origin", "read_clone_preconditions", "parse_issue_ref_from_task")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_base_ref")
+    data, cfg = input_of(request), cfg_of(request)
+    clone = str(data.get("clone_path") or cond_get(request, "clone_path", "fetch_clone_origin", "read_clone_preconditions") or "")
+    base_branch = str(data.get("base_branch") or cfg.get("base_branch") or "main")
+    repo, issue, _, context = _fix_identity(request)
+    if not clone:
+        return fail("missing_clone_path", failure_class="terminal", retry_safe=False, operation="read_base_ref", repo=repo, issue=issue, mutated=False)
+    clone_path = Path(clone)
+    if not clone_path.exists() or not (clone_path / ".git").exists():
+        return fail("clone_missing", failure_class="terminal", retry_safe=False, operation="read_base_ref", clone_path=clone, repo=repo, issue=issue, mutated=False)
+    try:
+        head = remote_ref(clone, "origin", base_branch)
+    except CommandError as exc:
+        return fail("base_ref_read_failed", failure_class="retryable_read", retry_safe=True, operation="read_base_ref", error=str(exc), clone_path=clone, base_branch=base_branch)
+    return ok(
+        status="read",
+        operation="read_base_ref",
+        clone_path=clone,
+        base_branch=base_branch,
+        base_head=head,
+        repo=repo,
+        issue=issue,
+        branch=context.get("branch"),
+        task_id=context.get("task_id"),
+    )
+
+
+def read_worktree_inventory(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_worktree_inventory", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "parse_issue_ref_from_task")
+    if terminal:
+        return terminal
+    idle = upstream_noop(request, "read_base_ref", "fetch_clone_origin", "read_clone_preconditions", "parse_issue_ref_from_task")
+    if idle:
+        return noop(str(idle.get("reason") or "no_ready_task"), operation="read_worktree_inventory")
+    repo, issue, board, context = _fix_identity(request)
+    clone = str(
+        input_of(request).get("clone_path")
+        or cond_get(request, "clone_path", "read_base_ref", "fetch_clone_origin", "read_clone_preconditions")
+        or context.get("clone_path")
+        or ""
+    )
+    if not clone:
+        return fail("missing_clone_path", failure_class="terminal", retry_safe=False, operation="read_worktree_inventory", repo=repo, issue=issue, mutated=False)
+    clone_path = Path(clone)
+    if not clone_path.exists() or not (clone_path / ".git").exists():
+        return fail("clone_missing", failure_class="terminal", retry_safe=False, operation="read_worktree_inventory", clone_path=clone, repo=repo, issue=issue, mutated=False)
+    try:
+        text = worktree_list(clone)
+        rows = parse_worktree_porcelain(text)
+    except (CommandError, ValueError) as exc:
+        return fail("worktree_list_failed", failure_class="retryable_read", retry_safe=True, operation="read_worktree_inventory", error=str(exc))
+    return ok(
+        status="read",
+        operation="read_worktree_inventory",
+        clone_path=clone,
+        worktrees=rows,
+        repo=repo,
+        issue=issue,
+        board=board,
+        branch=context.get("branch"),
+        task_id=context.get("task_id"),
+    )
+
+
 def read_branch_provenance(request: Request) -> Result:
+    terminal = _atomic_terminal(request, "read_branch_provenance", "read_worktree_inventory")
+    if terminal:
+        return terminal
     idle = upstream_noop(request, "read_worktree_inventory")
     if idle:
         return noop(str(idle.get("reason") or "no_ready_task"), operation="read_branch_provenance")
