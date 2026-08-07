@@ -13,7 +13,10 @@ from lokay.tick_common import add_common_flags, print_path_result, resolve_dry_r
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="lokay-tick-intake",
-        description="Fala-orchestrated issue intake tick. Default is dry-run.",
+        description=(
+            "Retired aggregate intake entrypoint. "
+            "Use lokay.process with canonical process path IDs."
+        ),
     )
     add_common_flags(p)
     p.add_argument("--limit", type=int, default=10, help="Max open issues per repo to scan")

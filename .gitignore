@@ -12,10 +12,8 @@ build/
 .coverage
 htmlcov/
 
-# Local-only Hermes/plugin config. Publish examples instead.
-config.yaml
-*.local.yaml
-*.local.json
+# Local-only Hermes/plugin TOML config.
+*.local.toml
 output/
 cards/
 drafts/
@@ -25,3 +23,10 @@ weekly/
 # Fala subprocess SDK scratch manifests.
 input/
 output/
+
+# Vendor / generated / local live (never commit)
+node_modules/
+.generated-machines/
+# Live machine policy — use config.example.toml + *.local.toml
+/config.toml
+/src/lokay/config.toml

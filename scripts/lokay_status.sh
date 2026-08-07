@@ -2,6 +2,8 @@
 set -euo pipefail
 
 # One-screen operational status for the Hermes lokay pipeline.
+# Production topology: one resident supervisor LaunchAgent; twelve child
+# commands are logical inventory only (never installed process agents).
 
 export HOME="${HOME:-/Users/mini-m4-main}"
 export PATH="${PATH:-/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
@@ -14,8 +16,12 @@ source "$SCRIPT_DIR/lokay_repos.sh"
 valid_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 FALA_MAX_RUN_AGE_SECONDS="${HERMES_LOKAY_FALA_MAX_RUN_AGE_SECONDS:-1800}"
 FALA_REQUIRE_LIVE="${HERMES_LOKAY_FALA_REQUIRE_LIVE:-1}"
-if ! valid_uint "$FALA_MAX_RUN_AGE_SECONDS" || [[ "$FALA_REQUIRE_LIVE" != 0 && "$FALA_REQUIRE_LIVE" != 1 ]]; then
-  printf 'invalid-env FALA_MAX_RUN_AGE_SECONDS=%s FALA_REQUIRE_LIVE=%s\n' "$FALA_MAX_RUN_AGE_SECONDS" "$FALA_REQUIRE_LIVE" >&2; exit 2
+# 2x singleton TTL (90s); status.loop_timestamp older than this is stale.
+SUPERVISOR_STATUS_MAX_AGE_SECONDS="${HERMES_LOKAY_SUPERVISOR_STATUS_MAX_AGE_SECONDS:-180}"
+if ! valid_uint "$FALA_MAX_RUN_AGE_SECONDS" || ! valid_uint "$SUPERVISOR_STATUS_MAX_AGE_SECONDS" || [[ "$FALA_REQUIRE_LIVE" != 0 && "$FALA_REQUIRE_LIVE" != 1 ]]; then
+  printf 'invalid-env FALA_MAX_RUN_AGE_SECONDS=%s SUPERVISOR_STATUS_MAX_AGE_SECONDS=%s FALA_REQUIRE_LIVE=%s\n' \
+    "$FALA_MAX_RUN_AGE_SECONDS" "$SUPERVISOR_STATUS_MAX_AGE_SECONDS" "$FALA_REQUIRE_LIVE" >&2
+  exit 2
 fi
 
 usage() {
@@ -76,17 +82,61 @@ launchctl_label_query() {
   printf '%s\n' "$found"
 }
 
-FALA_LABEL="${HERMES_LOKAY_FALA_LABEL:-com.mikolaj92.lokay.fala-tick-all}"
+validate_supervisor_status() {
+  # Fail-closed observational read of supervisor status.json.
+  # Args: fala_db max_age_seconds deployment_root config_path [launchctl_dump]
+  local fala_db="$1" max_age="$2" deployment_root="$3" config_path="${4:-}" launchctl_dump="${5:-}"
+  HERMES_LOKAY_STATUS_LAUNCHCTL_DUMP="$launchctl_dump" \
+    python3 "$SCRIPT_DIR/lokay_supervisor_status_check.py" \
+      "$fala_db" "$max_age" "$deployment_root" "$config_path"
+}
+
 DEPLOYMENT_ROOT="${HERMES_LOKAY_DEPLOYMENT_ROOT:-$HOME/.hermes/lokay/deployment}"
 FALA_DB="${HERMES_LOKAY_FALA_DB:-$HOME/.hermes/lokay/fala/state.sqlite}"
-FALA_PLIST="${HERMES_LOKAY_FALA_PLIST:-$HOME/Library/LaunchAgents/$FALA_LABEL.plist}"
-FALA_MAX_RUN_AGE_SECONDS="${HERMES_LOKAY_FALA_MAX_RUN_AGE_SECONDS:-1800}"
-FALA_REQUIRE_LIVE="${HERMES_LOKAY_FALA_REQUIRE_LIVE:-1}"
+LAUNCH_AGENTS_DIR="${HERMES_LOKAY_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
+SUPERVISOR_LABEL="com.mikolaj92.lokay.supervisor"
+AGGREGATE_FALA_LABEL="com.mikolaj92.lokay.fala-tick-all"
+PROCESS_LABELS=(
+  com.mikolaj92.lokay.repo-issue-poll
+  com.mikolaj92.lokay.issue-triage
+  com.mikolaj92.lokay.issue-feedback
+  com.mikolaj92.lokay.issue-split
+  com.mikolaj92.lokay.issue-close
+  com.mikolaj92.lokay.issue-ready
+  com.mikolaj92.lokay.issue-to-pr
+  com.mikolaj92.lokay.pr-triage
+  com.mikolaj92.lokay.pr-repair
+  com.mikolaj92.lokay.pr-merge
+  com.mikolaj92.lokay.cleanup
+  com.mikolaj92.lokay.cleanup-reconcile
+)
 status_failures=0
 
-fala_loaded=0
+supervisor_loaded=0
 query_status=0
-if launchctl_label_query "$FALA_LABEL" >/dev/null; then fala_loaded=1; else query_status=$?; fi
+if launchctl_label_query "$SUPERVISOR_LABEL" >/dev/null; then
+  supervisor_loaded=1
+else
+  query_status=$?
+fi
+[[ "$query_status" -ne 2 ]] || status_failures=$((status_failures + 1))
+process_loaded=0
+for process_label in "${PROCESS_LABELS[@]}"; do
+  query_status=0
+  if launchctl_label_query "$process_label" >/dev/null; then
+    process_loaded=$((process_loaded + 1))
+  else
+    query_status=$?
+  fi
+  [[ "$query_status" -ne 2 ]] || status_failures=$((status_failures + 1))
+done
+aggregate_loaded=0
+query_status=0
+if launchctl_label_query "$AGGREGATE_FALA_LABEL" >/dev/null; then
+  aggregate_loaded=1
+else
+  query_status=$?
+fi
 [[ "$query_status" -ne 2 ]] || status_failures=$((status_failures + 1))
 legacy_loaded_labels=()
 for legacy_label in \
@@ -107,11 +157,37 @@ else query_status=$?; fi
 [[ "$query_status" -ne 2 ]] || status_failures=$((status_failures + 1))
 
 printf '\nFala gate\n'
-if [[ "$fala_loaded" != 1 ]]; then
-  printf '  ERROR fala-not-loaded\n'
+if [[ "$supervisor_loaded" -ne 1 ]]; then
+  printf '  ERROR supervisor-job-missing label=%s loaded=%s expected=1\n' "$SUPERVISOR_LABEL" "$supervisor_loaded"
+  status_failures=$((status_failures + 1))
+else
+  printf '  supervisor job loaded=1 expected=1 label=%s\n' "$SUPERVISOR_LABEL"
+fi
+if [[ ! -f "$LAUNCH_AGENTS_DIR/$SUPERVISOR_LABEL.plist" ]]; then
+  printf '  ERROR supervisor-plist-missing path=%s\n' "$LAUNCH_AGENTS_DIR/$SUPERVISOR_LABEL.plist"
   status_failures=$((status_failures + 1))
 fi
-printf '  label configured=%s loaded=%s plist=%s\n' "$FALA_LABEL" "$([[ $fala_loaded == 1 ]] && echo yes || echo no)" "$FALA_PLIST"
+if [[ "$process_loaded" -ne 0 ]]; then
+  printf '  ERROR process-production-jobs-present loaded=%s expected=0\n' "$process_loaded"
+  status_failures=$((status_failures + 1))
+fi
+if [[ "$aggregate_loaded" -eq 1 ]]; then
+  printf '  ERROR aggregate-production-job-loaded label=%s\n' "$AGGREGATE_FALA_LABEL"
+  status_failures=$((status_failures + 1))
+fi
+if [[ -f "$LAUNCH_AGENTS_DIR/$AGGREGATE_FALA_LABEL.plist" ]]; then
+  printf '  ERROR aggregate-production-plist-present path=%s\n' "$LAUNCH_AGENTS_DIR/$AGGREGATE_FALA_LABEL.plist"
+  status_failures=$((status_failures + 1))
+fi
+for process_label in "${PROCESS_LABELS[@]}"; do
+  process_plist="$LAUNCH_AGENTS_DIR/$process_label.plist"
+  loaded=no
+  if launchctl_label_query "$process_label" >/dev/null; then loaded=yes; fi
+  if [[ "$loaded" == yes || -f "$process_plist" ]]; then
+    printf '  ERROR process-production residual label=%s loaded=%s plist=%s\n' "$process_label" "$loaded" "$process_plist"
+    status_failures=$((status_failures + 1))
+  fi
+done
 current_target=""
 if [[ -L "$DEPLOYMENT_ROOT/current" ]]; then
   current_target="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$DEPLOYMENT_ROOT/current" 2>/dev/null || true)"
@@ -124,115 +200,124 @@ if [[ -z "$current_target" || ! -f "$current_target/manifest.json" ]]; then
   status_failures=$((status_failures + 1))
 else
   fala_check=""
-  managed_python="$DEPLOYMENT_ROOT/runtime/$(basename "$current_target")/.venv/bin/python"
-  if [[ "$managed_python" == /* && -x "$managed_python" ]] && "$managed_python" -c 'import sys,tomllib; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1 && fala_check="$("$managed_python" - "$current_target" "$FALA_PLIST" "$FALA_REQUIRE_LIVE" "$DEPLOYMENT_ROOT" <<'PY'
-import hashlib, json, pathlib, plistlib, sys, tomllib
-cand=pathlib.Path(sys.argv[1]).resolve(); installed=pathlib.Path(sys.argv[2]).expanduser(); require_live=sys.argv[3]=="1"; root=pathlib.Path(sys.argv[4]).expanduser().resolve(); errors=[]; plist_relative="launchd/com.mikolaj92.lokay.fala-tick-all.plist"; pinned="b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
-sha=lambda data: hashlib.sha256(data).hexdigest()
-def artifact_path(relative):
-    if not isinstance(relative,str) or not relative or "\x00" in relative or pathlib.Path(relative).is_absolute() or ".." in pathlib.Path(relative).parts:
-        errors.append(f"artifact-path-invalid:{relative!r}"); return None
-    path=(cand/relative).resolve()
-    try: path.relative_to(cand)
-    except ValueError: errors.append(f"artifact-path-escapes:{relative}"); return None
-    return path
-def policy_from_toml_text(text):
-    root=tomllib.loads(text); automation=root.get("automation") or {}; executor=root.get("executor") or {}
-    if not isinstance(automation,dict) or not isinstance(executor,dict): raise ValueError("policy-table-invalid")
-    return {"automerge":root.get("automerge",automation.get("automerge",False)),"require_human_approval":root.get("require_human_approval",automation.get("require_human_approval",True)),"require_checks":root.get("require_checks",automation.get("require_checks",True)),"require_test_evidence":root.get("require_test_evidence",automation.get("require_test_evidence",True)),"executor_enabled":executor.get("enabled",False)}
+  managed_python=""
+  pythonpath=""
+  source_dir=""
+  tools_parent="$(cd "$SCRIPT_DIR/.." && pwd)"
+  if [[ "$current_target" == /* && -d "$current_target" && ! -L "$current_target" ]]; then
+    source_dir="$current_target/source/project/src"
+    managed_python="$current_target/source/project/.venv/bin/python"
+    pythonpath="$source_dir"
+  fi
+  if [[ -n "$managed_python" && "$managed_python" == /* && -x "$managed_python" && ! -L "$managed_python" && -d "$source_dir" && ! -L "$source_dir" ]] \
+    && PYTHONPATH="$pythonpath" "$managed_python" -c 'import sys,tomllib; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1 \
+    && fala_check="$(PYTHONPATH="$pythonpath" "$managed_python" - "$current_target" "$LAUNCH_AGENTS_DIR" "$FALA_REQUIRE_LIVE" "$DEPLOYMENT_ROOT" "$tools_parent" "$SUPERVISOR_LABEL" <<'PY'
+import hashlib, json, pathlib, plistlib, sys
+
+candidate = pathlib.Path(sys.argv[1]).resolve()
+installed_root = pathlib.Path(sys.argv[2]).expanduser()
+require_live = sys.argv[3] == "1"
+deployment_root = pathlib.Path(sys.argv[4]).expanduser().resolve()
+tools_parent = pathlib.Path(sys.argv[5]).resolve()
+supervisor_label = sys.argv[6]
+sys.path.insert(0, str(tools_parent))
+
+from tools.deployment_parity import (
+    AGGREGATE_FALA_LABEL,
+    AGGREGATE_FALA_MODULE,
+    DeploymentParityError,
+    sha256,
+    validate_fala_candidate,
+)
+
+RESIDUAL_PROCESS_LABELS = (
+    "com.mikolaj92.lokay.repo-issue-poll",
+    "com.mikolaj92.lokay.issue-triage",
+    "com.mikolaj92.lokay.issue-feedback",
+    "com.mikolaj92.lokay.issue-split",
+    "com.mikolaj92.lokay.issue-close",
+    "com.mikolaj92.lokay.issue-ready",
+    "com.mikolaj92.lokay.issue-to-pr",
+    "com.mikolaj92.lokay.pr-triage",
+    "com.mikolaj92.lokay.pr-repair",
+    "com.mikolaj92.lokay.pr-merge",
+    "com.mikolaj92.lokay.cleanup",
+    "com.mikolaj92.lokay.cleanup-reconcile",
+)
+
+errors = []
 try:
-    if cand.parent != (root/"versions").resolve(): errors.append("current-outside-versions")
-    manifest=json.loads((cand/"manifest.json").read_text(encoding="utf-8"))
-    if not isinstance(manifest,dict) or manifest.get("schema") != 1: errors.append("manifest-schema-invalid")
-    if not isinstance(manifest,dict): raise ValueError("manifest-not-object")
-    cid=str(manifest.get("candidate_id") or ""); identity=manifest.get("identity")
-    if not isinstance(identity,dict): errors.append("manifest-identity-invalid"); identity={}
-    if cid != cand.name: errors.append("candidate-id-path-mismatch")
-    if sha((json.dumps(identity,sort_keys=True,separators=(",",":"))+"\n").encode()) != cid: errors.append("manifest-hash-mismatch")
-    stable_keys={"schema","mode","plugin_commit","fala_tag","fala_commit","lock_hash","config_path","config_hash","db_path","metadata_path","lock_path","config_artifact_path","revision_path","policy","repos"}
-    expected_manifest_keys=stable_keys|{"candidate_id","identity","created_at","program_arguments","artifacts","runtime_identity"}
-    if set(manifest)!=expected_manifest_keys: errors.append("manifest-key-set-mismatch")
-    if set(identity)!=stable_keys: errors.append("manifest-identity-key-set-mismatch")
-    for key,expected in identity.items():
-        if key in stable_keys and manifest.get(key)!=expected: errors.append(f"identity-mismatch:{key}")
-    policy=manifest.get("policy"); policy_keys={"automerge","require_human_approval","require_checks","require_test_evidence","executor_enabled"}; promotion_policy={"automerge":True,"require_human_approval":False,"require_checks":True,"require_test_evidence":True,"executor_enabled":True}
-    if not isinstance(policy,dict) or set(policy)!=policy_keys or any(not isinstance(policy.get(key),bool) for key in policy_keys): errors.append("identity-policy-invalid")
-    elif policy!=promotion_policy: errors.append("identity-policy-unsafe")
-    try: expected_policy=policy_from_toml_text((cand/"source"/"config.toml").read_text(encoding="utf-8"))
-    except (OSError,UnicodeError,ValueError,tomllib.TOMLDecodeError): errors.append("identity-policy-config-unreadable"); expected_policy=None
-    if expected_policy is not None and isinstance(policy,dict) and set(policy)==policy_keys and all(isinstance(policy.get(key),bool) for key in policy_keys) and policy!=expected_policy: errors.append("identity-policy-config-mismatch")
-    active_config=pathlib.Path(str(manifest.get("config_path") or "")).expanduser()
-    if active_config.is_file() and not active_config.is_symlink():
-        try: active_policy=policy_from_toml_text(active_config.read_text(encoding="utf-8"))
-        except (OSError,UnicodeError,ValueError,tomllib.TOMLDecodeError): errors.append("identity-policy-active-config-unreadable"); active_policy=None
-        if active_policy is not None and isinstance(policy,dict) and set(policy)==policy_keys and all(isinstance(policy.get(key),bool) for key in policy_keys) and policy!=active_policy: errors.append("identity-policy-active-config-mismatch")
-    mode=manifest.get("mode")
-    manifest_args=manifest.get("program_arguments")
-    if not isinstance(manifest_args,list) or any(not isinstance(value,str) for value in manifest_args):
-        errors.append("identity-program-arguments-mismatch"); manifest_args=[]
-    frozen=["--frozen"] if "--frozen" in manifest_args else []
-    expected_args=[manifest_args[0] if manifest_args else "","run",*frozen,"--project",str(cand/"source"/"project"),"lokay-tick-all","--config",str(cand/"source"/"config.toml"),"--db",str(manifest.get("db_path") or ""),f"--{mode}","--json"]
-    if not manifest_args or not pathlib.Path(manifest_args[0]).is_absolute() or manifest_args != expected_args: errors.append("identity-program-arguments-mismatch")
-    if mode not in {"dry-run","live"}: errors.append("mode-invalid")
-    artifacts=manifest.get("artifacts")
-    if not isinstance(artifacts,dict) or not artifacts:
-        errors.append("manifest-artifacts-invalid"); artifacts={}
-    plist_relative="launchd/com.mikolaj92.lokay.fala-tick-all.plist"
-    if plist_relative not in artifacts: errors.append("identity-artifact-key-set-mismatch")
-    for relative,expected in artifacts.items():
-        if (not isinstance(relative,str) or not relative or not isinstance(expected,dict) or set(expected)!={"sha256","bytes"} or not isinstance(expected.get("sha256"),str) or len(expected["sha256"])!=64 or not isinstance(expected.get("bytes"),int) or expected["bytes"]<0): errors.append(f"identity-artifact-mismatch:{relative}")
-    if manifest.get("fala_tag") != "0.7.15" or manifest.get("fala_commit") != pinned: errors.append("fala-provenance-invalid")
-    cp=cand/plist_relative; cb=cp.read_bytes(); doc=plistlib.loads(cb); ib=installed.read_bytes(); plistlib.loads(ib); ph=sha(cb)
-    runtime=manifest.get("runtime_identity")
-    runtime_keys={"program_arguments","working_directory","standard_out_path","standard_error_path","environment_variables","start_interval","run_at_load","process_type","limit_load_to_session_type","plist_sha256"}
-    if not isinstance(runtime,dict) or set(runtime)!=runtime_keys:
-        errors.append("runtime-identity-key-set-mismatch"); runtime=runtime if isinstance(runtime,dict) else {}
-    if runtime.get("program_arguments") != manifest_args or runtime.get("program_arguments") != doc.get("ProgramArguments"): errors.append("runtime-identity-program-arguments-mismatch")
-    if runtime.get("working_directory") != doc.get("WorkingDirectory"): errors.append("runtime-identity-working-directory-mismatch")
-    for runtime_key,plist_key in (("standard_out_path","StandardOutPath"),("standard_error_path","StandardErrorPath"),("start_interval","StartInterval"),("run_at_load","RunAtLoad"),("process_type","ProcessType"),("limit_load_to_session_type","LimitLoadToSessionType")):
-        if runtime.get(runtime_key) != doc.get(plist_key): errors.append(f"runtime-identity-{runtime_key}-mismatch")
-    if runtime.get("environment_variables") != doc.get("EnvironmentVariables"): errors.append("runtime-identity-environment-mismatch")
-    if runtime.get("plist_sha256") != ph: errors.append("runtime-identity-plist-hash-mismatch")
-    if runtime.get("working_directory") != str(cand/"source"/"project"): errors.append("runtime-identity-working-directory-invalid")
-    runtime_env=runtime.get("environment_variables")
-    required_env={"HOME","UV_PROJECT_ENVIRONMENT","UV_CACHE_DIR"}
-    if not isinstance(runtime_env,dict) or not required_env.issubset(runtime_env) or any(not isinstance(runtime_env.get(key),str) or not pathlib.Path(runtime_env[key]).is_absolute() for key in required_env): errors.append("runtime-identity-environment-invalid")
-    for key in ("standard_out_path","standard_error_path"):
-        value=runtime.get(key)
-        if not isinstance(value,str) or not pathlib.Path(value).is_absolute() or "~" in value: errors.append(f"runtime-identity-{key}-invalid")
-    if runtime.get("start_interval") != 600 or runtime.get("run_at_load") is not False or runtime.get("process_type") != "Background" or runtime.get("limit_load_to_session_type") not in (None,"Background"): errors.append("runtime-identity-schedule-invalid")
-    for required_relative in ("fala-package.toml", "src/lokay/effector.py"):
-        required_file = cand / "source" / "project" / required_relative
-        if not required_file.is_file() or required_file.is_symlink(): errors.append(f"required-package-artifact-missing:{required_relative}")
-    declared=artifacts.get(plist_relative,{}); expected=declared.get("sha256") if isinstance(declared,dict) else declared
-    if expected != ph: errors.append("candidate-plist-hash-mismatch")
-    if isinstance(declared,dict) and declared.get("bytes") != len(cb): errors.append("candidate-plist-size-mismatch")
-    if sha(ib) != ph: errors.append("installed-plist-not-current")
-    args=doc.get("ProgramArguments")
-    if not isinstance(args,list) or args != manifest_args: errors.append("program-arguments-mismatch")
-    mode_args={"dry-run":"--dry-run","live":"--live"}
-    if mode not in mode_args or not isinstance(args,list) or args.count("--dry-run")+args.count("--live") != 1 or mode_args.get(mode) not in args: errors.append("mode-arguments-invalid")
-    if not isinstance(args,list) or any(required not in args for required in ("lokay-tick-all","--config","--db","--json")): errors.append("program-arguments-incomplete")
-    if require_live and "--live" not in args: errors.append("production-gate-requires-live")
-    if not pathlib.Path(str(manifest.get("config_path") or "")).is_absolute() or not pathlib.Path(str(manifest.get("db_path") or "")).is_absolute(): errors.append("runtime-path-not-absolute")
-    if doc.get("StartInterval") != 600 or doc.get("ProcessType") != "Background" or doc.get("RunAtLoad") is not False: errors.append("plist-schedule-invalid")
-    home=(doc.get("EnvironmentVariables") or {}).get("HOME")
-    if not isinstance(home,str) or not home.startswith("/"): errors.append("plist-home-invalid")
-    declared_paths=set(artifacts)
-    for path in cand.rglob("*"):
-        if path.is_file() and path != cand/"manifest.json" and str(path.relative_to(cand)) not in declared_paths: errors.append(f"unmanifested-artifact:{path.relative_to(cand)}")
-    for relative,declared_artifact in artifacts.items():
-        artifact=artifact_path(relative)
-        if artifact is None: continue
-        if not artifact.is_file(): errors.append(f"artifact-missing:{relative}"); continue
-        if artifact.stat().st_mode & 0o222: errors.append(f"artifact-writable:{relative}")
-        declared_hash=declared_artifact.get("sha256") if isinstance(declared_artifact,dict) else declared_artifact
-        if sha(artifact.read_bytes()) != declared_hash: errors.append(f"artifact-mismatch:{relative}")
-        if isinstance(declared_artifact,dict) and declared_artifact.get("bytes") != artifact.stat().st_size: errors.append(f"artifact-size-mismatch:{relative}")
-    if errors: print(";".join(errors)); raise SystemExit(1)
-    print(f"candidate_id={cid} plist_sha256={ph} mode={mode}")
-except (OSError,UnicodeError,TypeError,ValueError,json.JSONDecodeError,plistlib.InvalidFileException,tomllib.TOMLDecodeError) as exc:
-    print(f"validation-error={type(exc).__name__}:{exc}"); raise SystemExit(1)
+    if candidate.parent != (deployment_root / "versions").resolve():
+        errors.append("current-outside-versions")
+    result = validate_fala_candidate(candidate, deployment_root=deployment_root)
+    manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+    mode = manifest.get("mode")
+    if require_live and mode != "live":
+        errors.append("production-gate-requires-live")
+    processes = manifest.get("processes") or []
+    if not isinstance(processes, list):
+        errors.append("process-catalog-count-invalid")
+        processes = []
+    dispatch_commands = manifest.get("dispatch_commands") or []
+    if not isinstance(dispatch_commands, list):
+        dispatch_commands = []
+    inventory_count = len(dispatch_commands) if dispatch_commands else len(processes)
+    if inventory_count != 12:
+        errors.append("process-catalog-count-invalid")
+    if (installed_root / f"{AGGREGATE_FALA_LABEL}.plist").exists():
+        errors.append("aggregate-production-plist-present")
+    for residual in RESIDUAL_PROCESS_LABELS:
+        if (installed_root / f"{residual}.plist").exists():
+            errors.append(f"process-production-plist-present:{residual}")
+    for process in processes:
+        if not isinstance(process, dict):
+            errors.append("process-row-invalid")
+            continue
+        process_id = process.get("id")
+        if not isinstance(process_id, str) or not process_id:
+            continue
+        residual = f"com.mikolaj92.lokay.{process_id.replace('_', '-')}"
+        if (installed_root / f"{residual}.plist").exists() and residual != supervisor_label:
+            errors.append(f"process-production-plist-present:{residual}")
+    relative = f"launchd/{supervisor_label}.plist"
+    candidate_plist = candidate / relative
+    installed_plist = installed_root / f"{supervisor_label}.plist"
+    if not candidate_plist.is_file():
+        errors.append(f"candidate-plist-missing:{supervisor_label}")
+    elif not installed_plist.is_file() or installed_plist.is_symlink():
+        errors.append(f"installed-plist-missing:{supervisor_label}")
+    else:
+        if sha256(candidate_plist) != hashlib.sha256(installed_plist.read_bytes()).hexdigest():
+            errors.append(f"installed-plist-not-current:{supervisor_label}")
+        try:
+            document = plistlib.loads(candidate_plist.read_bytes())
+        except Exception:
+            errors.append(f"candidate-plist-invalid:{supervisor_label}")
+        else:
+            args = document.get("ProgramArguments")
+            label = document.get("Label")
+            if label != supervisor_label:
+                errors.append(f"supervisor-label-mismatch:{label}")
+            if not isinstance(args, list) or AGGREGATE_FALA_MODULE in args or AGGREGATE_FALA_LABEL in map(str, args):
+                errors.append(f"aggregate-or-invalid-args:{supervisor_label}")
+            elif "lokay.supervisor" not in args:
+                errors.append(f"supervisor-args-invalid:{supervisor_label}")
+            if require_live and (not isinstance(args, list) or "--live" not in args):
+                errors.append(f"production-gate-requires-live:{supervisor_label}")
+    if errors:
+        print(";".join(errors))
+        raise SystemExit(1)
+    print(
+        f"candidate_id={result['candidate_id']} supervisor_label={supervisor_label} "
+        f"inventory_count={inventory_count} mode={mode}"
+    )
+except DeploymentParityError as exc:
+    details = ";".join(str(item) for item in (exc.result.get("errors") or ["candidate-invalid"]))
+    print(details)
+    raise SystemExit(1)
+except Exception as exc:
+    print(f"candidate-validation-error={type(exc).__name__}")
+    raise SystemExit(1)
 PY
   )"; then
     printf '  candidate gate=PASS current=%s %s\n' "$current_target" "$fala_check"
@@ -286,26 +371,38 @@ else
   printf '  db path=%s presence=missing integrity=unknown\n' "$FALA_DB"
   status_failures=$((status_failures + 1))
 fi
+
+printf '\nSupervisor status\n'
+supervisor_status_dump=""
+if [[ "$supervisor_loaded" -eq 1 ]]; then
+  supervisor_status_dump="$(launchctl_label_query "$SUPERVISOR_LABEL" 2>/dev/null || true)"
+fi
+status_check=""
+if status_check="$(validate_supervisor_status "$FALA_DB" "$SUPERVISOR_STATUS_MAX_AGE_SECONDS" "$DEPLOYMENT_ROOT" "${HERMES_LOKAY_CONFIG:-}" "$supervisor_status_dump")"; then
+  printf '  OK %s\n' "$status_check"
+else
+  printf '  ERROR supervisor-status %s\n' "${status_check:-validation-failed}"
+  status_failures=$((status_failures + 1))
+fi
 legacy_count="${#legacy_loaded_labels[@]}"
 mutator_gate="single-or-none"
 if [[ "$legacy_count" -gt 0 ]]; then
   mutator_gate=FAIL
   status_failures=$((status_failures + 1))
-  printf '  ERROR legacy-mutator-unexpected-loaded labels=%s\n' "${legacy_loaded_labels[*]}"
+  printf '  ERROR legacy-mutator-unexpected-loaded labels=%s
+' "${legacy_loaded_labels[*]}"
 fi
-if [[ "$fala_loaded" == 1 && "$health_repair_loaded" == 1 ]]; then
+if [[ "$aggregate_loaded" -eq 1 || "$health_repair_loaded" -eq 1 || "$process_loaded" -gt 0 ]]; then
   mutator_gate=FAIL
   status_failures=$((status_failures + 1))
 fi
-if [[ "$mutator_gate" == FAIL && "$fala_loaded" == 1 && ("$legacy_count" -gt 0 || "$health_repair_loaded" == 1) ]]; then
-  printf '  ERROR dual-mutator legacy-health-repair-and-fala-active\n'
+if [[ "$mutator_gate" == FAIL && ("$aggregate_loaded" -eq 1 || "$process_loaded" -gt 0 || "$supervisor_loaded" -eq 1) && ("$legacy_count" -gt 0 || "$health_repair_loaded" -eq 1 || "$aggregate_loaded" -eq 1 || "$process_loaded" -gt 0) ]]; then
+  printf '  ERROR dual-mutator legacy-health-repair-or-aggregate-active process_loaded=%s aggregate_loaded=%s supervisor_loaded=%s
+' "$process_loaded" "$aggregate_loaded" "$supervisor_loaded"
 fi
-for cmd in gh hermes launchctl find tail date python3; do
-  require_cmd "$cmd"
-done
 uid="$(id -u)"
 jobs=(
-  "fala|$FALA_LABEL"
+  "supervisor|$SUPERVISOR_LABEL"
   "update|com.mikolaj92.lokay.hermes-update"
   "health|com.mikolaj92.lokay.health"
 )
@@ -320,15 +417,18 @@ for item in "${jobs[@]}"; do
     runs="$(printf '%s\n' "$info" | awk -F '= ' '/runs =/ {gsub(/[^0-9].*/, "", $2); print $2; exit}')"
     last="$(printf '%s\n' "$info" | awk -F '= ' '/last exit code =/ {gsub(/[^0-9-].*/, "", $2); print $2; exit}')"
     printf '  %-9s state=%s runs=%s last_exit=%s\n' "$name" "${state:-unknown}" "${runs:-0}" "${last:-unknown}"
-    if [[ "$name" == fala && ( -z "$last" || "$last" != 0) ]]; then
-      printf '  ERROR fala-last-exit-invalid exit_code=%s\n' "${last:-unknown}"
+    if [[ "$name" == supervisor && ( -z "$last" || "$last" != 0) ]]; then
+      printf '  ERROR supervisor-last-exit-invalid label=%s exit_code=%s
+' "$label" "${last:-unknown}"
       status_failures=$((status_failures + 1))
     elif [[ "$name" == health && -z "$last" ]]; then
       status_failures=$((status_failures + 1))
     fi
   else
     printf '  %-9s missing label=%s\n' "$name" "$label"
-    :
+    if [[ "$name" == supervisor ]]; then
+      status_failures=$((status_failures + 1))
+    fi
   fi
 done
 
@@ -400,7 +500,7 @@ fi
 
 printf '\nRecent Decisions\n'
 RECENT_SIGNAL_PATTERN='DECISION|CLAUDE_|WORKTREE_|LOCAL_BRANCH_|DONE|WARN|ERROR|ASSIGN_FAILED|PR_ASSIGNED|FIX_TASK_CREATED|FIX_TASK_FAILED|LOCK_HELD|KANBAN_LIST_FAILED|PR_LIST_FAILED|MERGE_FAILED|watchdog-worker-'
-for log in "$LOG_DIR/repo-issue-to-pr-dispatch.log" "$LOG_DIR/repo-pr-triage.log" "$LOG_DIR/lokay-cleanup.log" "$LOG_DIR/lokay-hermes-update.log" "$LOG_DIR/lokay-health.log"; do
+for log in "$LOG_DIR/repo-issue-to-pr-dispatch.log" "$LOG_DIR/repo-pr-triage.log" "$LOG_DIR/lokay-cleanup.log" "$LOG_DIR/lokay-hermes-update.log" "$LOG_DIR/lokay-health.log" "$LOG_DIR/lokay-supervisor.out.log"; do
   [[ -f "$log" ]] || continue
   printf '  %s\n' "$(basename "$log")"
   recent="$(tail -n 80 "$log" | grep -E "$RECENT_SIGNAL_PATTERN" | tail -n 8 || true)"

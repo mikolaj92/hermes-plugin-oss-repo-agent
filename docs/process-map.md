@@ -25,10 +25,11 @@ Status legend used below:
 
 ## 1. One sentence
 
-One scheduled tick (`lokay-tick-all` → Fala path `auto_worker`) composes four
-work lanes, one join, and one gated cleanup lane. GitHub owns public issue/PR
-facts; Hermes Kanban owns agent work items; local FS/git owns leftovers; Fala
-owns process journal; OMP only runs when a gate authorizes it.
+One resident supervisor LaunchAgent (`com.mikolaj92.lokay.supervisor` via
+`python -m lokay.supervisor`) dispatches twelve catalog process IDs
+(`lokay-process-<id>` via `lokay.process`) as logical children. GitHub owns
+public issue/PR facts; Hermes Kanban owns agent work items; local FS/git owns
+leftovers; Fala owns process journal; OMP only runs when a gate authorizes it.
 
 There is **no single runtime state machine** for the whole lifecycle. Runtime is
 composed decision tables + evidence. The only formal SM today is dispatch
@@ -44,7 +45,7 @@ handoff (`dispatch.machine.ts`).
 | Agent work ownership / decomposition | Hermes Kanban | intake / dispatch / triage / cleanup steps | Titles/markers are idempotency keys |
 | Claim file, worktree, local branch leftovers | Local FS + git | claim / dispatch / repair / lifecycle / cleanup | Cleanup is local-only for branches |
 | Process run / conduction journal | Fala SQLite | package host | Correlate logs ↔ run IDs |
-| Scheduling | launchd | human promotion of candidate | Sole mutator job: `lokay-tick-all` |
+| Scheduling | launchd | human promotion of candidate | Sole mutator job: `com.mikolaj92.lokay.supervisor` |
 | Code changes on branch | worktree | OMP when authorized | Never on pending checks for same head |
 
 Lokay is an **adapter/orchestrator**, not a second SoT.
@@ -55,21 +56,28 @@ Lokay is an **adapter/orchestrator**, not a second SoT.
 
 | Trigger | Path | Mutates? | Role |
 | --- | --- | --- | --- |
-| launchd / `lokay-tick-all` | `auto_worker` | only when live + guards | sole scheduled mutator |
-| `lokay-tick-intake` | `issue_intake` | if live | `diag` |
-| `lokay-tick-dispatch` | `issue_to_pr` | if live | `diag` |
-| `lokay-tick-triage` | `pr_triage` | if live | `diag` |
-| `lokay-tick-cleanup` | `cleanup` | if live | `diag` |
+| launchd / `com.mikolaj92.lokay.supervisor` | twelve `PROCESS_IDS` children | only when live + guards | sole scheduled mutator |
+| `python -m lokay.process lokay-process-<id>` | matching catalog path | if live | `diag` / child inventory |
+| retired `lokay-tick-*` / `lokay-tick-all` | retired aliases | never as production | fail-closed or manual diagnostic only |
 | dry-run (default) | any | no | plan / authorize without side effects |
 
-Legacy shell intake/dispatch/triage/cleanup, webhooks, backfill, and extra
-scheduled jobs are removed and must not return as operational paths.
+Legacy shell intake/dispatch/triage/cleanup, webhooks, backfill, aggregate
+tick-all LaunchAgents, and per-process LaunchAgents are removed and must not
+return as operational paths.
+
 
 ---
 
-## 4. `auto_worker` shape (corrected)
+## 4. Historical composed graph (retired aggregate evidence)
 
-Not “six independent lanes”. One composed graph:
+> Historical evidence: the retired package-host path `auto_worker` (manual
+> `lokay-tick-all`) once composed four work lanes, one join, and gated cleanup
+> in a single host run. Production no longer schedules that aggregate. Live
+> topology is one supervisor + twelve independent process IDs. Keep the graph
+> below only as evidence of intentional couplings that still matter across
+> child processes.
+
+Not “six independent LaunchAgents”. Historical composed graph:
 
 ```text
 intake_* (≈47)               # pre-intake triage → priority gate → direction → claim → Kanban
@@ -88,23 +96,24 @@ repair (`lifecycle_decide_lifecycle_transition` conducts into
 `triage_decide_repair_attempt`). Early PR triage also interleaves intake priority
 (`intake_decide_issue_priority` conduction includes `triage_decide_triage_action`).
 
-### 4.1 Lanes
+### 4.1 Lanes (logical; scheduled as catalog processes)
 
 | Lane | Prefix / atom | Path source | Responsibility | Status |
 | --- | --- | --- | --- | --- |
-| Intake | `intake_*` | `issue_intake` | pre-intake triage → direction → claim → Kanban `[issue]` | `live` |
+| Intake | `intake_*` | `repo_issue_poll` / `issue_*` catalog IDs | pre-intake triage → direction → claim → Kanban `[issue]` | `live` |
 | Dispatch | `dispatch_*` | `issue_to_pr` | select Kanban → handoff `[fix-pr]` → OMP → PR | `live` |
-| PR triage | `triage_*` | `pr_triage` | select PR → decide merge/comment/repair/skip → apply | `live` |
+| PR triage | `triage_*` | `pr_triage` / `pr_merge` / `pr_repair` | select PR → decide merge/comment/repair/skip → apply | `live` |
 | Lifecycle | `lifecycle_*` | subset of reconcile | read GH+local → decide transition → optional orphan release | `live` (thin; mid-triage) |
-| Aggregate | `aggregate_lane_results` | orchestration | join receipts, `worked`/`idle`/`pending`, cleanup auth | `live` |
+| Aggregate | `aggregate_lane_results` | orchestration helper | join receipts, `worked`/`idle`/`pending`, cleanup auth | `live` helper (not a LaunchAgent) |
 | Cleanup | `cleanup_*` | `cleanup` | local worktree/branch/claim cleanup + maintenance task | `live` (gated) |
 
-### 4.2 Paths outside the scheduled composition
+### 4.2 Paths outside the retired aggregate composition
 
 | Path | Role | Status |
 | --- | --- | --- |
-| `cleanup_reconcile` | no-target / standalone reconciliation diagnostics | `live` path, **not** an `auto_worker` lane |
+| `cleanup_reconcile` | no-target / standalone reconciliation | `live` catalog process |
 | `dispatch.machine.ts` | formal intake→fix→PR handoff invariants | `formal` only |
+| `auto_worker` / `tick_all` / `issue_intake` / `lifecycle_ok` | retired aggregate aliases | forbidden production paths |
 
 ### 4.3 Hard couplings (not independent)
 
@@ -299,9 +308,10 @@ First-match order (matches `decide_lifecycle_transition`):
 | checks passed | `ready_for_merge` |
 | open PR with no actionable check state | terminal conflict |
 
-Lifecycle in `auto_worker` is intentionally thin: decide + optional orphan
-release, placed **between** PR decide and repair. Full no-target reconciliation
-remains path `cleanup_reconcile`.
+Lifecycle in the historical aggregate was intentionally thin: decide + optional
+orphan release, placed **between** PR decide and repair. Full no-target
+reconciliation remains path `cleanup_reconcile`. Live scheduling still honors
+that ordering via catalog process dispatch, not via a single `auto_worker` job.
 
 
 ### 6.6 Aggregate (`aggregate_lane_results`)
@@ -322,22 +332,23 @@ Work one row at a time. Do not expand a row into a second SoT.
 
 | ID | Process | Primary files | Package path(s) | Status | Next work note |
 | --- | --- | --- | --- | --- | --- |
-| P0 | Scheduled composition / tick entry | `tick_all.py`, `flows/runtime.py`, `fala-package.toml` `auto_worker` | `auto_worker` | `live` | Keep sole mutator invariant |
-| P1 | Open-issue poll + eligibility | `steps/poll.py` | `issue_intake` | `live` | |
-| P2 | Pre-intake triage (classify/mutate/close/receipts) | `issue_triage_*.py` | `issue_intake` | `live` | |
-| P3 | Direction + reject comment | `issue_direction.py` | `issue_intake` | `live` | Keep priority + require-keywords order |
-| P4 | Claim + assign + labels | `claim.py` | `issue_intake` | `live` | |
-| P5 | Kanban `[issue]` ensure | `kanban_intake.py` | `issue_intake` | `live` | |
+| P0 | Scheduled supervisor entry | `supervisor.py`, `templates/launchd/lokay-supervisor.plist.template` | twelve `PROCESS_IDS` | `live` | Keep sole LaunchAgent invariant |
+| P1 | Open-issue poll + eligibility | `steps/poll.py` | `repo_issue_poll` | `live` | |
+| P2 | Pre-intake triage (classify/mutate/close/receipts) | `issue_triage_*.py` | `issue_triage` | `live` | |
+| P3 | Direction + reject comment | `issue_direction.py` | `issue_ready` / related | `live` | Keep priority + require-keywords order |
+| P4 | Claim + assign + labels | `claim.py` | issue claim steps | `live` | |
+| P5 | Kanban `[issue]` ensure | `kanban_intake.py` | intake kanban steps | `live` | |
 | P6 | Dispatch handoff + implement + PR | `issue_to_pr.py`, adapters | `issue_to_pr` | `live` | Formal SM covers handoff only |
 | P7 | PR triage decide + merge/comment | `triage.py` | `pr_triage` | `live` | |
-| P8 | Repair (head-bound) | `repair.py` | `pr_triage` | `live` | Highest complexity; keep receipts/reservations |
-| P9 | Lifecycle thin reconcile | `cleanup_reconcile.py` (lifecycle atoms) | `auto_worker` lifecycle_* | `live` | Do not conflate with full cleanup |
-| P10 | Aggregate / cleanup auth | `orchestration.py` | `auto_worker` | `live` | |
-| P11 | Local cleanup + maintenance task | `cleanup.py` | `cleanup` | `live` | Gated by aggregate in auto_worker |
-| P12 | Standalone no-target reconcile | `cleanup_reconcile.py` | `cleanup_reconcile` | `live`/`diag` | Not a sixth auto_worker lane |
+| P8 | Repair (head-bound) | `repair.py` | `pr_repair` | `live` | Highest complexity; keep receipts/reservations |
+| P9 | Lifecycle thin reconcile | `cleanup_reconcile.py` (lifecycle atoms) | lifecycle helpers | `live` | Do not conflate with full cleanup |
+| P10 | Aggregate / cleanup auth | `orchestration.py` | helper, not a LaunchAgent | `live` | |
+| P11 | Local cleanup + maintenance task | `cleanup.py` | `cleanup` | `live` | Gated by verified cleanup identity |
+| P12 | Standalone no-target reconcile | `cleanup_reconcile.py` | `cleanup_reconcile` | `live`/`diag` | Catalog process, not a sixth LaunchAgent |
 | P13 | Full-lifecycle formal SM | — | — | `scaffold`/`gap` | Only if we later want TLA beyond handoff |
 | P14 | Doc/package parity | `docs/auto-worker.md`, `docs/process-map.md`, package | — | `live` | path table matches package; composition + §6.4/§6.5 decision order match code |
-| P15 | Mixed issue split | `issue_triage.py`, `issue_triage_mutations.py`, `issue_triage_receipts.py` | `issue_intake` | `live` | One idempotent child per validated portion; existing close atom owns parent close |
+| P15 | Mixed issue split | `issue_triage.py`, `issue_triage_mutations.py`, `issue_triage_receipts.py` | `issue_split` | `live` | One idempotent child per validated portion; existing close atom owns parent close |
+
 
 ---
 
@@ -352,7 +363,7 @@ When fixing/implementing, prefer this order so contracts stay stable:
 5. **P7 triage order** — eligibility before readiness
 6. **P8 repair head-binding** — no double OMP
 7. **P9/P10/P11 cleanup auth chain** — no ungated local delete
-8. **P14 docs** — make auto-worker path table match package
+8. **P14 docs** — keep twelve-process + one-supervisor topology accurate
 9. **P13** only if a real bug needs full-lifecycle formalization
 
 Each process change should:
@@ -360,7 +371,7 @@ Each process change should:
 - name the process ID above
 - preserve ownership table
 - update this map if a decision table or coupling edge changes
-- keep individual ticks diagnostic-only
+- keep individual process modules diagnostic-only outside the supervisor
 
 ---
 
@@ -371,16 +382,18 @@ Each process change should:
 - Not mirroring every Kanban status to GitHub
 - Not force-push or remote branch deletion in cleanup
 - Not treating dry-run success or idle ticks as issue resolution
+- Not restoring aggregate or per-process LaunchAgents
 
 ---
 
 ## 10. Acceptance for “map is good enough to code against”
 
-- [x] Lanes = 4 work + aggregate + cleanup; `cleanup_reconcile` separate
+- [x] Live topology = one supervisor LaunchAgent + twelve logical process IDs
+- [x] Historical aggregate graph preserved as labeled evidence only
 - [x] Frozen is label precedence, not classifier class
 - [x] Ready ≠ auto-claim; direction and eligibility sit in between
 - [x] Decision tables match current step entrypoints named above (incl. repair lifecycle gate + lifecycle first-match)
 - [x] Hard couplings listed (triage decide → lifecycle → repair)
 - [x] Process IDs ready for one-by-one work
-- [x] auto-worker path table includes pre-intake triage + cleanup_reconcile
+- [x] auto-worker docs describe supervisor + twelve process IDs
 - [ ] Runtime/docs fully parity-checked after each process fix (ongoing)

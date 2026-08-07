@@ -1,4 +1,4 @@
-"""PR triage package path: decide + merge/comment/repair branches in one host run."""
+"""PR triage package path: decide action only; repair lives on pr_repair."""
 
 from __future__ import annotations
 
@@ -13,6 +13,15 @@ from lokay.flows.runtime import run_package_path_async
 
 PATH_ID = "pr_triage"
 PACKAGE_PATH = Path(__file__).resolve().parents[3] / "fala-package.toml"
+_PR_TRIAGE_EFFECTORS = (
+    "read_open_prs",
+    "filter_fix_prs",
+    "select_fix_pr",
+    "load_pr_fields",
+    "evaluate_checks",
+    "evaluate_test_evidence",
+    "decide_triage_action",
+)
 _TERMINAL_FAILURES = frozenset({"failed", "cancelled", "timed_out"})
 _IDLE_REASONS = frozenset(
     {
@@ -75,7 +84,6 @@ def _step_config(cfg: AgentConfig, *, is_dry: bool, **extra: Any) -> dict[str, A
         "dispatch_receipts": cfg.paths.dispatch_receipts,
         "merge_receipts": cfg.paths.merge_receipts,
         "task_receipts": cfg.paths.task_receipts,
-        "repair_receipt_root": str(Path(cfg.paths.task_receipts) / "repair"),
         "active_issue": cfg.paths.active_issue,
         "dry_run": is_dry,
         "live": not is_dry,
@@ -153,7 +161,7 @@ async def run_pr_triage_decide(
     worker_id: str = "lokay:tick-triage",
     max_ticks: int = 40,
 ) -> PathRunResult:
-    """Run the pr_triage package path once (decide + gated branch effectors)."""
+    """Run the pr_triage package path once (decide only)."""
     cfg = config or load_config()
     is_dry = _resolve_dry_run(cfg, dry_run)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -168,28 +176,15 @@ async def run_pr_triage_decide(
             status="failed" if cfg.repos else "idle", action="skip",
         )
     resolved_repo = str(context["repo"])
-    board = str(context["board"])
-    clone_path = str(context["clone_path"])
-    receipt = str(Path(cfg.paths.merge_receipts) / f"merge-{resolved_repo.replace('/', '_')}-{pr_number or 'auto'}-{rid}.json")
-    repair_root = Path(cfg.paths.task_receipts)
-    repair_receipt = str(repair_root / f"repair-{resolved_repo.replace('/', '_')}-{pr_number or 'auto'}-{rid}.json")
     step_config = _step_config(
         cfg,
         is_dry=is_dry,
         **context,
-        worktree_root=cfg.paths.worktree_root,
-        receipt_path=receipt,
-        repair_receipt_path=repair_receipt,
-        repair_state_root=str(repair_root),
-        repair_receipt_root=str(repair_root),
     )
     candidate = str(cfg.raw.get("candidate") or cfg.raw.get("candidate_id") or "")
     candidate_sha = str(cfg.raw.get("candidate_sha") or candidate)
     head_sha = str(cfg.raw.get("head_sha") or cfg.raw.get("verified_head") or cfg.raw.get("head_oid") or "")
     check_run_id = str(cfg.raw.get("check_run_id") or "")
-    raw = cfg.raw if isinstance(cfg.raw, dict) else {}
-    attempt_recovery = raw.get("attempt_recovery") if isinstance(raw.get("attempt_recovery"), dict) and raw.get("attempt_recovery") else None
-    repair_creation_recovery = raw.get("repair_creation_recovery") if isinstance(raw.get("repair_creation_recovery"), dict) and raw.get("repair_creation_recovery") else None
     configured_repos = [
         {"repo": entry.repo, "board": entry.board, "clone_path": entry.clone_path, "priority": entry.priority}
         for entry in cfg.repos
@@ -216,68 +211,22 @@ async def run_pr_triage_decide(
         dry_input.update(context)
     list_input: dict[str, Any] = {**dry_input, "limit": limit}
     load_input: dict[str, Any] = dict(dry_input)
-    repair_input: dict[str, Any] = {
-        **dry_input,
-        **context,
-        "repo": resolved_repo,
-        "board": board,
-        "clone_path": clone_path,
-        "pr_number": pr_number,
-        "worktree_root": step_config["worktree_root"],
-        "repair_state_root": str(repair_root),
-        "repair_receipt_root": str(repair_root),
-        "receipt": repair_receipt,
-        "receipt_path": repair_receipt,
-        "repair_receipt_path": repair_receipt,
-        "base_branch": step_config["base_branch"],
-        "db_path": str(db_path),
-        "attempt_recovery": attempt_recovery,
-        "repair_creation_recovery": repair_creation_recovery,
-    }
     effector_inputs: dict[str, dict[str, Any]] = {
         "read_open_prs": list_input,
+        "filter_fix_prs": dict(dry_input),
+        "select_fix_pr": dict(dry_input),
         "load_pr_fields": load_input,
         "evaluate_checks": {**dry_input, "require_checks": step_config["require_checks"]},
         "evaluate_test_evidence": {**dry_input, "require_test_evidence": step_config["require_test_evidence"]},
-        "decide_triage_action": {**dry_input, "automerge": step_config["automerge"], "branch_prefix": step_config["branch_prefix"], "base_branch": step_config["base_branch"], "require_human_approval": step_config["require_human_approval"]},
-        "assign_pr": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
-        "merge_pr": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
-        "build_merge_receipt": {**dry_input, "receipt_path": receipt},
-        "close_linked_issue": {**dry_input, "repo": resolved_repo},
-        "post_pr_comment": {**dry_input, "repo": resolved_repo, **({"number": pr_number} if pr_number else {})},
-        "create_review_task": {**dry_input, "repo": resolved_repo, "board": board, **({"number": pr_number} if pr_number else {})},
-        "read_review_tasks": repair_input,
-        "find_review_marker": repair_input,
-        "reconcile_review_task": repair_input,
-        "build_repair_prompt": repair_input,
-        "triage_build_repair_prompt": dict(repair_input),
-        **{step_id: dict(repair_input) for step_id in (
-            "read_repair_attempt_baseline", "read_repair_completed_receipt", "read_repair_attempt_reconciliation",
-            "read_repair_attempt_recovery_evidence", "claim_repair_attempt_recovery", "verify_repair_attempt_recovery",
-            "read_repair_recovery_continuation_evidence", "claim_repair_recovery_continuation", "verify_repair_recovery_continuation",
-            "read_repair_base_head", "decide_legacy_repair_head_refresh", "update_legacy_repair_pr_branch", "verify_legacy_repair_pr_head",
-            "decide_repair_attempt", "read_repair_context",
-            "read_repair_remote_head", "fetch_repair_remote_head", "verify_fetched_repair_remote_head",
-            "read_repair_worktree_inventory", "read_repair_branch_provenance", "read_repair_worktree_cleanliness",
-            "read_repair_remote_ancestry", "decide_repair_worktree_fast_forward", "read_repair_worktree_branch_before_fast_forward", "read_repair_worktree_head_before_fast_forward", "read_repair_worktree_cleanliness_before_fast_forward", "decide_repair_worktree_fast_forward_execution", "fast_forward_repair_worktree",
-            "read_repair_creation_evidence", "decide_repair_worktree_ownership", "create_repair_branch",
-            "write_repair_branch_provenance", "add_repair_worktree", "prepare_repair_worktree", "verify_repair_worktree",
-        )},
-        **{f"triage_{step_id}": dict(repair_input) for step_id in (
-            "read_repair_attempt_baseline", "read_repair_completed_receipt", "read_repair_attempt_reconciliation",
-            "read_repair_attempt_recovery_evidence", "claim_repair_attempt_recovery", "verify_repair_attempt_recovery",
-            "read_repair_recovery_continuation_evidence", "claim_repair_recovery_continuation", "verify_repair_recovery_continuation",
-            "read_repair_base_head", "decide_legacy_repair_head_refresh", "update_legacy_repair_pr_branch", "verify_legacy_repair_pr_head",
-            "decide_repair_attempt", "read_repair_context",
-            "read_repair_remote_head", "fetch_repair_remote_head", "verify_fetched_repair_remote_head",
-            "read_repair_worktree_inventory", "read_repair_branch_provenance", "read_repair_worktree_cleanliness",
-            "read_repair_remote_ancestry", "decide_repair_worktree_fast_forward", "read_repair_worktree_branch_before_fast_forward", "read_repair_worktree_head_before_fast_forward", "read_repair_worktree_cleanliness_before_fast_forward", "decide_repair_worktree_fast_forward_execution", "fast_forward_repair_worktree",
-            "read_repair_creation_evidence", "decide_repair_worktree_ownership", "create_repair_branch",
-            "write_repair_branch_provenance", "add_repair_worktree", "prepare_repair_worktree", "verify_repair_worktree",
-        )},
-        "create_local_branch": {**dry_input, "clone_path": clone_path, "repo": resolved_repo, "receipt_path": receipt, "worktree_root": step_config["worktree_root"], "base_branch": step_config["base_branch"]},
-        "push_branch": repair_input,
+        "decide_triage_action": {
+            **dry_input,
+            "automerge": step_config["automerge"],
+            "branch_prefix": step_config["branch_prefix"],
+            "base_branch": step_config["base_branch"],
+            "require_human_approval": step_config["require_human_approval"],
+        },
     }
+    effector_configs = {step_id: step_config for step_id in _PR_TRIAGE_EFFECTORS}
 
     host = await run_package_path_async(
         db_path=db_path,
@@ -286,7 +235,7 @@ async def run_pr_triage_decide(
         run_id=rid,
         inputs=step_config,
         effector_inputs=effector_inputs,
-        effector_configs={step_id: step_config for step_id in effector_inputs},
+        effector_configs=effector_configs,
         max_ticks=max_ticks,
         worker_id=worker_id,
     )
@@ -301,10 +250,11 @@ async def run_pr_triage_decide(
     resolved_number = load_out.get("number") or pr_obj.get("number") or pr_number
     status, stopped_reason = _normalize_status(run_status=host.run_status, summaries=summaries, decide_out=decide_out, list_out=list_out)
     failed_steps = _failed_steps(summaries)
-    worked = bool(action and action != "skip" and status not in {"idle", *_TERMINAL_FAILURES} and any(
-        bool(process_values(item).get("mutated")) or (str(item.get("status") or "") == "succeeded" and str(process_values(item).get("status") or "") not in {"noop", "planned", ""})
-        for item in summaries if item.get("step_id") in {"assign_pr", "merge_pr", "build_merge_receipt", "close_linked_issue", "post_pr_comment", "create_review_task", "create_local_branch", "invoke_omp", "push_branch"}
-    ))
+    worked = bool(
+        action
+        and action != "skip"
+        and status not in {"idle", *_TERMINAL_FAILURES}
+    )
     summary = {
         "repo": resolved_repo,
         "action": action,

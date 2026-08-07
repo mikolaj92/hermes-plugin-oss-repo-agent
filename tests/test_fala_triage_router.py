@@ -86,17 +86,15 @@ class TriagePackageFlowTests(unittest.TestCase):
         self.assertEqual(result.status, "idle")
         repos = runner.await_args.kwargs["effector_inputs"]["read_open_prs"]["repos"]
         self.assertEqual([entry["repo"] for entry in repos], ["o/first", "o/second"])
-    def test_repair_recovery_inputs_include_authoritative_context(self) -> None:
+    def test_pr_triage_selects_only_declared_decide_effectors(self) -> None:
         db_path = Path(tempfile.mktemp())
-        attempt_recovery = {"run_id": "old-run", "process_id": "old-process", "candidate": "old-candidate"}
-        repair_creation_recovery = {"run_id": "creation-run", "candidate": "creation-candidate"}
         cfg = AgentConfig(
             mode="dry-run",
             repos=(RepoEntry(repo="o/r", board="board", clone_path="/tmp/o-r"),),
             raw={
                 "candidate": "candidate-a",
-                "attempt_recovery": attempt_recovery,
-                "repair_creation_recovery": repair_creation_recovery,
+                "attempt_recovery": {"run_id": "old-run", "process_id": "old-process", "candidate": "old-candidate"},
+                "repair_creation_recovery": {"run_id": "creation-run", "candidate": "creation-candidate"},
             },
         )
         host = _host(processes=[_process("read_open_prs", output={"status": "noop", "reason": "no_open_prs"})])
@@ -114,25 +112,39 @@ class TriagePackageFlowTests(unittest.TestCase):
             return runner
 
         runner = asyncio.run(scenario())
-        inputs = runner.await_args.kwargs["effector_inputs"]
         expected_ids = {
-            "read_repair_creation_evidence", "read_repair_attempt_baseline", "read_repair_completed_receipt", "read_repair_attempt_reconciliation",
-            "read_repair_attempt_recovery_evidence", "claim_repair_attempt_recovery", "verify_repair_attempt_recovery",
-            "read_repair_recovery_continuation_evidence", "claim_repair_recovery_continuation", "verify_repair_recovery_continuation",
-            "read_repair_base_head", "decide_legacy_repair_head_refresh", "update_legacy_repair_pr_branch", "verify_legacy_repair_pr_head",
-            "triage_read_repair_creation_evidence", "triage_read_repair_attempt_baseline", "triage_read_repair_completed_receipt", "triage_read_repair_attempt_reconciliation",
-            "triage_read_repair_attempt_recovery_evidence", "triage_claim_repair_attempt_recovery", "triage_verify_repair_attempt_recovery",
-            "triage_read_repair_recovery_continuation_evidence", "triage_claim_repair_recovery_continuation", "triage_verify_repair_recovery_continuation",
-            "triage_read_repair_base_head", "triage_decide_legacy_repair_head_refresh", "triage_update_legacy_repair_pr_branch", "triage_verify_legacy_repair_pr_head",
+            "read_open_prs",
+            "filter_fix_prs",
+            "select_fix_pr",
+            "load_pr_fields",
+            "evaluate_checks",
+            "evaluate_test_evidence",
+            "decide_triage_action",
         }
-        for step_id in expected_ids:
-            with self.subTest(step_id=step_id):
-                self.assertEqual(inputs[step_id]["db_path"], str(db_path))
-                self.assertEqual(inputs[step_id]["run_id"], "triage-run")
-                self.assertEqual(inputs[step_id]["path_id"], "pr_triage")
-                self.assertEqual(inputs[step_id]["candidate"], "candidate-a")
-                self.assertEqual(inputs[step_id]["attempt_recovery"], attempt_recovery)
-                self.assertEqual(inputs[step_id]["repair_creation_recovery"], repair_creation_recovery)
+        inputs = runner.await_args.kwargs["effector_inputs"]
+        configs = runner.await_args.kwargs["effector_configs"]
+        self.assertEqual(set(inputs), expected_ids)
+        self.assertEqual(set(configs), expected_ids)
+        self.assertNotIn("prepare_repair_worktree", inputs)
+        self.assertFalse(any(step_id.startswith("triage_") for step_id in inputs))
+        self.assertFalse(
+            any(
+                "repair" in step_id or step_id in {
+                    "assign_pr",
+                    "merge_pr",
+                    "build_merge_receipt",
+                    "close_linked_issue",
+                    "post_pr_comment",
+                    "create_review_task",
+                    "create_local_branch",
+                    "push_branch",
+                }
+                for step_id in inputs
+            )
+        )
+        self.assertEqual(inputs["read_open_prs"]["run_id"], "triage-run")
+        self.assertEqual(inputs["read_open_prs"]["path_id"], "pr_triage")
+        self.assertEqual(inputs["read_open_prs"]["candidate"], "candidate-a")
 
     def test_single_package_path_invocation(self) -> None:
         host = _host(

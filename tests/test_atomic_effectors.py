@@ -14,6 +14,7 @@ from unittest import mock
 
 from lokay.adapters_cli import CommandError
 from lokay.catalog import EFFECTORS, domains, load_all
+from lokay.process_runtime import payload_digest
 from lokay.steps import claim, cleanup, issue_direction, issue_to_pr, kanban_intake, poll, repair, triage
 from lokay.steps.claim import _reserve_claim
 
@@ -37,6 +38,70 @@ def triage_req(action, input_data=None, config=None):
         }
     }
     return req(data, config)
+
+
+def durable_merge_request(
+    *,
+    action="merge",
+    path_id="pr_merge",
+    repo="o/r",
+    number=5,
+    head_oid="abc",
+    generation="generation-5",
+    candidate_id="candidate-5",
+    config_sha256="config-5",
+    **extra,
+):
+    """Build a request with complete verified pr_decision durable predecessor evidence."""
+    subject = {"repo": repo, "number": number, "head_oid": head_oid}
+    decision = {"status": "decided", "ok": True, "action": action, **subject}
+    identity = {
+        "schema_version": 1,
+        "process_id": "pr_triage",
+        "candidate_id": candidate_id,
+        "config_sha256": config_sha256,
+        "generation": generation,
+        "correlation_id": payload_digest(
+            {
+                "process_id": "pr_triage",
+                "kind": "pr_decision",
+                "subject": payload_digest(subject),
+            }
+        ),
+        "subject": subject,
+        "predecessor_digests": [],
+        "operation": "publish",
+        "source": "lokay.process_runtime",
+        "mutation_status": "mutated",
+        "payload": decision,
+    }
+    digest = payload_digest(identity)
+    body = {**identity, "content_digest": digest, "verified_readback_state": "verified"}
+    payload = {
+        "path_id": path_id,
+        "repo": repo,
+        "number": number,
+        "head_oid": head_oid,
+        "pr_decision": digest,
+        "generation": generation,
+        "candidate_id": candidate_id,
+        "config_sha256": config_sha256,
+        "predecessor_evidence": {
+            "groups": [["pr_decision"]],
+            "required_inputs": ["pr_decision"],
+            "subject": subject,
+            "receipts": {
+                "pr_decision": {
+                    "process_id": "pr_triage",
+                    "receipt_kind": "pr_decision",
+                    "digest": digest,
+                    "payload": body,
+                }
+            },
+        },
+    }
+    payload.update(extra)
+    return req(payload)
 
 
 class EnvelopeContractTests(unittest.TestCase):
@@ -2799,6 +2864,200 @@ class RepairTests(unittest.TestCase):
             self.assertEqual(conflict["status"], "failed")
             self.assertEqual(conflict["reason"], "receipt_conflict")
             self.assertEqual(Path(path).read_text(encoding="utf-8"), original)
+
+    def test_repair_receipt_build_publish_verify_preserves_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = {
+                "repo": "owner/repo",
+                "issue": 10,
+                "pr_number": 11,
+                "branch": "ai/fix/10",
+                "clone_path": "/clone",
+                "worktree_root": "/worktrees",
+                "repair_state_root": str(root),
+                "dry_run": False,
+                "run_id": "run-a",
+                "candidate": "candidate-a",
+                "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+            }
+            decision = {
+                "ok": True,
+                "status": "invoke",
+                "authorize": True,
+                "verified_head": "a" * 40,
+                "run_id": "run-a",
+                "process_id": "run-a:auto_worker:triage_verify_repair_receipt",
+                "candidate": "candidate-a",
+                "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+            }
+            peers = {
+                "verify_existing_repair_pr": {
+                    "ok": True,
+                    "status": "verified",
+                    "head_oid": "b" * 40,
+                    "pr": {"number": 11, "headRefOid": "b" * 40, "headRefName": "ai/fix/10"},
+                },
+                "verify_repair_push_oid": {
+                    "ok": True,
+                    "status": "verified",
+                    "local_oid": "b" * 40,
+                    "remote_oid": "b" * 40,
+                },
+                "verify_repair_omp_postconditions": {
+                    "ok": True,
+                    "status": "verified",
+                    "before_oid": "a" * 40,
+                    "after_oid": "b" * 40,
+                    "omp_process_id": "run-a:auto_worker:triage_invoke_repair_omp",
+                    "omp": {"status": "completed", "stdout": "ok"},
+                },
+                "invoke_repair_omp": {
+                    "ok": True,
+                    "status": "invoked",
+                    "omp_process_id": "run-a:auto_worker:triage_invoke_repair_omp",
+                    "omp": {"status": "completed", "stdout": "ok"},
+                },
+            }
+            context = repair._repair_context(req(data))
+            built = repair.build_repair_receipt(req({
+                **data,
+                "conduction": {"decide_repair_attempt": decision, **peers},
+            }))
+            published = repair.publish_repair_receipt(req({
+                **data,
+                "conduction": {
+                    "decide_repair_attempt": decision,
+                    "build_repair_receipt": built,
+                },
+            }))
+            verified = repair.verify_repair_receipt(req({
+                **data,
+                "conduction": {
+                    "decide_repair_attempt": decision,
+                    "build_repair_receipt": built,
+                    "publish_repair_receipt": published,
+                },
+            }))
+            path = Path(built["receipt_path"])
+            on_disk = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual((built["status"], published["status"], verified["status"]), ("built", "written", "verified"))
+            self.assertEqual(built["receipt_path"], published["receipt_path"])
+            self.assertEqual(verified["receipt_path"], built["receipt_path"])
+            self.assertEqual(built["ownership_receipt"], context["receipt"])
+            self.assertEqual(built["payload"]["phase"], "REPAIR_COMPLETED")
+            self.assertEqual(built["payload"]["before_oid"], "a" * 40)
+            self.assertEqual(built["payload"]["after_oid"], "b" * 40)
+            self.assertNotEqual(built["payload"]["before_oid"], built["payload"]["after_oid"])
+            self.assertEqual(built["payload"]["candidate"], "candidate-a")
+            self.assertEqual(built["payload"]["run"]["run_id"], "run-a")
+            self.assertEqual(built["payload"]["run"]["omp_process_id"], "run-a:auto_worker:triage_invoke_repair_omp")
+            self.assertEqual(built["payload"]["run"]["receipt_process_id"], "run-a:auto_worker:triage_verify_repair_receipt")
+            self.assertEqual(built["payload"]["provenance"]["repo"], "owner/repo")
+            self.assertEqual(built["payload"]["provenance"]["pr_number"], 11)
+            self.assertEqual(built["payload"]["provenance"]["branch"], "ai/fix/10")
+            self.assertEqual(built["payload"]["provenance"]["local_branch"], context["local_branch"])
+            self.assertEqual(built["payload"]["provenance"]["worktree_path"], context["worktree_path"])
+            self.assertEqual(built["payload"]["provenance"]["issue"], context["issue"])
+            self.assertEqual(built["payload"]["provenance"]["receipt"], context["receipt"])
+            self.assertEqual(on_disk, built["payload"])
+            self.assertEqual(verified["payload"], built["payload"])
+            self.assertTrue(str(path).startswith(str(root / "repair-receipts" / "owner__repo" / "11" / "")))
+            self.assertEqual(str(path), repair._repair_attempt_receipt(req(data), built["payload"]))
+
+            missing_omp = repair.build_repair_receipt(req({
+                **data,
+                "conduction": {
+                    "decide_repair_attempt": decision,
+                    **peers,
+                    "verify_repair_omp_postconditions": {
+                        "ok": True,
+                        "status": "verified",
+                        "before_oid": "a" * 40,
+                        "after_oid": "b" * 40,
+                        "omp_process_id": "",
+                        "omp": {},
+                    },
+                    "invoke_repair_omp": {
+                        "ok": True,
+                        "status": "invoked",
+                        "omp_process_id": "",
+                        "omp": {},
+                    },
+                },
+            }))
+            self.assertEqual((missing_omp["status"], missing_omp["reason"]), ("failed", "missing_repair_omp_provenance"))
+
+            missing_run = repair.build_repair_receipt(req({
+                **{k: v for k, v in data.items() if k not in {"run_id", "candidate"}},
+                "conduction": {
+                    "decide_repair_attempt": {
+                        **decision,
+                        "run_id": "",
+                        "process_id": "",
+                        "candidate": "",
+                    },
+                    **peers,
+                },
+            }))
+            self.assertEqual((missing_run["status"], missing_run["reason"]), ("failed", "missing_repair_receipt_provenance"))
+
+            same_heads = repair.build_repair_receipt(req({
+                **data,
+                "conduction": {
+                    "decide_repair_attempt": {**decision, "verified_head": "b" * 40},
+                    **peers,
+                    "verify_repair_push_oid": {
+                        "ok": True,
+                        "status": "verified",
+                        "local_oid": "b" * 40,
+                        "remote_oid": "b" * 40,
+                    },
+                    "verify_repair_omp_postconditions": {
+                        "ok": True,
+                        "status": "verified",
+                        "before_oid": "b" * 40,
+                        "after_oid": "b" * 40,
+                        "omp_process_id": "run-a:auto_worker:triage_invoke_repair_omp",
+                        "omp": {"status": "completed"},
+                    },
+                },
+            }))
+            self.assertEqual((same_heads["status"], same_heads["reason"]), ("failed", "invalid_repair_receipt_heads"))
+
+            original = path.read_bytes()
+            conflict = repair.publish_repair_receipt(req({
+                **data,
+                "conduction": {
+                    "decide_repair_attempt": decision,
+                    "build_repair_receipt": {
+                        "ok": True,
+                        "status": "built",
+                        "payload": {
+                            **built["payload"],
+                            "after_oid": "c" * 40,
+                            "run": {**built["payload"]["run"], "run_id": "run-b"},
+                        },
+                        "receipt_path": built["receipt_path"],
+                    },
+                },
+            }))
+            self.assertEqual((conflict["status"], conflict["reason"], path.read_bytes()), ("failed", "receipt_conflict", original))
+
+            path.write_text("{}", encoding="utf-8")
+            mismatch = repair.verify_repair_receipt(req({
+                **data,
+                "conduction": {
+                    "decide_repair_attempt": decision,
+                    "build_repair_receipt": built,
+                    "publish_repair_receipt": published,
+                },
+            }))
+            self.assertEqual(
+                (mismatch["status"], mismatch["reason"], mismatch["failure_class"], mismatch["retry_safe"]),
+                ("failed", "repair_receipt_readback_mismatch", "terminal", False),
+            )
+
     def test_malformed_completed_receipt_blocks_second_omp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3093,16 +3352,44 @@ CREATE TABLE processes (
     attempt INTEGER NOT NULL,
     max_attempts INTEGER NOT NULL,
     output_json TEXT NOT NULL,
-    error_json TEXT NOT NULL
+    error_json TEXT NOT NULL,
+    metadata TEXT NOT NULL
 );
 CREATE TABLE runs (
     id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    package_id TEXT,
+    package_version TEXT,
+    package_digest TEXT,
+    correlation_path_id TEXT,
+    correlation_path_digest TEXT,
+    runtime_version TEXT,
+    backend_version TEXT,
+    schema_version INTEGER NOT NULL,
     metadata TEXT NOT NULL
 );
 """
+            def _run_row(run_id: str) -> tuple[object, ...]:
+                return (
+                    run_id,
+                    "completed",
+                    "lokay",
+                    "1",
+                    "pkg-digest",
+                    "auto_worker",
+                    "path-digest",
+                    "0.7.15",
+                    "native",
+                    6,
+                    json.dumps({"mode": "live"}),
+                )
+
             with sqlite3.connect(db) as connection:
                 connection.executescript(schema)
-                connection.execute("INSERT INTO runs VALUES (?, ?)", ("run-a", json.dumps({"mode": "live"})))
+                connection.execute(
+                    "INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    _run_row("run-a"),
+                )
             context = {
                 "repo": "o/r",
                 "issue": "1",
@@ -3122,7 +3409,11 @@ CREATE TABLE runs (
             def persist(run_id: str, step: str, output: dict[str, object], *, attempt: int = 1) -> None:
                 with sqlite3.connect(db) as connection:
                     connection.execute(
-                        "INSERT INTO processes VALUES (?,?,?,?,?,?,?)",
+                        "INSERT OR IGNORE INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        _run_row(run_id),
+                    )
+                    connection.execute(
+                        "INSERT INTO processes VALUES (?,?,?,?,?,?,?,?)",
                         (
                             run_id,
                             f"{run_id}:auto_worker:{step}",
@@ -3131,6 +3422,14 @@ CREATE TABLE runs (
                             1,
                             json.dumps(output, sort_keys=True),
                             "{}",
+                            json.dumps(
+                                {
+                                    "correlation_path_id": "auto_worker",
+                                    "correlation_path_spec_id": "auto_worker",
+                                    "effector_id": step,
+                                    "seq": 0,
+                                }
+                            ),
                         ),
                     )
 
@@ -3453,7 +3752,7 @@ CREATE TABLE runs (
         with tempfile.TemporaryDirectory() as tmp:
             reservation = Path(tmp) / "reservation.json"
             reservation.write_text("{}\n", encoding="utf-8")
-            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            process_id = "run:pr_repair:invoke_repair_omp"
             request = invoke_req({
                 "dry_run": False,
                 "prompt": "fix checks",
@@ -3518,7 +3817,7 @@ CREATE TABLE runs (
     def test_invoke_evidence_requires_started_and_terminal_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             reservation = Path(tmp) / "reservation.json"
-            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            process_id = "run:pr_repair:invoke_repair_omp"
             started_path = repair._repair_invoke_evidence_path(reservation, process_id)
             terminal_path = repair._repair_invoke_terminal_evidence_path(reservation, process_id)
             started_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3537,7 +3836,7 @@ CREATE TABLE runs (
     def test_invoke_evidence_orphan_terminal_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             reservation = Path(tmp) / "reservation.json"
-            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            process_id = "run:pr_repair:invoke_repair_omp"
             terminal_path = repair._repair_invoke_terminal_evidence_path(reservation, process_id)
             terminal_path.parent.mkdir(parents=True, exist_ok=True)
             terminal_path.write_text(json.dumps({"kind": "repair_invoke_evidence", "process_id": process_id, "status": "failed", "pre_head": "head", "pre_status": "", "post_head": "head", "post_status": "", "mutated": False, "error": "failed"}) + "\n", encoding="utf-8")
@@ -3558,7 +3857,7 @@ CREATE TABLE runs (
         with tempfile.TemporaryDirectory() as tmp:
             root, reservation = Path(tmp), Path(tmp) / "reservation.json"
             reservation.write_text("{}\n")
-            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            process_id = "run:pr_repair:invoke_repair_omp"
             request = invoke_req({"repo": "o/r", "number": 1, "verified_head": "head", "worktree_path": str(root / "wt"), "prompt": "fix", "conduction": {"verify_repair_attempt_reservation": {"ok": True, "status": "verified", "verified": True, "reservation_path": str(reservation)}, "read_repair_omp_preconditions": {"ok": True, "status": "ready", "worktree_path": str(root / "wt"), "pre_head": "head"}, "decide_repair_attempt": {"ok": True, "status": "invoke", "authorize": True}}}, process_id=process_id)
             calls = {"count": 0}
             def write(path, payload, exclusive=False):
@@ -3770,7 +4069,7 @@ CREATE TABLE runs (
                 connection.execute("CREATE TABLE processes (run_id TEXT, id TEXT, status TEXT, input_json TEXT, output_json TEXT, error_json TEXT, metadata TEXT)")
                 connection.execute("INSERT INTO processes VALUES (?,?,?,?,?,?,?)", ("old-run", process_id, "failed", json.dumps(process_input), "{}", json.dumps({"code": "adapter_failed"}), json.dumps(metadata)))
             out = repair.read_repair_attempt_recovery_evidence(req({
-                "path_id": "auto_worker", "run_id": "new-run", "candidate": "new-candidate", "repo": "o/r", "number": 1, "verified_head": "head-a", "db_path": str(db),
+                "path_id": "pr_repair", "run_id": "new-run", "candidate": "new-candidate", "repo": "o/r", "number": 1, "verified_head": "head-a", "db_path": str(db),
                 "attempt_recovery": {"run_id": "stale-run", "process_id": "stale", "candidate": "stale-candidate", "path_id": "auto_worker", "effector_id": "triage_verify_repair_attempt_reservation", "repo": "o/r", "pr_number": 1, "verified_head": "head-a"},
                 "conduction": {"read_repair_attempt_state": {"ok": True, "status": "found", "attempt_state": state, "reservation_path": str(reservation)}, "read_repair_attempt_reconciliation": {"ok": True, "status": "unchanged", "authorize_reinvoke": True, "snapshot": {"pre_head": "head-a", "pre_status": ""}}}
             }))
@@ -3851,7 +4150,7 @@ CREATE TABLE runs (
             out = repair.read_repair_attempt_recovery_evidence(
                 req(
                     {
-                        "path_id": "auto_worker",
+                        "path_id": "pr_repair",
                         "run_id": "new-run",
                         "candidate": "new-candidate",
                         "repo": "o/r",
@@ -4090,7 +4389,7 @@ CREATE TABLE runs (
             claim_path.write_text(json.dumps(claim, sort_keys=True) + "\n", encoding="utf-8")
             reservation_path.write_text("{}\n", encoding="utf-8")
             db = root / "state.sqlite"
-            invoke_process_id = "run-b:auto_worker:triage_invoke_repair_omp"
+            invoke_process_id = "run-b:pr_repair:invoke_repair_omp"
             started = {"kind": "repair_invoke_evidence", "process_id": invoke_process_id, "status": "started", "pre_head": head, "pre_status": "", "mutated": None}
             terminal = {**started, "status": "failed", "post_head": head, "post_status": "", "mutated": False, "error": "failed"}
             repair._repair_invoke_evidence_path(reservation_path, invoke_process_id).write_text(json.dumps(started) + "\n", encoding="utf-8")
@@ -4102,7 +4401,7 @@ CREATE TABLE runs (
                 connection.execute(
                     "INSERT INTO processes VALUES (?,?,?,?,?)",
                     (
-                        "run-b:auto_worker:triage_invoke_repair_omp",
+                        "run-b:pr_repair:invoke_repair_omp",
                         "run-b",
                         "failed",
                         "{}",
@@ -4112,7 +4411,7 @@ CREATE TABLE runs (
                 connection.execute(
                     "INSERT INTO processes VALUES (?,?,?,?,?)",
                     (
-                        "run-b:auto_worker:triage_push_repair_branch",
+                        "run-b:pr_repair:push_repair_branch",
                         "run-b",
                         "succeeded",
                         json.dumps({"values": {"ok": True, "status": "noop", "mutated": False}}, sort_keys=True),
@@ -4132,7 +4431,7 @@ CREATE TABLE runs (
                 "run_id": "run-c",
                 "candidate": "candidate-c",
                 "db_path": str(db),
-                "path_id": "auto_worker",
+                "path_id": "pr_repair",
                 "conduction": {
                     "verify_repair_attempt_recovery": verified,
                     "read_repair_attempt_state": state,
@@ -4226,7 +4525,7 @@ CREATE TABLE runs (
                 connection.execute(
                     "INSERT INTO processes VALUES (?,?,?,?,?)",
                     (
-                        "run-b:auto_worker:triage_invoke_repair_omp",
+                        "run-b:pr_repair:invoke_repair_omp",
                         "run-b",
                         "failed",
                         "{}",
@@ -4236,7 +4535,7 @@ CREATE TABLE runs (
                 connection.execute(
                     "INSERT INTO processes VALUES (?,?,?,?,?)",
                     (
-                        "run-b:auto_worker:triage_push_repair_branch",
+                        "run-b:pr_repair:push_repair_branch",
                         "run-b",
                         "succeeded",
                         json.dumps({"values": {"ok": True, "status": "noop", "mutated": False}}, sort_keys=True),
@@ -4247,7 +4546,7 @@ CREATE TABLE runs (
                 "run_id": "run-c",
                 "candidate": "candidate-c",
                 "db_path": str(db),
-                "path_id": "auto_worker",
+                "path_id": "pr_repair",
                 "conduction": {
                     "verify_repair_attempt_recovery": {
                         "ok": True,
@@ -4293,7 +4592,7 @@ CREATE TABLE runs (
             claim_path.write_text(json.dumps(claim, sort_keys=True) + "\n", encoding="utf-8")
             reservation_path.write_text("{}\n", encoding="utf-8")
             db = root / "state.sqlite"
-            invoke_process_id = "run-b:auto_worker:triage_invoke_repair_omp"
+            invoke_process_id = "run-b:pr_repair:invoke_repair_omp"
             started = {
                 "kind": "repair_invoke_evidence",
                 "process_id": invoke_process_id,
@@ -4334,7 +4633,7 @@ CREATE TABLE runs (
                 connection.execute(
                     "INSERT INTO processes VALUES (?,?,?,?,?)",
                     (
-                        "run-b:auto_worker:triage_invoke_repair_omp",
+                        "run-b:pr_repair:invoke_repair_omp",
                         "run-b",
                         "succeeded",
                         json.dumps(semantic_invoke, sort_keys=True),
@@ -4344,7 +4643,7 @@ CREATE TABLE runs (
                 connection.execute(
                     "INSERT INTO processes VALUES (?,?,?,?,?)",
                     (
-                        "run-b:auto_worker:triage_push_repair_branch",
+                        "run-b:pr_repair:push_repair_branch",
                         "run-b",
                         "succeeded",
                         json.dumps({"values": {"ok": True, "status": "noop", "mutated": False}}, sort_keys=True),
@@ -4357,7 +4656,7 @@ CREATE TABLE runs (
                         "run_id": "run-c",
                         "candidate": "candidate-c",
                         "db_path": str(db),
-                        "path_id": "auto_worker",
+                        "path_id": "pr_repair",
                         "conduction": {
                             "verify_repair_attempt_recovery": {
                                 "ok": True,
@@ -4744,7 +5043,7 @@ CREATE TABLE runs (
             ctx = repair._repair_context(req(base))
             res_path = root / "reservation.json"
             res_path.write_text("{}\n")
-            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            process_id = "run:pr_repair:invoke_repair_omp"
             started = {"kind": "repair_invoke_evidence", "process_id": process_id, "status": "started", "pre_head": "head-a", "pre_status": "", "mutated": None}
             terminal = {**started, "status": "succeeded", "post_head": "head-a", "post_status": "", "mutated": True}
             repair._repair_invoke_evidence_path(res_path, process_id).parent.mkdir(parents=True, exist_ok=True)
@@ -4752,6 +5051,7 @@ CREATE TABLE runs (
             repair._repair_invoke_terminal_evidence_path(res_path, process_id).write_text(json.dumps(terminal) + "\n", encoding="utf-8")
             request = req({
                 **base,
+                "path_id": "pr_repair",
                 "attempt_recovery": {"run_id": "run", "path_id": "auto_worker", "candidate": "cand"},
                 "conduction": {
                     "read_repair_completed_receipt": {"ok": True, "status": "absent"},
@@ -4790,7 +5090,7 @@ CREATE TABLE runs (
             ctx = repair._repair_context(req(base))
             res_path = root / "reservation.json"
             res_path.write_text("{}\n")
-            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            process_id = "run:pr_repair:invoke_repair_omp"
             started = {
                 "kind": "repair_invoke_evidence",
                 "process_id": process_id,
@@ -4815,6 +5115,7 @@ CREATE TABLE runs (
             )
             request = req({
                 **base,
+                "path_id": "pr_repair",
                 "conduction": {
                     "read_repair_completed_receipt": {"ok": True, "status": "absent"},
                     "read_repair_attempt_state": {
@@ -4856,7 +5157,7 @@ CREATE TABLE runs (
             ctx = repair._repair_context(req(base))
             res_path = root / "reservation.json"
             res_path.write_text("{}\n")
-            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            process_id = "run:pr_repair:invoke_repair_omp"
             started = {
                 "kind": "repair_invoke_evidence",
                 "process_id": process_id,
@@ -4881,6 +5182,7 @@ CREATE TABLE runs (
             )
             request = req({
                 **base,
+                "path_id": "pr_repair",
                 "conduction": {
                     "read_repair_completed_receipt": {"ok": True, "status": "absent"},
                     "read_repair_attempt_state": {
@@ -4919,7 +5221,7 @@ CREATE TABLE runs (
             ctx = repair._repair_context(req(base))
             res_path = root / "reservation.json"
             res_path.write_text("{}\n")
-            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            process_id = "run:pr_repair:invoke_repair_omp"
             started = {
                 "kind": "repair_invoke_evidence",
                 "process_id": process_id,
@@ -4944,6 +5246,7 @@ CREATE TABLE runs (
             )
             request = req({
                 **base,
+                "path_id": "pr_repair",
                 # no attempt_recovery — must still see mutated evidence
                 "conduction": {
                     "read_repair_completed_receipt": {"ok": True, "status": "absent"},
@@ -5147,7 +5450,7 @@ CREATE TABLE runs (
             ctx = repair._repair_context(req(base))
             res_path = root / "reservation.json"
             res_path.write_text("{}\n")
-            process_id = "run:auto_worker:triage_invoke_repair_omp"
+            process_id = "run:pr_repair:invoke_repair_omp"
             started = {"kind": "repair_invoke_evidence", "process_id": process_id, "status": "started", "pre_head": "head-a", "pre_status": "", "mutated": None}
             terminal = {**started, "status": "succeeded", "post_head": "head-committed-new", "post_status": "", "mutated": True}
             repair._repair_invoke_evidence_path(res_path, process_id).parent.mkdir(parents=True, exist_ok=True)
@@ -5911,7 +6214,7 @@ class TriageTests(unittest.TestCase):
     def test_non_merge_action_noops_before_assignee_read(self) -> None:
         decision = {"status": "decided", "ok": True, "action": "comment_block", "reason": "missing_test_evidence"}
         with mock.patch("lokay.steps.triage._pr_view") as read:
-            out = triage.read_pr_assignees(req({"conduction": {"triage_decide_triage_action": decision}}))
+            out = triage.read_pr_assignees(req({"path_id": "pr_triage", "conduction": {"triage_decide_triage_action": decision}}))
         self.assertEqual(out["status"], "noop")
         self.assertEqual(out["reason"], "not_selected")
         self.assertFalse(out["mutated"])
@@ -5928,7 +6231,7 @@ class TriageTests(unittest.TestCase):
         }
         readback = mock.Mock(stdout='{"assignees": [{"login": "mikolaj92"}]}')
         with mock.patch("lokay.steps.triage._pr_view", return_value=readback) as read:
-            out = triage.read_pr_assignees(req({"conduction": {"triage_decide_triage_action": decision}}))
+            out = triage.read_pr_assignees(req({"path_id": "pr_triage", "conduction": {"triage_decide_triage_action": decision}}))
         self.assertEqual((out["repo"], out["number"]), ("o/r", 5))
         read.assert_called_once_with("gh", "o/r", 5, "assignees")
 
@@ -5944,6 +6247,7 @@ class TriageTests(unittest.TestCase):
         readback = mock.Mock(stdout='{"assignees": []}')
         with mock.patch("lokay.steps.triage._pr_view", return_value=readback):
             assignees = triage.read_pr_assignees(req({
+                "path_id": "pr_triage",
                 "conduction": {"triage_decide_triage_action": decision},
             }))
         selected = triage.decide_pr_assignee(req({
@@ -5951,6 +6255,7 @@ class TriageTests(unittest.TestCase):
         }))
         with mock.patch("lokay.steps.triage.run_cmd"):
             assigned = triage.assign_pr(req({
+                "path_id": "pr_triage",
                 "conduction": {
                     "triage_decide_pr_assignee": selected,
                     "triage_decide_triage_action": decision,
@@ -5971,14 +6276,16 @@ class TriageTests(unittest.TestCase):
             "operation": "verify_pr_comment",
         }
         merge_view = {"state": "OPEN", "headRefOid": "abc"}
+        preconditions_request = durable_merge_request(
+            path_id="pr_merge",
+            dry_run=False,
+            conduction={
+                "triage_verify_pr_assignee": verified,
+                "triage_verify_pr_comment": comment_noop,
+            },
+        )
         with mock.patch("lokay.steps.triage._read_merge_view", return_value=merge_view):
-            preconditions = triage.read_merge_preconditions(req({
-                "dry_run": False,
-                "conduction": {
-                    "triage_verify_pr_assignee": verified,
-                    "triage_verify_pr_comment": comment_noop,
-                },
-            }))
+            preconditions = triage.read_merge_preconditions(preconditions_request)
         self.assertEqual(
             (
                 preconditions["status"],
@@ -5988,14 +6295,26 @@ class TriageTests(unittest.TestCase):
             ),
             ("merge_preconditions_read", "o/r", 5, "abc"),
         )
-        merged = triage.merge_pr(req({
-            "dry_run": True,
-            "conduction": {
+        merged = triage.merge_pr(durable_merge_request(
+            path_id="pr_merge",
+            dry_run=True,
+            conduction={
+                "triage_read_merge_preconditions": preconditions,
+            },
+        ))
+        self.assertEqual((merged["status"], merged["repo"], merged["number"]), ("planned", "o/r", 5))
+        foreign = triage.merge_pr(durable_merge_request(
+            path_id="pr_triage",
+            dry_run=True,
+            conduction={
                 "triage_read_merge_preconditions": preconditions,
                 "triage_decide_triage_action": decision,
             },
-        }))
-        self.assertEqual((merged["status"], merged["repo"], merged["number"]), ("planned", "o/r", 5))
+        ))
+        self.assertEqual(foreign["status"], "failed")
+        self.assertEqual(foreign["reason"], "decision_gate_identity_mismatch")
+        self.assertFalse(foreign["mutated"])
+
 
     def test_existing_assignee_is_verified_for_merge(self) -> None:
         decision = {
@@ -6037,7 +6356,16 @@ class TriageTests(unittest.TestCase):
             "status": "merge_provenance_verified",
             "ok": True,
             "repo": "o/r",
-            "verified_provenance": {"head_ref": "ai/fix/10-repair", "merge_oid": "abc"},
+            "verified_provenance": {
+                "source": "github_pr_readback",
+                "state": "MERGED",
+                "repo": "o/r",
+                "number": 5,
+                "head_oid": "abc",
+                "head_ref": "ai/fix/10-repair",
+                "merge_oid": "merge-5",
+                "merged_at": "2026-01-01T00:00:00Z",
+            },
         }
         linked = triage.verify_linked_merge_provenance(req({
             "conduction": {"triage_verify_merge_provenance": provenance},
@@ -6052,6 +6380,7 @@ class TriageTests(unittest.TestCase):
         run.assert_called_once_with(["gh", "issue", "view", "10", "--repo", "o/r", "--json", "state"], timeout=60)
         decision = {"status": "decided", "ok": True, "action": "merge"}
         closed = triage.close_linked_issue(req({
+            "path_id": "pr_triage",
             "dry_run": False,
             "conduction": {
                 "triage_read_linked_issue_state": state,
@@ -6062,9 +6391,72 @@ class TriageTests(unittest.TestCase):
             (state["status"], state["issue"], closed["status"], closed["mutated"]),
             ("issue_state_read", 10, "already_closed", False),
         )
+    def test_merge_provenance_verifier_rejects_changed_authoritative_head(self) -> None:
+        source = {
+            "ok": True,
+            "status": "merge_postcondition_read",
+            "repo": "o/r",
+            "number": 5,
+            "head_oid": "abc",
+            "verified_provenance": {
+                "source": "github_pr_readback",
+                "state": "MERGED",
+                "repo": "o/r",
+                "number": 5,
+                "head_oid": "abc",
+                "head_ref": "ai/fix/5-repair",
+                "merge_oid": "merge-5",
+                "merged_at": "2026-01-01T00:00:00Z",
+            },
+        }
+        changed_view = {
+            "state": "MERGED",
+            "headRefOid": "changed-head",
+            "headRefName": "ai/fix/5-repair",
+            "mergeCommit": {"oid": "merge-5"},
+            "mergedAt": "2026-01-01T00:00:00Z",
+        }
+        with mock.patch("lokay.steps.triage._read_merge_view", return_value=changed_view):
+            result = triage.verify_merge_provenance(
+                req({
+                    **durable_merge_request(number=5, head_oid="abc")["input"],
+                    "conduction": {"read_merge_postcondition": source},
+                })
+            )
+        self.assertEqual((result["status"], result["reason"]), ("failed", "merge_provenance_unverified"))
+
+    def test_merge_provenance_verifier_accepts_matching_authoritative_view(self) -> None:
+        provenance = {
+            "source": "github_pr_readback",
+            "state": "MERGED",
+            "repo": "o/r",
+            "number": 5,
+            "head_oid": "abc",
+            "head_ref": "ai/fix/5-repair",
+            "merge_oid": "merge-5",
+            "merged_at": "2026-01-01T00:00:00Z",
+        }
+        source = {"ok": True, "status": "merge_postcondition_read", **provenance, "verified_provenance": provenance}
+        matching_view = {
+            "state": "MERGED",
+            "headRefOid": "abc",
+            "headRefName": "ai/fix/5-repair",
+            "mergeCommit": {"oid": "merge-5"},
+            "mergedAt": "2026-01-01T00:00:00Z",
+        }
+        with mock.patch("lokay.steps.triage._read_merge_view", return_value=matching_view):
+            result = triage.verify_merge_provenance(
+                req({
+                    **durable_merge_request(number=5, head_oid="abc")["input"],
+                    "conduction": {"read_merge_postcondition": source},
+                })
+            )
+        self.assertEqual((result["status"], result["verified_provenance"]), ("merge_provenance_verified", provenance))
+
 
     def test_merge_preconditions_reject_failed_comment_verification(self) -> None:
         result = triage.read_merge_preconditions(req({
+            "path_id": "pr_triage",
             "repo": "o/r",
             "number": 5,
             "head_oid": "abc",
@@ -6122,7 +6514,24 @@ class TriageTests(unittest.TestCase):
         self.assertFalse(automated_comment["pass_"])
 
     def test_decide_triage_action_routes(self) -> None:
-        base = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "labels": [], "author": {"login": "o"}, "headRefName": "ai/fix/1", "baseRefName": "main"}, "checks_pass": True, "evidence_pass": True, "automerge": True, "repo": "o/r"}
+        base = {
+            "pr": {
+                "number": 1,
+                "state": "OPEN",
+                "mergeable": "MERGEABLE",
+                "reviewDecision": "APPROVED",
+                "labels": [],
+                "author": {"login": "o"},
+                "headRefName": "ai/fix/1",
+                "headRefOid": "deadbeef",
+                "baseRefName": "main",
+            },
+            "checks_pass": True,
+            "evidence_pass": True,
+            "automerge": True,
+            "repo": "o/r",
+            "number": 1,
+        }
         self.assertEqual(triage.decide_triage_action(req(base))["action"], "merge")
         self.assertEqual(triage.decide_triage_action(req({**base, "checks_pass": False}))["action"], "repair")
         conducted = {
@@ -6132,7 +6541,9 @@ class TriageTests(unittest.TestCase):
                     "number": 5,
                     "pr": {
                         **base["pr"],
+                        "number": 5,
                         "headRefName": "ai/fix/5",
+                        "headRefOid": "abc",
                         "baseRefName": "main",
                     },
                 },
@@ -6142,36 +6553,70 @@ class TriageTests(unittest.TestCase):
             "automerge": True,
         }
         merge = triage.decide_triage_action(req(conducted))
-        self.assertEqual((merge["repo"], merge["number"]), ("o/r", 5))
+        self.assertEqual((merge["repo"], merge["number"], merge["head_oid"]), ("o/r", 5, "abc"))
         self.assertEqual(triage.decide_triage_action(req({**base, "evidence_pass": False}))["action"], "repair")
         approval_required = {**base, "require_human_approval": True}
         approval_required["pr"] = {**base["pr"], "reviewDecision": ""}
         self.assertEqual(triage.decide_triage_action(req(approval_required))["action"], "comment_block")
 
+
     def test_canonical_comment_chain_dry_run(self) -> None:
         decision = {"status": "decided", "ok": True, "action": "comment_block"}
         read = {"status": "comments_read", "ok": True, "comments": [], "repo": "o/r", "number": 5}
-        request = req({"repo": "o/r", "number": 5, "body": "blocked", "dry_run": True, "conduction": {"decide_triage_action": decision, "read_pr_comments": read}})
+        request = req({"path_id": "pr_triage", "repo": "o/r", "number": 5, "body": "blocked", "dry_run": True, "conduction": {"decide_triage_action": decision, "read_pr_comments": read}})
         selected = triage.decide_pr_comment(request)
         self.assertEqual(selected["status"], "comment_selected")
-        posted = triage.post_pr_comment(req({**request["input"], "conduction": {"decide_triage_action": decision, "read_pr_comments": read, "decide_pr_comment": selected}}))
+        posted = triage.post_pr_comment(req({**request["input"], "path_id": "pr_triage", "conduction": {"decide_triage_action": decision, "read_pr_comments": read, "decide_pr_comment": selected}}))
         self.assertEqual(posted["status"], "planned")
 
     def test_canonical_merge_chain_and_branch_gate(self) -> None:
-        decision = {"status": "decided", "ok": True, "action": "merge"}
         pre = {"status": "merge_preconditions_read", "ok": True, "repo": "o/r", "number": 5, "head_oid": "abc"}
-        request = req({"repo": "o/r", "number": 5, "head_oid": "abc", "dry_run": True, "conduction": {"decide_triage_action": decision, "read_merge_preconditions": pre}})
+        request = durable_merge_request(
+            path_id="pr_merge",
+            dry_run=True,
+            conduction={"read_merge_preconditions": pre},
+        )
         merged = triage.merge_pr(request)
         self.assertEqual(merged["status"], "planned")
-        blocked = triage.merge_pr(req({"repo": "o/r", "number": 5, "head_oid": "abc", "conduction": {"decide_triage_action": {"status": "decided", "ok": True, "action": "comment_block"}, "read_merge_preconditions": pre}}))
+        blocked = triage.merge_pr(durable_merge_request(
+            action="comment_block",
+            path_id="pr_merge",
+            conduction={"read_merge_preconditions": pre},
+        ))
         self.assertEqual(blocked["reason"], "not_selected")
+        foreign = triage.merge_pr(durable_merge_request(
+            path_id="pr_triage",
+            dry_run=False,
+            conduction={
+                "decide_triage_action": {
+                    "status": "decided",
+                    "ok": True,
+                    "action": "merge",
+                    "repo": "o/r",
+                    "number": 5,
+                    "head_oid": "abc",
+                },
+                "read_merge_preconditions": pre,
+            },
+        ))
+        self.assertEqual(foreign["status"], "failed")
+        self.assertEqual(foreign["reason"], "decision_gate_identity_mismatch")
+        self.assertFalse(foreign["mutated"])
+
 
     def test_terminal_decision_attribution_is_exact(self) -> None:
         peer = {"status": "failed", "ok": False, "reason": "invalid_pr", "failure_class": "terminal"}
-        out = triage.merge_pr(req({"repo": "o/r", "number": 3, "head_oid": "abc", "conduction": {"decide_triage_action": peer}}))
+        out = triage.merge_pr(req({
+            "path_id": "pr_merge",
+            "repo": "o/r",
+            "number": 3,
+            "head_oid": "abc",
+            "conduction": {"read_merge_preconditions": peer},
+        }))
         self.assertEqual(out["reason"], "upstream_failed")
-        self.assertEqual(out["upstream_effector"], "decide_triage_action")
+        self.assertEqual(out["upstream_effector"], "read_merge_preconditions")
         self.assertEqual(out["upstream"], peer)
+
 
 
 
@@ -6211,7 +6656,7 @@ class CleanupTests(unittest.TestCase):
     def test_read_worktree_ownership_already_absent_when_missing(self) -> None:
         with mock.patch("lokay.steps.cleanup.worktree_list", return_value=""), mock.patch(
             "lokay.steps.cleanup.parse_worktree_porcelain", return_value=[]
-        ):
+        ), mock.patch("lokay.steps.cleanup.os.path.lexists", return_value=False):
             out = cleanup.read_worktree_ownership(req({
                 "clone_path": "/c",
                 "worktree_path": "/wt",
@@ -6263,6 +6708,127 @@ class CleanupTests(unittest.TestCase):
             }))
         self.assertFalse(out["ok"], out)
         self.assertEqual(out["reason"], "worktree_ownership_mismatch")
+
+    def test_read_worktree_ownership_fails_on_residual_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            residual = Path(temp) / "wt"
+            residual.mkdir()
+            with mock.patch("lokay.steps.cleanup.worktree_list", return_value=""), mock.patch(
+                "lokay.steps.cleanup.parse_worktree_porcelain", return_value=[]
+            ):
+                out = cleanup.read_worktree_ownership(req({
+                    "clone_path": "/c",
+                    "worktree_path": str(residual),
+                    "branch": "ai/fix/3-x",
+                    "conduction": {
+                        "verify_cleanup_guards": {"ok": True, "status": "verified"},
+                        "validate_cleanup_identity": {
+                            "ok": True,
+                            "status": "validated",
+                            "identity": {
+                                "clone_path": "/c",
+                                "worktree_path": str(residual),
+                                "local_branch": "ai/fix/3-x",
+                                "branch": "ai/fix/3-x",
+                            },
+                        },
+                    },
+                }))
+        self.assertFalse(out["ok"], out)
+        self.assertEqual(out["reason"], "worktree_path_residual")
+
+    def test_verify_worktree_absent_fails_on_residual_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            residual = Path(temp) / "wt"
+            residual.mkdir()
+            with mock.patch("lokay.steps.cleanup.worktree_list", return_value=""), mock.patch(
+                "lokay.steps.cleanup.parse_worktree_porcelain", return_value=[]
+            ):
+                out = cleanup.verify_worktree_absent(req({
+                    "clone_path": "/c",
+                    "worktree_path": str(residual),
+                    "conduction": {
+                        "remove_worktree": {"ok": True, "status": "removed", "mutated": True},
+                    },
+                }))
+        self.assertFalse(out["ok"], out)
+        self.assertEqual(out["reason"], "worktree_not_absent")
+        self.assertTrue(out.get("path_residual"))
+
+    def test_aggregate_gate_unauthorized_is_terminal(self) -> None:
+        out = cleanup.check_issue_closed(req({
+            "repo": "owner/repo",
+            "issue": 3,
+            "conduction": {
+                "aggregate_lane_results": {
+                    "ok": True,
+                    "status": "aggregated",
+                    "cleanup_authorized": False,
+                },
+            },
+        }))
+        self.assertFalse(out["ok"], out)
+        self.assertEqual(out["reason"], "cleanup_not_authorized")
+
+    def test_aggregate_gate_malformed_ok_fails_closed(self) -> None:
+        out = cleanup.check_issue_closed(req({
+            "repo": "owner/repo",
+            "issue": 3,
+            "conduction": {
+                "aggregate_lane_results": {
+                    "status": "aggregated",
+                    "cleanup_authorized": True,
+                    "cleanup_identity": {
+                        "repo": "owner/repo",
+                        "issue": 3,
+                        "pr_number": 4,
+                        "branch": "ai/fix/3-x",
+                        "head_oid": "abc",
+                        "board": "b",
+                        "clone_path": "/c",
+                        "priority": 1,
+                    },
+                },
+            },
+        }))
+        self.assertFalse(out["ok"], out)
+        self.assertEqual(out["reason"], "upstream_failed")
+
+    def test_cleanup_value_ignores_input_when_aggregate_unauthorized(self) -> None:
+        value = cleanup._cleanup_value(
+            req({
+                "repo": "attacker/repo",
+                "branch": "ai/fix/99-x",
+                "conduction": {
+                    "aggregate_lane_results": {
+                        "ok": True,
+                        "status": "aggregated",
+                        "cleanup_authorized": False,
+                    },
+                },
+            }),
+            "repo",
+            default="",
+        )
+        self.assertEqual(value, "")
+
+    def test_decide_cleanup_outcome_treats_missing_ok_as_failure(self) -> None:
+        evidence = {
+            "parse_cleanup_issue_number": {"ok": True, "status": "parsed", "issue": 7, "mutated": False},
+            "check_issue_closed": {"status": "checked", "closed": True, "mutated": False},
+            "check_no_open_pr_for_branch": {"ok": True, "status": "checked", "safe_to_cleanup": True, "mutated": False},
+            "remove_worktree": {"ok": True, "status": "already_absent", "mutated": False},
+            "delete_local_branch": {"ok": True, "status": "already_absent", "mutated": False},
+            "release_claim_file": {"ok": True, "status": "already_absent", "mutated": False},
+        }
+        out = cleanup.decide_cleanup_outcome(req({
+            "conduction": {
+                "collect_cleanup_receipt_evidence": {"ok": True, "status": "collected", "evidence": evidence},
+            },
+        }))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "decided")
+        self.assertEqual(out["outcome"], "failure")
 
     def test_absent_worktree_chain_allows_claim_release_evidence(self) -> None:
         ownership = {

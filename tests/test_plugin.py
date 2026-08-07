@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import tomllib
 import json
 import sys
 import tempfile
@@ -9,6 +10,7 @@ import unittest
 import os
 from argparse import ArgumentParser
 from pathlib import Path
+from lokay.registry import canonical_toml
 from unittest import mock
 
 
@@ -81,55 +83,28 @@ class ConfigAndCommandTests(unittest.TestCase):
 
     def _write_mode_config(self, directory: Path, mode: str) -> Path:
         path = directory / f"config-{mode}.toml"
-        root = directory / "root"
-        root.mkdir(exist_ok=True)
-        path.write_text(
-            f'''mode = "{mode}"
-branch_prefix = "ai/fix"
-base_branch = "main"
-
-[github]
-cli = "gh"
-assignee = "owner"
-
-[labels]
-ready = "ai:ready"
-in_progress = "ai:in-progress"
-blocked = "ai:blocked"
-pr_opened = "ai:pr-opened"
-generated = "ai:generated"
-
-[automation]
-max_active_issues = 1
-automerge = true
-require_human_approval = false
-require_checks = false
-require_test_evidence = false
-fixer_assignee = "lokay-fixer"
-merge_method = "merge"
-
-[executor]
-enabled = true
-command = "omp"
-model = "omniroute/omp/default"
-thinking = "medium"
-timeout_seconds = 7200
-
-[paths]
-worktree_root = "{root / 'worktrees'}"
-dispatch_receipts = "{root / 'dispatch'}"
-task_receipts = "{root / 'task-receipts'}"
-merge_receipts = "{root / 'merge'}"
-active_issue = "{root / 'active'}"
-
-[[repos]]
-repo = "owner/example-repo"
-board = "owner-example-repo"
-clone_path = "{root / 'clone'}"
-priority = 100
-''',
-            encoding="utf-8",
-        )
+        portable_root = f"~/.lokay-test/{directory.name}"
+        data = tomllib.loads((PLUGIN_ROOT / "config.toml").read_text(encoding="utf-8"))
+        data["mode"] = mode
+        data["github"]["assignee"] = "owner"
+        data["automation"]["require_checks"] = False
+        data["automation"]["require_test_evidence"] = False
+        data["executor"]["enabled"] = True
+        data["paths"] = {
+            "worktree_root": f"{portable_root}/worktrees",
+            "dispatch_receipts": f"{portable_root}/dispatch",
+            "task_receipts": f"{portable_root}/task-receipts",
+            "merge_receipts": f"{portable_root}/merge",
+            "active_issue": f"{portable_root}/active",
+            "triage_receipts": f"{portable_root}/triage",
+        }
+        data["repos"] = [{
+            "repo": "owner/example-repo",
+            "board": "owner-example-repo",
+            "clone_path": f"{portable_root}/clone",
+            "priority": 100,
+        }]
+        path.write_bytes(canonical_toml(data))
         return path
 
     def test_render_launchd_parser_rejects_unknown_or_live_flag(self):
@@ -190,10 +165,11 @@ priority = 100
                     self.assertEqual(getattr(root_cfg.executor, name), getattr(runtime_cfg.executor, name))
                 for name, relative in {
                     "worktree_root": ".hermes/worktrees/lokay",
-                    "dispatch_receipts": ".hermes/state/lokay-dispatch",
-                    "task_receipts": ".hermes/state/lokay-receipts",
-                    "merge_receipts": ".hermes/state/lokay-merge",
-                    "active_issue": ".hermes/state/lokay-active",
+                    "dispatch_receipts": ".hermes/state/lokay-dispatch-live",
+                    "task_receipts": ".hermes/state/lokay-receipts-live",
+                    "merge_receipts": ".hermes/state/lokay-merge-live",
+                    "active_issue": ".hermes/state/lokay-active-live",
+                    "triage_receipts": ".hermes/state/lokay-triage-live",
                 }.items():
                     value = Path(getattr(runtime_cfg.paths, name))
                     self.assertTrue(value.is_absolute())
@@ -204,18 +180,16 @@ priority = 100
                 self.assertTrue(runtime_clone.is_absolute())
                 self.assertEqual(root_clone, runtime_clone)
                 self.assertEqual(runtime_clone, expected_root / "repos/example-repo")
-
-    def test_task_receipts_path_is_optional_and_defaults(self):
+    def test_missing_required_path_is_rejected(self):
         runtime_config = importlib.import_module("lokay.config")
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            config = self._write_mode_config(root, "live")
-            config.write_text(config.read_text(encoding="utf-8").replace(f'task_receipts = "{root / "root" / "task-receipts"}"\n', ""), encoding="utf-8")
-            schema = json.loads((PLUGIN_ROOT / "schemas" / "config.schema.json").read_text(encoding="utf-8"))
-            self.assertNotIn("task_receipts", schema["properties"]["paths"]["required"])
-            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
-                loaded = runtime_config.load_config(config)
-            self.assertEqual(loaded.paths.task_receipts, str(root / ".hermes/state/lokay-receipts"))
+            config = self._write_mode_config(Path(tmp), "live")
+            data = tomllib.loads(config.read_text(encoding="utf-8"))
+            del data["paths"]["task_receipts"]
+            config.write_bytes(canonical_toml(data))
+            with self.assertRaisesRegex(runtime_config.ConfigError, "paths: missing required key\\(s\\): task_receipts"):
+                runtime_config.load_config(config)
+
 
     def test_root_operational_modes_require_config_and_explicit_live(self):
         module = load_plugin()
@@ -304,49 +278,23 @@ priority = 100
             executor.validate_command(executor.CommandSpec(("git", "push", "--force")))
         self.assertEqual(executor.git_spec(("status",)).env["GIT_MASTER"], "1")
 
-    def test_load_json_config_without_yaml(self):
-        module = load_plugin()
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "config.json"
-            path.write_text(
-                json.dumps({"version": 1, "mode": "dry-run", "repos": [{"repo": "owner/repo", "board": "owner-repo"}]}),
-                encoding="utf-8",
-            )
-            cfg = module.commands.load_config(path)
-            self.assertEqual(cfg.repos[0].repo, "owner/repo")
     def test_load_toml_config_preserves_runtime_shape(self):
         module = load_plugin()
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "config.toml"
-            path.write_text(
-                """
-mode = "live"
-branch_prefix = "ai/fix"
-
-[automation]
-automerge = true
-
-[executor]
-enabled = true
-command = "omp"
-
-[paths]
-worktree_root = "/tmp/runtime-worktrees"
-
-[[repos]]
-repo = "owner/repo"
-board = "owner-repo"
-clone_path = "/tmp/runtime-clone"
-""",
-                encoding="utf-8",
-            )
+            directory = Path(tmp)
+            path = self._write_mode_config(directory, "live")
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+            data["automation"]["automerge"] = True
+            data["paths"]["worktree_root"] = "~/.lokay-test/runtime-worktrees"
+            data["repos"][0]["clone_path"] = "~/.lokay-test/runtime-clone"
+            path.write_bytes(canonical_toml(data))
             cfg = module.commands.load_config(path)
         self.assertEqual(cfg.mode, "live")
         self.assertTrue(cfg.automerge)
         self.assertTrue(cfg.executor.enabled)
         self.assertEqual(cfg.executor.command, "omp")
-        self.assertEqual(cfg.worktree_root, "/tmp/runtime-worktrees")
-        self.assertEqual(cfg.repos[0].clone_path, "/tmp/runtime-clone")
+        self.assertEqual(cfg.worktree_root, str(Path.home() / ".lokay-test/runtime-worktrees"))
+        self.assertEqual(cfg.repos[0].clone_path, str(Path.home() / ".lokay-test/runtime-clone"))
 
     def test_malformed_toml_is_rejected(self):
         module = load_plugin()
@@ -361,19 +309,18 @@ clone_path = "/tmp/runtime-clone"
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text("mode = \"dry-run\"\n", encoding="utf-8")
-            tomllib = module.commands.load_config.__globals__["tomllib"]
-            with mock.patch.object(tomllib, "loads", return_value=[]):
-                with self.assertRaisesRegex(module.commands.ConfigError, "config root must be a mapping"):
+            registry_tomllib = importlib.import_module("lokay.registry").tomllib
+            with mock.patch.object(registry_tomllib, "loads", return_value=[]):
+                with self.assertRaisesRegex(module.commands.ConfigError, "config: root must be a TOML table"):
                     module.commands.load_config(path)
 
     def test_explicit_toml_cli_config_reaches_render_launchd(self):
         module = load_plugin()
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "config.toml"
-            path.write_text(
-                "mode = \"dry-run\"\n\n[automation]\nautomerge = true\n\n[[repos]]\nrepo = \"owner/repo\"\nboard = \"owner-repo\"\n",
-                encoding="utf-8",
-            )
+            path = self._write_mode_config(Path(tmp), "dry-run")
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+            data["automation"]["automerge"] = True
+            path.write_bytes(canonical_toml(data))
             parser = ArgumentParser()
             module.commands.setup_parser(parser)
             parsed = parser.parse_args(

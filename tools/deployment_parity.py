@@ -13,6 +13,10 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
+from lokay.registry import PROCESS_IDS
+
+
+
 
 FALA_PINNED_COMMIT = "b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
 FALA_TAG = "0.7.15"
@@ -42,6 +46,45 @@ TEMPLATE_ENTRYPOINTS = {
     "lokay-health.plist.template": "lokay_health.sh",
     "lokay-hermes-update.plist.template": "lokay_hermes_update.sh",
 }
+AGGREGATE_FALA_LABEL = "com.mikolaj92.lokay.fala-tick-all"
+AGGREGATE_FALA_MODULE = "lokay.tick_all"
+PROCESS_MODULE = "lokay.process"
+SUPERVISOR_MODULE = "lokay.supervisor"
+SUPERVISOR_LABEL = "com.mikolaj92.lokay.supervisor"
+SUPERVISOR_PLIST_RELATIVE = f"launchd/{SUPERVISOR_LABEL}.plist"
+SUPERVISOR_TEMPLATE_NAME = "lokay-supervisor.plist.template"
+PROCESS_TEMPLATE_NAME = "lokay-process.plist.template"
+PROCESS_ENV_KEYS = (
+    "HOME",
+    "PYTHONPATH",
+    "FALA_HOME",
+    "FALA_EFFECTOR_ROOT",
+    "FALA_CANDIDATE_ID",
+    "HERMES_LOKAY_GENERATION",
+    "HERMES_LOKAY_PROCESS_STATE_ROOT",
+)
+PROCESS_PATH_ENV_KEYS = (
+    "HOME",
+    "PYTHONPATH",
+    "FALA_HOME",
+    "FALA_EFFECTOR_ROOT",
+    "HERMES_LOKAY_PROCESS_STATE_ROOT",
+)
+PROCESS_IDENTITY_KEYS = ("id", "enabled", "interval_seconds", "command")
+RUNTIME_IDENTITY_KEYS = (
+    "label",
+    "program_arguments",
+    "working_directory",
+    "standard_out_path",
+    "standard_error_path",
+    "environment_variables",
+    "start_interval",
+    "run_at_load",
+    "keep_alive",
+    "process_type",
+    "limit_load_to_session_type",
+    "plist_sha256",
+)
 
 
 
@@ -117,7 +160,7 @@ def _validate_script_inventory(root: Path, label: str, errors: list[str]) -> Non
 
 def _validate_config_roots(roots: Iterable[Path], errors: list[str]) -> dict[str, str]:
     """Validate the exact active config inventory and return its hashes."""
-    allowed = {"config.toml", "config.yaml", "config.yml", "config.json"}
+    allowed = {"config.toml"}
     hashes: dict[str, str] = {}
     seen: set[Path] = set()
     for root in roots:
@@ -174,17 +217,28 @@ def _render_template(raw: str, active_home: Path, active_root: Path | None = Non
     """Render compatibility markers used by canonical launchd fixtures."""
     rendered = raw
     active_root = active_root or (active_home / ".hermes" / "scripts")
+    project = active_root.parent / "project"
     replacements = {
         "{{HOME}}": str(active_home),
         "{{ACTIVE_SCRIPTS}}": str(active_root),
-        "{{UV_BIN}}": "/usr/bin/uv",
-        "{{PROJECT_ROOT}}": str(active_home / ".hermes" / "project"),
+        "{{PYTHON_PATH}}": str(project / ".venv" / "bin" / "python"),
+        "{{PYTHONPATH}}": str(project / "src"),
+        "{{FALA_HOME}}": str(project / "Fala"),
+        "{{FALA_EFFECTOR_ROOT}}": str(project / "effectors"),
+        "{{PROJECT_ROOT}}": str(project),
         "{{CONFIG_PATH}}": str(active_home / ".hermes" / "config.toml"),
         "{{DB_PATH}}": str(active_home / ".hermes" / "fala.sqlite"),
         "{{MODE_ARG}}": "--dry-run",
         "{{INTAKE_LIMIT}}": "10",
         "{{LOG_DIR}}": str(active_home / ".hermes" / "logs"),
         "<config-path>": str(active_home / ".hermes" / "config.toml"),
+        # Supervisor template defaults for parity fixture rendering.
+        "{{LABEL}}": SUPERVISOR_LABEL,
+        "{{COMMAND}}": "lokay-process-repo_issue_poll",
+        "{{START_INTERVAL}}": "60",
+        "{{CANDIDATE_ID}}": "0" * 64,
+        "{{GENERATION}}": "0" * 64,
+        "{{PROCESS_STATE_ROOT}}": str(Path(active_home / ".hermes" / "fala.sqlite").parent / "process-state"),
     }
     for marker, value in replacements.items():
         rendered = rendered.replace(marker, value)
@@ -274,9 +328,14 @@ def _validate_active_plist_roots(
     contracts: dict[str, tuple[str, tuple[str, ...]]],
     errors: list[str],
 ) -> None:
-    expected = {name: contracts[name] for template in templates if (name := _plist_name(template)) in contracts}
-    fala_name = "com.mikolaj92.lokay.fala-tick-all.plist"
-    fala_template_name = "lokay-fala-tick-all.plist"
+    # Active LaunchAgents only host script entrypoints plus installed process labels.
+    # Catalog process templates are candidate-rendered under launchd/<label>.plist, not
+    # as a single lokay-process.plist active artifact.
+    expected = {
+        name: contracts[name]
+        for template in templates
+        if template.name in TEMPLATE_ENTRYPOINTS and (name := _plist_name(template)) in contracts
+    }
     for root_input in roots:
         root = root_input.expanduser()
         if root.is_symlink():
@@ -285,11 +344,13 @@ def _validate_active_plist_roots(
         if not root.is_dir():
             errors.append(f"required active directory missing: {root}")
             continue
+        aggregate = root / f"{AGGREGATE_FALA_LABEL}.plist"
+        if aggregate.exists():
+            errors.append(f"aggregate production launchd artifact is forbidden: {aggregate}")
         for name, (expected_label, expected_args) in expected.items():
-            installed_name = fala_name if name == fala_template_name else name
-            path = root / installed_name
+            path = root / name
             if not path.exists():
-                errors.append(f"missing active launchd artifact: {installed_name}")
+                errors.append(f"missing active launchd artifact: {name}")
                 continue
             if path.is_symlink():
                 errors.append(f"active launchd artifact must not be a symlink: {path}")
@@ -307,7 +368,7 @@ def _validate_active_plist_roots(
                 continue
             if document.get("Label") != expected_label:
                 errors.append(f"active launchd Label mismatch: {path}")
-            if name != fala_template_name and document.get("ProgramArguments") != list(expected_args):
+            if document.get("ProgramArguments") != list(expected_args):
                 errors.append(f"active launchd ProgramArguments mismatch: {path}")
 
 
@@ -347,7 +408,7 @@ def validate(
     seen_labels: dict[str, Path] = {}
     seen_executors: dict[tuple[str, ...], Path] = {}
     seen_names: set[str] = set()
-    expected_names = set(TEMPLATE_ENTRYPOINTS) | {"lokay-fala-tick-all.plist.template"}
+    expected_names = set(TEMPLATE_ENTRYPOINTS)
     for template in templates:
         if template.name in seen_names:
             errors.append(f"duplicate launchd template entry: {template.name}")
@@ -390,37 +451,69 @@ def validate(
                 errors.append(f"launchd entrypoint mismatch: {template} points to {Path(executable).name}; expected {expected_name}")
             elif Path(executable).expanduser().resolve() != expected:
                 errors.append(f"launchd ProgramArguments path mismatch: {template} points to {executable}; expected {expected}")
-        elif template.name != "lokay-fala-tick-all.plist.template":
-            errors.append(f"launchd executable is not a deployed script: {template}")
-        if template.name == "lokay-fala-tick-all.plist.template":
-            if label != "com.mikolaj92.lokay.fala-tick-all":
-                errors.append(f"Fala launchd Label mismatch: {template}")
-            if document.get("StartInterval") != 600 or document.get("ProcessType") != "Background" or document.get("RunAtLoad") is not False:
-                errors.append(f"Fala launchd schedule/process contract invalid: {template}")
-            if document.get("LimitLoadToSessionType") not in (None, "Background"):
-                errors.append(f"Fala launchd session contract invalid: {template}")
-            env = document.get("EnvironmentVariables")
-            if not isinstance(env, dict) or not isinstance(env.get("HOME"), str):
-                errors.append(f"Fala launchd HOME is missing: {template}")
-            for key in ("StandardOutPath", "StandardErrorPath"):
-                if not isinstance(document.get(key), str) or not Path(document[key]).is_absolute():
-                    errors.append(f"Fala launchd {key} is invalid: {template}")
-            mode_flags = [value for value in arguments if value in ("--dry-run", "--live")]
-            if len(mode_flags) != 1:
-                errors.append(f"Fala launchd mode flags are not exactly once: {template}")
+        else:
+            if label == AGGREGATE_FALA_LABEL or AGGREGATE_FALA_MODULE in arguments or template.name == "lokay-fala-tick-all.plist.template":
+                errors.append(f"aggregate production launchd template is forbidden: {template}")
+            elif template.name == PROCESS_TEMPLATE_NAME or PROCESS_MODULE in arguments:
+                errors.append(f"per-process production launchd template is forbidden: {template}")
+            elif template.name != SUPERVISOR_TEMPLATE_NAME and SUPERVISOR_MODULE not in arguments:
+                errors.append(f"launchd executable is not a deployed script: {template}")
             else:
-                _validate_args(arguments, project=active_root.parent / "project", config=active_home / ".hermes" / "config.toml", db_path=str(active_home / ".hermes" / "fala.sqlite"), mode=mode_flags[0][2:], label="launchd template", errors=errors)
-            project_index = arguments.index("--project") if "--project" in arguments else -1
-            if project_index < 0 or project_index + 1 >= len(arguments):
-                errors.append(f"Fala launchd project path is missing: {template}")
-            else:
-                project_path = Path(arguments[project_index + 1]).expanduser()
-                if not project_path.is_absolute():
-                    errors.append(f"Fala launchd project path is not absolute: {template}")
-                if "candidates" in project_path.parts:
-                    errors.append(f"Fala launchd project path points at mutable candidates: {template}")
-                if document.get("WorkingDirectory") != arguments[project_index + 1]:
-                    errors.append(f"Fala launchd WorkingDirectory is not project-local: {template}")
+                if label != SUPERVISOR_LABEL:
+                    errors.append(f"supervisor launchd Label mismatch: {template}")
+                if (
+                    document.get("ProcessType") != "Background"
+                    or document.get("RunAtLoad") is not True
+                    or document.get("KeepAlive") is not True
+                    or "StartInterval" in document
+                ):
+                    errors.append(f"supervisor launchd schedule/process contract invalid: {template}")
+                if document.get("LimitLoadToSessionType") not in (None, "Background"):
+                    errors.append(f"supervisor launchd session contract invalid: {template}")
+                env = document.get("EnvironmentVariables")
+                project = active_root.parent / "project"
+                expected_env = {
+                    "HOME": str(active_home),
+                    "PYTHONPATH": str(project / "src"),
+                    "FALA_HOME": str(project / "Fala"),
+                    "FALA_EFFECTOR_ROOT": str(project / "effectors"),
+                    "FALA_CANDIDATE_ID": "0" * 64,
+                    "HERMES_LOKAY_GENERATION": "0" * 64,
+                    "HERMES_LOKAY_PROCESS_STATE_ROOT": str(
+                        (active_home / ".hermes" / "fala.sqlite").parent / "process-state"
+                    ),
+                }
+                if not isinstance(env, dict) or set(env) != set(PROCESS_ENV_KEYS):
+                    errors.append(f"supervisor launchd environment must be exactly {sorted(PROCESS_ENV_KEYS)}: {template}")
+                elif env != expected_env:
+                    errors.append(f"supervisor launchd environment values mismatch: {template}")
+                for key in ("StandardOutPath", "StandardErrorPath"):
+                    if not isinstance(document.get(key), str) or not Path(document[key]).is_absolute():
+                        errors.append(f"supervisor launchd {key} is invalid: {template}")
+                mode_flags = [value for value in arguments if value in ("--dry-run", "--live")]
+                if len(mode_flags) != 1:
+                    errors.append(f"supervisor launchd mode flags are not exactly once: {template}")
+                else:
+                    _validate_supervisor_args(
+                        arguments,
+                        project=project,
+                        config=active_home / ".hermes" / "config.toml",
+                        db_path=str(active_home / ".hermes" / "fala.sqlite"),
+                        mode=mode_flags[0][2:],
+                        label="launchd template",
+                        errors=errors,
+                    )
+                working_directory = document.get("WorkingDirectory")
+                if not isinstance(working_directory, str) or not working_directory:
+                    errors.append(f"supervisor launchd WorkingDirectory is missing: {template}")
+                else:
+                    project_path = Path(working_directory).expanduser()
+                    if not project_path.is_absolute():
+                        errors.append(f"supervisor launchd WorkingDirectory is not absolute: {template}")
+                    if "candidates" in project_path.parts:
+                        errors.append(f"supervisor launchd WorkingDirectory points at mutable candidates: {template}")
+                    if working_directory != str(active_root.parent / "project"):
+                        errors.append(f"supervisor launchd WorkingDirectory is not project-local: {template}")
 
     errors.extend(f"missing launchd template: {name}" for name in sorted(expected_names - seen_names))
     plist_roots = list(active_plist_roots or [])
@@ -461,7 +554,7 @@ def _relative_candidate_path(candidate: Path, value: object, label: str, errors:
 
 
 
-def _validate_args(
+def _validate_supervisor_args(
     args: object,
     *,
     project: Path,
@@ -480,14 +573,163 @@ def _validate_args(
     if not args:
         errors.append(f"Fala {label} ProgramArguments must not be empty")
         return None
-    expected = [args[0], "run", "--frozen", "--project", str(project), "lokay-tick-all", "--config", str(config), "--db", db_path, f"--{mode}", "--json"]
-    if len(args) != len(expected) or args != expected:
-        errors.append(f"Fala {label} ProgramArguments do not match canonical contract")
-    if args.count("--project") != 1 or args.count("--config") != 1 or args.count("--db") != 1:
+    if AGGREGATE_FALA_MODULE in args or any(AGGREGATE_FALA_LABEL in value for value in args):
+        errors.append(f"Fala {label} ProgramArguments must not use aggregate tick_all")
+    if PROCESS_MODULE in args:
+        errors.append(f"Fala {label} ProgramArguments must not use per-process module")
+    python = str(project / ".venv" / "bin" / "python")
+    expected = [
+        python,
+        "-m",
+        SUPERVISOR_MODULE,
+        "--config",
+        str(config),
+        "--db",
+        db_path,
+        f"--{mode}",
+        "--json",
+    ]
+    if args != expected:
+        errors.append(f"Fala {label} ProgramArguments do not match canonical supervisor contract")
+    if args.count("--config") != 1 or args.count("--db") != 1 or args.count("-m") != 1:
         errors.append(f"Fala {label} ProgramArguments flags are not exactly once")
     if not Path(args[0]).is_absolute():
-        errors.append(f"Fala {label} uv executable must be absolute")
+        errors.append(f"Fala {label} python executable must be absolute")
     return args
+
+
+def _validate_child_args(
+    args: object,
+    *,
+    project: Path,
+    config: Path,
+    db_path: str,
+    mode: object,
+    command: str,
+    label: str,
+    errors: list[str],
+) -> list[str] | None:
+    if not isinstance(args, list) or any(not isinstance(value, str) for value in args):
+        errors.append(f"Fala {label} dispatch command must be a string list")
+        return None
+    if mode not in {"dry-run", "live"}:
+        errors.append(f"Fala {label} mode is invalid")
+        return None
+    if not args:
+        errors.append(f"Fala {label} dispatch command must not be empty")
+        return None
+    if AGGREGATE_FALA_MODULE in args or any(AGGREGATE_FALA_LABEL in value for value in args):
+        errors.append(f"Fala {label} dispatch command must not use aggregate tick_all")
+    if SUPERVISOR_MODULE in args:
+        errors.append(f"Fala {label} dispatch command must not use supervisor module")
+    python = str(project / ".venv" / "bin" / "python")
+    expected = [
+        python,
+        "-m",
+        PROCESS_MODULE,
+        command,
+        "--config",
+        str(config),
+        "--db",
+        db_path,
+        f"--{mode}",
+        "--json",
+    ]
+    if args != expected:
+        errors.append(f"Fala {label} dispatch command does not match canonical process contract")
+    if args.count("--config") != 1 or args.count("--db") != 1 or args.count("-m") != 1:
+        errors.append(f"Fala {label} dispatch command flags are not exactly once")
+    if not Path(args[0]).is_absolute():
+        errors.append(f"Fala {label} python executable must be absolute")
+    return args
+
+
+def _expected_dispatch_commands(
+    *,
+    project: Path,
+    config: Path,
+    db_path: str,
+    mode: object,
+    process_rows: list[dict[str, object]],
+) -> list[list[str]]:
+    python = str(project / ".venv" / "bin" / "python")
+    expected: list[list[str]] = []
+    for process_id, row in zip(PROCESS_IDS, process_rows):
+        command = str(row.get("command") or f"lokay-process-{process_id}")
+        expected.append(
+            [
+                python,
+                "-m",
+                PROCESS_MODULE,
+                command,
+                "--config",
+                str(config),
+                "--db",
+                db_path,
+                f"--{mode}",
+                "--json",
+            ]
+        )
+    return expected
+
+
+def _load_candidate_processes(config_path: Path, errors: list[str]) -> list[dict[str, object]]:
+    """Load the exact catalog-derived process identity rows from candidate config."""
+    try:
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+            import tomli as tomllib  # type: ignore
+
+        embedded = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        errors.append(f"Fala candidate process catalog is unreadable: {exc}")
+        return []
+    processes = embedded.get("processes")
+    if not isinstance(processes, list) or not processes:
+        errors.append("Fala candidate process catalog is missing")
+        return []
+    if len(processes) != len(PROCESS_IDS):
+        errors.append(f"Fala candidate must define exactly {len(PROCESS_IDS)} processes, found {len(processes)}")
+    rows: list[dict[str, object]] = []
+    for index, process in enumerate(processes):
+        if not isinstance(process, dict):
+            errors.append(f"Fala candidate process row is invalid at index {index}")
+            continue
+        if "launchd_label" in process:
+            errors.append(f"Fala candidate process launchd_label is forbidden at index {index}")
+        process_id = process.get("id")
+        enabled = process.get("enabled")
+        interval = process.get("interval_seconds")
+        command = process.get("command")
+        expected_id = PROCESS_IDS[index] if index < len(PROCESS_IDS) else None
+        if not isinstance(process_id, str) or not process_id:
+            errors.append(f"Fala candidate process id is invalid at index {index}")
+            continue
+        if expected_id is not None and process_id != expected_id:
+            errors.append(
+                f"Fala candidate process order mismatch at index {index}: expected {expected_id!r}, got {process_id!r}"
+            )
+        if not isinstance(enabled, bool):
+            errors.append(f"Fala candidate process enabled is invalid for {process_id}")
+        if not isinstance(interval, int) or isinstance(interval, bool) or interval < 30:
+            errors.append(f"Fala candidate process interval_seconds is invalid for {process_id}")
+        if not isinstance(command, str) or command != f"lokay-process-{process_id}":
+            errors.append(f"Fala candidate process command is invalid for {process_id}")
+        identity_keys = set(process) & set(PROCESS_IDENTITY_KEYS)
+        # Accept full catalog rows in config; identity surface is only the four keys.
+        rows.append(
+            {
+                "id": process_id,
+                "enabled": enabled,
+                "interval_seconds": interval,
+                "command": command,
+            }
+        )
+        del identity_keys
+    return rows
+
+
 
 
 def _git_head(path: Path) -> str:
@@ -498,6 +740,8 @@ def _git_head(path: Path) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
 def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = None) -> dict[str, object]:
     """Validate an immutable Fala candidate without filesystem mutation."""
     candidate_input = candidate.expanduser()
@@ -544,8 +788,17 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         "revision_path",
         "policy",
         "repos",
+        "processes",
     }
-    manifest_required = stable_keys | {"candidate_id", "identity", "created_at", "program_arguments", "artifacts", "runtime_identity"}
+    manifest_required = stable_keys | {
+        "candidate_id",
+        "identity",
+        "created_at",
+        "program_arguments",
+        "dispatch_commands",
+        "artifacts",
+        "runtime_identity",
+    }
     if manifest.get("schema") != 1:
         errors.append("Fala manifest schema must be 1")
     if set(manifest) != manifest_required:
@@ -580,23 +833,21 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
     repos_inventory = identity.get("repos")
     if not isinstance(repos_inventory, list) or any(
         not isinstance(r, dict)
-        or set(r) != {"repo", "board", "clone_path"}
+        or set(r) != {"repo", "board", "clone_path", "priority"}
         or not isinstance(r["repo"], str)
         or not isinstance(r["board"], str)
         or not (isinstance(r["clone_path"], str) or r["clone_path"] is None)
+        or not isinstance(r["priority"], int)
+        or isinstance(r["priority"], bool)
         for r in repos_inventory
     ):
         errors.append("Fala repos inventory is missing or invalid")
     paths: dict[str, Path | None] = {}
     for key in ("metadata_path", "lock_path", "config_artifact_path", "revision_path"):
         paths[key] = _relative_candidate_path(candidate, identity.get(key), key, errors)
-    plist_relative = "launchd/com.mikolaj92.lokay.fala-tick-all.plist"
-    plist_path = _relative_candidate_path(candidate, plist_relative, "plist path", errors)
     project = candidate / "source" / "project"
     config = candidate / "source" / "config.toml"
 
-    # Every path must remain contained, every directory immutable, and every file
-    # a private regular file (an external hardlink is not immutable provenance).
     try:
         candidate_real = candidate.resolve()
         for path in candidate.rglob("*"):
@@ -619,8 +870,81 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
     if not isinstance(artifacts, dict) or not artifacts or any(not isinstance(k, str) or not k for k in artifacts):
         errors.append("Fala manifest artifacts must be a non-empty object")
         artifacts = artifacts if isinstance(artifacts, dict) else {}
-    plist_relative = "launchd/com.mikolaj92.lokay.fala-tick-all.plist"
-    required_paths = {plist_relative, *(str(identity.get(key) or "") for key in ("metadata_path", "lock_path", "config_artifact_path", "revision_path"))}
+    aggregate_relative = f"launchd/{AGGREGATE_FALA_LABEL}.plist"
+    if aggregate_relative in artifacts or (candidate / aggregate_relative).exists():
+        errors.append("aggregate production launchd artifact is forbidden")
+    launchd_dir = candidate / "launchd"
+    if launchd_dir.is_dir():
+        for path in sorted(launchd_dir.glob("*.plist")):
+            relative = str(path.relative_to(candidate))
+            if relative == aggregate_relative:
+                continue
+            if relative != SUPERVISOR_PLIST_RELATIVE:
+                errors.append(f"per-process production launchd artifact is forbidden: {relative}")
+        for path in sorted(launchd_dir.glob("*.plist.template")):
+            errors.append(f"per-process production launchd template is forbidden: {path.relative_to(candidate)}")
+    config_artifact_path = paths["config_artifact_path"]
+    catalog_source = config_artifact_path if config_artifact_path and _regular_file(config_artifact_path) else config
+    catalog = _load_candidate_processes(catalog_source, errors) if catalog_source and _regular_file(catalog_source) else []
+    identity_processes = identity.get("processes")
+    if not isinstance(identity_processes, list):
+        errors.append("Fala identity processes inventory is missing or invalid")
+        identity_processes = []
+    if len(catalog) != len(PROCESS_IDS):
+        errors.append(f"Fala candidate must define exactly {len(PROCESS_IDS)} processes, found {len(catalog)}")
+    if len(identity_processes) != len(PROCESS_IDS):
+        errors.append(
+            f"Fala identity processes must contain exactly {len(PROCESS_IDS)} entries, found {len(identity_processes)}"
+        )
+    normalized_identity: list[dict[str, object]] = []
+    for index, row in enumerate(identity_processes):
+        if not isinstance(row, dict):
+            errors.append(f"Fala identity process row is invalid at index {index}")
+            continue
+        if "launchd_label" in row:
+            errors.append(f"Fala process launchd_label is forbidden for {row.get('id') or index}")
+        if set(row) != set(PROCESS_IDENTITY_KEYS):
+            errors.append(f"Fala process identity key set is invalid for {row.get('id') or index}")
+        process_id = row.get("id")
+        expected_id = PROCESS_IDS[index] if index < len(PROCESS_IDS) else None
+        if not isinstance(process_id, str) or not process_id:
+            errors.append(f"Fala identity process id is invalid at index {index}")
+            continue
+        if expected_id is not None and process_id != expected_id:
+            errors.append(
+                f"Fala identity process order mismatch at index {index}: expected {expected_id!r}, got {process_id!r}"
+            )
+        command = row.get("command")
+        if not isinstance(command, str) or command != f"lokay-process-{process_id}":
+            errors.append(f"Fala identity process command is invalid for {process_id}")
+        enabled = row.get("enabled")
+        if not isinstance(enabled, bool):
+            errors.append(f"Fala identity process enabled is invalid for {process_id}")
+        interval = row.get("interval_seconds")
+        if not isinstance(interval, int) or isinstance(interval, bool) or interval < 30:
+            errors.append(f"Fala identity process interval_seconds is invalid for {process_id}")
+        normalized_identity.append(
+            {
+                "id": process_id,
+                "enabled": enabled,
+                "interval_seconds": interval,
+                "command": command,
+            }
+        )
+    if catalog and normalized_identity and normalized_identity != catalog:
+        errors.append("Fala identity processes do not match candidate config catalog")
+    process_rows = catalog if catalog else normalized_identity
+    process_ids = [row.get("id") for row in process_rows if isinstance(row, dict)]
+    if process_ids and process_ids != list(PROCESS_IDS[: len(process_ids)]):
+        errors.append("Fala process catalog must match canonical PROCESS_IDS order")
+    if len(process_ids) != len(set(process_ids)):
+        errors.append("Fala process catalog contains duplicate process ids")
+    supervisor_relative = SUPERVISOR_PLIST_RELATIVE
+    supervisor_path = _relative_candidate_path(candidate, supervisor_relative, "supervisor plist path", errors)
+    required_paths = {
+        supervisor_relative,
+        *(str(identity.get(key) or "") for key in ("metadata_path", "lock_path", "config_artifact_path", "revision_path")),
+    }
     actual_artifacts = {str(path.relative_to(candidate)) for path in candidate.rglob("*") if path.is_file() and path != manifest_path}
     if set(artifacts) != actual_artifacts:
         unexpected = sorted(actual_artifacts - set(artifacts))
@@ -644,42 +968,151 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         if declared["bytes"] != path.stat().st_size:
             errors.append(f"Fala candidate artifact byte-size mismatch: {relative}")
 
-    runtime = manifest.get("runtime_identity")
-    runtime_keys = {"program_arguments", "working_directory", "standard_out_path", "standard_error_path", "environment_variables", "start_interval", "run_at_load", "process_type", "limit_load_to_session_type", "plist_sha256"}
-    if not isinstance(runtime, dict) or set(runtime) != runtime_keys:
-        errors.append("Fala runtime_identity key set is invalid")
+    runtime_entries = manifest.get("runtime_identity")
+    program_arguments = manifest.get("program_arguments")
+    dispatch_commands = manifest.get("dispatch_commands")
+    if not isinstance(runtime_entries, list) or len(runtime_entries) != 1:
+        errors.append("Fala runtime_identity must be a list of exactly 1 supervisor entry")
+        runtime_entries = runtime_entries if isinstance(runtime_entries, list) else []
+    if not isinstance(program_arguments, list) or len(program_arguments) != 1:
+        errors.append("Fala program_arguments must be a list of exactly 1 supervisor argv list")
+        program_arguments = program_arguments if isinstance(program_arguments, list) else []
+    if not isinstance(dispatch_commands, list) or len(dispatch_commands) != len(PROCESS_IDS):
+        errors.append(
+            f"Fala dispatch_commands must be a list of exactly {len(PROCESS_IDS)} child argv lists"
+        )
+        dispatch_commands = dispatch_commands if isinstance(dispatch_commands, list) else []
+    python = project / ".venv" / "bin" / "python"
+    if not _regular_file(python) or not os.access(python, os.X_OK):
+        errors.append("Fala candidate python interpreter must be a regular non-symlink executable")
+    db_path = str(identity.get("db_path") or "")
+    pythonpath = str(project / "src")
+    expected_env_keys = set(PROCESS_ENV_KEYS)
+    expected_process_state_root = str(Path(db_path).expanduser().resolve().parent / "process-state") if db_path else ""
+    supervisor_args = program_arguments[0] if program_arguments else None
+    runtime = runtime_entries[0] if runtime_entries else None
+    if not isinstance(runtime, dict) or set(runtime) != set(RUNTIME_IDENTITY_KEYS):
+        errors.append("Fala runtime_identity key set is invalid for supervisor")
         runtime = runtime if isinstance(runtime, dict) else {}
-    runtime_args = manifest.get("program_arguments")
-    if not isinstance(runtime_args, list) or runtime.get("program_arguments") != runtime_args:
-        errors.append("Fala manifest runtime ProgramArguments mismatch")
-    _validate_args(runtime_args, project=project, config=config, db_path=str(identity.get("db_path") or ""), mode=mode, label="manifest", errors=errors)
+    if runtime.get("label") != SUPERVISOR_LABEL:
+        errors.append("Fala runtime_identity label mismatch for supervisor")
+    if runtime.get("program_arguments") != supervisor_args:
+        errors.append("Fala runtime ProgramArguments mismatch for supervisor")
+    _validate_supervisor_args(
+        supervisor_args,
+        project=project,
+        config=config,
+        db_path=db_path,
+        mode=mode,
+        label="manifest:supervisor",
+        errors=errors,
+    )
     if runtime.get("working_directory") != str(project):
-        errors.append("Fala runtime working directory is not version-local")
+        errors.append("Fala runtime working directory is not version-local for supervisor")
     for key in ("standard_out_path", "standard_error_path"):
         value = runtime.get(key)
         if not isinstance(value, str) or not Path(value).is_absolute() or "~" in value:
-            errors.append(f"Fala runtime {key} is invalid")
+            errors.append(f"Fala runtime {key} is invalid for supervisor")
+        elif Path(value).name != f"{SUPERVISOR_LABEL}.{ 'out' if key == 'standard_out_path' else 'err' }.log":
+            errors.append(f"Fala runtime {key} basename is invalid for supervisor")
     env = runtime.get("environment_variables")
-    expected_env_keys = {"HOME"} if candidate.parent.name == "candidates" else {"HOME", "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "FALA_EFFECTOR_ROOT", "FALA_HOME", "PATH"}
-    path_keys = expected_env_keys - {"PATH"}
-    if not isinstance(env, dict) or set(env) != expected_env_keys or not isinstance(env.get("HOME"), str) or not Path(env["HOME"]).is_absolute():
-        errors.append(f"Fala runtime environment_variables must be exactly {sorted(expected_env_keys)}")
-    elif any(not isinstance(env[key], str) or not Path(env[key]).is_absolute() for key in path_keys):
-        errors.append("Fala runtime environment variable paths must be absolute")
-    elif "PATH" in env and (not isinstance(env["PATH"], str) or not all(Path(part).is_absolute() for part in env["PATH"].split(os.pathsep))):
-        errors.append("Fala runtime PATH entries must be absolute")
-    elif deployment_root is not None and "UV_PROJECT_ENVIRONMENT" in env:
-        expected_runtime = (deployment_root.expanduser().resolve() / "runtime" / candidate_id).resolve()
-        if Path(env["UV_PROJECT_ENVIRONMENT"]).parent.resolve() != expected_runtime or Path(env["UV_CACHE_DIR"]).parent.resolve() != expected_runtime:
-            errors.append("Fala UV runtime paths are not candidate-local")
-        if Path(env["FALA_EFFECTOR_ROOT"]).parent.resolve() != expected_runtime:
-            errors.append("Fala effector root is not candidate-local")
-        if Path(env["FALA_HOME"]).resolve() != (project / "Fala").resolve():
-            errors.append("Fala runtime source path is not version-local")
-    if runtime.get("start_interval") != 600 or runtime.get("run_at_load") is not False or runtime.get("process_type") != "Background" or runtime.get("limit_load_to_session_type") not in (None, "Background"):
-        errors.append("Fala runtime schedule/process/session contract is invalid")
-    if plist_path is not None and runtime.get("plist_sha256") != sha256(plist_path):
-        errors.append("Fala runtime plist hash mismatch")
+    if not isinstance(env, dict) or set(env) != expected_env_keys:
+        errors.append(f"Fala runtime environment_variables must be exactly {sorted(expected_env_keys)} for supervisor")
+    elif any(not isinstance(env.get(key), str) for key in expected_env_keys):
+        errors.append("Fala runtime environment variable values must be strings for supervisor")
+    elif any(not Path(env[key]).is_absolute() for key in PROCESS_PATH_ENV_KEYS):
+        errors.append("Fala runtime environment variable paths must be absolute for supervisor")
+    elif env.get("PYTHONPATH") != pythonpath:
+        errors.append("Fala PYTHONPATH is not candidate-local for supervisor")
+    elif env.get("FALA_CANDIDATE_ID") != candidate_id or env.get("HERMES_LOKAY_GENERATION") != candidate_id:
+        errors.append(
+            "Fala runtime FALA_CANDIDATE_ID/HERMES_LOKAY_GENERATION must equal 64-hex candidate_id for supervisor"
+        )
+    elif expected_process_state_root and env.get("HERMES_LOKAY_PROCESS_STATE_ROOT") != expected_process_state_root:
+        errors.append(
+            "Fala runtime HERMES_LOKAY_PROCESS_STATE_ROOT must be <db_parent>/process-state for supervisor"
+        )
+    else:
+        try:
+            if Path(env["FALA_HOME"]).resolve() != (project / "Fala").resolve():
+                errors.append("Fala runtime source path is not version-local for supervisor")
+            if Path(env["FALA_EFFECTOR_ROOT"]).resolve() != (project / "effectors").resolve():
+                errors.append("Fala effector root is not candidate-local for supervisor")
+        except OSError as exc:
+            errors.append(f"Fala runtime environment paths are unreadable for supervisor: {exc}")
+    if (
+        runtime.get("start_interval") is not None
+        or runtime.get("run_at_load") is not True
+        or runtime.get("keep_alive") is not True
+        or runtime.get("process_type") != "Background"
+        or runtime.get("limit_load_to_session_type") not in (None, "Background")
+    ):
+        errors.append("Fala runtime schedule/process/session contract is invalid for supervisor")
+    if supervisor_path is None or not _regular_file(supervisor_path):
+        errors.append("missing or non-regular Fala supervisor plist")
+    else:
+        if runtime.get("plist_sha256") != sha256(supervisor_path):
+            errors.append("Fala runtime plist hash mismatch for supervisor")
+        try:
+            document = plistlib.loads(supervisor_path.read_bytes())
+            if not isinstance(document, dict) or document.get("Label") != SUPERVISOR_LABEL:
+                errors.append("Fala plist Label is invalid for supervisor")
+            arguments = document.get("ProgramArguments") if isinstance(document, dict) else None
+            if arguments != supervisor_args:
+                errors.append("Fala plist ProgramArguments mismatch for supervisor")
+            if document.get("WorkingDirectory") != runtime.get("working_directory"):
+                errors.append("Fala plist WorkingDirectory mismatch for supervisor")
+            if (
+                "StartInterval" in document
+                or document.get("ProcessType") != "Background"
+                or document.get("RunAtLoad") is not True
+                or document.get("KeepAlive") is not True
+            ):
+                errors.append("Fala plist schedule/process contract is invalid for supervisor")
+            if document.get("LimitLoadToSessionType") not in (None, "Background"):
+                errors.append("Fala plist session contract is invalid for supervisor")
+            env = document.get("EnvironmentVariables")
+            if not isinstance(env, dict) or not isinstance(env.get("HOME"), str) or not Path(env["HOME"]).is_absolute():
+                errors.append("Fala plist HOME is invalid for supervisor")
+            if env != runtime.get("environment_variables"):
+                errors.append("Fala plist EnvironmentVariables mismatch for supervisor")
+            for key, runtime_key in (("StandardOutPath", "standard_out_path"), ("StandardErrorPath", "standard_error_path")):
+                if document.get(key) != runtime.get(runtime_key):
+                    errors.append(f"Fala plist {key} mismatch for supervisor")
+            if AGGREGATE_FALA_MODULE in (arguments or []) or document.get("Label") == AGGREGATE_FALA_LABEL:
+                errors.append("aggregate production launchd artifact is forbidden for supervisor")
+            if PROCESS_MODULE in (arguments or []):
+                errors.append("per-process production launchd artifact is forbidden for supervisor")
+        except (OSError, plistlib.InvalidFileException, ValueError) as exc:
+            errors.append(f"invalid Fala candidate plist for supervisor: {exc}")
+
+    if process_rows and len(process_rows) == len(PROCESS_IDS):
+        expected_dispatch = _expected_dispatch_commands(
+            project=project,
+            config=config,
+            db_path=db_path,
+            mode=mode,
+            process_rows=process_rows,
+        )
+        if dispatch_commands != expected_dispatch:
+            errors.append("Fala dispatch_commands do not match ordered PROCESS_IDS child argv contract")
+        for index, (process_id, args) in enumerate(zip(PROCESS_IDS, dispatch_commands)):
+            row = process_rows[index] if index < len(process_rows) else {}
+            command = str(row.get("command") or f"lokay-process-{process_id}")
+            _validate_child_args(
+                args,
+                project=project,
+                config=config,
+                db_path=db_path,
+                mode=mode,
+                command=command,
+                label=f"dispatch:{process_id}",
+                errors=errors,
+            )
+            if isinstance(args, list) and args and args[0] != str(python):
+                errors.append(f"Fala dispatch command python is not candidate-local for {process_id}")
+    elif dispatch_commands:
+        errors.append("Fala dispatch_commands require a complete PROCESS_IDS process inventory")
 
     metadata_path = paths["metadata_path"]
     lock_path = paths["lock_path"]
@@ -775,33 +1208,21 @@ def validate_fala_candidate(candidate: Path, *, deployment_root: Path | None = N
         if not _regular_file(required_file):
             errors.append(f"required Fala package artifact is missing: {required_relative}")
 
-    try:
-        document = plistlib.loads(plist_path.read_bytes() if plist_path else b"")
-        if not isinstance(document, dict) or document.get("Label") != "com.mikolaj92.lokay.fala-tick-all":
-            errors.append("Fala plist Label is invalid")
-        arguments = document.get("ProgramArguments") if isinstance(document, dict) else None
-        if arguments != runtime_args:
-            errors.append("Fala plist ProgramArguments mismatch")
-        if document.get("WorkingDirectory") != runtime.get("working_directory"):
-            errors.append("Fala plist WorkingDirectory mismatch")
-        if document.get("StartInterval") != 600 or document.get("ProcessType") != "Background" or document.get("RunAtLoad") is not False:
-            errors.append("Fala plist schedule/process contract is invalid")
-        if document.get("LimitLoadToSessionType") not in (None, "Background"):
-            errors.append("Fala plist session contract is invalid")
-        env = document.get("EnvironmentVariables")
-        if not isinstance(env, dict) or not isinstance(env.get("HOME"), str) or not Path(env["HOME"]).is_absolute():
-            errors.append("Fala plist HOME is invalid")
-        if env != runtime.get("environment_variables"):
-            errors.append("Fala plist EnvironmentVariables mismatch")
-        for key, runtime_key in (("StandardOutPath", "standard_out_path"), ("StandardErrorPath", "standard_error_path")):
-            if document.get(key) != runtime.get(runtime_key):
-                errors.append(f"Fala plist {key} mismatch")
-    except (OSError, plistlib.InvalidFileException, ValueError) as exc:
-        errors.append(f"invalid Fala candidate plist: {exc}")
-    result: dict[str, object] = {"ok": not errors, "candidate": str(candidate), "candidate_id": candidate_id, "manifest": str(manifest_path), "plist": str(plist_path) if plist_path else "", "metadata": str(metadata_path) if metadata_path else "", "errors": errors}
+    result: dict[str, object] = {
+        "ok": not errors,
+        "candidate": str(candidate),
+        "candidate_id": candidate_id,
+        "manifest": str(manifest_path),
+        "plists": [supervisor_relative],
+        "supervisor_plist": supervisor_relative,
+        "dispatch_commands": len(dispatch_commands) if isinstance(dispatch_commands, list) else 0,
+        "metadata": str(metadata_path) if metadata_path else "",
+        "errors": errors,
+    }
     if errors:
         raise DeploymentParityError(result)
     return result
+
 class DeploymentParityError(RuntimeError):
     def __init__(self, result: dict[str, object]):
         self.result = result

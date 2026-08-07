@@ -1,12 +1,14 @@
 import importlib
 import importlib.util
-import json
+import tomllib
+from importlib import resources
 import sys
 import tempfile
 import types
 import unittest
 from argparse import ArgumentParser
 from pathlib import Path
+from lokay.registry import canonical_toml
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -29,42 +31,19 @@ def load_plugin():
 
 
 def write_config(path):
-    path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "mode": "dry-run",
-                "clone_root": "./repos",
-                "worktree_root": "./worktrees",
-                "branch_prefix": "ai/fix",
-                "automerge": False,
-                "github": {"cli": "gh", "default_limit": 10, "assignee": "owner"},
-                "labels": {
-                    "ready": "ai:ready",
-                    "in_progress": "ai:in-progress",
-                    "blocked": "ai:blocked",
-                    "pr_opened": "ai:pr-opened",
-                    "generated": "ai:generated",
-                },
-                "executor": {
-                    "enabled": False,
-                    "command": "opencode",
-                    "timeout_seconds": 1800,
-                },
-                "repos": [
-                    {
-                        "repo": "owner/example-repo",
-                        "board": "example-board",
-                        "clone_path": "./repos/example-repo",
-                        "trusted_authors": [],
-                        "trusted_branch_prefixes": ["ai/fix"],
-                        "allowed_base_branches": ["main"],
-                        "external_pr_policy": "block",
-                    }
-                ],
-            }
-        )
-    )
+    data = tomllib.loads((PLUGIN_ROOT / "config.toml").read_text(encoding="utf-8"))
+    data["mode"] = "dry-run"
+    data["github"]["assignee"] = "owner"
+    data["automation"]["automerge"] = False
+    data["automation"]["require_human_approval"] = True
+    data["executor"]["enabled"] = False
+    data["repos"] = [{
+        "repo": "owner/example-repo",
+        "board": "owner-example-repo",
+        "clone_path": f"~/.lokay-test/product/{path.parent.name}/repos/example-repo",
+        "priority": 50,
+    }]
+    path.write_bytes(canonical_toml(data))
     return path
 
 
@@ -79,29 +58,18 @@ class LokayInitAndDryRunTests(unittest.TestCase):
         self.commands.setup_parser(parser)
         return parser
 
-    def test_parser_registers_init_command(self):
+    def test_parser_registers_copy_only_init(self):
         args = self.parser().parse_args([
-            "--config",
-            "config.yaml",
-            "init",
-            "--repo",
-            "owner/example-repo",
-            "--board",
-            "example-board",
+            "--config", "config.toml", "init", "--project-root", str(PLUGIN_ROOT)
         ])
         self.assertEqual(args.lokay_command, "init")
+        self.assertEqual(args.project_root, str(PLUGIN_ROOT))
 
-    def test_init_bypasses_config_loading_and_writes_starter_config(self):
+    def test_init_copies_checkout_config_without_loading_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "config.yaml"
+            target = Path(tmp) / "config.toml"
             args = self.parser().parse_args([
-                "--config",
-                str(target),
-                "init",
-                "--repo",
-                "owner/example-repo",
-                "--board",
-                "example-board",
+                "--config", str(target), "init", "--project-root", str(PLUGIN_ROOT)
             ])
             original = self.commands.load_config
             self.commands.load_config = lambda path: self.fail("init loaded config")
@@ -110,27 +78,36 @@ class LokayInitAndDryRunTests(unittest.TestCase):
             finally:
                 self.commands.load_config = original
             self.assertTrue(result["ok"])
-            self.assertTrue(target.exists())
-            loaded = self.config.load_config(str(target))
-            self.assertEqual(loaded.mode, "dry-run")
-            self.assertFalse(loaded.automerge)
-            self.assertFalse(loaded.executor.enabled)
-            self.assertEqual(loaded.repos[0].repo, "owner/example-repo")
-            self.assertEqual(loaded.repos[0].board, "example-board")
-            self.assertEqual(loaded.github.assignee, "owner")
-            self.assertIn("validate", " ".join(result["next_commands"]))
+            self.assertEqual(target.read_bytes(), (PLUGIN_ROOT / "config.toml").read_bytes())
+            self.assertEqual(
+                result["sha256"],
+                __import__("hashlib").sha256(target.read_bytes()).hexdigest(),
+            )
 
-    def test_init_refuses_to_overwrite_existing_config_without_force(self):
+    def test_init_rejects_invalid_source_without_destination_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "config.yaml"
-            target.write_text("version: 1\n")
-            args = self.parser().parse_args(["--config", str(target), "init"])
-            with self.assertRaises(self.config.ConfigError):
-                self.commands.run_from_args(args)
+            root = Path(tmp) / "project"
+            root.mkdir()
+            (root / "config.toml").write_text("mode = \"live\"\n", encoding="utf-8")
+            target = Path(tmp) / "destination" / "config.toml"
+            with self.assertRaises(self.commands.ConfigError):
+                self.commands.init_project(str(target), str(root))
+            self.assertFalse(target.exists())
+            self.assertFalse(target.parent.exists())
+
+    def test_init_rejects_existing_destination_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            (root / "config.toml").write_bytes((PLUGIN_ROOT / "config.toml").read_bytes())
+            target = Path(tmp) / "target.toml"
+            target.symlink_to(root / "config.toml")
+            with self.assertRaises(self.commands.ConfigError):
+                self.commands.init_project(str(target), str(root))
+            self.assertTrue(target.is_symlink())
 
     def test_root_config_example_uses_safe_production_policy(self):
-        example = PLUGIN_ROOT / "config.example.yaml"
-        self.assertTrue(example.exists())
+        example = PLUGIN_ROOT / "config.example.toml"
         loaded = self.config.load_config(str(example))
         self.assertEqual(loaded.mode, "live")
         self.assertTrue(loaded.automerge)
@@ -139,37 +116,18 @@ class LokayInitAndDryRunTests(unittest.TestCase):
         self.assertTrue(loaded.require_test_evidence)
         self.assertTrue(loaded.executor.enabled)
         self.assertEqual(loaded.executor.command, "omp")
+        self.assertEqual(len(loaded.processes), 12)
         self.assertTrue(loaded.repos)
 
-    def test_alternate_config_example_uses_safe_production_policy(self):
-        example = PLUGIN_ROOT / "examples" / "config.example.yaml"
-        loaded = self.config.load_config(str(example))
-        self.assertEqual(loaded.mode, "live")
-        self.assertTrue(loaded.automerge)
-        self.assertFalse(loaded.require_human_approval)
-        self.assertTrue(loaded.require_checks)
-        self.assertTrue(loaded.require_test_evidence)
-        self.assertTrue(loaded.executor.enabled)
-        self.assertEqual(loaded.executor.command, "omp")
-    def test_docs_and_ci_are_present_for_three_minute_path(self):
-        readme = (PLUGIN_ROOT / "README.md").read_text()
-        after_install = PLUGIN_ROOT / "after-install.md"
-        ci = PLUGIN_ROOT / ".github" / "workflows" / "ci.yml"
-        self.assertTrue(after_install.exists())
-        self.assertTrue(ci.exists())
-        self.assertIn("init", readme)
-        self.assertIn("install", readme.lower())
-        self.assertIn("checks", ci.read_text().lower())
+    def test_packaged_config_resource_matches_checkout(self):
+        resource = resources.files("lokay").joinpath("config.toml")
+        self.assertEqual(resource.read_bytes(), (PLUGIN_ROOT / "config.toml").read_bytes())
 
     def test_intake_dry_run_returns_concrete_planned_work(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(Path(tmp) / "config.json")
+            config_path = write_config(Path(tmp) / "config.toml")
             args = self.parser().parse_args([
-                "--config",
-                str(config_path),
-                "intake",
-                "--limit",
-                "2",
+                "--config", str(config_path), "intake", "--limit", "2"
             ])
             result = self.commands.run_from_args(args)
             self.assertFalse(result["effective_live"])
@@ -182,13 +140,9 @@ class LokayInitAndDryRunTests(unittest.TestCase):
 
     def test_dispatch_dry_run_reinforces_executor_and_merge_safety(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(Path(tmp) / "config.json")
+            config_path = write_config(Path(tmp) / "config.toml")
             args = self.parser().parse_args([
-                "--config",
-                str(config_path),
-                "dispatch",
-                "--max",
-                "2",
+                "--config", str(config_path), "dispatch", "--max", "2"
             ])
             result = self.commands.run_from_args(args)
             self.assertFalse(result["effective_live"])
@@ -199,11 +153,9 @@ class LokayInitAndDryRunTests(unittest.TestCase):
 
     def test_pr_triage_dry_run_plans_claim_without_merge(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(Path(tmp) / "config.json")
+            config_path = write_config(Path(tmp) / "config.toml")
             args = self.parser().parse_args([
-                "--config",
-                str(config_path),
-                "pr-triage",
+                "--config", str(config_path), "pr-triage"
             ])
             result = self.commands.run_from_args(args)
             self.assertFalse(result["effective_live"])

@@ -294,5 +294,32 @@ class CleanupReconcileTests(unittest.TestCase):
         self.assertEqual(result["field"], "task_receipt_path")
         self.assertFalse(self.output.exists())
 
+    def test_branch_name_match_on_other_path_is_not_presence(self) -> None:
+        rows = [{"path": str(self.root / "other-wt"), "branch": "ai/fix/8-test"}]
+        with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch(
+            "lokay.steps.cleanup_reconcile.worktree_list", return_value=""
+        ), mock.patch(
+            "lokay.steps.cleanup_reconcile.parse_worktree_porcelain", return_value=rows
+        ), mock.patch(
+            "lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True
+        ):
+            result = reconcile_chain(self.data, self.config)
+        self.assertEqual(result["status"], "reconciled", result)
+
+    def test_residual_worktree_path_blocks_reconciliation(self) -> None:
+        self.worktree.parent.mkdir(parents=True)
+        self.worktree.mkdir()
+        with mock.patch("lokay.steps.cleanup_reconcile.run_cmd", side_effect=self._command), mock.patch(
+            "lokay.steps.cleanup_reconcile.worktree_list", return_value=""
+        ), mock.patch(
+            "lokay.steps.cleanup_reconcile.parse_worktree_porcelain", return_value=[]
+        ), mock.patch(
+            "lokay.steps.cleanup_reconcile._local_branch_absent", return_value=True
+        ):
+            result = reconcile_chain(self.data, self.config)
+        self.assertEqual(result["reason"], "cleanup_reconciliation_failed", result)
+        self.assertIn("worktree evidence is not absent", result["error"])
+        self.assertFalse(self.output.exists())
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,46 +1,132 @@
 #!/usr/bin/env bash
 
-# Shared repo mapping for the mini-m4-0 lokay runtime.
+# Shared registry access for the mini-m4-0 lokay runtime.
 # Format: repo|board|clone_path|priority
+# Source of truth: root-canonical TOML via candidate-local
+#   python -m lokay.registry --config <path> --format shell
 
-lokay_default_repos() {
-  cat <<'REPOS'
-mikolaj92/Fala|mikolaj92-fala|/Users/mini-m4-main/Developer/hermes-repos/Fala-live|100
-mikolaj92/datasource-kit|mikolaj92-datasource-kit|/Users/mini-m4-main/Developer/hermes-repos/datasource-kit-live|90
-mikolaj92/reviewkit|mikolaj92-reviewkit|/Users/mini-m4-main/Developer/hermes-repos/reviewkit-live|80
-mikolaj92/msds-portal|mikolaj92-msds-portal|/Users/mini-m4-main/Developer/hermes-repos/msds-portal-live|50
-mikolaj92/app-factory|mikolaj92-app-factory|/Users/mini-m4-main/Developer/hermes-repos/app-factory-live|45
-mikolaj92/basecoat-factory|mikolaj92-basecoat-factory|/Users/mini-m4-main/Developer/hermes-repos/basecoat-factory-live|40
-mikolaj92/my-auth|mikolaj92-my-auth|/Users/mini-m4-main/Developer/hermes-repos/my-auth-live|30
-mikolaj92/my-usermanager|mikolaj92-my-usermanager|/Users/mini-m4-main/Developer/hermes-repos/my-usermanager-live|30
-mikolaj92/Posejdon|mikolaj92-posejdon|/Users/mini-m4-main/Developer/hermes-repos/Posejdon-live|25
-mikolaj92/lokay|mikolaj92-lokay|/Users/mini-m4-main/Developer/hermes-repos/lokay-live|20
-mikolaj92/influenzer|mikolaj92-influenzer|/Users/mini-m4-main/Developer/hermes-repos/influenzer-live|20
-mikolaj92/wolnyrolnik|mikolaj92-wolnyrolnik|/Users/mini-m4-main/Developer/hermes-repos/wolnyrolnik-live|18
-mikolaj92/Temida|mikolaj92-temida|/Users/mini-m4-main/Developer/hermes-repos/Temida-repo-agent-live|15
-mikolaj92/emitype|mikolaj92-emitype|/Users/mini-m4-main/Developer/hermes-repos/emitype-live|15
-mikolaj92/rnkstr|mikolaj92-rnkstr|/Users/mini-m4-main/Developer/hermes-repos/rnkstr-live|15
-REPOS
+lokay_reject_retired_env() {
+  if [[ -n "${HERMES_LOKAY_REPOS_FILE+x}" ]]; then
+    printf 'registry-error retired-env=HERMES_LOKAY_REPOS_FILE\n' >&2
+    return 1
+  fi
+  if [[ -n "${HERMES_LOKAY_WORKTREE_ROOT+x}" ]]; then
+    printf 'registry-error retired-env=HERMES_LOKAY_WORKTREE_ROOT\n' >&2
+    return 1
+  fi
+  return 0
+}
+
+lokay_config_path() {
+  local configured="${HERMES_LOKAY_CONFIG:-}"
+  if [[ -n "$configured" ]]; then
+    printf '%s\n' "$configured"
+    return 0
+  fi
+  printf '%s\n' "${HOME:-/Users/mini-m4-main}/.hermes/lokay/config.toml"
+}
+
+lokay_candidate_root() {
+  local deployment_root candidate
+  deployment_root="${HERMES_LOKAY_DEPLOYMENT_ROOT:-${HOME:-/Users/mini-m4-main}/.hermes/lokay/deployment}"
+  if [[ ! -L "$deployment_root/current" ]]; then
+    printf 'registry-error missing-current path=%s/current\n' "$deployment_root" >&2
+    return 1
+  fi
+  candidate="$(realpath "$deployment_root/current" 2>/dev/null || true)"
+  if [[ -z "$candidate" || ! -d "$candidate" || -L "$candidate" ]]; then
+    printf 'registry-error invalid-current path=%s/current\n' "$deployment_root" >&2
+    return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
+lokay_candidate_pythonpath() {
+  local candidate
+  candidate="$(lokay_candidate_root)" || return 1
+  if [[ ! -d "$candidate/source/project/src" || -L "$candidate/source/project/src" ]]; then
+    printf 'registry-error source-unavailable path=%s/source/project/src\n' "$candidate" >&2
+    return 1
+  fi
+  printf '%s\n' "$candidate/source/project/src"
+}
+
+
+lokay_managed_python() {
+  local candidate managed_python
+  candidate="$(lokay_candidate_root)" || return 1
+  managed_python="$candidate/source/project/.venv/bin/python"
+  if [[ "$managed_python" != /* || ! -x "$managed_python" || -L "$managed_python" ]] \
+    || ! "$managed_python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; then
+    printf 'registry-error interpreter-unavailable path=%s\n' "$managed_python" >&2
+    return 1
+  fi
+  printf '%s\n' "$managed_python"
 }
 
 lokay_repos() {
-  local source="${HERMES_LOKAY_REPOS_FILE:-}"
-  local content
-  if [[ -n "$source" ]]; then
-    [[ -f "$source" && -r "$source" ]] || { printf 'registry-error path=%s\n' "$source" >&2; return 1; }
-    content="$(grep -Ev '^[[:space:]]*(#|$)' "$source")" || { printf 'registry-error path=%s\n' "$source" >&2; return 1; }
-  else
-    content="$(lokay_default_repos)" || return 1
+  lokay_reject_retired_env || return 1
+  local config python content status pythonpath
+  config="$(lokay_config_path)" || return 1
+  if [[ ! -f "$config" || ! -r "$config" || -L "$config" ]]; then
+    printf 'registry-error path=%s\n' "$config" >&2
+    return 1
   fi
+  python="$(lokay_managed_python)" || return 1
+  pythonpath="$(lokay_candidate_pythonpath)" || return 1
+  status=0
+  content="$(PYTHONPATH="$pythonpath" "$python" -m lokay.registry --config "$config" --format shell 2>&1)" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    printf 'registry-error config=%s details=%s\n' "$config" "$(printf '%s' "$content" | tr '\n' ' ' | sed 's/  */ /g')" >&2
+    return 1
+  fi
+  [[ -n "$content" ]] || { printf 'registry-error empty config=%s\n' "$config" >&2; return 1; }
   local line repo board clone priority extra
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     IFS='|' read -r repo board clone priority extra <<<"$line"
     [[ -n "$repo" && -n "$board" && -n "$clone" && "$priority" =~ ^[0-9]+$ && -z "${extra:-}" ]] || {
-      printf 'registry-error malformed-entry=%s\n' "$line" >&2; return 1;
+      printf 'registry-error malformed-entry=%s\n' "$line" >&2
+      return 1
     }
   done <<<"$content"
   printf '%s\n' "$content"
+}
+
+lokay_worktree_root() {
+  lokay_reject_retired_env || return 1
+  local config python root status pythonpath
+  config="$(lokay_config_path)" || return 1
+  if [[ ! -f "$config" || ! -r "$config" || -L "$config" ]]; then
+    printf 'registry-error path=%s\n' "$config" >&2
+    return 1
+  fi
+  python="$(lokay_managed_python)" || return 1
+  pythonpath="$(lokay_candidate_pythonpath)" || return 1
+  status=0
+  root="$(PYTHONPATH="$pythonpath" "$python" - "$config" <<'PY' 2>&1
+from pathlib import Path
+import sys
+
+from lokay.registry import ConfigError, load_registry
+
+try:
+    document = load_registry(sys.argv[1])
+except ConfigError as exc:
+    print(f"registry-error: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+print(str(Path(str(document.data["paths"]["worktree_root"])).expanduser()))
+PY
+  )" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    printf 'registry-error worktree-root config=%s details=%s\n' "$config" "$(printf '%s' "$root" | tr '\n' ' ' | sed 's/  */ /g')" >&2
+    return 1
+  fi
+  [[ -n "$root" && "$root" == /* ]] || {
+    printf 'registry-error worktree-root-invalid value=%s\n' "$root" >&2
+    return 1
+  }
+  printf '%s\n' "$root"
 }
 
 lokay_board_for_repo() {

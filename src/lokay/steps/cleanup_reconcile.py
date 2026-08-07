@@ -333,19 +333,34 @@ def read_github_terminal_state(request: Request) -> Result:
     except (CommandError, OSError, ValueError, json.JSONDecodeError) as exc:
         return fail("github_terminal_state_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc))
     return ok(status="read", issue=issue, pr=pr, open_prs=opens)
+
 def read_reconcile_worktree_state(request: Request) -> Result:
-    """Read worktree and local branch absence state."""
+    """Read worktree and local branch absence state.
+
+    Absence is path-exact only. Branch-name matches on other paths must not
+    be treated as presence of the configured worktree, and inventory silence
+    with a residual path/symlink fails closed.
+    """
     upstream = _reconcile_upstream_failure(request, "read_reconcile_worktree_state", "validate_reconcile_identity", "read_remote_provenance")
     if upstream:
         return upstream
     data = input_of(request)
     try:
         rows = parse_worktree_porcelain(worktree_list(str(data["clone_path"])))
-        worktree_absent = not any(str(Path(row.get("path") or "").resolve()) == str(Path(str(data["worktree_path"])).resolve()) or row.get("branch") == data["branch"] for row in rows)
+        target = str(Path(str(data["worktree_path"])).resolve())
+        inventory_present = any(str(Path(row.get("path") or "").resolve()) == target for row in rows)
+        path_residual = os.path.lexists(str(data["worktree_path"]))
+        worktree_absent = not inventory_present and not path_residual
         branch_absent = _local_branch_absent(str(data["clone_path"]), str(data["branch"]))
     except (CommandError, OSError, ValueError) as exc:
         return fail("reconcile_worktree_state_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc))
-    return ok(status="read", worktree_absent=worktree_absent and not os.path.lexists(str(data["worktree_path"])), local_branch_absent=branch_absent)
+    return ok(
+        status="read",
+        worktree_absent=worktree_absent,
+        local_branch_absent=branch_absent,
+        inventory_present=inventory_present,
+        path_residual=path_residual,
+    )
 
 
 def decide_no_target_reconciliation(request: Request) -> Result:

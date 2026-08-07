@@ -7,6 +7,9 @@ import json
 import os
 import sqlite3
 import subprocess
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 from lokay.steps.claim import claim_directory_lock
 from lokay.adapters_cli import CommandError, hermes_kanban_json, run_cmd
 from lokay.config import MAX_EXECUTOR_TIMEOUT_SECONDS
@@ -26,9 +29,18 @@ from lokay.envelope import (
 
 
 def _repair_decision_gate(request: Request) -> Result | None:
-    """No-op unless decide_triage_action selected repair."""
-    decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
-    if not decide and "action" not in input_of(request):
+    """No-op unless an authoritative decision selected repair.
+
+    Accepts conducted decide_triage_action (legacy/tests), durable pr_decision
+    predecessor input for the standalone pr_repair path, or explicit action.
+    """
+    decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action", "pr_decision")
+    data = input_of(request)
+    if not decide:
+        raw = data.get("pr_decision")
+        if isinstance(raw, Mapping) and raw:
+            decide = dict(raw)
+    if not decide and "action" not in data:
         return None
     if decide.get("ok") is False or str(decide.get("status") or "") in {
         "failed",
@@ -48,7 +60,7 @@ def _repair_decision_gate(request: Request) -> Result | None:
             action=decide.get("action"),
             worked=False,
         )
-    action = str(input_of(request).get("action") or decide.get("action") or "")
+    action = str(data.get("action") or decide.get("action") or "")
     if action == "repair":
         return None
     if not action or action == "skip":
@@ -446,13 +458,21 @@ def _repair_completed_receipt(
     return str(path), payload
 
 def _repair_recovery_identity(request: Request, state: dict[str, object], recovery: dict[str, object]) -> tuple[str, str, str, str] | None:
-    """Derive the verifier identity from current path and immutable state."""
+    """Derive the verifier identity from historical evidence path and immutable state.
+
+    Evidence path_id may be historical (auto_worker/pr_triage). Current request path is not
+    used to select an aggregate identity when recovery names the failed process path.
+    """
     data, cfg = input_of(request), cfg_of(request)
-    configured_path = data.get("path_id") if "path_id" in data else cfg.get("path_id")
-    if configured_path is None:
-        configured_path = recovery.get("path_id")
-    if not isinstance(configured_path, str) or configured_path not in {"auto_worker", "pr_triage"}:
-        return None
+    # Prefer recovery path_id so pr_repair can validate historical auto_worker evidence.
+    recovery_path = recovery.get("path_id")
+    if isinstance(recovery_path, str) and recovery_path in {"pr_repair", "pr_triage", "auto_worker"}:
+        configured_path = recovery_path
+    else:
+        configured_path = data.get("path_id") if "path_id" in data else cfg.get("path_id")
+        if configured_path != "pr_repair":
+            return None
+        configured_path = "pr_repair"
     run_id = state.get("run_id")
     candidate = state.get("candidate")
     if not isinstance(run_id, str) or not run_id or not isinstance(candidate, str) or not candidate:
@@ -755,11 +775,12 @@ def read_repair_recovery_continuation_evidence(request: Request) -> Result:
     predecessor_hash, predecessor_kind, latest_run_id, latest_candidate, latest_path = loaded
     if current_run_id == latest_run_id and current_candidate == latest_candidate:
         return ok(status="original", operation="read_repair_recovery_continuation_evidence", continuation_required=False, continuation_verified=True, recovery_claim=claim, latest_transition_path=latest_path, mutated=False)
-    path_id = str(data.get("path_id") or cfg.get("path_id") or "")
-    invoke_id = "triage_invoke_repair_omp" if path_id == "auto_worker" else "invoke_repair_omp"
-    push_id = "triage_push_repair_branch" if path_id == "auto_worker" else "push_repair_branch"
-    if path_id not in {"auto_worker", "pr_triage"}:
+    path_id = str(data.get("path_id") or cfg.get("path_id") or "pr_repair")
+    # Current continuation runs only on pr_repair; historical aggregate path is not invocable.
+    if path_id != "pr_repair":
         return fail("invalid_repair_recovery_continuation", failure_class="terminal", retry_safe=False, operation="read_repair_recovery_continuation_evidence")
+    invoke_id = "invoke_repair_omp"
+    push_id = "push_repair_branch"
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
             rows = connection.execute(
@@ -1141,14 +1162,11 @@ def read_repair_attempt_reconciliation(request: Request) -> Result:
             )
         data, cfg = input_of(request), cfg_of(request)
         path_id = data.get("path_id") if "path_id" in data else cfg.get("path_id")
-        if not isinstance(path_id, str) or path_id not in {"auto_worker", "pr_triage"}:
-            path_id = "auto_worker"
+        if not isinstance(path_id, str) or path_id != "pr_repair":
+            path_id = "pr_repair"
         run_id = state.get("run_id")
         if isinstance(run_id, str) and run_id:
-            invoke_process_id = (
-                f"{run_id}:{path_id}:"
-                f"{'triage_invoke_repair_omp' if path_id == 'auto_worker' else 'invoke_repair_omp'}"
-            )
+            invoke_process_id = f"{run_id}:{path_id}:invoke_repair_omp"
             invoke_evidence = _read_repair_invoke_evidence(Path(reservation_path), invoke_process_id)
             if isinstance(invoke_evidence, dict) and not invoke_evidence.get("ok", True):
                 return invoke_evidence
@@ -1762,14 +1780,18 @@ def decide_repair_attempt(request: Request) -> Result:
     if pending:
         return ok(status="pending", decision="wait", authorize=False, reason="checks_pending", checks=checks, **identity)
     failures = [item for item in checks if item["conclusion"] in {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"}]
-    triage = cond_blob(request, "decide_triage_action", "triage_decide_triage_action")
+    decision = cond_blob(request, "decide_triage_action", "triage_decide_triage_action", "pr_decision")
+    if not decision:
+        raw = input_of(request).get("pr_decision")
+        if isinstance(raw, Mapping) and raw:
+            decision = dict(raw)
     triage_repair = (
-        triage.get("ok") is True
-        and triage.get("status") == "decided"
-        and triage.get("action") == "repair"
+        decision.get("ok") is True
+        and decision.get("status") == "decided"
+        and decision.get("action") == "repair"
     )
-    missing_test_evidence = triage_repair and triage.get("reason") == "missing_test_evidence"
-    merge_conflict = triage_repair and triage.get("reason") == "merge_conflict"
+    missing_test_evidence = triage_repair and decision.get("reason") == "missing_test_evidence"
+    merge_conflict = triage_repair and decision.get("reason") == "merge_conflict"
     if not failures and not missing_test_evidence and not merge_conflict:
         return ok(status="already_repaired", decision="already_repaired", authorize=False, reason="checks_passed", checks=checks, **identity)
     if failures:
@@ -1918,7 +1940,11 @@ def build_repair_prompt(request: Request) -> Result:
         return upstream
     data = input_of(request)
     cfg = cfg_of(request)
-    decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action")
+    decide = cond_blob(request, "decide_triage_action", "decide", "triage_decide_triage_action", "pr_decision")
+    if not decide:
+        raw = data.get("pr_decision")
+        if isinstance(raw, Mapping) and raw:
+            decide = dict(raw)
     checks = cond_blob(request, "evaluate_checks", "checks", "triage_evaluate_checks")
     loaded = cond_blob(request, "load_pr_fields", "triage_load_pr_fields")
     created = cond_blob(request, "create_review_task", "create_fix_task")
@@ -2026,9 +2052,9 @@ from lokay.steps.issue_to_pr import (
 def read_review_tasks(request: Request) -> Result:
     gated = _repair_decision_gate(request)
     if gated is not None: return gated
-    terminal = _atomic_terminal(request, "read_review_tasks", "decide_triage_action")
+    terminal = _atomic_terminal(request, "read_review_tasks", "decide_triage_action", "pr_decision")
     if terminal: return terminal
-    idle = upstream_noop(request, "decide_triage_action")
+    idle = upstream_noop(request, "decide_triage_action", "pr_decision")
     if idle: return noop(str(idle.get("reason") or "no_selected_pr"), operation="read_review_tasks")
     data, cfg = input_of(request), cfg_of(request); selected = cond_blob(request, "select_fix_pr", "triage_select_fix_pr"); board = str(data.get("board") or cfg.get("board") or selected.get("board") or "")
     if not board: return fail("missing_board", failure_class="terminal", retry_safe=False, operation="read_review_tasks")
@@ -2159,7 +2185,7 @@ _REPAIR_CONTEXT_ALIASES = (
     "read_repair_worktree_cleanliness", "read_repair_remote_ancestry",
     "decide_repair_worktree_fast_forward", "read_repair_worktree_branch_before_fast_forward", "read_repair_worktree_head_before_fast_forward", "read_repair_worktree_cleanliness_before_fast_forward", "decide_repair_worktree_fast_forward_execution", "fast_forward_repair_worktree",
     "decide_repair_worktree_ownership", "create_repair_branch", "write_repair_branch_provenance", "add_repair_worktree",
-    "prepare_repair_worktree", "verify_repair_worktree",
+    "verify_repair_worktree",
     "verify_repair_omp_postconditions", "decide_repair_push", "push_repair_branch",
     "read_repair_pushed_ref", "verify_repair_push_oid",
 )
@@ -2680,6 +2706,7 @@ def read_repair_creation_evidence(request: Request) -> Result:
     allowed = {
         ("auto_worker", "triage_create_repair_branch"),
         ("pr_triage", "create_repair_branch"),
+        ("pr_repair", "create_repair_branch"),
     }
     if (path_id, effector_id) not in allowed:
         return fail("invalid_repair_recovery_identity", failure_class="terminal", retry_safe=False, operation="read_repair_creation_evidence")
@@ -2882,13 +2909,13 @@ def add_repair_worktree(request: Request) -> Result:
      return ok(status="added", operation="add_repair_worktree", worktree_path=str(path), branch=context["branch"], local_branch=context["local_branch"], mutated=True)
 
 def prepare_repair_worktree(request: Request) -> Result:
-     """Mutation atom for the already-decided exact-head worktree add."""
+     """Retired alias; canonical execution uses add_repair_worktree only."""
      return add_repair_worktree(request)
 def verify_repair_worktree(request: Request) -> Result:
-     upstream = _repair_upstream(request, "verify_repair_worktree", "add_repair_worktree", "prepare_repair_worktree")
+     upstream = _repair_upstream(request, "verify_repair_worktree", "add_repair_worktree")
      if upstream:
          return upstream
-     added = cond_blob(request, "add_repair_worktree", "prepare_repair_worktree")
+     added = cond_blob(request, "add_repair_worktree")
      if dry_run_flag(request) and added.get("status") == "planned":
          return planned(operation="verify_repair_worktree", worktree_path=_repair_context(request)["worktree_path"])
      context = _repair_context(request)
@@ -3678,7 +3705,12 @@ def decide_legacy_repair_head_refresh(request: Request) -> Result:
     )
     if terminal is not None:
         return terminal
-    action = str(input_of(request).get("action") or cond_blob(request, "decide_triage_action", "decide").get("action") or "")
+    _legacy_decision = cond_blob(request, "decide_triage_action", "decide", "pr_decision")
+    if not _legacy_decision:
+        raw = input_of(request).get("pr_decision")
+        if isinstance(raw, Mapping) and raw:
+            _legacy_decision = dict(raw)
+    action = str(input_of(request).get("action") or _legacy_decision.get("action") or "")
     state_read = cond_blob(request, "read_repair_attempt_state")
     if state_read.get("status") == "found":
         nested = state_read.get("attempt_state")

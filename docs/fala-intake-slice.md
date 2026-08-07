@@ -3,8 +3,10 @@
 ## Goal
 
 Document the intake correlation path hosted by Fala 0.7.15. Production
-scheduling runs the composed `auto_worker` path; this slice is a manual
-diagnostic entrypoint only.
+scheduling is the resident supervisor LaunchAgent
+(`com.mikolaj92.lokay.supervisor`), which dispatches catalog process IDs such as
+`repo_issue_poll` and `issue_triage`. This slice is a manual diagnostic
+entrypoint only.
 
 ## Runtime
 
@@ -19,10 +21,11 @@ Installed from Git via `[tool.uv.sources]` (`mikolaj92/Fala` tag `v0.7.15`).
 ```bash
 uv sync
 uv run lokay-tick-intake --dry-run
+# preferred catalog process form:
+uv run python -m lokay.process lokay-process-repo_issue_poll --dry-run
 ```
 
-For scheduled operation use only:
-
-```bash
-uv run lokay-tick-all --dry-run
-```
+For scheduled operation use only the supervisor LaunchAgent template
+`templates/launchd/lokay-supervisor.plist.template` (label
+`com.mikolaj92.lokay.supervisor`). Do not schedule `lokay-tick-all`,
+`auto_worker`, or per-process LaunchAgents.

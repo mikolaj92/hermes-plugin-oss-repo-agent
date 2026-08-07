@@ -1,27 +1,30 @@
 # Start here
 
-Run the composed Fala auto-worker in dry-run mode first. It does not merge,
-force push, delete branches, or run an executor.
+Dry-run the resident supervisor or one catalog process first. Neither merges,
+force pushes, deletes branches, nor runs an executor unless live mode is
+explicitly authorized.
 
 ```bash
-hermes lokay --config config.yaml init
-hermes lokay --config config.yaml validate
-uv run lokay-tick-all --dry-run
+hermes lokay --config ~/.hermes/lokay/config.toml init
+hermes lokay --config ~/.hermes/lokay/config.toml validate
+uv run python -m lokay.process lokay-process-repo_issue_poll --dry-run
 ```
 
-The first command writes a starter `config.yaml` with `mode: dry-run`,
-`automerge: false`, and `executor.enabled: false`.
+`init` copies the canonical `config.toml` from the checkout or packaged plugin into `~/.hermes/lokay/config.toml`; it does not generate or overwrite a starter file.
 
-To use real repositories, edit `github.assignee` and `repos:` in the generated
-config and keep running dry-run auto-worker commands until the planned graph
-looks correct. Live mutation requires the configured live mode and the
-explicit `--live` flag.
+To use real repositories, edit the copied TOML configuration and keep running
+dry-run process commands until the planned graph looks correct. Live mutation
+requires the configured live mode and the explicit `--live` flag.
 
-`lokay-tick-all` / `auto_worker` is the sole scheduled mutator. Individual
-ticks (`lokay-tick-intake`, `lokay-tick-dispatch`,
-`lokay-tick-triage`, and `lokay-tick-cleanup`) are manual diagnostics
-only, not deployment paths. Legacy shell intake/dispatch/triage/cleanup,
+Production topology is exactly one resident LaunchAgent
+(`com.mikolaj92.lokay.supervisor` via `python -m lokay.supervisor`). The twelve
+catalog process IDs (`lokay-process-<id>` via `lokay.process`) are logical
+children only and must never be installed as separate LaunchAgents. Retired
+aggregate aliases (`lokay-tick-all` / `auto_worker`, `issue_intake`,
+`lifecycle_ok`) and individual tick CLIs are manual diagnostics only, not
+production LaunchAgent paths. Legacy shell intake/dispatch/triage/cleanup,
 backfill, webhook, and cron entrypoints are removed.
+
 
 Fast checks (under two minutes):
 

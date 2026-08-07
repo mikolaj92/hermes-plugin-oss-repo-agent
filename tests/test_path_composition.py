@@ -11,17 +11,298 @@ from pathlib import Path
 
 
 PACKAGE_PATH = Path(__file__).resolve().parents[1] / "fala-package.toml"
-EXPECTED_PATH_IDS = {"issue_intake", "issue_to_pr", "pr_triage", "cleanup", "cleanup_reconcile", "auto_worker"}
+EXPECTED_PATH_ORDER = (
+    "repo_issue_poll",
+    "issue_triage",
+    "issue_feedback",
+    "issue_split",
+    "issue_close",
+    "issue_ready",
+    "issue_to_pr",
+    "pr_triage",
+    "pr_repair",
+    "pr_merge",
+    "cleanup",
+    "cleanup_reconcile",
+)
+EXPECTED_PATH_IDS = set(EXPECTED_PATH_ORDER)
+FORBIDDEN_PATH_IDS = {"issue_intake", "auto_worker", "tick_all"}
+
+# Exact process-owned effector sets (path_id == process_id).
+OWNED_EFFECTORS: dict[str, tuple[str, ...]] = {
+    "repo_issue_poll": (
+        "read_open_issues",
+        "normalize_issue_rows",
+    ),
+    "issue_triage": (
+        "read_triage_receipt_index",
+        "select_triage_candidate",
+        "reserve_triage_run_budget",
+        "read_triage_issue_state",
+        "read_triage_comments",
+        "read_triage_repository_state",
+        "build_triage_context",
+        "classify_triage_issue",
+        "verify_triage_repository_unchanged",
+        "publish_triage_decision_receipt",
+        "read_triage_canonical_issue",
+        "read_triage_labels",
+        "decide_triage_mutation",
+    ),
+    "issue_feedback": (
+        "ensure_triage_label",
+        "publish_triage_mutation_authorization",
+        "mutate_triage_issue_labels",
+        "post_triage_feedback",
+        "verify_triage_feedback",
+        "observe_triage_feedback",
+        "publish_triage_feedback_receipt",
+        "publish_triage_mutation_verification",
+    ),
+    "issue_split": (
+        "split_mixed_triage_issue",
+    ),
+    "issue_close": (
+        "publish_triage_close_authorization",
+        "close_triage_issue",
+        "verify_triage_issue_closed",
+        "publish_triage_close_verification",
+        "verify_triage_receipt",
+    ),
+    "issue_ready": (
+        "build_triage_terminal",
+        "filter_issue_eligibility",
+        "select_issue_candidate",
+        "decide_issue_priority",
+        "decide_issue_action",
+        "read_issue_comments",
+        "decide_issue_comment",
+        "post_issue_comment",
+        "verify_issue_comment",
+        "reserve_claim_file",
+        "read_issue_claim_state",
+        "assign_issue",
+        "intake_add_issue_label",
+        "verify_issue_claim",
+        "build_issue_claim_result",
+        "read_intake_tasks",
+        "find_intake_marker",
+        "create_intake_task",
+        "reconcile_intake_task",
+    ),
+    "pr_triage": (
+        "read_open_prs",
+        "filter_fix_prs",
+        "select_fix_pr",
+        "load_pr_fields",
+        "evaluate_checks",
+        "evaluate_test_evidence",
+        "decide_triage_action",
+    ),
+    "pr_repair": (
+        "read_review_tasks",
+        "find_review_marker",
+        "create_review_task",
+        "reconcile_review_task",
+        "build_repair_prompt",
+        "read_repair_context",
+        "read_repair_remote_head",
+        "fetch_repair_remote_head",
+        "verify_fetched_repair_remote_head",
+        "read_repair_worktree_inventory",
+        "read_repair_branch_provenance",
+        "read_repair_worktree_cleanliness",
+        "read_repair_remote_ancestry",
+        "decide_repair_worktree_fast_forward",
+        "read_repair_worktree_branch_before_fast_forward",
+        "read_repair_worktree_head_before_fast_forward",
+        "read_repair_worktree_cleanliness_before_fast_forward",
+        "decide_repair_worktree_fast_forward_execution",
+        "read_repair_creation_evidence",
+        "read_repair_attempt_state",
+        "read_repair_base_head",
+        "decide_legacy_repair_head_refresh",
+        "update_legacy_repair_pr_branch",
+        "verify_legacy_repair_pr_head",
+        "fast_forward_repair_worktree",
+        "decide_repair_worktree_ownership",
+        "create_repair_branch",
+        "write_repair_branch_provenance",
+        "add_repair_worktree",
+        "verify_repair_worktree",
+        "read_repair_attempt_baseline",
+        "read_repair_completed_receipt",
+        "read_repair_attempt_reconciliation",
+        "read_repair_attempt_recovery_evidence",
+        "claim_repair_attempt_recovery",
+        "verify_repair_attempt_recovery",
+        "read_repair_recovery_continuation_evidence",
+        "claim_repair_recovery_continuation",
+        "verify_repair_recovery_continuation",
+        "decide_repair_attempt",
+        "reserve_repair_attempt",
+        "verify_repair_attempt_reservation",
+        "read_repair_omp_preconditions",
+        "invoke_repair_omp",
+        "verify_repair_omp_postconditions",
+        "read_repair_worktree_head",
+        "decide_repair_push",
+        "push_repair_branch",
+        "read_repair_pushed_ref",
+        "verify_repair_push_oid",
+        "read_existing_repair_pr",
+        "verify_existing_repair_pr",
+        "build_repair_receipt",
+        "publish_repair_receipt",
+        "verify_repair_receipt",
+        "update_repair_branch_provenance",
+        "verify_updated_repair_branch_provenance",
+    ),
+    "pr_merge": (
+        "read_pr_assignees",
+        "decide_pr_assignee",
+        "assign_pr",
+        "verify_pr_assignee",
+        "read_pr_comments",
+        "decide_pr_comment",
+        "post_pr_comment",
+        "verify_pr_comment",
+        "read_merge_preconditions",
+        "merge_pr",
+        "read_merge_postcondition",
+        "verify_merge_provenance",
+        "verify_linked_merge_provenance",
+        "read_linked_issue_state",
+        "close_linked_issue",
+        "verify_linked_issue_closed",
+        "build_merge_receipt",
+        "read_receipt_merge_provenance",
+        "publish_merge_receipt",
+        "verify_merge_receipt",
+    ),
+}
+
+# Sibling exclusivity: each process forbids exclusive effectors owned by siblings.
+FORBIDDEN_EFFECTORS: dict[str, frozenset[str]] = {
+    "issue_triage": frozenset(
+        {
+            "post_triage_feedback",
+            "publish_triage_feedback_receipt",
+            "split_mixed_triage_issue",
+            "close_triage_issue",
+            "verify_triage_issue_closed",
+            "publish_triage_close_authorization",
+            "publish_triage_close_verification",
+            "verify_triage_receipt",
+            "build_triage_terminal",
+            "reserve_claim_file",
+            "assign_issue",
+            "filter_issue_eligibility",
+            "select_issue_candidate",
+            "create_intake_task",
+        }
+    ),
+    "issue_feedback": frozenset(
+        {
+            "close_triage_issue",
+            "verify_triage_issue_closed",
+            "publish_triage_close_authorization",
+            "publish_triage_close_verification",
+            "verify_triage_receipt",
+            "split_mixed_triage_issue",
+            "build_triage_terminal",
+            "reserve_claim_file",
+            "assign_issue",
+            "build_issue_claim_result",
+            "filter_issue_eligibility",
+            "select_issue_candidate",
+            "create_intake_task",
+        }
+    ),
+    "issue_split": frozenset(
+        {
+            "close_triage_issue",
+            "verify_triage_issue_closed",
+            "post_triage_feedback",
+            "publish_triage_feedback_receipt",
+            "build_triage_terminal",
+            "reserve_claim_file",
+            "assign_issue",
+            "filter_issue_eligibility",
+            "select_issue_candidate",
+        }
+    ),
+    "issue_close": frozenset(
+        {
+            "post_triage_feedback",
+            "publish_triage_feedback_receipt",
+            "split_mixed_triage_issue",
+            "build_triage_terminal",
+            "reserve_claim_file",
+            "assign_issue",
+            "create_intake_task",
+            "filter_issue_eligibility",
+            "select_issue_candidate",
+        }
+    ),
+    "issue_ready": frozenset(
+        {
+            "close_triage_issue",
+            "verify_triage_issue_closed",
+            "post_triage_feedback",
+            "publish_triage_feedback_receipt",
+            "split_mixed_triage_issue",
+            "publish_triage_close_authorization",
+            "publish_triage_close_verification",
+            "verify_triage_receipt",
+        }
+    ),
+    "pr_triage": frozenset(
+        {
+            "merge_pr",
+            "publish_merge_receipt",
+            "verify_merge_receipt",
+            "invoke_repair_omp",
+            "publish_repair_receipt",
+            "verify_repair_receipt",
+            "reserve_repair_attempt",
+            "decide_repair_attempt",
+        }
+    ),
+    "pr_repair": frozenset(
+        {
+            "merge_pr",
+            "publish_merge_receipt",
+            "verify_merge_receipt",
+            "close_linked_issue",
+            "read_merge_preconditions",
+        }
+    ),
+    "pr_merge": frozenset(
+        {
+            "invoke_repair_omp",
+            "publish_repair_receipt",
+            "verify_repair_receipt",
+            "reserve_repair_attempt",
+            "decide_repair_attempt",
+            "create_repair_branch",
+        }
+    ),
+}
+
 LANE_ROOTS = {
-    "issue_intake": ("select_issue_candidate",),
+    "repo_issue_poll": ("read_open_issues",),
+    "issue_triage": ("select_triage_candidate",),
+    "issue_feedback": ("ensure_triage_label",),
+    "issue_split": ("split_mixed_triage_issue",),
+    "issue_close": ("publish_triage_close_authorization",),
+    "issue_ready": ("build_triage_terminal",),
     "issue_to_pr": ("select_dispatch_task",),
     "pr_triage": ("select_fix_pr",),
-    "auto_worker": (
-        "intake_select_issue_candidate",
-        "triage_read_open_prs",
-        "lifecycle_read_lifecycle_github_state",
-        "lifecycle_read_lifecycle_local_evidence",
-    ),
+    "pr_repair": ("read_review_tasks",),
+    "pr_merge": ("read_pr_assignees",),
+    "cleanup": ("resolve_cleanup_branch_source",),
+    "cleanup_reconcile": ("validate_reconcile_identity",),
 }
 
 
@@ -31,7 +312,14 @@ class PackageStructureTests(unittest.TestCase):
         package = tomllib.loads(PACKAGE_PATH.read_text(encoding="utf-8"))
         self.assertEqual(package["version"], "2")
         paths = package["correlation_paths"]
-        self.assertEqual({path["id"] for path in paths}, EXPECTED_PATH_IDS)
+        path_ids = [path["id"] for path in paths]
+        self.assertEqual(path_ids, list(EXPECTED_PATH_ORDER))
+        self.assertEqual(set(path_ids), EXPECTED_PATH_IDS)
+        self.assertEqual(len(path_ids), 12)
+        for forbidden in FORBIDDEN_PATH_IDS:
+            self.assertNotIn(forbidden, path_ids)
+
+        by_path = {path["id"]: path for path in paths}
 
         for path in paths:
             effectors = path["effectors"]
@@ -51,6 +339,13 @@ class PackageStructureTests(unittest.TestCase):
                     effector["id"],
                 )
 
+            owned = OWNED_EFFECTORS.get(path["id"])
+            if owned is not None:
+                self.assertEqual(tuple(effector["id"] for effector in effectors), owned)
+
+            forbidden = FORBIDDEN_EFFECTORS.get(path["id"], frozenset())
+            self.assertFalse(path_effector_ids & forbidden, path["id"])
+
             lane_roots = LANE_ROOTS.get(path["id"])
             if lane_roots is None:
                 continue
@@ -67,317 +362,210 @@ class PackageStructureTests(unittest.TestCase):
                             changed = True
                 reachable.update(lane_reachable)
             self.assertTrue(
-                all(effector["id"] in reachable for effector in effectors[first_selector_position + 1:]),
+                all(effector["id"] in reachable for effector in effectors[first_selector_position + 1 :]),
                 f"{path['id']} has an operation outside its declared selector lanes",
             )
 
-            if path["id"] == "issue_intake":
-                by_id = {effector["id"]: effector for effector in effectors}
-                expected = {
-                    "read_triage_receipt_index": ["normalize_issue_rows"],
-                    "select_triage_candidate": ["normalize_issue_rows", "read_triage_receipt_index"],
-                    "reserve_triage_run_budget": ["select_triage_candidate"],
-                    "read_triage_issue_state": ["reserve_triage_run_budget", "select_triage_candidate"],
-                    "read_triage_comments": ["reserve_triage_run_budget", "select_triage_candidate"],
-                    "read_triage_repository_state": ["reserve_triage_run_budget", "select_triage_candidate"],
-                    "build_triage_context": ["read_triage_repository_state", "reserve_triage_run_budget", "select_triage_candidate"],
-                    "classify_triage_issue": ["read_triage_issue_state", "read_triage_comments", "build_triage_context", "reserve_triage_run_budget", "select_triage_candidate"],
-                    "verify_triage_repository_unchanged": ["classify_triage_issue", "build_triage_context"],
-                    "publish_triage_decision_receipt": ["verify_triage_repository_unchanged", "classify_triage_issue"],
-                    "read_triage_canonical_issue": ["classify_triage_issue", "reserve_triage_run_budget", "select_triage_candidate"],
-                    "read_triage_labels": ["publish_triage_decision_receipt", "reserve_triage_run_budget", "select_triage_candidate"],
-                    "decide_triage_mutation": ["read_triage_labels", "classify_triage_issue", "read_triage_issue_state", "read_triage_comments", "read_triage_canonical_issue", "reserve_triage_run_budget", "select_triage_candidate"],
-                    "ensure_triage_label": ["decide_triage_mutation", "read_triage_labels"],
-                    "publish_triage_mutation_authorization": ["decide_triage_mutation", "ensure_triage_label"],
-                    "mutate_triage_issue_labels": ["publish_triage_mutation_authorization", "ensure_triage_label", "decide_triage_mutation", "read_triage_labels"],
-                    "post_triage_feedback": ["publish_triage_mutation_authorization", "mutate_triage_issue_labels", "decide_triage_mutation", "read_triage_labels", "classify_triage_issue"],
-                    "verify_triage_feedback": ["post_triage_feedback", "mutate_triage_issue_labels", "read_triage_labels", "decide_triage_mutation"],
-                    "observe_triage_feedback": ["verify_triage_feedback", "read_triage_labels", "decide_triage_mutation"],
-                    "publish_triage_feedback_receipt": ["observe_triage_feedback", "verify_triage_feedback"],
-                    "publish_triage_mutation_verification": ["mutate_triage_issue_labels", "verify_triage_feedback", "decide_triage_mutation"],
-                    "split_mixed_triage_issue": ["decide_triage_mutation", "classify_triage_issue", "read_triage_labels"],
-                    "publish_triage_close_authorization": ["decide_triage_mutation", "read_triage_issue_state", "read_triage_comments", "read_triage_canonical_issue", "read_triage_labels", "classify_triage_issue", "publish_triage_mutation_verification", "publish_triage_feedback_receipt", "split_mixed_triage_issue"],
-                    "close_triage_issue": ["publish_triage_close_authorization", "read_triage_labels", "decide_triage_mutation"],
-                    "verify_triage_issue_closed": ["close_triage_issue", "read_triage_labels", "decide_triage_mutation"],
-                    "publish_triage_close_verification": ["verify_triage_issue_closed"],
-                    "verify_triage_receipt": ["publish_triage_close_verification", "publish_triage_close_authorization", "publish_triage_mutation_verification", "publish_triage_feedback_receipt", "publish_triage_decision_receipt"],
-                    "build_triage_terminal": ["normalize_issue_rows", "select_triage_candidate", "reserve_triage_run_budget", "verify_triage_receipt", "decide_triage_mutation", "mutate_triage_issue_labels", "verify_triage_feedback", "verify_triage_issue_closed"],
-                    "filter_issue_eligibility": ["build_triage_terminal"],
-                    "select_issue_candidate": ["filter_issue_eligibility"],
-                }
-                for effector_id, conduction in expected.items():
-                    self.assertEqual(by_id[effector_id]["conduction"], conduction, effector_id)
-                auto_path = next(item for item in package["correlation_paths"] if item["id"] == "auto_worker")
-                auto_by_id = {effector["id"]: effector for effector in auto_path["effectors"]}
-                for effector_id, conduction in expected.items():
-                    prefixed_id = f"intake_{effector_id}"
-                    self.assertEqual(
-                        auto_by_id[prefixed_id]["conduction"],
-                        [f"intake_{upstream}" for upstream in conduction],
-                        prefixed_id,
-                    )
-                self.assertLess(positions["normalize_issue_rows"], positions["read_triage_receipt_index"])
+        # Disjoint sibling ownership for issue and PR process families.
+        issue_siblings = ("issue_feedback", "issue_split", "issue_close", "issue_ready")
+        for left in issue_siblings:
+            left_ids = {effector["id"] for effector in by_path[left]["effectors"]}
+            for right in issue_siblings:
+                if left >= right:
+                    continue
+                right_ids = {effector["id"] for effector in by_path[right]["effectors"]}
+                self.assertFalse(left_ids & right_ids, f"{left}/{right}")
 
-                self.assertIn("decide_issue_priority", by_id)
-                self.assertLess(positions["select_issue_candidate"], positions["decide_issue_priority"])
-                self.assertLess(positions["decide_issue_priority"], positions["decide_issue_action"])
-                self.assertLess(positions["read_triage_receipt_index"], positions["select_triage_candidate"])
-                self.assertLess(positions["select_triage_candidate"], positions["reserve_triage_run_budget"])
-                self.assertLess(positions["reserve_triage_run_budget"], positions["classify_triage_issue"])
-                self.assertLess(positions["classify_triage_issue"], positions["publish_triage_mutation_authorization"])
-                self.assertLess(positions["publish_triage_mutation_authorization"], positions["mutate_triage_issue_labels"])
-                self.assertLess(positions["publish_triage_mutation_verification"], positions["publish_triage_close_authorization"])
-                self.assertLess(positions["split_mixed_triage_issue"], positions["publish_triage_close_authorization"])
-                self.assertLess(positions["publish_triage_close_authorization"], positions["close_triage_issue"])
-                self.assertLess(positions["close_triage_issue"], positions["verify_triage_issue_closed"])
-                self.assertLess(positions["verify_triage_issue_closed"], positions["publish_triage_close_verification"])
-                self.assertLess(positions["publish_triage_close_verification"], positions["verify_triage_receipt"])
-                self.assertLess(positions["verify_triage_receipt"], positions["build_triage_terminal"])
-                self.assertLess(positions["build_triage_terminal"], positions["filter_issue_eligibility"])
-                self.assertLess(positions["filter_issue_eligibility"], positions["select_issue_candidate"])
-                for triage_id in expected:
-                    if triage_id in {"filter_issue_eligibility", "select_issue_candidate"}:
-                        continue
-                    for legacy in ("select_issue_candidate", "decide_issue_action", "reserve_claim_file", "read_intake_tasks", "create_intake_task", "reconcile_intake_task"):
-                        self.assertNotIn(triage_id, by_id[legacy].get("conduction", []))
-                self.assertNotIn("select_triage_candidate", by_id["filter_issue_eligibility"]["conduction"])
-                self.assertNotIn("normalize_issue_rows", by_id["filter_issue_eligibility"]["conduction"])
+        pr_siblings = ("pr_triage", "pr_repair", "pr_merge")
+        for left in pr_siblings:
+            left_ids = {effector["id"] for effector in by_path[left]["effectors"]}
+            for right in pr_siblings:
+                if left >= right:
+                    continue
+                right_ids = {effector["id"] for effector in by_path[right]["effectors"]}
+                self.assertFalse(left_ids & right_ids, f"{left}/{right}")
 
-            if path["id"] in {"pr_triage", "auto_worker"}:
-                prefix = "triage_" if path["id"] == "auto_worker" else ""
-                by_id = {effector["id"]: effector for effector in effectors}
-                self.assertEqual(
-                    by_id[f"{prefix}read_pr_comments"]["conduction"],
-                    [f"{prefix}decide_triage_action", f"{prefix}verify_pr_assignee", f"{prefix}load_pr_fields"],
-                )
-                self.assertEqual(
-                    by_id[f"{prefix}decide_pr_comment"]["conduction"],
-                    [f"{prefix}read_pr_comments", f"{prefix}decide_triage_action", f"{prefix}load_pr_fields"],
-                )
-                self.assertEqual(
-                    by_id[f"{prefix}post_pr_comment"]["conduction"],
-                    [f"{prefix}decide_pr_comment", f"{prefix}decide_triage_action", f"{prefix}load_pr_fields"],
-                )
-                self.assertEqual(
-                    by_id[f"{prefix}verify_pr_comment"]["conduction"],
-                    [f"{prefix}post_pr_comment", f"{prefix}decide_pr_comment", f"{prefix}load_pr_fields"],
-                )
-                self.assertEqual(
-                    by_id[f"{prefix}find_review_marker"]["conduction"],
-                    [f"{prefix}read_review_tasks", f"{prefix}load_pr_fields"],
-                )
-                self.assertEqual(
-                    by_id[f"{prefix}create_review_task"]["conduction"],
-                    [f"{prefix}find_review_marker", f"{prefix}load_pr_fields"],
-                )
-                self.assertEqual(
-                    by_id[f"{prefix}read_review_tasks"]["conduction"],
-                    [f"{prefix}decide_triage_action", f"{prefix}select_fix_pr"],
-                )
-                self.assertEqual(
-                    by_id[f"{prefix}read_repair_context"]["conduction"],
-                    [f"{prefix}build_repair_prompt", f"{prefix}decide_triage_action"],
-                )
-                self.assertEqual(by_id[f"{prefix}read_existing_repair_pr"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}verify_repair_push_oid"])
-                self.assertEqual(
-                    by_id[f"{prefix}build_repair_receipt"]["conduction"],
-                    [
-                        f"{prefix}decide_repair_attempt",
-                        f"{prefix}verify_existing_repair_pr",
-                        f"{prefix}verify_repair_push_oid",
-                        f"{prefix}verify_repair_omp_postconditions",
-                        f"{prefix}invoke_repair_omp",
-                    ],
-                )
-                self.assertEqual(
-                    by_id[f"{prefix}verify_repair_receipt"]["conduction"],
-                    [f"{prefix}decide_repair_attempt", f"{prefix}publish_repair_receipt", f"{prefix}build_repair_receipt"],
-                )
-                self.assertEqual(by_id[f"{prefix}update_repair_branch_provenance"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}verify_repair_receipt", f"{prefix}verify_repair_push_oid"])
-                self.assertEqual(by_id[f"{prefix}verify_updated_repair_branch_provenance"]["conduction"], [f"{prefix}update_repair_branch_provenance"])
-                expected_completed = [f"{prefix}load_pr_fields"]
-                if path["id"] == "auto_worker":
-                    expected_completed.extend([f"{prefix}read_repair_context", f"{prefix}read_repair_remote_head", "lifecycle_decide_lifecycle_transition"])
-                else:
-                    expected_completed.append(f"{prefix}read_repair_remote_head")
-                self.assertEqual(by_id[f"{prefix}read_repair_completed_receipt"]["conduction"], expected_completed)
-                self.assertIn(f"{prefix}read_repair_completed_receipt", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
-                self.assertIn(f"{prefix}decide_triage_action", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
-                self.assertIn(f"{prefix}read_repair_attempt_reconciliation", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
-                self.assertEqual(
-                    by_id[f"{prefix}decide_repair_worktree_ownership"]["conduction"],
-                    [
-                        f"{prefix}read_repair_context",
-                        f"{prefix}read_repair_remote_head",
-                        f"{prefix}read_repair_worktree_inventory",
-                        f"{prefix}read_repair_branch_provenance",
-                        f"{prefix}read_repair_creation_evidence",
-                        f"{prefix}verify_legacy_repair_pr_head",
-                        f"{prefix}read_repair_worktree_cleanliness",
-                        f"{prefix}read_repair_remote_ancestry",
-                        f"{prefix}fast_forward_repair_worktree",
-                    ],
-                )
-                self.assertEqual(by_id[f"{prefix}read_repair_attempt_reconciliation"]["conduction"], [f"{prefix}read_repair_attempt_state", f"{prefix}read_repair_completed_receipt", f"{prefix}read_repair_remote_head", f"{prefix}read_repair_worktree_inventory", f"{prefix}read_repair_branch_provenance"])
-                self.assertIn(f"{prefix}fetch_repair_remote_head", by_id)
-                self.assertIn(f"{prefix}verify_fetched_repair_remote_head", by_id)
-                self.assertEqual(by_id[f"{prefix}fetch_repair_remote_head"]["conduction"], [f"{prefix}read_repair_context", f"{prefix}read_repair_remote_head"])
-                self.assertEqual(by_id[f"{prefix}verify_fetched_repair_remote_head"]["conduction"], [f"{prefix}fetch_repair_remote_head"])
-                self.assertIn(f"{prefix}verify_fetched_repair_remote_head", by_id[f"{prefix}read_repair_remote_ancestry"]["conduction"])
-                self.assertEqual(by_id[f"{prefix}read_repair_attempt_recovery_evidence"]["conduction"], [f"{prefix}read_repair_attempt_state", f"{prefix}read_repair_attempt_reconciliation"])
-                self.assertEqual(by_id[f"{prefix}claim_repair_attempt_recovery"]["conduction"], [f"{prefix}read_repair_attempt_recovery_evidence"])
-                self.assertEqual(by_id[f"{prefix}verify_repair_attempt_recovery"]["conduction"], [f"{prefix}claim_repair_attempt_recovery"])
-                self.assertEqual(by_id[f"{prefix}read_repair_recovery_continuation_evidence"]["conduction"], [f"{prefix}verify_repair_attempt_recovery", f"{prefix}read_repair_attempt_state"])
-                self.assertEqual(by_id[f"{prefix}claim_repair_recovery_continuation"]["conduction"], [f"{prefix}read_repair_recovery_continuation_evidence"])
-                self.assertEqual(by_id[f"{prefix}verify_repair_recovery_continuation"]["conduction"], [f"{prefix}claim_repair_recovery_continuation", f"{prefix}verify_repair_attempt_recovery", f"{prefix}read_repair_attempt_state"])
-                self.assertIn(f"{prefix}verify_repair_attempt_recovery", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
-                self.assertIn(f"{prefix}verify_repair_recovery_continuation", by_id[f"{prefix}decide_repair_attempt"]["conduction"])
-                self.assertEqual(by_id[f"{prefix}read_repair_attempt_baseline"]["conduction"], [f"{prefix}verify_repair_worktree", f"{prefix}decide_repair_worktree_ownership", f"{prefix}read_repair_attempt_state", f"{prefix}read_repair_remote_head"])
-                self.assertEqual(by_id[f"{prefix}reserve_repair_attempt"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}read_repair_context", f"{prefix}read_repair_attempt_baseline", f"{prefix}verify_repair_attempt_recovery", f"{prefix}verify_repair_recovery_continuation"])
-                self.assertEqual(by_id[f"{prefix}verify_repair_attempt_reservation"]["conduction"], [f"{prefix}decide_repair_attempt", f"{prefix}reserve_repair_attempt", f"{prefix}read_repair_context", f"{prefix}verify_repair_attempt_recovery", f"{prefix}verify_repair_recovery_continuation"])
-                self.assertEqual(
-                    by_id[f"{prefix}read_repair_base_head"]["conduction"],
-                    [f"{prefix}read_repair_attempt_state", f"{prefix}read_repair_context", f"{prefix}read_repair_remote_head"],
-                )
-                self.assertGreater(by_id[f"{prefix}invoke_repair_omp"]["adapter"]["timeout_seconds"], 7200)
-                self.assertEqual(
-                    by_id[f"{prefix}decide_legacy_repair_head_refresh"]["conduction"],
-                    [f"{prefix}decide_triage_action", f"{prefix}read_repair_attempt_state", f"{prefix}load_pr_fields", f"{prefix}read_repair_base_head"],
-                )
-                self.assertEqual(by_id[f"{prefix}update_legacy_repair_pr_branch"]["conduction"], [f"{prefix}decide_legacy_repair_head_refresh"])
-                self.assertEqual(by_id[f"{prefix}verify_legacy_repair_pr_head"]["conduction"], [f"{prefix}decide_legacy_repair_head_refresh", f"{prefix}update_legacy_repair_pr_branch"])
-                self.assertIn(f"{prefix}verify_legacy_repair_pr_head", by_id[f"{prefix}decide_repair_worktree_ownership"]["conduction"])
+        # Bounded process-local conduction contracts retained from the prior package.
+        issue_triage = {effector["id"]: effector for effector in by_path["issue_triage"]["effectors"]}
+        self.assertEqual(issue_triage["select_triage_candidate"]["conduction"], ["read_triage_receipt_index"])
+        self.assertEqual(issue_triage["reserve_triage_run_budget"]["conduction"], ["select_triage_candidate"])
+        self.assertEqual(
+            issue_triage["decide_triage_mutation"]["conduction"],
+            [
+                "read_triage_labels",
+                "classify_triage_issue",
+                "read_triage_issue_state",
+                "read_triage_comments",
+                "read_triage_canonical_issue",
+                "reserve_triage_run_budget",
+                "select_triage_candidate",
+            ],
+        )
+        self.assertNotIn("post_triage_feedback", issue_triage)
+        self.assertNotIn("close_triage_issue", issue_triage)
 
-            if path["id"] == "issue_to_pr":
-                by_id = {effector["id"]: effector for effector in effectors}
-                self.assertGreater(by_id["invoke_omp"]["adapter"]["timeout_seconds"], 7200)
-                self.assertEqual(
-                    by_id["complete_task"]["conduction"],
-                    [
-                        "decide_task_completion",
-                        "read_task_for_completion",
-                        "select_dispatch_task",
-                        "decide_held_issue_already_merged",
-                        "read_merged_closing_prs",
-                        "invoke_omp",
-                        "verify_omp_postconditions",
-                    ],
-                )
-                self.assertEqual(
-                    by_id["read_task_for_completion"]["conduction"],
-                    [
-                        "select_dispatch_task",
-                        "decide_held_issue_already_merged",
-                        "read_merged_closing_prs",
-                        "verify_dispatch_receipt",
-                        "invoke_omp",
-                        "verify_omp_postconditions",
-                    ],
-                )
-                self.assertEqual(by_id["update_branch_local_oid"]["conduction"], ["verify_push_oid"])
-                self.assertEqual(by_id["verify_updated_branch_local_oid"]["conduction"], ["update_branch_local_oid"])
-                self.assertEqual(by_id["read_open_pr_for_branch"]["conduction"], ["verify_updated_branch_local_oid"])
+        issue_feedback = {effector["id"]: effector for effector in by_path["issue_feedback"]["effectors"]}
+        self.assertEqual(
+            issue_feedback["publish_triage_feedback_receipt"]["conduction"],
+            ["observe_triage_feedback", "verify_triage_feedback"],
+        )
+        self.assertNotIn("close_triage_issue", issue_feedback)
+        self.assertNotIn("split_mixed_triage_issue", issue_feedback)
 
-            if path["id"] == "cleanup":
-                by_id = {effector["id"]: effector for effector in effectors}
-                self.assertEqual(
-                    by_id["verify_claim_release_evidence"]["conduction"],
-                    [
-                        "verify_cleanup_guards",
-                        "verify_local_branch_absent",
-                        "verify_worktree_absent",
-                        "remove_worktree",
-                        "delete_local_branch",
-                        "check_issue_closed",
-                        "check_no_open_pr_for_branch",
-                    ],
-                )
-                self.assertEqual(
-                    by_id["collect_cleanup_receipt_evidence"]["conduction"],
-                    [
-                        "verify_claim_absent",
-                        "parse_cleanup_issue_number",
-                        "check_issue_closed",
-                        "check_no_open_pr_for_branch",
-                        "remove_worktree",
-                        "delete_local_branch",
-                        "release_claim_file",
-                    ],
-                )
+        issue_close = {effector["id"]: effector for effector in by_path["issue_close"]["effectors"]}
+        self.assertEqual(
+            issue_close["verify_triage_receipt"]["conduction"],
+            ["publish_triage_close_verification", "publish_triage_close_authorization"],
+        )
+        self.assertNotIn("post_triage_feedback", issue_close)
 
-            if path["id"] == "auto_worker":
-                by_id = {effector["id"]: effector for effector in effectors}
-                self.assertGreater(by_id["dispatch_invoke_omp"]["adapter"]["timeout_seconds"], 7200)
-                self.assertEqual(
-                    by_id["dispatch_complete_task"]["conduction"],
-                    [
-                        "dispatch_decide_task_completion",
-                        "dispatch_read_task_for_completion",
-                        "dispatch_select_dispatch_task",
-                        "dispatch_decide_held_issue_already_merged",
-                        "dispatch_read_merged_closing_prs",
-                        "dispatch_invoke_omp",
-                        "dispatch_verify_omp_postconditions",
-                    ],
-                )
-                self.assertEqual(
-                    by_id["dispatch_read_task_for_completion"]["conduction"],
-                    [
-                        "dispatch_select_dispatch_task",
-                        "dispatch_decide_held_issue_already_merged",
-                        "dispatch_read_merged_closing_prs",
-                        "dispatch_verify_dispatch_receipt",
-                        "dispatch_invoke_omp",
-                        "dispatch_verify_omp_postconditions",
-                    ],
-                )
-                self.assertEqual(by_id["dispatch_update_branch_local_oid"]["conduction"], ["dispatch_verify_push_oid"])
-                self.assertEqual(by_id["dispatch_verify_updated_branch_local_oid"]["conduction"], ["dispatch_update_branch_local_oid"])
-                self.assertEqual(by_id["dispatch_read_open_pr_for_branch"]["conduction"], ["dispatch_verify_updated_branch_local_oid"])
-                self.assertEqual(
-                    by_id["cleanup_verify_claim_release_evidence"]["conduction"],
-                    [
-                        "aggregate_lane_results",
-                        "cleanup_verify_cleanup_guards",
-                        "cleanup_verify_local_branch_absent",
-                        "cleanup_verify_worktree_absent",
-                        "cleanup_remove_worktree",
-                        "cleanup_delete_local_branch",
-                        "cleanup_check_issue_closed",
-                        "cleanup_check_no_open_pr_for_branch",
-                    ],
-                )
-                self.assertEqual(
-                    by_id["cleanup_collect_cleanup_receipt_evidence"]["conduction"],
-                    [
-                        "aggregate_lane_results",
-                        "cleanup_verify_claim_absent",
-                        "cleanup_parse_cleanup_issue_number",
-                        "cleanup_check_issue_closed",
-                        "cleanup_check_no_open_pr_for_branch",
-                        "cleanup_remove_worktree",
-                        "cleanup_delete_local_branch",
-                        "cleanup_release_claim_file",
-                    ],
-                )
+        issue_ready = {effector["id"]: effector for effector in by_path["issue_ready"]["effectors"]}
+        self.assertEqual(issue_ready["filter_issue_eligibility"]["conduction"], ["build_triage_terminal"])
+        self.assertEqual(issue_ready["select_issue_candidate"]["conduction"], ["filter_issue_eligibility"])
+        self.assertNotIn("normalize_issue_rows", issue_ready["filter_issue_eligibility"]["conduction"])
+        self.assertNotIn("select_triage_candidate", issue_ready["filter_issue_eligibility"]["conduction"])
 
+        pr_triage = {effector["id"]: effector for effector in by_path["pr_triage"]["effectors"]}
+        self.assertEqual(
+            pr_triage["decide_triage_action"]["conduction"],
+            [
+                "evaluate_checks",
+                "evaluate_test_evidence",
+                "read_open_prs",
+                "filter_fix_prs",
+                "select_fix_pr",
+                "load_pr_fields",
+            ],
+        )
+        self.assertNotIn("merge_pr", pr_triage)
+        self.assertNotIn("invoke_repair_omp", pr_triage)
 
-            if path["id"] == "auto_worker":
-                self.assertLess(positions["triage_decide_triage_action"], positions["intake_decide_issue_priority"])
-                self.assertLess(positions["intake_select_issue_candidate"], positions["intake_decide_issue_priority"])
-                self.assertLess(positions["intake_decide_issue_priority"], positions["intake_decide_issue_action"])
-                self.assertEqual(
-                    by_id["intake_decide_issue_priority"]["conduction"],
-                    ["intake_select_issue_candidate", "triage_decide_triage_action"],
-                )
-                self.assertTrue(
-                    all(
-                        effector["id"].startswith(
-                            ("intake_", "dispatch_", "triage_", "lifecycle_", "aggregate_", "cleanup_")
-                        )
-                        for effector in effectors
-                    )
-                )
+        pr_repair = {effector["id"]: effector for effector in by_path["pr_repair"]["effectors"]}
+        self.assertEqual(
+            pr_repair["build_repair_receipt"]["conduction"],
+            [
+                "decide_repair_attempt",
+                "verify_existing_repair_pr",
+                "verify_repair_push_oid",
+                "verify_repair_omp_postconditions",
+                "invoke_repair_omp",
+            ],
+        )
+        self.assertEqual(
+            pr_repair["verify_repair_receipt"]["conduction"],
+            ["decide_repair_attempt", "publish_repair_receipt", "build_repair_receipt"],
+        )
+        self.assertEqual(
+            pr_repair["decide_repair_worktree_ownership"]["conduction"],
+            [
+                "read_repair_context",
+                "read_repair_remote_head",
+                "read_repair_worktree_inventory",
+                "read_repair_branch_provenance",
+                "read_repair_creation_evidence",
+                "verify_legacy_repair_pr_head",
+                "read_repair_worktree_cleanliness",
+                "read_repair_remote_ancestry",
+                "fast_forward_repair_worktree",
+            ],
+        )
+        self.assertEqual(
+            pr_repair["reserve_repair_attempt"]["conduction"],
+            [
+                "decide_repair_attempt",
+                "read_repair_context",
+                "read_repair_attempt_baseline",
+                "verify_repair_attempt_recovery",
+                "verify_repair_recovery_continuation",
+            ],
+        )
+        self.assertGreater(pr_repair["invoke_repair_omp"]["adapter"]["timeout_seconds"], 7200)
+        self.assertNotIn("merge_pr", pr_repair)
+
+        pr_merge = {effector["id"]: effector for effector in by_path["pr_merge"]["effectors"]}
+        self.assertEqual(
+            pr_merge["read_merge_preconditions"]["conduction"],
+            ["verify_pr_assignee", "verify_pr_comment"],
+        )
+        self.assertEqual(pr_merge["verify_merge_receipt"]["conduction"], ["publish_merge_receipt"])
+        self.assertNotIn("invoke_repair_omp", pr_merge)
+        self.assertNotIn("create_repair_branch", pr_merge)
+
+        issue_to_pr = {effector["id"]: effector for effector in by_path["issue_to_pr"]["effectors"]}
+        self.assertGreater(issue_to_pr["invoke_omp"]["adapter"]["timeout_seconds"], 7200)
+        self.assertEqual(
+            issue_to_pr["complete_task"]["conduction"],
+            [
+                "decide_task_completion",
+                "read_task_for_completion",
+                "select_dispatch_task",
+                "decide_held_issue_already_merged",
+                "read_merged_closing_prs",
+                "invoke_omp",
+                "verify_omp_postconditions",
+            ],
+        )
+        self.assertEqual(
+            issue_to_pr["read_task_for_completion"]["conduction"],
+            [
+                "select_dispatch_task",
+                "decide_held_issue_already_merged",
+                "read_merged_closing_prs",
+                "verify_dispatch_receipt",
+                "invoke_omp",
+                "verify_omp_postconditions",
+            ],
+        )
+        self.assertEqual(issue_to_pr["update_branch_local_oid"]["conduction"], ["verify_push_oid"])
+        self.assertEqual(issue_to_pr["verify_updated_branch_local_oid"]["conduction"], ["update_branch_local_oid"])
+        self.assertEqual(issue_to_pr["read_open_pr_for_branch"]["conduction"], ["verify_updated_branch_local_oid"])
+
+        cleanup = {effector["id"]: effector for effector in by_path["cleanup"]["effectors"]}
+        self.assertEqual(
+            cleanup["verify_claim_release_evidence"]["conduction"],
+            [
+                "verify_cleanup_guards",
+                "verify_local_branch_absent",
+                "verify_worktree_absent",
+                "remove_worktree",
+                "delete_local_branch",
+                "check_issue_closed",
+                "check_no_open_pr_for_branch",
+            ],
+        )
+        self.assertEqual(
+            cleanup["collect_cleanup_receipt_evidence"]["conduction"],
+            [
+                "verify_claim_absent",
+                "parse_cleanup_issue_number",
+                "check_issue_closed",
+                "check_no_open_pr_for_branch",
+                "remove_worktree",
+                "delete_local_branch",
+                "release_claim_file",
+            ],
+        )
+
+        cleanup_reconcile = {effector["id"]: effector for effector in by_path["cleanup_reconcile"]["effectors"]}
+        self.assertEqual(
+            tuple(effector["id"] for effector in by_path["cleanup_reconcile"]["effectors"]),
+            (
+                "validate_reconcile_identity",
+                "read_local_receipts",
+                "read_claim_process_evidence",
+                "read_github_terminal_state",
+                "read_remote_provenance",
+                "read_reconcile_worktree_state",
+                "decide_no_target_reconciliation",
+                "update_task_receipt",
+                "publish_reconcile_receipt",
+                "verify_no_target_reconciliation",
+            ),
+        )
+        self.assertEqual(
+            cleanup_reconcile["verify_no_target_reconciliation"]["conduction"],
+            ["publish_reconcile_receipt"],
+        )
 
 
 if __name__ == "__main__":

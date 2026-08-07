@@ -1,1 +1,1010 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["version","mode","branch_prefix","base_branch","github","labels","automation","executor","paths","repos"],"additionalProperties":false,"properties":{"version":{"type":"integer","const":1},"mode":{"type":"string","enum":["dry-run","live"]},"branch_prefix":{"type":"string","minLength":1},"base_branch":{"type":"string","minLength":1},"github":{"type":"object","additionalProperties":false,"properties":{"cli":{"type":"string","minLength":1},"assignee":{"type":"string","minLength":1}}},"labels":{"type":"object","additionalProperties":false,"required":["ready","in_progress","blocked","pr_opened","generated"],"properties":{"ready":{"type":"string","minLength":1},"in_progress":{"type":"string","minLength":1},"blocked":{"type":"string","minLength":1},"pr_opened":{"type":"string","minLength":1},"generated":{"type":"string","minLength":1},"needs_feedback":{"type":"string","minLength":1},"duplicate":{"type":"string","minLength":1},"out_of_scope":{"type":"string","minLength":1},"frozen":{"type":"string","minLength":1}}},"automation":{"type":"object","additionalProperties":false,"properties":{"max_active_issues":{"type":"integer","minimum":1},"automerge":{"type":"boolean"},"require_human_approval":{"type":"boolean"},"require_checks":{"type":"boolean"},"require_test_evidence":{"type":"boolean"},"fixer_assignee":{"type":"string","minLength":1},"merge_method":{"type":"string","enum":["merge","squash","rebase"]}}},"direction":{"type":"object","additionalProperties":false,"properties":{"repo_goal":{"type":"string"},"require_keywords":{"type":"array","items":{"type":"string"}},"deny_keywords":{"type":"array","items":{"type":"string"}},"reject_labels":{"type":"array","items":{"type":"string"}},"min_goal_overlap":{"type":"integer","minimum":1}}},"triage":{"type":"object","additionalProperties":false,"properties":{"enabled":{"type":"boolean"},"context_paths":{"type":"array","items":{"type":"string","minLength":1}},"context_max_bytes":{"type":"integer","minimum":1},"auto_close_duplicates":{"type":"boolean"},"auto_close_out_of_scope":{"type":"boolean"}}},"executor":{"type":"object","additionalProperties":false,"properties":{"enabled":{"type":"boolean"},"command":{"type":"string","minLength":1},"model":{"type":"string","minLength":1},"thinking":{"type":"string","minLength":1},"timeout_seconds":{"type":"number","exclusiveMinimum":0}}},"paths":{"type":"object","additionalProperties":false,"required":["worktree_root","dispatch_receipts","merge_receipts","active_issue"],"properties":{"worktree_root":{"type":"string","minLength":1},"dispatch_receipts":{"type":"string","minLength":1},"task_receipts":{"type":"string","minLength":1},"merge_receipts":{"type":"string","minLength":1},"active_issue":{"type":"string","minLength":1},"triage_receipts":{"type":"string","minLength":1}}},"repos":{"type":"array","minItems":1,"items":{"type":"object","required":["repo","board","clone_path"],"additionalProperties":false,"properties":{"repo":{"type":"string","minLength":1},"board":{"type":"string","minLength":1},"clone_path":{"type":"string","minLength":1},"priority":{"type":"integer"},"triage_goal":{"type":"string"},"triage_context_paths":{"type":"array","items":{"type":"string","minLength":1}},"auto_close_duplicates":{"type":"boolean"},"auto_close_out_of_scope":{"type":"boolean"}}}}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "The activation parser is authoritative for leading/trailing whitespace, duplicate string-array entries, owner/repository syntax, portable ~/ paths, symlink and parent-component safety, and lease/stale-owner cross-field relationships; JSON Schema intentionally remains structural for those parser-only checks.",
+  "type": "object",
+  "required": [
+    "version",
+    "mode",
+    "branch_prefix",
+    "base_branch",
+    "github",
+    "labels",
+    "automation",
+    "direction",
+    "triage",
+    "executor",
+    "paths",
+    "repos",
+    "processes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "dry-run",
+        "live"
+      ]
+    },
+    "branch_prefix": {
+      "type": "string",
+      "minLength": 1
+    },
+    "base_branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cli",
+        "default_limit",
+        "assignee"
+      ],
+      "properties": {
+        "cli": {
+          "type": "string",
+          "minLength": 1
+        },
+        "default_limit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "assignee": {
+          "type": "string"
+        }
+      }
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ready",
+        "in_progress",
+        "blocked",
+        "pr_opened",
+        "generated",
+        "needs_feedback",
+        "duplicate",
+        "out_of_scope",
+        "frozen"
+      ],
+      "properties": {
+        "ready": {
+          "type": "string",
+          "minLength": 1
+        },
+        "in_progress": {
+          "type": "string",
+          "minLength": 1
+        },
+        "blocked": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pr_opened": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generated": {
+          "type": "string",
+          "minLength": 1
+        },
+        "needs_feedback": {
+          "type": "string",
+          "minLength": 1
+        },
+        "duplicate": {
+          "type": "string",
+          "minLength": 1
+        },
+        "out_of_scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "frozen": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "automation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_active_issues",
+        "automerge",
+        "require_human_approval",
+        "require_checks",
+        "require_test_evidence",
+        "fixer_assignee",
+        "merge_method"
+      ],
+      "properties": {
+        "max_active_issues": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "automerge": {
+          "type": "boolean"
+        },
+        "require_human_approval": {
+          "type": "boolean"
+        },
+        "require_checks": {
+          "type": "boolean"
+        },
+        "require_test_evidence": {
+          "type": "boolean"
+        },
+        "fixer_assignee": {
+          "type": "string",
+          "minLength": 1
+        },
+        "merge_method": {
+          "type": "string",
+          "enum": [
+            "merge",
+            "squash",
+            "rebase"
+          ]
+        }
+      }
+    },
+    "direction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo_goal",
+        "require_keywords",
+        "deny_keywords",
+        "reject_labels",
+        "min_goal_overlap"
+      ],
+      "properties": {
+        "repo_goal": {
+          "type": "string"
+        },
+        "require_keywords": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "deny_keywords": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "reject_labels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "min_goal_overlap": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "triage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "context_paths",
+        "context_max_bytes",
+        "auto_close_duplicates",
+        "auto_close_out_of_scope"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "context_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "context_max_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "auto_close_duplicates": {
+          "type": "boolean"
+        },
+        "auto_close_out_of_scope": {
+          "type": "boolean"
+        }
+      }
+    },
+    "executor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "command",
+        "model",
+        "thinking",
+        "timeout_seconds",
+        "max_attempts",
+        "retry_backoff_seconds"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "thinking": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 7200
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retry_backoff_seconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worktree_root",
+        "dispatch_receipts",
+        "task_receipts",
+        "merge_receipts",
+        "active_issue",
+        "triage_receipts"
+      ],
+      "properties": {
+        "worktree_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dispatch_receipts": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_receipts": {
+          "type": "string",
+          "minLength": 1
+        },
+        "merge_receipts": {
+          "type": "string",
+          "minLength": 1
+        },
+        "active_issue": {
+          "type": "string",
+          "minLength": 1
+        },
+        "triage_receipts": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "repos": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repo",
+          "board",
+          "clone_path",
+          "priority"
+        ],
+        "properties": {
+          "repo": {
+            "type": "string",
+            "minLength": 1
+          },
+          "board": {
+            "type": "string",
+            "minLength": 1
+          },
+          "clone_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "triage_goal": {
+            "type": "string"
+          },
+          "triage_context_paths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "auto_close_duplicates": {
+            "type": "boolean"
+          },
+          "auto_close_out_of_scope": {
+            "type": "boolean"
+          },
+          "trusted_authors": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "trusted_branch_prefixes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "allowed_base_branches": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "external_pr_policy": {
+            "type": "string",
+            "enum": [
+              "block",
+              "report",
+              "ignore"
+            ]
+          }
+        }
+      }
+    },
+    "processes": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/repo_issue_pollGraph"
+        },
+        {
+          "$ref": "#/$defs/issue_triageGraph"
+        },
+        {
+          "$ref": "#/$defs/issue_feedbackGraph"
+        },
+        {
+          "$ref": "#/$defs/issue_splitGraph"
+        },
+        {
+          "$ref": "#/$defs/issue_closeGraph"
+        },
+        {
+          "$ref": "#/$defs/issue_readyGraph"
+        },
+        {
+          "$ref": "#/$defs/issue_to_prGraph"
+        },
+        {
+          "$ref": "#/$defs/pr_triageGraph"
+        },
+        {
+          "$ref": "#/$defs/pr_repairGraph"
+        },
+        {
+          "$ref": "#/$defs/pr_mergeGraph"
+        },
+        {
+          "$ref": "#/$defs/cleanupGraph"
+        },
+        {
+          "$ref": "#/$defs/cleanup_reconcileGraph"
+        }
+      ],
+      "items": {
+        "$ref": "#/$defs/processBase"
+      }
+    }
+  },
+  "$defs": {
+    "processBase": {
+      "type": "object",
+      "required": [
+        "id",
+        "enabled",
+        "interval_seconds",
+        "concurrency",
+        "selector",
+        "lease_seconds",
+        "lease_renew_seconds",
+        "stale_owner_after_seconds",
+        "lock_scope",
+        "retry_classes",
+        "max_attempts",
+        "backoff_seconds",
+        "input_cursor",
+        "output_receipts",
+        "health_id",
+        "candidate_fencing",
+        "predecessors",
+        "successors",
+        "command"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "repo_issue_poll",
+            "issue_triage",
+            "issue_feedback",
+            "issue_split",
+            "issue_close",
+            "issue_ready",
+            "issue_to_pr",
+            "pr_triage",
+            "pr_repair",
+            "pr_merge",
+            "cleanup",
+            "cleanup_reconcile"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "interval_seconds": {
+          "type": "integer",
+          "minimum": 30
+        },
+        "concurrency": {
+          "type": "integer",
+          "const": 1
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lease_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_renew_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stale_owner_after_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lock_scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retry_classes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "backoff_seconds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "input_cursor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "output_receipts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "health_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidate_fencing": {
+          "const": true
+        },
+        "predecessors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "successors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "repo_issue_pollGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "repo_issue_poll"
+            },
+            "output_receipts": {
+              "const": [
+                "repo_poll",
+                "issue_snapshot"
+              ]
+            },
+            "predecessors": {
+              "const": []
+            },
+            "successors": {
+              "const": [
+                "issue_triage"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "issue_triageGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "issue_triage"
+            },
+            "output_receipts": {
+              "const": [
+                "issue_decision"
+              ]
+            },
+            "predecessors": {
+              "const": [
+                "issue_snapshot",
+                "child_handoff"
+              ]
+            },
+            "successors": {
+              "const": [
+                "issue_feedback",
+                "issue_split",
+                "issue_close",
+                "issue_ready"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "issue_feedbackGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "issue_feedback"
+            },
+            "output_receipts": {
+              "const": [
+                "feedback",
+                "feedback_verified"
+              ]
+            },
+            "predecessors": {
+              "const": [
+                "issue_decision"
+              ]
+            },
+            "successors": {
+              "const": []
+            }
+          }
+        }
+      ]
+    },
+    "issue_splitGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "issue_split"
+            },
+            "output_receipts": {
+              "const": [
+                "split",
+                "child_handoff",
+                "split_verified"
+              ]
+            },
+            "predecessors": {
+              "const": [
+                "issue_decision"
+              ]
+            },
+            "successors": {
+              "const": [
+                "issue_triage",
+                "issue_close"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "issue_closeGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "issue_close"
+            },
+            "output_receipts": {
+              "const": [
+                "close_authorization",
+                "close_verified"
+              ]
+            },
+            "predecessors": {
+              "const": [
+                "issue_decision",
+                "split_verified"
+              ]
+            },
+            "successors": {
+              "const": []
+            }
+          }
+        }
+      ]
+    },
+    "issue_readyGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "issue_ready"
+            },
+            "output_receipts": {
+              "const": [
+                "claim",
+                "task_handoff"
+              ]
+            },
+            "predecessors": {
+              "const": [
+                "issue_decision"
+              ]
+            },
+            "successors": {
+              "const": [
+                "issue_to_pr"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "issue_to_prGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "issue_to_pr"
+            },
+            "output_receipts": {
+              "const": [
+                "implementation",
+                "pr_opened"
+              ]
+            },
+            "predecessors": {
+              "const": [
+                "claim",
+                "task_handoff"
+              ]
+            },
+            "successors": {
+              "const": [
+                "pr_triage"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "pr_triageGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "pr_triage"
+            },
+            "output_receipts": {
+              "const": [
+                "pr_decision"
+              ]
+            },
+            "predecessors": {
+              "const": [
+                "pr_opened",
+                "repair_verified"
+              ]
+            },
+            "successors": {
+              "const": [
+                "pr_repair",
+                "pr_merge"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "pr_repairGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "pr_repair"
+            },
+            "output_receipts": {
+              "const": [
+                "repair_reservation",
+                "repair_verified"
+              ]
+            },
+            "predecessors": {
+              "const": [
+                "pr_decision"
+              ]
+            },
+            "successors": {
+              "const": [
+                "pr_triage"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "pr_mergeGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "pr_merge"
+            },
+            "output_receipts": {
+              "const": [
+                "merge_verified",
+                "finalization"
+              ]
+            },
+            "predecessors": {
+              "const": [
+                "pr_decision"
+              ]
+            },
+            "successors": {
+              "const": [
+                "cleanup"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "cleanupGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "cleanup"
+            },
+            "output_receipts": {
+              "const": [
+                "cleanup_verified"
+              ]
+            },
+            "predecessors": {
+              "const": [
+                "finalization"
+              ]
+            },
+            "successors": {
+              "const": []
+            }
+          }
+        }
+      ]
+    },
+    "cleanup_reconcileGraph": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/processBase"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "output_receipts",
+            "predecessors",
+            "successors"
+          ],
+          "properties": {
+            "id": {
+              "const": "cleanup_reconcile"
+            },
+            "output_receipts": {
+              "const": [
+                "cleanup_reconciliation"
+              ]
+            },
+            "predecessors": {
+              "const": [
+                "unresolved cleanup evidence"
+              ]
+            },
+            "successors": {
+              "const": []
+            }
+          }
+        }
+      ]
+    }
+  }
+}

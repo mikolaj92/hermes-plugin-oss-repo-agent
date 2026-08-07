@@ -1,18 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Immutable Fala candidate template; renderer must replace every marker. -->
+<!-- Resident candidate-pinned supervisor; renderer must replace every marker. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.mikolaj92.lokay.fala-tick-all</string>
+  <string>{{LABEL}}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{{UV_BIN}}</string>
-    <string>run</string>
-    <string>--frozen</string>
-    <string>--project</string>
-    <string>{{PROJECT_ROOT}}</string>
-    <string>lokay-tick-all</string>
+    <string>{{PYTHON_PATH}}</string>
+    <string>-m</string>
+    <string>lokay.supervisor</string>
     <string>--config</string>
     <string>{{CONFIG_PATH}}</string>
     <string>--db</string>
@@ -24,19 +21,31 @@
   <dict>
     <key>HOME</key>
     <string>{{HOME}}</string>
+    <key>PYTHONPATH</key>
+    <string>{{PYTHONPATH}}</string>
+    <key>FALA_HOME</key>
+    <string>{{FALA_HOME}}</string>
+    <key>FALA_EFFECTOR_ROOT</key>
+    <string>{{FALA_EFFECTOR_ROOT}}</string>
+    <key>FALA_CANDIDATE_ID</key>
+    <string>{{CANDIDATE_ID}}</string>
+    <key>HERMES_LOKAY_GENERATION</key>
+    <string>{{GENERATION}}</string>
+    <key>HERMES_LOKAY_PROCESS_STATE_ROOT</key>
+    <string>{{PROCESS_STATE_ROOT}}</string>
   </dict>
   <key>WorkingDirectory</key>
   <string>{{PROJECT_ROOT}}</string>
-  <key>StartInterval</key>
-  <integer>600</integer>
   <key>StandardOutPath</key>
-  <string>{{LOG_DIR}}/lokay-fala-tick-all.out.log</string>
+  <string>{{LOG_DIR}}/{{LABEL}}.out.log</string>
   <key>StandardErrorPath</key>
-  <string>{{LOG_DIR}}/lokay-fala-tick-all.err.log</string>
+  <string>{{LOG_DIR}}/{{LABEL}}.err.log</string>
   <key>ProcessType</key>
   <string>Background</string>
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
   <key>LimitLoadToSessionType</key>
   <string>Background</string>
 </dict>

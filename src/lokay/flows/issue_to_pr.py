@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -133,11 +132,6 @@ async def run_issue_to_pr_flow(
     resolved_board = str(context["board"])
     resolved_clone = str(context["clone_path"])
     wt_root = worktree_root or cfg.paths.worktree_root
-    if not wt_root:
-        wt_root = os.environ.get(
-            "HERMES_LOKAY_WORKTREE_ROOT",
-            str(Path.home() / ".hermes" / "worktrees" / "lokay"),
-        )
     receipt = receipt_path or str(Path(cfg.paths.dispatch_receipts) / f"dispatch-{rid}.json")
     step_config: dict[str, Any] = {
         **context,

@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import subprocess
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import fala
-
-from lokay.config import AgentConfig, PathConfig, RepoEntry
+from lokay.config import AgentConfig, RepoEntry
 from lokay.flows.intake import run_intake_flow
+from lokay.flows.runtime import HostPathRunResult, JournalProcess
+from lokay.flows.triage import run_pr_triage_decide
+from lokay.process import build_effective_run
+from lokay.process_contracts import FORBIDDEN_PATH_ALIASES, PROCESS_CONTRACTS
+from lokay.registry import PROCESS_IDS
 from lokay.steps import claim, kanban_intake, poll
+from lokay.tick_all import run_all
 
 
 class _Req(dict):
@@ -59,302 +60,463 @@ class ClaimKanbanDryRunTests(unittest.TestCase):
         self.assertEqual(result["status"], "planned")
 
 
+class ProcessSpecificHostPathTests(unittest.TestCase):
+    """Canonical process path contracts replace retired auto_worker/run_all host composition."""
 
-
-class TickAllHostPathTests(unittest.TestCase):
     @staticmethod
-    def _host(*, failed: bool = False):
-        from lokay.flows.runtime import HostPathRunResult, JournalProcess
-
-        run_status = "failed" if failed else "completed"
-        process_status = "failed" if failed else "succeeded"
-        process = JournalProcess(
-            id="intake_poll" if not failed else "dispatch_open_pull_request",
-            status=process_status,
-            attempt=1,
-            max_attempts=1,
-            output={"status": "planned" if not failed else "error"},
-            error={} if not failed else {"message": "dispatch failed"},
+    def _effective(process_id: str, cfg: AgentConfig, *, run_id: str = "process-run") -> dict:
+        contract = PROCESS_CONTRACTS[process_id]
+        return build_effective_run(
+            contract=contract,
+            process_id=process_id,
+            run_id=run_id,
+            db_path=Path("/tmp/process.sqlite"),
+            cfg=cfg,
+            generation="test-generation",
+            candidate_id="a" * 64,
+            config_sha256="b" * 64,
+            command=f"lokay-process-{process_id}",
         )
+
+    @staticmethod
+    def _host(
+        *,
+        path_id: str,
+        failed: bool = False,
+        processes: tuple[JournalProcess, ...] | None = None,
+        run_id: str = "process-run",
+    ) -> HostPathRunResult:
+        if processes is None:
+            step_id = "open_pull_request" if failed else "read_open_prs"
+            process = JournalProcess(
+                id=f"{run_id}:{path_id}:{step_id}",
+                status="failed" if failed else "succeeded",
+                attempt=1,
+                max_attempts=1,
+                output={"status": "error" if failed else "planned"},
+                error={"message": "dispatch failed"} if failed else {},
+                metadata={"correlation_path_id": path_id, "effector_id": step_id},
+                correlation_path_id=path_id,
+                effector_id=step_id,
+            )
+            processes = (process,)
         return HostPathRunResult(
-            run_id="auto-worker-run",
-            path_id="auto_worker",
-            run_status=run_status,
+            run_id=run_id,
+            path_id=path_id,
+            run_status="failed" if failed else "completed",
             replayed=False,
             ticks=1,
-            processes=(process,),
+            processes=processes,
         )
 
-    def test_run_all_makes_one_auto_worker_host_call(self) -> None:
-        from lokay.tick_all import run_all
+    def test_twelve_process_paths_are_canonical_and_disjoint(self) -> None:
+        self.assertEqual(tuple(PROCESS_CONTRACTS), PROCESS_IDS)
+        self.assertEqual(len(PROCESS_IDS), 12)
+        for process_id in PROCESS_IDS:
+            contract = PROCESS_CONTRACTS[process_id]
+            self.assertEqual(contract.process_id, process_id)
+            self.assertEqual(contract.path_id, process_id)
+            self.assertNotIn(contract.path_id, FORBIDDEN_PATH_ALIASES)
+            self.assertNotIn(contract.path_id, {"auto_worker", "tick_all", "issue_intake"})
+            self.assertTrue(contract.allowed_effectors)
+            self.assertFalse(set(contract.allowed_effectors) & FORBIDDEN_PATH_ALIASES)
 
+        pr_group = ("pr_triage", "pr_repair", "pr_merge")
+        for index, left in enumerate(pr_group):
+            left_set = set(PROCESS_CONTRACTS[left].allowed_effectors)
+            for right in pr_group[index + 1 :]:
+                right_set = set(PROCESS_CONTRACTS[right].allowed_effectors)
+                self.assertFalse(left_set & right_set, msg=f"ownership overlap {left}/{right}")
+
+    def test_pr_triage_effective_run_is_one_owned_host_path(self) -> None:
         cfg = AgentConfig(
             mode="dry-run",
             repos=(RepoEntry(repo="o/r", board="board-r", clone_path="/tmp/o-r"),),
+            raw={"github": {"default_limit": 7}},
         )
-        runner = mock.AsyncMock(return_value=self._host())
-        with mock.patch("lokay.tick_all.run_package_path_async", new=runner):
-            result = asyncio.run(
-                run_all(db_path=Path("/tmp/auto-worker.sqlite"), config=cfg, dry_run=True, limit=7)
-            )
+        effective = self._effective("pr_triage", cfg)
+        contract = PROCESS_CONTRACTS["pr_triage"]
 
-        runner.assert_awaited_once()
-        self.assertEqual(runner.await_args.kwargs["path_id"], "auto_worker")
-        self.assertEqual(runner.await_args.kwargs["max_ticks"], 256)
-        effector_inputs = runner.await_args.kwargs["effector_inputs"]
-        self.assertEqual(effector_inputs["triage_read_open_prs"]["limit"], 7)
-        self.assertTrue(effector_inputs["triage_decide_triage_action"]["require_human_approval"])
-        self.assertTrue(effector_inputs["cleanup_remove_worktree"]["require_safe"])
-        self.assertTrue(effector_inputs["dispatch_read_clone_preconditions"]["dry_run"])
-        self.assertNotIn("clone_path", effector_inputs["dispatch_read_clone_preconditions"])
-        self.assertIn("cleanup_build_cleanup_receipt", effector_inputs)
-        self.assertIn("cleanup_receipt_path", effector_inputs["cleanup_collect_cleanup_receipt_evidence"])
-        self.assertEqual(result["path_id"], "auto_worker")
-        self.assertFalse(result["any_failed"])
-        self.assertEqual(result["processes"][0]["id"], "intake_poll")
-        self.assertEqual(result["processes"][0]["output"]["status"], "planned")
-    def test_multi_repo_auto_worker_does_not_inject_first_repo_context(self) -> None:
-        from lokay.tick_all import run_all
+        self.assertEqual(effective["inputs"]["path_id"], "pr_triage")
+        self.assertEqual(effective["inputs"]["process_id"], "pr_triage")
+        self.assertEqual(effective["max_ticks"], contract.max_ticks)
+        self.assertEqual(set(effective["effector_inputs"]), set(contract.allowed_effectors))
+        self.assertEqual(set(effective["effector_configs"]), set(contract.allowed_effectors))
+        self.assertEqual(effective["effector_inputs"]["read_open_prs"]["limit"], 7)
+        self.assertTrue(effective["effector_inputs"]["decide_triage_action"]["require_human_approval"])
+        self.assertNotIn("auto_worker", effective["effector_inputs"])
+        self.assertFalse(any(step.startswith("triage_") for step in effective["effector_inputs"]))
+        for sibling in PROCESS_CONTRACTS["pr_repair"].allowed_effectors[:5]:
+            self.assertNotIn(sibling, effective["effector_inputs"])
+        for sibling in ("merge_pr", "remove_worktree", "read_open_issues"):
+            self.assertNotIn(sibling, effective["effector_inputs"])
 
+    def test_cleanup_and_poll_effective_runs_stay_process_local(self) -> None:
+        cfg = AgentConfig(
+            mode="dry-run",
+            repos=(RepoEntry(repo="o/r", board="board-r", clone_path="/tmp/o-r"),),
+            raw={"github": {"default_limit": 7}},
+        )
+        cleanup = self._effective("cleanup", cfg)
+        poll_run = self._effective("repo_issue_poll", cfg)
+
+        self.assertEqual(cleanup["inputs"]["path_id"], "cleanup")
+        self.assertTrue(all(value.get("require_safe") is True for value in cleanup["effector_inputs"].values()))
+        self.assertIn("remove_worktree", cleanup["effector_inputs"])
+        self.assertNotIn("decide_triage_action", cleanup["effector_inputs"])
+
+        self.assertEqual(poll_run["inputs"]["path_id"], "repo_issue_poll")
+        self.assertEqual(set(poll_run["effector_inputs"]), {"read_open_issues", "normalize_issue_rows"})
+        self.assertEqual(poll_run["effector_inputs"]["read_open_issues"]["limit"], 7)
+        self.assertEqual(
+            [entry["repo"] for entry in poll_run["effector_inputs"]["read_open_issues"]["repos"]],
+            ["o/r"],
+        )
+
+    def test_multi_repo_effective_run_carries_full_catalog_without_first_repo_injection(self) -> None:
         cfg = AgentConfig(
             mode="dry-run",
             repos=(
                 RepoEntry(repo="o/first", board="first-board", clone_path="/tmp/first"),
-                RepoEntry(repo="o/temida", board="temida-board", clone_path="/tmp/temida", triage_context_paths=("CONTRIBUTING.md",)),
+                RepoEntry(
+                    repo="o/temida",
+                    board="temida-board",
+                    clone_path="/tmp/temida",
+                    triage_context_paths=("CONTRIBUTING.md",),
+                ),
             ),
+            raw={"github": {"default_limit": 7}},
         )
-        runner = mock.AsyncMock(return_value=self._host())
-        with mock.patch("lokay.tick_all.run_package_path_async", new=runner):
-            asyncio.run(run_all(db_path=Path("/tmp/auto-worker.sqlite"), config=cfg, dry_run=True, limit=7))
-        inputs = runner.await_args.kwargs["effector_inputs"]
+        effective = self._effective("pr_triage", cfg)
+        inputs = effective["effector_inputs"]
+        repos = effective["inputs"]["repos"]
+
         for value in inputs.values():
             self.assertNotEqual(value.get("repo"), "o/first")
             self.assertNotEqual(value.get("board"), "first-board")
             self.assertNotEqual(value.get("clone_path"), "/tmp/first")
-        self.assertEqual(runner.await_args.kwargs["inputs"]["repos"][1]["repo"], "o/temida")
-        self.assertEqual(runner.await_args.kwargs["inputs"]["repos"][1]["triage_context_paths"], ["CONTRIBUTING.md"])
-        self.assertEqual(inputs["intake_build_triage_context"]["triage_context_paths"], ["README.md"])
+        self.assertEqual([entry["repo"] for entry in repos], ["o/first", "o/temida"])
+        self.assertEqual(repos[1]["triage_context_paths"], ["CONTRIBUTING.md"])
+        self.assertEqual(repos[0]["triage_context_paths"], ["README.md"])
+        self.assertEqual(inputs["read_open_prs"]["repos"][1]["repo"], "o/temida")
 
-
-    def test_empty_auto_worker_is_idle_and_not_worked(self) -> None:
-        from lokay.flows.runtime import HostPathRunResult, JournalProcess
-        from lokay.tick_all import run_all
-
-        host = HostPathRunResult(
-            run_id="auto-worker-idle",
-            path_id="auto_worker",
-            run_status="completed",
-            replayed=False,
-            ticks=1,
+    def test_idle_pr_triage_host_is_not_worked(self) -> None:
+        host = self._host(
+            path_id="pr_triage",
             processes=(
                 JournalProcess(
-                    id="intake_poll",
+                    id="process-run:pr_triage:read_open_prs",
                     status="succeeded",
                     attempt=1,
                     max_attempts=1,
-                    output={"status": "noop", "reason": "no_eligible_issues", "mutated": False},
+                    output={"status": "noop", "reason": "no_open_prs", "mutated": False},
                     error={},
+                    metadata={"correlation_path_id": "pr_triage", "effector_id": "read_open_prs"},
+                    correlation_path_id="pr_triage",
+                    effector_id="read_open_prs",
+                ),
+                JournalProcess(
+                    id="process-run:pr_triage:decide_triage_action",
+                    status="succeeded",
+                    attempt=1,
+                    max_attempts=1,
+                    output={"status": "noop", "action": "skip", "reason": "no_open_prs", "mutated": False},
+                    error={},
+                    metadata={"correlation_path_id": "pr_triage", "effector_id": "decide_triage_action"},
+                    correlation_path_id="pr_triage",
+                    effector_id="decide_triage_action",
                 ),
             ),
         )
-        runner = mock.AsyncMock(return_value=host)
-        with mock.patch("lokay.tick_all.run_package_path_async", new=runner):
-            result = asyncio.run(
-                run_all(db_path=Path("/tmp/auto-worker-idle.sqlite"), config=AgentConfig(mode="dry-run"), dry_run=True)
-            )
+        cfg = AgentConfig(
+            mode="dry-run",
+            repos=(RepoEntry(repo="o/r", board="board-r", clone_path="/tmp/o-r"),),
+        )
 
-        self.assertEqual(result["status"], "idle")
-        self.assertEqual(result["stopped_reason"], "idle")
-        self.assertFalse(result["summary"]["worked"])
-        self.assertFalse(result["any_failed"])
+        async def scenario():
+            runner = mock.AsyncMock(return_value=host)
+            with mock.patch("lokay.flows.triage.run_package_path_async", new=runner):
+                result = await run_pr_triage_decide(
+                    db_path=Path("/tmp/process-idle.sqlite"),
+                    config=cfg,
+                    dry_run=True,
+                )
+            return result, runner
 
-    def test_run_all_preserves_failed_process_evidence_and_nonzero_marker(self) -> None:
-        from lokay.tick_all import run_all
-
-        cfg = AgentConfig(mode="dry-run")
-        runner = mock.AsyncMock(return_value=self._host(failed=True))
-        with mock.patch("lokay.tick_all.run_package_path_async", new=runner):
-            result = asyncio.run(
-                run_all(db_path=Path("/tmp/auto-worker-failed.sqlite"), config=cfg, dry_run=True)
-            )
-
+        result, runner = asyncio.run(scenario())
         runner.assert_awaited_once()
-        self.assertTrue(result["any_failed"])
-        self.assertEqual(result["failed"][0]["id"], "dispatch_open_pull_request")
-        self.assertEqual(result["failed"][0]["error"]["message"], "dispatch failed")
+        self.assertEqual(runner.await_args.kwargs["path_id"], "pr_triage")
+        self.assertEqual(result.path_id, "pr_triage")
+        self.assertEqual(result.status, "idle")
+        self.assertEqual(result.stopped_reason, "no_open_prs")
+        self.assertFalse(result.summary["worked"])
+        self.assertEqual(result.failed, [])
 
-
-class IntakeFlowE2ETests(unittest.TestCase):
-    def test_flow_runs_direction_then_claim_kanban_dry(self) -> None:
-        issues = [
-            {
-                "number": 9,
-                "title": "ship it",
-                "url": "https://example/9",
-                "updatedAt": "2026-07-28T10:00:00Z",
-                "labels": [{"name": "ai:ready"}],
-            }
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            gh = Path(tmp) / "gh"
-            gh.write_text(
-                "#!/bin/sh\ncase \"$*\" in\n  *\"--json comments\"*) printf '%s\\n' '{\"comments\":[]}' ;;\n  *\"--json assignees,labels\"*) printf '%s\\n' '{\"assignees\":[],\"labels\":[{\"name\":\"ai:ready\"}]}' ;;\n  *) printf '%s\\n' '[{\"number\":9,\"title\":\"ship it\",\"url\":\"https://example/9\",\"updatedAt\":\"2026-07-28T10:00:00Z\",\"labels\":[{\"name\":\"ai:ready\"}],\"assignees\":[]}]' ;;\nesac\n",
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
-            hermes = Path(tmp) / "hermes"
-            hermes.write_text("#!/bin/sh\nprintf '%s\\n' '[]'\n", encoding="utf-8")
-            hermes.chmod(0o755)
-            cfg = AgentConfig(
-                mode="dry-run",
-                gh_cli=str(gh),
-                assignee="mikolaj92",
-                repos=(
-                    RepoEntry(
-                        repo="o/r",
-                        board="board-r",
-                        clone_path="/tmp/o-r",
-                        priority=1,
-                    ),
+    def test_failed_process_evidence_is_preserved(self) -> None:
+        host = self._host(
+            path_id="pr_triage",
+            failed=True,
+            processes=(
+                JournalProcess(
+                    id="process-run:pr_triage:read_open_prs",
+                    status="succeeded",
+                    attempt=1,
+                    max_attempts=1,
+                    output={"status": "listed", "count": 1},
+                    error={},
+                    metadata={"correlation_path_id": "pr_triage", "effector_id": "read_open_prs"},
+                    correlation_path_id="pr_triage",
+                    effector_id="read_open_prs",
                 ),
-            )
-            db = Path(tmp) / "state.sqlite"
-            fala_home = Path(fala.__file__).resolve().parents[2]
-            if not (fala_home / "mojo" / "fala").is_dir():
-                self.skipTest("installed Fala package does not include its Mojo source checkout")
-            with mock.patch.dict(os.environ, {"FALA_HOME": str(fala_home), "PATH": f"{tmp}:{os.environ.get('PATH', '')}"}, clear=False):
-                result = asyncio.run(
-                    run_intake_flow(
-                        db_path=db,
-                        config=cfg,
-                        dry_run=True,
-                        limit=5,
-                        run_id="test-intake-1",
-                        max_ticks=47,
-                    )
+                JournalProcess(
+                    id="process-run:pr_triage:decide_triage_action",
+                    status="failed",
+                    attempt=1,
+                    max_attempts=1,
+                    output={"status": "error"},
+                    error={"message": "dispatch failed"},
+                    metadata={"correlation_path_id": "pr_triage", "effector_id": "decide_triage_action"},
+                    correlation_path_id="pr_triage",
+                    effector_id="decide_triage_action",
+                ),
+            ),
+        )
+        cfg = AgentConfig(
+            mode="dry-run",
+            repos=(RepoEntry(repo="o/r", board="board-r", clone_path="/tmp/o-r"),),
+        )
+
+        async def scenario():
+            runner = mock.AsyncMock(return_value=host)
+            with mock.patch("lokay.flows.triage.run_package_path_async", new=runner):
+                return await run_pr_triage_decide(
+                    db_path=Path("/tmp/process-failed.sqlite"),
+                    config=cfg,
+                    dry_run=True,
                 )
 
-        self.assertEqual(result.failed, [], msg=str(result.processes))
-        self.assertEqual(result.stopped_reason, "worked")
-        self.assertGreaterEqual(result.ticks, len(result.processes))
-        self.assertEqual(len(result.failed), 0)
-        steps = {p["step_id"]: p for p in result.processes}
-        for step in ("read_open_issues", "decide_issue_action", "post_issue_comment", "build_issue_claim_result", "reconcile_intake_task"):
-            self.assertEqual(steps[step]["status"], "succeeded")
-        self.assertEqual(result.summary["eligible_count"], 1)
-        self.assertEqual(result.summary["issue_action"], "accept")
-        # dry-run claim/kanban use status planned (envelope)
-        self.assertIn(result.summary["claim_status"], ("planned", "claimed"))
-        self.assertEqual(result.summary["kanban_status"], "intake_reconciled")
+        result = asyncio.run(scenario())
+        self.assertEqual(result.status, "failed")
+        self.assertEqual([item["step_id"] for item in result.failed], ["decide_triage_action"])
+        self.assertEqual(result.failed[0]["error"]["message"], "dispatch failed")
+        self.assertIn("decide_triage_action", result.summary["failed_steps"])
 
-        self.assertEqual(result.fala_version, "0.7.15")
 
-    def _assert_auto_worker_repair_lane(self, conclusion: str) -> None:
-        from lokay.flows.common import process_values
-        from lokay.flows.runtime import read_journal_processes
-        from lokay.tick_all import run_all
+class ProcessRepairLaneContractTests(unittest.TestCase):
+    """Repair ownership lives on pr_repair after pr_triage decides action=repair."""
 
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            calls = root / "gh-calls"
-            remote = root / "remote.git"
-            seed = root / "seed"
-            clone = root / "clone"
-            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
-            subprocess.run(["git", "init", "-b", "main", str(seed)], check=True, capture_output=True)
-            subprocess.run(["git", "-C", str(seed), "config", "user.email", "test@example.invalid"], check=True)
-            subprocess.run(["git", "-C", str(seed), "config", "user.name", "Test"], check=True)
-            (seed / "README").write_text("fixture\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(seed), "add", "README"], check=True)
-            subprocess.run(["git", "-C", str(seed), "commit", "-m", "fixture"], check=True, capture_output=True)
-            subprocess.run(["git", "-C", str(seed), "branch", "ai/fix/9"], check=True)
-            subprocess.run(["git", "-C", str(seed), "remote", "add", "origin", str(remote)], check=True)
-            subprocess.run(["git", "-C", str(seed), "push", "origin", "main", "ai/fix/9"], check=True, capture_output=True)
-            subprocess.run(["git", "--git-dir", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"], check=True)
-            subprocess.run(["git", "clone", str(remote), str(clone)], check=True, capture_output=True)
-            head_oid = subprocess.run(["git", "-C", str(seed), "rev-parse", "ai/fix/9"], check=True, capture_output=True, text=True).stdout.strip()
-            hermes = root / "hermes"
-            hermes.write_text("#!/bin/sh\nprintf '%s\\n' '[]'\n", encoding="utf-8")
-            hermes.chmod(0o755)
-            gh = root / "gh"
-            gh.write_text(
-                "#!/bin/sh\n"
-                f"printf '%s\\n' \"$*\" >> {calls}\n"
-                "case \"$1 $2\" in\n"
-                "  \"issue list\") printf '%s\\n' '[]' ;;\n"
-                f"  \"pr list\") printf '%s\\n' '[{{\"number\":9,\"title\":\"review me\",\"url\":\"https://example/9\",\"body\":\"Needs automated repair\",\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"ai/fix/9\",\"headRefOid\":\"{head_oid}\",\"baseRefName\":\"main\",\"baseRefOid\":\"{head_oid}\",\"author\":{{\"login\":\"o\"}},\"labels\":[],\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"conclusion\":\"{conclusion}\"}}],\"commits\":[],\"closingIssuesReferences\":[{{\"number\":10}}]}}]' ;;\n"
-                "  \"issue view\") printf '%s\\n' '{\"number\":10,\"state\":\"OPEN\",\"labels\":[],\"assignees\":[]}' ;;\n"
-                "  \"pr view\") case \"$*\" in\n"
-                "    *\"--json comments\"*) printf '%s\\n' '{\"comments\":[]}' ;;\n"
-                f"    *) printf '%s\\n' '{{\"number\":9,\"title\":\"review me\",\"url\":\"https://example/9\",\"body\":\"Needs automated repair\",\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"ai/fix/9\",\"headRefOid\":\"{head_oid}\",\"baseRefName\":\"main\",\"baseRefOid\":\"{head_oid}\",\"author\":{{\"login\":\"o\"}},\"labels\":[],\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"conclusion\":\"{conclusion}\"}}],\"commits\":[],\"closingIssuesReferences\":[{{\"number\":10}}]}}' ;;\n"
-                "  esac ;;\n"
-                "  *) printf '%s\\n' 'unexpected gh mutation' >&2; exit 97 ;;\n"
-                "esac\n",
-                encoding="utf-8",
+    def test_pr_triage_decides_repair_without_owning_repair_effectors(self) -> None:
+        for conclusion, expected_checks in (
+            ("FAILURE", "checks_failed"),
+            ("SUCCESS", "checks_passed"),
+        ):
+            with self.subTest(conclusion=conclusion):
+                host = HostPathRunResult(
+                    run_id=f"pr-triage-{conclusion.lower()}",
+                    path_id="pr_triage",
+                    run_status="completed",
+                    replayed=False,
+                    ticks=4,
+                    processes=(
+                        JournalProcess(
+                            id="run:pr_triage:read_open_prs",
+                            status="succeeded",
+                            attempt=1,
+                            max_attempts=1,
+                            output={"status": "listed", "count": 1, "prs": [{"number": 9, "repo": "o/r"}]},
+                            error={},
+                            metadata={"correlation_path_id": "pr_triage", "effector_id": "read_open_prs"},
+                            correlation_path_id="pr_triage",
+                            effector_id="read_open_prs",
+                        ),
+                        JournalProcess(
+                            id="run:pr_triage:select_fix_pr",
+                            status="succeeded",
+                            attempt=1,
+                            max_attempts=1,
+                            output={"status": "selected", "repo": "o/r", "number": 9},
+                            error={},
+                            metadata={"correlation_path_id": "pr_triage", "effector_id": "select_fix_pr"},
+                            correlation_path_id="pr_triage",
+                            effector_id="select_fix_pr",
+                        ),
+                        JournalProcess(
+                            id="run:pr_triage:evaluate_checks",
+                            status="succeeded",
+                            attempt=1,
+                            max_attempts=1,
+                            output={"status": expected_checks},
+                            error={},
+                            metadata={"correlation_path_id": "pr_triage", "effector_id": "evaluate_checks"},
+                            correlation_path_id="pr_triage",
+                            effector_id="evaluate_checks",
+                        ),
+                        JournalProcess(
+                            id="run:pr_triage:evaluate_test_evidence",
+                            status="succeeded",
+                            attempt=1,
+                            max_attempts=1,
+                            output={"status": "evidence_missing"},
+                            error={},
+                            metadata={"correlation_path_id": "pr_triage", "effector_id": "evaluate_test_evidence"},
+                            correlation_path_id="pr_triage",
+                            effector_id="evaluate_test_evidence",
+                        ),
+                        JournalProcess(
+                            id="run:pr_triage:decide_triage_action",
+                            status="succeeded",
+                            attempt=1,
+                            max_attempts=1,
+                            output={"status": "decided", "action": "repair", "reason": "missing_test_evidence"},
+                            error={},
+                            metadata={"correlation_path_id": "pr_triage", "effector_id": "decide_triage_action"},
+                            correlation_path_id="pr_triage",
+                            effector_id="decide_triage_action",
+                        ),
+                    ),
+                )
+                cfg = AgentConfig(
+                    mode="dry-run",
+                    repos=(RepoEntry(repo="o/r", board="board-r", clone_path="/tmp/o-r"),),
+                )
+
+                async def scenario():
+                    runner = mock.AsyncMock(return_value=host)
+                    with mock.patch("lokay.flows.triage.run_package_path_async", new=runner):
+                        result = await run_pr_triage_decide(
+                            db_path=Path("/tmp/process-repair.sqlite"),
+                            config=cfg,
+                            dry_run=True,
+                            limit=1,
+                        )
+                    return result, runner
+
+                result, runner = asyncio.run(scenario())
+                kwargs = runner.await_args.kwargs
+                self.assertEqual(kwargs["path_id"], "pr_triage")
+                self.assertEqual(set(kwargs["effector_inputs"]), set(PROCESS_CONTRACTS["pr_triage"].allowed_effectors))
+                self.assertNotIn("invoke_repair_omp", kwargs["effector_inputs"])
+                self.assertNotIn("add_repair_worktree", kwargs["effector_inputs"])
+                self.assertEqual(result.path_id, "pr_triage")
+                self.assertEqual(result.action, "repair")
+                self.assertTrue(result.summary["worked"])
+                self.assertEqual(result.failed, [])
+                steps = {item["step_id"]: item for item in result.processes}
+                self.assertEqual(steps["evaluate_checks"]["output"]["status"], expected_checks)
+                self.assertEqual(steps["evaluate_test_evidence"]["output"]["status"], "evidence_missing")
+                self.assertEqual(steps["decide_triage_action"]["output"]["action"], "repair")
+
+    def test_pr_repair_contract_owns_repair_lane_and_forbids_triage_siblings(self) -> None:
+        contract = PROCESS_CONTRACTS["pr_repair"]
+        self.assertEqual(contract.path_id, "pr_repair")
+        for effector_id in (
+            "read_repair_context",
+            "read_repair_remote_head",
+            "add_repair_worktree",
+            "decide_repair_attempt",
+            "invoke_repair_omp",
+            "build_repair_receipt",
+        ):
+            self.assertIn(effector_id, contract.allowed_effectors)
+        for sibling in (
+            "read_open_prs",
+            "decide_triage_action",
+            "merge_pr",
+            "post_pr_comment",
+        ):
+            self.assertIn(sibling, contract.forbidden_sibling_effectors)
+            self.assertNotIn(sibling, contract.allowed_effectors)
+
+        cfg = AgentConfig(
+            mode="dry-run",
+            repos=(RepoEntry(repo="o/r", board="board-r", clone_path="/tmp/o-r"),),
+            raw={"candidate": "a" * 64},
+        )
+        effective = build_effective_run(
+            contract=contract,
+            process_id="pr_repair",
+            run_id="repair-run",
+            db_path=Path("/tmp/repair.sqlite"),
+            cfg=cfg,
+            generation="test-generation",
+            candidate_id="a" * 64,
+            config_sha256="b" * 64,
+            command="lokay-process-pr_repair",
+            predecessor_evidence={
+                "groups": [["pr_decision"]],
+                "receipts": {
+                    "pr_decision": {"digest": "c" * 64, "status": "ready"},
+                },
+                "pr_decision": "c" * 64,
+            },
+        )
+        self.assertEqual(effective["inputs"]["path_id"], "pr_repair")
+        self.assertEqual(set(effective["effector_inputs"]), set(contract.allowed_effectors))
+        self.assertIn("decide_repair_attempt", effective["effector_inputs"])
+        self.assertNotIn("decide_triage_action", effective["effector_inputs"])
+        self.assertEqual(effective["max_ticks"], contract.max_ticks)
+        self.assertEqual(effective["inputs"]["pr_decision"], "c" * 64)
+
+    def test_repair_attempt_stays_noop_when_executor_disabled(self) -> None:
+        from lokay.steps import repair
+
+        request = {
+            "input": {
+                "dry_run": True,
+                "path_id": "pr_repair",
+                "executor_enabled": False,
+                "conduction": {
+                    "verify_repair_worktree": {
+                        "ok": True,
+                        "status": "ready",
+                        "worktree_path": "/tmp/wt",
+                        "verified_head": "abc",
+                    },
+                    "read_repair_omp_preconditions": {
+                        "ok": True,
+                        "status": "ready",
+                        "worktree_path": "/tmp/wt",
+                        "pre_head": "abc",
+                    },
+                },
+            },
+            "config": {"executor_enabled": False},
+        }
+        out = repair.decide_repair_attempt(request)
+        self.assertEqual(out["status"], "noop")
+        self.assertFalse(out.get("authorize", True))
+        self.assertIn(out.get("reason"), {"executor_disabled", "dry_run", "disabled"})
+
+
+class RetiredAggregateActivationTests(unittest.TestCase):
+    def test_run_all_is_retired_for_aggregate_auto_worker(self) -> None:
+        with self.assertRaises(RuntimeError) as raised:
+            asyncio.run(
+                run_all(
+                    db_path=Path("/tmp/auto-worker.sqlite"),
+                    config=AgentConfig(mode="dry-run"),
+                    dry_run=True,
+                )
             )
-            gh.chmod(0o755)
-            cfg = AgentConfig(
-                mode="dry-run",
-                gh_cli=str(gh),
-                raw={"candidate": "a" * 64},
-                paths=PathConfig(
-                    worktree_root=str(root / "worktrees"),
-                    dispatch_receipts=str(root / "dispatch"),
-                    task_receipts=str(root / "receipts"),
-                    merge_receipts=str(root / "merge"),
-                    active_issue=str(root / "active"),
-                ),
-                repos=(RepoEntry(repo="o/r", board="board-r", clone_path=str(clone), priority=1),),
+        message = str(raised.exception)
+        self.assertIn("auto_worker", message)
+        self.assertIn("lokay.process", message)
+        for process_id in ("repo_issue_poll", "pr_triage", "pr_repair", "cleanup"):
+            self.assertIn(process_id, message)
+
+    def test_run_intake_flow_is_retired_for_aggregate_issue_intake(self) -> None:
+        with self.assertRaises(RuntimeError) as raised:
+            asyncio.run(
+                run_intake_flow(
+                    db_path=Path("/tmp/issue-intake.sqlite"),
+                    config=AgentConfig(mode="dry-run"),
+                    dry_run=True,
+                )
             )
-            db = root / "state.sqlite"
-            fala_home = Path(fala.__file__).resolve().parents[2]
-            if not (fala_home / "mojo" / "fala").is_dir():
-                self.skipTest("installed Fala package does not include its Mojo source checkout")
-            with mock.patch.dict(os.environ, {"FALA_HOME": str(fala_home), "PATH": f"{root}:{os.environ.get('PATH', '')}"}, clear=False):
-                result = asyncio.run(run_all(db_path=db, config=cfg, dry_run=True, limit=1))
-            processes = read_journal_processes(db, result["run_id"])
-            call_log = calls.read_text(encoding="utf-8")
-        by_step = {process.step_id: process for process in processes}
-        self.assertEqual(result["path_id"], "auto_worker")
-        self.assertEqual(by_step["intake_read_open_issues"].status, "succeeded")
-        self.assertIsNone(process_values({"output": by_step["intake_select_issue_candidate"].output})["selected"])
-        self.assertEqual(by_step["triage_read_open_prs"].status, "succeeded")
-        selected = process_values({"output": by_step["triage_select_fix_pr"].output})
-        self.assertEqual((selected["repo"], selected["number"]), ("o/r", 9))
-        checks = process_values({"output": by_step["triage_evaluate_checks"].output})
-        evidence = process_values({"output": by_step["triage_evaluate_test_evidence"].output})
-        self.assertEqual(checks["status"], "checks_passed" if conclusion == "SUCCESS" else "checks_failed")
-        self.assertEqual(evidence["status"], "evidence_missing")
-        decision = process_values({"output": by_step["triage_decide_triage_action"].output})
-        self.assertEqual(decision["action"], "repair")
-        lifecycle = process_values({"output": by_step["lifecycle_decide_lifecycle_transition"].output})
-        self.assertEqual(lifecycle["action"], "resume_repair")
-        repair_context = process_values({"output": by_step["triage_read_repair_context"].output})
-        remote_head = process_values({"output": by_step["triage_read_repair_remote_head"].output})
-        self.assertEqual(repair_context["status"], "read")
-        self.assertEqual(remote_head["status"], "read")
-        self.assertEqual(remote_head["remote_oid"], head_oid)
-        preparation = process_values({"output": by_step["triage_add_repair_worktree"].output})
-        self.assertEqual(preparation["status"], "planned")
-        attempt = process_values({"output": by_step["triage_decide_repair_attempt"].output})
-        self.assertEqual(attempt["status"], "noop")
-        self.assertFalse(attempt["authorize"])
-        self.assertEqual(attempt["reason"], "executor_disabled")
-        self.assertEqual(process_values({"output": by_step["triage_post_pr_comment"].output})["status"], "noop")
-        failed = [
-            (process.step_id, process.status, process.error, process_values({"output": process.output}))
-            for process in processes
-            if process.status != "succeeded"
-        ]
-        self.assertFalse(failed, msg=str(failed))
-        self.assertFalse(result["any_failed"])
-        self.assertNotIn("pr comment", call_log)
-
-    def test_auto_worker_runs_pr_lane_when_issue_intake_is_idle(self) -> None:
-        self._assert_auto_worker_repair_lane("FAILURE")
-
-    def test_auto_worker_repairs_green_pr_with_missing_test_evidence(self) -> None:
-        self._assert_auto_worker_repair_lane("SUCCESS")
+        message = str(raised.exception)
+        self.assertIn("issue_intake", message)
+        self.assertIn("lokay.process", message)
+        self.assertIn("repo_issue_poll", message)
 
 
 if __name__ == "__main__":

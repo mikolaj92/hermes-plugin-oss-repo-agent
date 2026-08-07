@@ -7,6 +7,7 @@ import plistlib
 import hashlib
 import os
 import subprocess
+import shutil
 import sys
 import tempfile
 import types
@@ -14,6 +15,11 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
+import copy
+
+from lokay.registry import canonical_toml, load_registry
+
+import tools.deployment_parity as parity
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,7 +47,14 @@ class DeploymentCandidateTests(unittest.TestCase):
     def setUp(self):
         self.module = load_plugin()
         self.commands = self.module.commands
-        self.cfg = self.commands.LokayConfig.from_mapping({"repos": []})
+        data = copy.deepcopy(load_registry(ROOT / "config.toml").data)
+        data["mode"] = "dry-run"
+        data["automation"]["automerge"] = True
+        data["automation"]["require_human_approval"] = False
+        data["automation"]["require_checks"] = True
+        data["automation"]["require_test_evidence"] = True
+        data["executor"]["enabled"] = True
+        self.cfg = self.commands.LokayConfig.from_mapping(data)
 
     def _fala_git_clean(self):
         project_root = ROOT.resolve()
@@ -61,14 +74,13 @@ class DeploymentCandidateTests(unittest.TestCase):
             return real_run(argv, *args, **kwargs)
 
         return patch.object(self.commands.subprocess, "run", side_effect=fake_run)
-    def test_init_force_overwrite_preserves_original_on_fsync_failure(self):
+    def test_init_rejects_existing_destination_without_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "config.toml"
             original = "mode = 'dry-run'\noriginal = true\n"
             target.write_text(original, encoding="utf-8")
-            with patch.object(self.commands.os, "fsync", side_effect=OSError("disk full")):
-                with self.assertRaisesRegex(OSError, "disk full"):
-                    self.commands.init_project(str(target), "owner/repo", "owner-board", "/tmp/clones", "/tmp/worktrees", None, True)
+            with self.assertRaisesRegex(self.commands.ConfigError, "config already exists"):
+                self.commands.init_project(str(target), str(ROOT))
             self.assertEqual(target.read_text(encoding="utf-8"), original)
             self.assertEqual(list(target.parent.glob(f".{target.name}.*")), [])
 
@@ -81,15 +93,47 @@ class DeploymentCandidateTests(unittest.TestCase):
             candidates = root / "candidates"
             self.assertEqual(list(candidates.iterdir()) if candidates.exists() else [], [])
 
-    def _render(self, root: Path, *, mode: str = "dry-run", config_path: Path | None = None, db_path: Path | None = None, autonomous: bool = True, top_level_precedence: bool = False) -> Path:
+    SUPERVISOR_LABEL = "com.mikolaj92.lokay.supervisor"
+
+
+    def _write_render_config(
+        self,
+        config: Path,
+        *,
+        mode: str = "dry-run",
+        autonomous: bool = True,
+    ) -> None:
+        data = copy.deepcopy(load_registry(ROOT / "config.toml").data)
+        data["mode"] = mode
+        data["automation"]["automerge"] = bool(autonomous)
+        data["automation"]["require_human_approval"] = not bool(autonomous)
+        data["automation"]["require_checks"] = True
+        data["automation"]["require_test_evidence"] = True
+        data["executor"]["enabled"] = bool(autonomous)
+        config.write_bytes(canonical_toml(data))
+
+
+    def _render(
+        self,
+        root: Path,
+        *,
+        mode: str = "dry-run",
+        config_path: Path | None = None,
+        db_path: Path | None = None,
+        autonomous: bool = True,
+    ) -> Path:
         config = config_path or root / "config.toml"
-        top_level = "automerge = true\n" if top_level_precedence else ""
-        config.write_text(
-            f"mode = '{mode}'\n{top_level}[automation]\nautomerge = {str(autonomous or top_level_precedence).lower()}\nrequire_human_approval = {str(not autonomous).lower()}\nrequire_checks = true\nrequire_test_evidence = true\n[executor]\nenabled = {str(autonomous).lower()}\n",
-            encoding="utf-8",
+        self._write_render_config(
+            config,
+            mode=mode,
+            autonomous=autonomous,
         )
         db = db_path or root / "state.sqlite"
         lock_data = self.commands.rewrite_fala_git_to_bundled_lock((ROOT / "uv.lock").read_bytes())
+        data = copy.deepcopy(load_registry(config).data)
+        cfg = self.commands.LokayConfig.from_mapping(data)
+        processes = self.commands._catalog_processes(cfg, config)
+        config_bytes = self.commands._materialize_candidate_config(config, processes)
         identity = {
             "schema": 1,
             "mode": mode,
@@ -98,39 +142,27 @@ class DeploymentCandidateTests(unittest.TestCase):
             "fala_commit": "b5f9a6d500a442a1c79060a862fe4b9da87bc98f",
             "lock_hash": hashlib.sha256(lock_data).hexdigest(),
             "config_path": str(config.absolute()),
-            "config_hash": hashlib.sha256(config.read_bytes()).hexdigest(),
+            "config_hash": hashlib.sha256(config_bytes).hexdigest(),
             "db_path": str(db.absolute()),
             "metadata_path": "source/metadata.json",
             "lock_path": "source/project/uv.lock",
             "config_artifact_path": "source/config.toml",
             "revision_path": "source/revision.txt",
             "policy": {
-                "automerge": autonomous,
-                "require_human_approval": not autonomous,
-                "require_checks": True,
-                "require_test_evidence": True,
-                "executor_enabled": autonomous,
+                "automerge": bool(cfg.automerge),
+                "require_human_approval": bool(cfg.require_human_approval),
+                "require_checks": bool(cfg.require_checks),
+                "require_test_evidence": bool(cfg.require_test_evidence),
+                "executor_enabled": bool(cfg.executor.enabled),
             },
-            "repos": [],
+            "repos": self.commands._identity_repos(cfg, config),
+            "processes": processes,
         }
         candidate_id = hashlib.sha256((json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
         candidate = root / "candidates" / candidate_id
         real_which = self.commands.shutil.which
         def fake_which(command, **kwargs):
-            return "/usr/bin/uv" if command == "uv" else real_which(command, **kwargs)
-        cfg = self.commands.LokayConfig.from_mapping(
-            {
-                "mode": mode,
-                "automation": {
-                    "automerge": autonomous,
-                    "require_human_approval": not autonomous,
-                    "require_checks": True,
-                    "require_test_evidence": True,
-                },
-                "executor": {"enabled": autonomous},
-                "repos": [],
-            }
-        )
+            return real_which(command, **kwargs)
         with self._fala_git_clean(), patch.object(self.commands, "_read_git_revision", return_value="plugin-commit"), patch.object(
             self.commands.shutil, "which", side_effect=fake_which
         ):
@@ -199,7 +231,7 @@ class DeploymentCandidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config.toml"
-            config.write_text("mode = 'dry-run'\n", encoding="utf-8")
+            self._write_render_config(config)
             fala_root = (ROOT.parent / "Fala").resolve()
             real_run = self.commands.subprocess.run
 
@@ -221,7 +253,7 @@ class DeploymentCandidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config.toml"
-            config.write_text("mode = 'dry-run'\n", encoding="utf-8")
+            self._write_render_config(config)
             fala_root = (ROOT.parent / "Fala").resolve()
             project_root = ROOT.resolve()
             real_run = self.commands.subprocess.run
@@ -446,7 +478,7 @@ class DeploymentCandidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config.toml"
-            config.write_text("mode = 'dry-run'\n", encoding="utf-8")
+            self._write_render_config(config)
             real_run = self.commands.subprocess.run
 
             def wrong_version(argv, *args, **kwargs):
@@ -469,7 +501,7 @@ class DeploymentCandidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config.toml"
-            config.write_text("mode = 'dry-run'\n", encoding="utf-8")
+            self._write_render_config(config)
             project_root = ROOT.resolve()
             real_run = self.commands.subprocess.run
 
@@ -583,7 +615,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 self.commands._bootout_legacy_mutators(states)
             self.assertIn(["launchctl", "bootout", f"user/{uid}/{health}"], calls)
     def test_fala_gui_only_state_selects_gui_domain(self):
-        label = "com.mikolaj92.lokay.fala-tick-all"
+        label = self.SUPERVISOR_LABEL
         uid = self.commands.os.getuid()
         def fake_state(observed_label, domain):
             return {"label": observed_label, "domain": domain, "loaded": domain == f"gui/{uid}", "available": True}
@@ -592,7 +624,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(self.commands._launchctl_intended_domain(label, states), f"gui/{uid}")
 
     def test_fala_user_only_state_selects_user_domain(self):
-        label = "com.mikolaj92.lokay.fala-tick-all"
+        label = self.SUPERVISOR_LABEL
         uid = self.commands.os.getuid()
         def fake_state(observed_label, domain):
             return {"label": observed_label, "domain": domain, "loaded": domain == f"user/{uid}", "available": True}
@@ -601,7 +633,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(self.commands._launchctl_intended_domain(label, states), f"user/{uid}")
 
     def test_fala_unavailable_user_domain_selects_and_verifies_gui(self):
-        label = "com.mikolaj92.lokay.fala-tick-all"
+        label = self.SUPERVISOR_LABEL
         uid = self.commands.os.getuid()
         states = {
             f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False, "available": False},
@@ -612,7 +644,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.commands._verify_launchctl_exact(label, f"gui/{uid}")
 
     def test_fala_unavailable_intended_domain_fails_closed(self):
-        label = "com.mikolaj92.lokay.fala-tick-all"
+        label = self.SUPERVISOR_LABEL
         uid = self.commands.os.getuid()
         states = {
             f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False, "available": False},
@@ -623,7 +655,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 self.commands._verify_launchctl_exact(label, f"user/{uid}")
 
     def test_fala_duplicate_domains_fail_closed(self):
-        label = "com.mikolaj92.lokay.fala-tick-all"
+        label = self.SUPERVISOR_LABEL
         uid = self.commands.os.getuid()
         states = {
             f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": True},
@@ -633,7 +665,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.commands._launchctl_intended_domain(label, states)
 
     def test_fala_cutover_bootstraps_only_intended_domain(self):
-        label = "com.mikolaj92.lokay.fala-tick-all"
+        label = self.SUPERVISOR_LABEL
         uid = self.commands.os.getuid()
         states = {
             f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False},
@@ -656,7 +688,7 @@ class DeploymentCandidateTests(unittest.TestCase):
         self.assertIn(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], calls)
         self.assertNotIn(["launchctl", "bootstrap", f"user/{uid}", str(plist)], calls)
     def test_fala_gui_domain_state_restores_on_rollback(self):
-        label = "com.mikolaj92.lokay.fala-tick-all"
+        label = self.SUPERVISOR_LABEL
         uid = self.commands.os.getuid()
         states = {
             f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": False},
@@ -690,7 +722,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             root = Path(directory)
             candidate = self._render(root)
             uid = self.commands.os.getuid()
-            label = "com.mikolaj92.lokay.fala-tick-all"
+            label = self.SUPERVISOR_LABEL
             states = {
                 f"user/{uid}": {"label": label, "domain": f"user/{uid}", "loaded": True, "available": True},
                 f"gui/{uid}": {"label": label, "domain": f"gui/{uid}", "loaded": False, "available": False},
@@ -805,6 +837,10 @@ class DeploymentCandidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             candidate = self._render(root)
+            stale_agents = root / "home" / "Library" / "LaunchAgents"
+            stale_agents.mkdir(parents=True)
+            for label in self.commands.STALE_FALA_LABELS:
+                (stale_agents / f"{label}.plist").write_bytes(f"stale:{label}".encode())
 
             before_manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
             stable_identity = before_manifest["identity"]
@@ -814,27 +850,62 @@ class DeploymentCandidateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 1, "", "not loaded")
                 return subprocess.CompletedProcess(argv, 0, "OK\n", "")
 
+            generation_path = root / "home" / ".hermes" / "lokay" / "generation"
             with patch.object(self.commands.Path, "home", return_value=root / "home"), patch.object(
                 self.commands, "_snapshot_legacy_mutators", return_value={}
-            ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(self.commands.subprocess, "run", side_effect=fake_run):
+            ), patch.object(self.commands, "_verify_launchctl_exact"), patch.object(
+                self.commands.subprocess, "run", side_effect=fake_run
+            ), patch.dict(os.environ, {"HOME": str(root / "home"), "HERMES_LOKAY_GENERATION_PATH": str(generation_path)}, clear=False):
                 result = self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
 
             candidate_id = result["candidate_id"]
             version = root / "versions" / candidate_id
-            installed = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist"
+            label = self.SUPERVISOR_LABEL
+            installed = root / "home" / "Library" / "LaunchAgents" / f"{label}.plist"
             document = plistlib.loads(installed.read_bytes())
             arguments = document["ProgramArguments"]
             environment = document["EnvironmentVariables"]
-            runtime_root = root / "runtime" / candidate_id
-            self.assertEqual(environment["UV_PROJECT_ENVIRONMENT"], str((runtime_root / ".venv").resolve()))
-            self.assertEqual(environment["UV_CACHE_DIR"], str((runtime_root / "cache").resolve()))
-            self.assertEqual(environment["FALA_HOME"], str((version / "source" / "project" / "Fala").resolve()))
-            self.assertEqual(environment["FALA_EFFECTOR_ROOT"], str((runtime_root / "effectors").resolve()))
-            self.assertEqual(document["WorkingDirectory"], str((version / "source" / "project").resolve()))
-            self.assertTrue((runtime_root / "effectors").is_dir())
-            self.assertEqual(environment["PATH"].split(":" )[0], str((root / "home" / ".local" / "share" / "mise" / "shims").resolve()))
-            self.assertIn(str((root / "home" / ".local" / "bin").resolve()), environment["PATH"].split(":"))
-            self.assertEqual(arguments[2], "--frozen")
+            project = version / "source" / "project"
+            self.assertEqual(document["Label"], label)
+            self.assertEqual(
+                set(environment),
+                {
+                    "HOME",
+                    "PYTHONPATH",
+                    "FALA_HOME",
+                    "FALA_EFFECTOR_ROOT",
+                    "FALA_CANDIDATE_ID",
+                    "HERMES_LOKAY_GENERATION",
+                    "HERMES_LOKAY_PROCESS_STATE_ROOT",
+                },
+            )
+            self.assertEqual(environment["HOME"], str((root / "home").resolve()))
+            self.assertEqual(environment["PYTHONPATH"], str((project / "src").resolve()))
+            self.assertEqual(environment["FALA_HOME"], str((project / "Fala").resolve()))
+            self.assertEqual(environment["FALA_EFFECTOR_ROOT"], str((project / "effectors").resolve()))
+            self.assertEqual(environment["FALA_CANDIDATE_ID"], candidate_id)
+            self.assertTrue(generation_path.is_file())
+            self.assertEqual(generation_path.read_text(encoding="utf-8").strip(), candidate_id)
+            self.assertEqual(environment["HERMES_LOKAY_GENERATION"], candidate_id)
+            self.assertEqual(
+                environment["HERMES_LOKAY_PROCESS_STATE_ROOT"],
+                str((Path(before_manifest["db_path"]).resolve().parent / "process-state")),
+            )
+            self.assertEqual(document["WorkingDirectory"], str(project.resolve()))
+            self.assertEqual(
+                arguments[:3],
+                [str((project / ".venv" / "bin" / "python").resolve()), "-m", "lokay.supervisor"],
+            )
+            self.assertIn("--json", arguments)
+            self.assertEqual(arguments[arguments.index("--config") + 1], str((version / "source" / "config.toml").resolve()))
+            self.assertEqual(Path(arguments[arguments.index("--db") + 1]).resolve(), Path(before_manifest["db_path"]).resolve())
+            mode_flags = [value for value in arguments if value in ("--dry-run", "--live")]
+            self.assertEqual(mode_flags, ["--dry-run"])
+            self.assertTrue(installed.is_file(), label)
+            agents = root / "home" / "Library" / "LaunchAgents"
+            self.assertEqual(sorted(path.name for path in agents.glob("*.plist")), [f"{label}.plist"])
+            self.assertFalse((agents / "com.mikolaj92.lokay.fala-tick-all.plist").exists())
+            self.assertFalse((agents / "com.mikolaj92.lokay.repo-issue-poll.plist").exists())
             self.assertTrue((version / "source" / "project" / "uv.lock").is_file())
             self.assertTrue((version / "source" / "project" / "README.md").is_file())
             self.assertTrue((version / "source" / "project" / "LICENSE").is_file())
@@ -873,9 +944,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             expected_native = deployed_build.parent / "__mojocache__" / f"_native.hash-{module._source_hash(version / 'source' / 'project' / 'Fala')}.so"
             self.assertTrue(expected_native.is_file(), f"expected {expected_native.name}; built {[path.name for path in expected_native.parent.glob('_native.hash-*.so')]}")
             self.assertNotIn(str(root / "candidates"), " ".join(arguments))
-            self.assertEqual(arguments[arguments.index("--project") + 1], str((version / "source" / "project").resolve()))
             self.assertEqual(arguments[arguments.index("--config") + 1], str((version / "source" / "config.toml").resolve()))
-            import tools.deployment_parity as parity
             self.assertTrue(parity.validate_fala_candidate(version, deployment_root=root)["ok"])
             version_manifest = json.loads((version / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(version_manifest["candidate_id"], expected_candidate_id)
@@ -884,14 +953,37 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual((root / "current").resolve(), version.resolve())
             previous = json.loads((root / "previous.json").read_text(encoding="utf-8"))
             self.assertIsNone(previous["candidate_id"])
-            self.assertEqual(version_manifest["runtime_identity"]["working_directory"], str((version / "source" / "project").resolve()))
+            self.assertEqual(len(version_manifest["runtime_identity"]), 1)
+            self.assertEqual(len(version_manifest["program_arguments"]), 1)
+            self.assertEqual(len(version_manifest["dispatch_commands"]), 12)
+            runtime0 = version_manifest["runtime_identity"][0]
+            self.assertEqual(runtime0["label"], label)
+            self.assertEqual(runtime0["program_arguments"], arguments)
+            self.assertEqual(version_manifest["program_arguments"][0], arguments)
+            self.assertIsNone(runtime0["start_interval"])
+            self.assertTrue(runtime0["run_at_load"])
+            self.assertTrue(runtime0["keep_alive"])
+            self.assertEqual(runtime0["process_type"], "Background")
+            self.assertEqual(runtime0["working_directory"], str((version / "source" / "project").resolve()))
             expected_log_dir = (root / "logs" / expected_candidate_id).resolve()
-            self.assertEqual(Path(version_manifest["runtime_identity"]["standard_out_path"]).parent, expected_log_dir)
-            self.assertEqual(Path(version_manifest["runtime_identity"]["standard_error_path"]).parent, expected_log_dir)
-            self.assertEqual(version_manifest["runtime_identity"]["plist_sha256"], hashlib.sha256(installed.read_bytes()).hexdigest())
-            plist_artifact = version_manifest["artifacts"]["launchd/com.mikolaj92.lokay.fala-tick-all.plist"]
+            self.assertEqual(Path(runtime0["standard_out_path"]).parent, expected_log_dir)
+            self.assertEqual(Path(runtime0["standard_error_path"]).parent, expected_log_dir)
+            self.assertEqual(Path(runtime0["standard_out_path"]).name, f"{label}.out.log")
+            self.assertEqual(Path(runtime0["standard_error_path"]).name, f"{label}.err.log")
+            self.assertEqual(runtime0["plist_sha256"], hashlib.sha256(installed.read_bytes()).hexdigest())
+            plist_artifact = version_manifest["artifacts"][f"launchd/{label}.plist"]
             self.assertEqual(plist_artifact["sha256"], hashlib.sha256(installed.read_bytes()).hexdigest())
             self.assertEqual(plist_artifact["bytes"], installed.stat().st_size)
+            for process_id, dispatch in zip(
+                [
+                    "repo_issue_poll", "issue_triage", "issue_feedback", "issue_split", "issue_close",
+                    "issue_ready", "issue_to_pr", "pr_triage", "pr_repair", "pr_merge", "cleanup", "cleanup_reconcile",
+                ],
+                version_manifest["dispatch_commands"],
+            ):
+                self.assertEqual(dispatch[1:4], ["-m", "lokay.process", f"lokay-process-{process_id}"])
+                self.assertEqual(dispatch[0], str((project / ".venv" / "bin" / "python").resolve()))
+
     def test_durability_failure_prevents_cutover(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1011,7 +1103,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
 
             old_current = (root / "current").resolve()
-            launch_agent = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist"
+            launch_agent = root / "home" / "Library" / "LaunchAgents" / f"{self.SUPERVISOR_LABEL}.plist"
             old_plist = launch_agent.read_bytes()
             old_previous = (root / "previous.json").read_bytes()
             second = self._render(root, config_path=root / "other.toml", db_path=root / "other.sqlite")
@@ -1098,7 +1190,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                 self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
             old_current = (root / "current").resolve()
             import tools.deployment_parity as parity
-            launch_agent = root / "home" / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist"
+            launch_agent = root / "home" / "Library" / "LaunchAgents" / f"{self.SUPERVISOR_LABEL}.plist"
             old_plist = launch_agent.read_bytes()
             old_previous = (root / "previous.json").read_bytes()
             second = self._render(root, config_path=root / "other.toml", db_path=root / "other.sqlite")
@@ -1127,10 +1219,20 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertEqual(result["candidate_id"], manifest["candidate_id"])
             self.assertTrue(result["ok"])
 
-    def test_candidate_policy_uses_top_level_precedence(self):
+    def test_candidate_policy_uses_canonical_automation_values(self):
         with tempfile.TemporaryDirectory() as directory:
-            candidate = self._render(Path(directory), top_level_precedence=True)
-            import tools.deployment_parity as parity
+            candidate = self._render(Path(directory))
+            manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["policy"],
+                {
+                    "automerge": True,
+                    "require_human_approval": False,
+                    "require_checks": True,
+                    "require_test_evidence": True,
+                    "executor_enabled": True,
+                },
+            )
             self.assertTrue(parity.validate_fala_candidate(candidate)["ok"])
 
     def test_autonomous_policy_is_accepted_in_live_mode(self):
@@ -1153,11 +1255,32 @@ class DeploymentCandidateTests(unittest.TestCase):
             import tools.deployment_parity as parity
             self.assertTrue(parity.validate_fala_candidate(candidate)["ok"])
             manifest = json.loads(candidate.joinpath("manifest.json").read_text(encoding="utf-8"))
-            argv = manifest["program_arguments"]
+            argv_list = manifest["program_arguments"]
+            self.assertEqual(len(argv_list), 1)
+            argv = argv_list[0]
             self.assertIn("--live", argv)
             self.assertNotIn("--dry-run", argv)
-            self.assertEqual(manifest["runtime_identity"]["start_interval"], 600)
-            self.assertFalse(manifest["runtime_identity"]["run_at_load"])
+            self.assertEqual(argv[1:3], ["-m", "lokay.supervisor"])
+            self.assertIn("--json", argv)
+            runtime_list = manifest["runtime_identity"]
+            self.assertEqual(len(runtime_list), 1)
+            self.assertEqual(runtime_list[0]["label"], self.SUPERVISOR_LABEL)
+            self.assertEqual(runtime_list[0]["program_arguments"], argv)
+            self.assertIsNone(runtime_list[0]["start_interval"])
+            self.assertTrue(runtime_list[0]["run_at_load"])
+            self.assertTrue(runtime_list[0]["keep_alive"])
+            dispatch = manifest["dispatch_commands"]
+            self.assertEqual(len(dispatch), 12)
+            for process_id, command in zip(
+                [
+                    "repo_issue_poll", "issue_triage", "issue_feedback", "issue_split", "issue_close",
+                    "issue_ready", "issue_to_pr", "pr_triage", "pr_repair", "pr_merge", "cleanup", "cleanup_reconcile",
+                ],
+                dispatch,
+            ):
+                self.assertEqual(command[1:4], ["-m", "lokay.process", f"lokay-process-{process_id}"])
+                self.assertIn("--live", command)
+                self.assertNotIn("--dry-run", command)
 
     def test_candidate_policy_is_required_and_autonomous(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1253,16 +1376,40 @@ class DeploymentCandidateTests(unittest.TestCase):
                     ("latest", '{"mode":"dry-run"}', now, now),
                 )
                 db.commit()
-            repos = root / "repos.txt"
-            repos.write_text("\n", encoding="utf-8")
+            config_path = root / "config.toml"
+            data = copy.deepcopy(load_registry(ROOT / "config.toml").data)
+            data["mode"] = "dry-run"
+            data["automation"]["automerge"] = True
+            data["automation"]["require_human_approval"] = False
+            data["automation"]["require_checks"] = True
+            data["automation"]["require_test_evidence"] = True
+            data["executor"]["enabled"] = True
+            config_path.write_bytes(canonical_toml(data))
+            render_config = root / "candidate-config.toml"
+            candidate = self._render(root, config_path=render_config, db_path=db_path, autonomous=True)
+            deployment = root / "deployment"
+            version = deployment / "versions" / candidate.name
+            version.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(candidate, version)
+            self.commands._promote_version_runtime(version, deployment, candidate.name)
+            (deployment / "current").symlink_to(version, target_is_directory=True)
+            home = root / "home"
+            installed = home / "Library" / "LaunchAgents"
+            installed.mkdir(parents=True, exist_ok=True)
+            primary_plist = installed / f"{self.SUPERVISOR_LABEL}.plist"
+            shutil.copy2(version / "launchd" / primary_plist.name, primary_plist)
             env = os.environ.copy()
+            env.pop("HERMES_LOKAY_REPOS_FILE", None)
+            env.pop("HERMES_LOKAY_WORKTREE_ROOT", None)
             env.update(
                 {
+                    "HOME": str(home),
                     "HERMES_LOKAY_FALA_DB": str(db_path),
                     "HERMES_LOKAY_FALA_REQUIRE_LIVE": "0",
-                    "HERMES_LOKAY_REPOS_FILE": str(repos),
+                    "HERMES_LOKAY_CONFIG": str(config_path),
+                    "HERMES_LOKAY_FALA_PLIST": str(primary_plist),
                     "HERMES_LOKAY_LOG_DIR": str(root / "logs"),
-                    "HERMES_LOKAY_DEPLOYMENT_ROOT": str(root / "deployment"),
+                    "HERMES_LOKAY_DEPLOYMENT_ROOT": str(deployment),
                 }
             )
             completed = subprocess.run(
@@ -1273,6 +1420,10 @@ class DeploymentCandidateTests(unittest.TestCase):
                 timeout=30,
             )
             self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("candidate gate=PASS", completed.stdout)
+            combined = completed.stdout + completed.stderr
+            self.assertNotIn("managed-python-unavailable", combined)
+            self.assertNotIn("interpreter-unavailable", combined)
             self.assertIn("unresolved-runs:", completed.stdout)
             self.assertIn("old-failed", completed.stdout)
             self.assertIn("old-created", completed.stdout)
@@ -1309,7 +1460,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertTrue(any(call[:2] == ["launchctl", "print"] for call in calls))
             self.assertTrue(any(call[:2] == ["launchctl", "bootout"] for call in calls))
             self.assertFalse((root / "current").exists())
-            self.assertFalse((home / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist").exists())
+            self.assertFalse((home / "Library" / "LaunchAgents" / f"{self.SUPERVISOR_LABEL}.plist").exists())
 
     def _legacy_loaded_snapshot(self, home: Path, labels: list[str], *, repair: bool = True) -> dict[str, dict]:
         uid = self.commands.os.getuid()
@@ -1388,7 +1539,7 @@ class DeploymentCandidateTests(unittest.TestCase):
             ]
             fala_bootstraps = [
                 i for i, call in enumerate(calls)
-                if call[:2] == ["launchctl", "bootstrap"] and "lokay.fala-tick-all" in " ".join(call)
+                if call[:2] == ["launchctl", "bootstrap"] and self.SUPERVISOR_LABEL in " ".join(call)
             ]
             self.assertTrue(legacy_bootouts)
             self.assertTrue(fala_bootstraps)
@@ -1444,6 +1595,108 @@ class DeploymentCandidateTests(unittest.TestCase):
             self.assertFalse(any(call[:2] == ["launchctl", "bootstrap"] for call in calls))
             self.assertFalse((root / "current").exists())
 
+    def test_bootstrap_failure_restores_stale_plists_and_loaded_domain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            home = root / "home"
+            agents = home / "Library" / "LaunchAgents"
+            stale_labels = [
+                self.commands.AGGREGATE_FALA_LABEL,
+                "com.mikolaj92.lokay.repo-issue-poll",
+            ]
+            stale_bytes = {
+                label: f"original:{label}".encode("utf-8")
+                for label in stale_labels
+            }
+            agents.mkdir(parents=True)
+            for label, data in stale_bytes.items():
+                (agents / f"{label}.plist").write_bytes(data)
+            loaded_label = self.commands.AGGREGATE_FALA_LABEL
+            user_domain = f"user/{self.commands.os.getuid()}"
+            loaded_domains = {(user_domain, loaded_label)}
+            calls: list[list[str]] = []
+
+            def failing_run(argv, **kwargs):
+                command = list(argv)
+                calls.append(command)
+                if command[:2] == ["launchctl", "print"]:
+                    domain, label = command[2].rsplit("/", 1)
+                    if (domain, label) in loaded_domains:
+                        return subprocess.CompletedProcess(command, 0, "state = running\\n", "")
+                    return subprocess.CompletedProcess(command, 1, "", "not loaded")
+                if command[:2] == ["launchctl", "bootout"]:
+                    domain, label = command[2].rsplit("/", 1)
+                    loaded_domains.discard((domain, label))
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if command[:2] == ["plutil", "-lint"]:
+                    return subprocess.CompletedProcess(command, 0, "OK\\n", "")
+                if command[:2] == ["launchctl", "bootstrap"]:
+                    domain = command[2]
+                    label = Path(command[3]).stem
+                    if label == self.SUPERVISOR_LABEL:
+                        raise subprocess.CalledProcessError(1, command)
+                    loaded_domains.add((domain, label))
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch.object(self.commands.Path, "home", return_value=home), patch.object(
+                self.commands, "_snapshot_legacy_mutators", return_value={}
+            ), patch.object(self.commands, "_bootout_legacy_mutators"), patch.object(
+                self.commands, "_verify_launchctl_exact"
+            ), patch.object(self.commands.subprocess, "run", side_effect=failing_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "rolled back after launchd failure"):
+                    self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+
+            for label, data in stale_bytes.items():
+                self.assertEqual((agents / f"{label}.plist").read_bytes(), data)
+            self.assertIn((user_domain, loaded_label), loaded_domains)
+            self.assertFalse((root / "current").exists())
+
+
+    def test_stale_plist_unlink_failure_rolls_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            home = root / "home"
+            agents = home / "Library" / "LaunchAgents"
+            agents.mkdir(parents=True)
+            stale_label = self.commands.AGGREGATE_FALA_LABEL
+            stale_target = agents / f"{stale_label}.plist"
+            stale_bytes = b"cannot-remove-stale-plist"
+            stale_target.write_bytes(stale_bytes)
+            current = root / "current"
+            unlink_calls = 0
+            original_unlink = Path.unlink
+
+            def refuse_stale_unlink(path, *args, **kwargs):
+                nonlocal unlink_calls
+                if path == stale_target:
+                    unlink_calls += 1
+                    raise OSError("unlink refused")
+                return original_unlink(path, *args, **kwargs)
+
+            def fake_run(argv, **kwargs):
+                if argv[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "not loaded")
+                if argv[:2] == ["plutil", "-lint"]:
+                    return subprocess.CompletedProcess(argv, 0, "OK\\n", "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch.object(self.commands.Path, "home", return_value=home), patch.object(
+                self.commands, "_snapshot_legacy_mutators", return_value={}
+            ), patch.object(self.commands, "_bootout_legacy_mutators"), patch.object(
+                self.commands, "_verify_launchctl_exact"
+            ), patch.object(self.commands.subprocess, "run", side_effect=fake_run), patch.object(
+                Path, "unlink", autospec=True, side_effect=refuse_stale_unlink
+            ):
+                with self.assertRaisesRegex(self.commands.ConfigError, "rolled back after launchd failure: unlink refused"):
+                    self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+
+            self.assertEqual(unlink_calls, 1)
+            self.assertEqual(stale_target.read_bytes(), stale_bytes)
+            self.assertFalse(current.exists())
+
     def test_legacy_bootout_failure_aborts_before_fala_bootstrap(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1471,12 +1724,12 @@ class DeploymentCandidateTests(unittest.TestCase):
 
             self.assertFalse(
                 any(
-                    call[:2] == ["launchctl", "bootstrap"] and "lokay.fala-tick-all" in " ".join(call)
+                    call[:2] == ["launchctl", "bootstrap"] and self.SUPERVISOR_LABEL in " ".join(call)
                     for call in calls
                 )
             )
             self.assertFalse((root / "current").exists())
-            self.assertFalse((home / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist").exists())
+            self.assertFalse((home / "Library" / "LaunchAgents" / f"{self.SUPERVISOR_LABEL}.plist").exists())
 
     def test_fala_bootstrap_failure_restores_legacy_and_previous_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1494,10 +1747,10 @@ class DeploymentCandidateTests(unittest.TestCase):
             ), patch.object(self.commands, "_bootout_legacy_mutators"), patch.object(
                 self.commands, "_verify_launchctl_exact"
             ), patch.object(self.commands.subprocess, "run", side_effect=successful_run):
-                self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
 
+                self.commands.deploy_fala(self.cfg, str(first), True, deployment_root=str(root))
             old_current = (root / "current").resolve()
-            launch_agent = home / "Library" / "LaunchAgents" / "com.mikolaj92.lokay.fala-tick-all.plist"
+            launch_agent = home / "Library" / "LaunchAgents" / f"{self.SUPERVISOR_LABEL}.plist"
             old_plist = launch_agent.read_bytes()
             second = self._render(root, config_path=root / "other.toml", db_path=root / "other.sqlite")
             legacy_label = self.commands.LEGACY_SHELL_MUTATOR_LABELS[0]
@@ -1523,7 +1776,7 @@ class DeploymentCandidateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 1, "", "not loaded")
                 if argv[:2] == ["plutil", "-lint"]:
                     return subprocess.CompletedProcess(argv, 0, "OK\n", "")
-                if argv[:2] == ["launchctl", "bootstrap"] and "lokay.fala-tick-all" in " ".join(argv):
+                if argv[:2] == ["launchctl", "bootstrap"] and self.SUPERVISOR_LABEL in " ".join(argv):
                     raise subprocess.CalledProcessError(1, argv)
                 if argv[:2] == ["launchctl", "bootstrap"] and argv[-1] == str(legacy_plist):
                     restored = True
@@ -1553,6 +1806,210 @@ class DeploymentCandidateTests(unittest.TestCase):
                 )
             )
             self.assertTrue(any(call[:2] == ["launchctl", "bootout"] and call[2].endswith(f"/{legacy_label}") for call in calls))
+
+    def test_pre_staging_domain_state_does_not_drive_cutover_rollback(self):
+        """Pre-staging launchd state must not drive cutover domain or rollback restore."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            home = root / "home"
+            agents = home / "Library" / "LaunchAgents"
+            agents.mkdir(parents=True)
+            label = self.SUPERVISOR_LABEL
+            uid = self.commands.os.getuid()
+            user_domain = f"user/{uid}"
+            gui_domain = f"gui/{uid}"
+            (agents / f"{label}.plist").write_bytes(b"original-supervisor")
+            managed_labels = [
+                self.SUPERVISOR_LABEL,
+                *[item for item in self.commands.STALE_FALA_LABELS if item != self.SUPERVISOR_LABEL],
+            ]
+            wave_size = len(managed_labels)
+            probe_count = 0
+            calls: list[list[str]] = []
+            written_previous: dict = {}
+
+            def unloaded(label_arg: str) -> dict[str, dict]:
+                return {
+                    user_domain: {
+                        "label": label_arg,
+                        "domain": user_domain,
+                        "loaded": False,
+                        "available": True,
+                    },
+                    gui_domain: {
+                        "label": label_arg,
+                        "domain": gui_domain,
+                        "loaded": False,
+                        "available": True,
+                    },
+                }
+
+            def early_states(label_arg: str) -> dict[str, dict]:
+                # Pre-staging: both domains unloaded so an early-only path would
+                # bootstrap/restore user/. Late path must instead honor gui load.
+                return unloaded(label_arg)
+
+            def late_states(label_arg: str) -> dict[str, dict]:
+                states = unloaded(label_arg)
+                if label_arg == label:
+                    states[gui_domain] = {
+                        "label": label_arg,
+                        "domain": gui_domain,
+                        "loaded": True,
+                        "available": True,
+                    }
+                return states
+
+            def domain_states(label_arg: str) -> dict[str, dict]:
+                nonlocal probe_count
+                wave = probe_count // wave_size
+                probe_count += 1
+                if wave == 0:
+                    return early_states(label_arg)
+                return late_states(label_arg)
+
+            real_atomic_write = self.commands._atomic_write
+
+            def capturing_atomic_write(path, data, *args, **kwargs):
+                target = Path(path)
+                if target.name == "previous.json":
+                    payload = data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
+                    written_previous["payload"] = json.loads(payload.decode("utf-8"))
+                return real_atomic_write(path, data, *args, **kwargs)
+
+            def failing_run(argv, **kwargs):
+                command = list(argv)
+                calls.append(command)
+                if command[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(command, 1, "", "not loaded")
+                if command[:2] == ["plutil", "-lint"]:
+                    return subprocess.CompletedProcess(command, 0, "OK\n", "")
+                if command[:2] == ["launchctl", "bootstrap"]:
+                    raise subprocess.CalledProcessError(1, command)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch.object(self.commands.Path, "home", return_value=home), patch.object(
+                self.commands, "_snapshot_legacy_mutators", return_value={}
+            ), patch.object(self.commands, "_bootout_legacy_mutators"), patch.object(
+                self.commands, "_launchctl_domain_states", side_effect=domain_states
+            ), patch.object(self.commands, "_verify_launchctl_unloaded"), patch.object(
+                self.commands, "_atomic_write", side_effect=capturing_atomic_write
+            ), patch.object(self.commands.subprocess, "run", side_effect=failing_run):
+                with self.assertRaisesRegex(self.commands.ConfigError, "rolled back after launchd failure"):
+                    self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+
+            # One early wave (validation) + one late wave (cutover/rollback).
+            self.assertEqual(probe_count, 2 * wave_size)
+            self.assertIn("payload", written_previous)
+            previous_loaded = written_previous["payload"]["loaded_state"][label]
+            self.assertTrue(previous_loaded[gui_domain]["loaded"])
+            self.assertFalse(previous_loaded[user_domain]["loaded"])
+            self.assertEqual(written_previous["payload"]["domain"], gui_domain)
+
+            supervisor_bootstraps = [
+                call
+                for call in calls
+                if call[:2] == ["launchctl", "bootstrap"] and call[-1].endswith(f"{label}.plist")
+            ]
+            # Late snapshot: cutover targets gui and rollback restores gui.
+            # An early-only snapshot would have bootstrapped user once and skipped restore.
+            self.assertEqual(len(supervisor_bootstraps), 2)
+            self.assertTrue(all(call[2] == gui_domain for call in supervisor_bootstraps))
+            self.assertFalse((root / "current").exists())
+            self.assertEqual((agents / f"{label}.plist").read_bytes(), b"original-supervisor")
+
+    def test_late_domain_snapshot_skips_restore_when_unloaded_after_staging(self):
+        """Rollback must not re-bootstrap a domain that only looked loaded pre-staging."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = self._render(root)
+            home = root / "home"
+            agents = home / "Library" / "LaunchAgents"
+            agents.mkdir(parents=True)
+            label = self.SUPERVISOR_LABEL
+            uid = self.commands.os.getuid()
+            user_domain = f"user/{uid}"
+            gui_domain = f"gui/{uid}"
+            (agents / f"{label}.plist").write_bytes(b"original-supervisor")
+            managed_labels = [
+                self.SUPERVISOR_LABEL,
+                *[item for item in self.commands.STALE_FALA_LABELS if item != self.SUPERVISOR_LABEL],
+            ]
+            wave_size = len(managed_labels)
+            probe_count = 0
+            calls: list[list[str]] = []
+
+            def unloaded(label_arg: str) -> dict[str, dict]:
+                return {
+                    user_domain: {
+                        "label": label_arg,
+                        "domain": user_domain,
+                        "loaded": False,
+                        "available": True,
+                    },
+                    gui_domain: {
+                        "label": label_arg,
+                        "domain": gui_domain,
+                        "loaded": False,
+                        "available": True,
+                    },
+                }
+
+            def early_states(label_arg: str) -> dict[str, dict]:
+                states = unloaded(label_arg)
+                if label_arg == label:
+                    states[user_domain] = {
+                        "label": label_arg,
+                        "domain": user_domain,
+                        "loaded": True,
+                        "available": True,
+                    }
+                return states
+
+            def late_states(label_arg: str) -> dict[str, dict]:
+                return unloaded(label_arg)
+
+            def domain_states(label_arg: str) -> dict[str, dict]:
+                nonlocal probe_count
+                wave = probe_count // wave_size
+                probe_count += 1
+                if wave == 0:
+                    return early_states(label_arg)
+                return late_states(label_arg)
+
+            def failing_run(argv, **kwargs):
+                command = list(argv)
+                calls.append(command)
+                if command[:2] == ["launchctl", "print"]:
+                    return subprocess.CompletedProcess(command, 1, "", "not loaded")
+                if command[:2] == ["plutil", "-lint"]:
+                    return subprocess.CompletedProcess(command, 0, "OK\n", "")
+                if command[:2] == ["launchctl", "bootstrap"]:
+                    raise subprocess.CalledProcessError(1, command)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch.object(self.commands.Path, "home", return_value=home), patch.object(
+                self.commands, "_snapshot_legacy_mutators", return_value={}
+            ), patch.object(self.commands, "_bootout_legacy_mutators"), patch.object(
+                self.commands, "_launchctl_domain_states", side_effect=domain_states
+            ), patch.object(self.commands, "_verify_launchctl_unloaded"), patch.object(
+                self.commands.subprocess, "run", side_effect=failing_run
+            ):
+                with self.assertRaisesRegex(self.commands.ConfigError, "rolled back after launchd failure"):
+                    self.commands.deploy_fala(self.cfg, str(candidate), True, deployment_root=str(root))
+
+            self.assertEqual(probe_count, 2 * wave_size)
+            supervisor_bootstraps = [
+                call
+                for call in calls
+                if call[:2] == ["launchctl", "bootstrap"] and call[-1].endswith(f"{label}.plist")
+            ]
+            # Late snapshot is unloaded, so cutover bootstraps user once and rollback must not re-bootstrap.
+            self.assertEqual(len(supervisor_bootstraps), 1)
+            self.assertEqual(supervisor_bootstraps[0][2], user_domain)
+            self.assertFalse((root / "current").exists())
+            self.assertEqual((agents / f"{label}.plist").read_bytes(), b"original-supervisor")
 
     def test_deploy_fala_rejects_symlink_deployment_root(self):
         with tempfile.TemporaryDirectory() as directory:

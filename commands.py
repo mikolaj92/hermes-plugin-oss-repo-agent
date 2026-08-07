@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import stat
 import plistlib
 import re
 import shutil
@@ -17,7 +18,7 @@ from argparse import ArgumentParser, Namespace
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows development only
@@ -29,6 +30,28 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 from . import github_cli, kanban
 from .config import ConfigError, LokayConfig, default_config_path, load_config
 from .executor import CommandSpec, Runner, planned_command
+from lokay.registry import (
+    PROCESS_IDS,
+    ConfigError as RegistryConfigError,
+    load_registry,
+    process_defaults,
+)
+
+AGGREGATE_FALA_LABEL = "com.mikolaj92.lokay.fala-tick-all"
+SUPERVISOR_LABEL = "com.mikolaj92.lokay.supervisor"
+STALE_FALA_LABELS = (
+    AGGREGATE_FALA_LABEL,
+    *(f"com.mikolaj92.lokay.{process_id.replace('_', '-')}" for process_id in PROCESS_IDS),
+)
+SUPERVISOR_MODULE = "lokay.supervisor"
+DEFAULT_GENERATION_PATH = Path("~/.hermes/lokay/generation")
+PROCESS_ENV_FENCE_KEYS = (
+    "FALA_CANDIDATE_ID",
+    "HERMES_LOKAY_GENERATION",
+    "HERMES_LOKAY_PROCESS_STATE_ROOT",
+)
+
+
 
 INTAKE_ASSIGNEE = "lokay-intake"
 FALA_PINNED_COMMIT = "b5f9a6d500a442a1c79060a862fe4b9da87bc98f"
@@ -79,12 +102,7 @@ def setup_parser(parser: ArgumentParser) -> None:
     subparsers = parser.add_subparsers(dest="lokay_command")
     subparsers.required = True
     init = subparsers.add_parser("init")
-    init.add_argument("--repo", default="owner/example-repo")
-    init.add_argument("--board", default="owner-example-repo")
-    init.add_argument("--clone-root", default="./repos")
-    init.add_argument("--worktree-root", default="./worktrees")
-    init.add_argument("--assignee", default=None)
-    init.add_argument("--force", action="store_true")
+    init.add_argument("--project-root", default=None)
     subparsers.add_parser("validate")
     bootstrap = subparsers.add_parser("bootstrap")
     bootstrap.add_argument("--apply", action="store_true")
@@ -133,12 +151,7 @@ def run_from_args(args: Namespace, runner: Runner | None = None) -> dict[str, An
     if command == "init":
         return init_project(
             getattr(args, "config", None),
-            str(getattr(args, "repo", "owner/example-repo")),
-            str(getattr(args, "board", "owner-example-repo")),
-            str(getattr(args, "clone_root", "./repos")),
-            str(getattr(args, "worktree_root", "./worktrees")),
-            getattr(args, "assignee", None),
-            bool(getattr(args, "force", False)),
+            getattr(args, "project_root", None),
         )
     if command == "validate-fala-candidate":
         from .tools.deployment_parity import validate_fala_candidate
@@ -182,19 +195,81 @@ def run_from_args(args: Namespace, runner: Runner | None = None) -> dict[str, An
     raise ConfigError(f"unknown command: {command}")
 
 
-def init_project(config_path: str | None, repo: str, board: str, clone_root: str, worktree_root: str, assignee: str | None, force: bool) -> dict[str, Any]:
+
+
+def _validated_init_source(project_root: str | None) -> tuple[bytes, str, str]:
+    import importlib.resources
+
+    if project_root is not None:
+        source_path: Path | None = (Path(project_root).expanduser() / "config.toml").absolute()
+        source_label = str(source_path)
+        resource_context = None
+    else:
+        try:
+            resource = importlib.resources.files("lokay").joinpath("config.toml")
+            resource_context = importlib.resources.as_file(resource)
+        except (ImportError, OSError, TypeError) as exc:
+            raise ConfigError("packaged init source config is unavailable") from exc
+        source_path = None
+        source_label = "lokay/config.toml"
+
+    def read_source(path: Path, label: str) -> tuple[bytes, str]:
+        if path.suffix.lower() != ".toml":
+            raise ConfigError(f"config must use .toml extension: {label}")
+        try:
+            source_stat = path.lstat()
+        except OSError as exc:
+            raise ConfigError(f"init source config is missing: {label}") from exc
+        if path.is_symlink() or not path.is_file() or not stat.S_ISREG(source_stat.st_mode):
+            raise ConfigError(f"init source config must be a regular file: {label}")
+        try:
+            source_bytes = path.read_bytes()
+        except OSError as exc:
+            raise ConfigError(f"unable to read init source config: {label}") from exc
+        source_hash = hashlib.sha256(source_bytes).hexdigest()
+        try:
+            registry = load_registry(path)
+        except RegistryConfigError as exc:
+            raise ConfigError(str(exc)) from exc
+        except (OSError, TypeError, ValueError) as exc:
+            raise ConfigError(f"invalid init source config: {label}") from exc
+        if registry.raw_bytes != source_bytes or registry.sha256 != source_hash:
+            raise ConfigError(f"init source config changed while reading: {label}")
+        return source_bytes, source_hash
+
+    if resource_context is None:
+        assert source_path is not None
+        source_bytes, source_hash = read_source(source_path, source_label)
+    else:
+        try:
+            with resource_context as materialized:
+                source_bytes, source_hash = read_source(Path(materialized), source_label)
+        except (ImportError, OSError, TypeError) as exc:
+            raise ConfigError("packaged init source config is unavailable") from exc
+    return source_bytes, source_hash, source_label
+
+
+def init_project(config_path: str | None, project_root: str | None = None) -> dict[str, Any]:
     target = Path(config_path).expanduser() if config_path else default_config_path()
-    if target.exists() and not force:
-        raise ConfigError(f"config already exists: {target}; pass --force to overwrite")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    leaf = repo.split("/")[-1] or "example-repo"
-    text = starter_config(repo, board, clone_root, worktree_root, leaf, assignee or repo.split("/", 1)[0])
-    _atomic_write(target, text.encode("utf-8"))
+    if target.suffix.lower() != ".toml":
+        raise ConfigError(f"config must use .toml extension: {target}")
+    if os.path.lexists(target):
+        try:
+            destination_stat = target.lstat()
+        except OSError as exc:
+            raise ConfigError(f"config destination is unavailable: {target}") from exc
+        if target.is_symlink() or not stat.S_ISREG(destination_stat.st_mode):
+            raise ConfigError(f"config destination already exists: {target}")
+        raise ConfigError(f"config already exists: {target}")
+    source_bytes, source_hash, source_name = _validated_init_source(project_root)
+    _atomic_write(target, source_bytes)
     config_arg = str(target)
     return {
         "ok": True,
         "config": config_arg,
         "created": [config_arg],
+        "source": source_name,
+        "sha256": source_hash,
         "next_commands": [
             f"hermes lokay --config {config_arg} validate",
             f"hermes lokay --config {config_arg} intake --limit 3",
@@ -204,39 +279,6 @@ def init_project(config_path: str | None, repo: str, board: str, clone_root: str
     }
 
 
-def starter_config(repo: str, board: str, clone_root: str, worktree_root: str, leaf: str, assignee: str) -> str:
-    clone_path = f"{clone_root.rstrip('/')}/{leaf}"
-    return "\n".join([
-        "version: 1",
-        "mode: dry-run",
-        f"clone_root: {clone_root}",
-        f"worktree_root: {worktree_root}",
-        "branch_prefix: ai/fix",
-        "automerge: false",
-        "github:",
-        "  cli: gh",
-        "  default_limit: 10",
-        f"  assignee: {assignee}",
-        "labels:",
-        "  ready: ai:ready",
-        "  in_progress: ai:in-progress",
-        "  blocked: ai:blocked",
-        "  pr_opened: ai:pr-opened",
-        "  generated: ai:generated",
-        "executor:",
-        "  enabled: false",
-        "  command: opencode",
-        "  timeout_seconds: 1800",
-        "repos:",
-        f"  - repo: {repo}",
-        f"    board: {board}",
-        f"    clone_path: {clone_path}",
-        "    trusted_authors: []",
-        "    trusted_branch_prefixes: [ai/fix]",
-        "    allowed_base_branches: [main]",
-        "    external_pr_policy: block",
-        "",
-    ])
 
 
 def safety_guards() -> list[str]:
@@ -631,6 +673,18 @@ def _fsync_tree(root: Path) -> None:
         elif path.is_dir():
             _fsync_directory(path)
     _fsync_directory(root)
+def _seal_tree(root: Path) -> None:
+    """Remove write bits from a tree while preserving read and execute bits."""
+    try:
+        for path in sorted(root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+            if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                continue
+            path.chmod(path.stat().st_mode & 0o555)
+        if not root.is_symlink():
+            root.chmod(root.stat().st_mode & 0o555)
+    except OSError as exc:
+        raise ConfigError(f"unable to seal immutable tree: {root}") from exc
+
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
@@ -681,44 +735,368 @@ def _deployment_lock(root: Path):
             handle.close()
 
 
-def _render_fala_plist(*, project_root: Path, config_path: Path, db_path: Path, mode: str, home: Path, uv_bin: str, log_dir: Path) -> bytes:
-    template = project_root / "templates" / "launchd" / "lokay-fala-tick-all.plist.template"
+def _toml_literal(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_literal(item) for item in value) + "]"
+    raise ConfigError(f"unsupported TOML literal type: {type(value).__name__}")
+
+
+def _materialize_candidate_config(config_path: Path, processes: list[dict[str, Any]]) -> bytes:
+    """Return candidate config bytes, injecting the process catalog when missing."""
+    try:
+        raw = config_path.read_bytes()
+        document = tomllib.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, TypeError) as exc:
+        raise ConfigError(f"unable to read candidate source config: {exc}") from exc
+    existing = document.get("processes")
+    if isinstance(existing, list) and existing:
+        ordered_ids = [str(item.get("id") or "") for item in existing if isinstance(item, dict)]
+        if ordered_ids != list(PROCESS_IDS):
+            raise ConfigError("source config process catalog must match canonical PROCESS_IDS order")
+        identity_rows = [_process_identity_row(item) for item in existing]
+        if identity_rows != processes:
+            raise ConfigError("source config process catalog does not match identity processes")
+        return raw
+    defaults_by_id = {str(item["id"]): dict(item) for item in process_defaults()}
+    text = raw.decode("utf-8")
+    if text and not text.endswith("\n"):
+        text += "\n"
+    for process in processes:
+        process_id = str(process["id"])
+        row = defaults_by_id.get(process_id)
+        if row is None:
+            raise ConfigError(f"missing process defaults for {process_id}")
+        row = dict(row)
+        row["enabled"] = bool(process["enabled"])
+        row["interval_seconds"] = int(process["interval_seconds"])
+        row["command"] = str(process["command"])
+        # Stable identity no longer carries launchd_label; drop any defaults residue.
+        row.pop("launchd_label", None)
+        text += "\n[[processes]]\n"
+        for key, value in row.items():
+            text += f"{key} = {_toml_literal(value)}\n"
+    return text.encode("utf-8")
+
+
+def _process_identity_row(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a full process record onto the stable identity key set."""
+    process_id = str(record.get("id") or "")
+    if not process_id:
+        raise ConfigError("process id is missing")
+    command = str(record.get("command") or f"lokay-process-{process_id}")
+    expected_command = f"lokay-process-{process_id}"
+    if command != expected_command:
+        raise ConfigError(f"process {process_id} command must be {expected_command!r}, got {command!r}")
+    try:
+        interval = int(record.get("interval_seconds"))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"process {process_id} interval_seconds must be an integer") from exc
+    if interval < 1:
+        raise ConfigError(f"process {process_id} interval_seconds must be >= 1")
+    enabled = record.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"process {process_id} enabled must be a boolean")
+    return {
+        "id": process_id,
+        "enabled": enabled,
+        "interval_seconds": interval,
+        "command": command,
+    }
+
+
+def _catalog_processes(cfg: LokayConfig, config_path: Path) -> list[dict[str, Any]]:
+    """Resolve the ordered 12-process identity catalog, fail closed on mismatch."""
+    del cfg
+    try:
+        raw_processes = [dict(item) for item in load_registry(config_path).processes]
+    except (RegistryConfigError, OSError, TypeError, ValueError) as exc:
+        raise ConfigError(f"unable to load canonical process catalog: {exc}") from exc
+    if len(raw_processes) != len(PROCESS_IDS):
+        raise ConfigError(
+            f"process catalog must declare exactly {len(PROCESS_IDS)} processes, got {len(raw_processes)}"
+        )
+    ordered: list[dict[str, Any]] = []
+    for expected_id, record in zip(PROCESS_IDS, raw_processes):
+        process_id = str(record.get("id") or "")
+        if process_id != expected_id:
+            raise ConfigError(
+                f"process catalog must declare process IDs in canonical order: expected {expected_id!r}, got {process_id!r}"
+            )
+        ordered.append(_process_identity_row(record))
+    if len(ordered) != len(PROCESS_IDS):
+        raise ConfigError(f"process catalog must declare exactly {len(PROCESS_IDS)} processes")
+    return ordered
+
+
+def _identity_repos(cfg: LokayConfig, config_path: Path) -> list[dict[str, Any]]:
+    """Return the canonical ordered repository inventory."""
+    del cfg
+    try:
+        return [dict(item) for item in load_registry(config_path).repos]
+    except (RegistryConfigError, OSError, TypeError, ValueError, KeyError) as exc:
+        raise ConfigError(f"unable to load canonical repository inventory: {exc}") from exc
+
+
+def _process_state_root(db_path: Path) -> Path:
+    """Durable process-state root co-located with the Fala database."""
+    return Path(db_path).expanduser().resolve().parent / "process-state"
+
+
+def _generation_pointer_path() -> Path:
+    configured = (
+        os.environ.get("HERMES_LOKAY_GENERATION_PATH")
+        or os.environ.get("LOKAY_GENERATION_PATH")
+        or ""
+    ).strip()
+    if configured:
+        return Path(configured).expanduser()
+    return DEFAULT_GENERATION_PATH.expanduser()
+
+
+def _process_environment(
+    *,
+    home: Path,
+    project_root: Path,
+    db_path: Path,
+    candidate_id: str,
+) -> dict[str, str]:
+    """Build the exact launchd EnvironmentVariables for the supervisor job."""
+    if not re.fullmatch(r"[0-9a-f]{64}", str(candidate_id or "")):
+        raise ConfigError("process environment requires a 64-hex candidate_id")
+    return {
+        "HOME": str(Path(home).resolve()),
+        "PYTHONPATH": str(Path(project_root) / "src"),
+        "FALA_HOME": str(Path(project_root) / "Fala"),
+        "FALA_EFFECTOR_ROOT": str(Path(project_root) / "effectors"),
+        "FALA_CANDIDATE_ID": str(candidate_id),
+        "HERMES_LOKAY_GENERATION": str(candidate_id),
+        "HERMES_LOKAY_PROCESS_STATE_ROOT": str(_process_state_root(db_path)),
+    }
+
+
+def _publish_generation(candidate_id: str) -> Path:
+    """Atomically publish ~/.hermes/lokay/generation (or configured path)."""
+    if not re.fullmatch(r"[0-9a-f]{64}", str(candidate_id or "")):
+        raise ConfigError("generation publish requires a 64-hex candidate_id")
+    path = _generation_pointer_path()
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        parent.chmod(0o700)
+    except OSError:
+        pass
+    fd, name = tempfile.mkstemp(prefix=".generation.", suffix=".tmp", dir=str(parent))
+    temp = Path(name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(str(candidate_id) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(str(temp), str(path))
+        try:
+            dir_fd = os.open(str(parent), os.O_RDONLY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        path.chmod(0o600)
+    except Exception as exc:
+        if temp.exists():
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+        raise ConfigError(f"unable to publish generation fence: {exc}") from exc
+    return path
+
+
+def _supervisor_program_arguments(
+    *,
+    python_path: Path,
+    config_path: Path,
+    db_path: Path,
+    mode: str,
+) -> list[str]:
+    return [
+        str(python_path),
+        "-m",
+        SUPERVISOR_MODULE,
+        "--config",
+        str(config_path),
+        "--db",
+        str(db_path),
+        f"--{mode}",
+        "--json",
+    ]
+
+
+def _process_program_arguments(
+    *,
+    python_path: Path,
+    command: str,
+    config_path: Path,
+    db_path: Path,
+    mode: str,
+) -> list[str]:
+    return [
+        str(python_path),
+        "-m",
+        "lokay.process",
+        command,
+        "--config",
+        str(config_path),
+        "--db",
+        str(db_path),
+        f"--{mode}",
+        "--json",
+    ]
+
+
+def _dispatch_commands(
+    *,
+    python_path: Path,
+    config_path: Path,
+    db_path: Path,
+    mode: str,
+    processes: list[dict[str, Any]],
+) -> list[list[str]]:
+    """Ordered twelve child argv lists in PROCESS_IDS order."""
+    if len(processes) != len(PROCESS_IDS):
+        raise ConfigError(f"dispatch_commands requires exactly {len(PROCESS_IDS)} processes")
+    commands: list[list[str]] = []
+    for expected_id, process in zip(PROCESS_IDS, processes):
+        process_id = str(process.get("id") or "")
+        if process_id != expected_id:
+            raise ConfigError(
+                f"dispatch_commands process order mismatch: expected {expected_id!r}, got {process_id!r}"
+            )
+        command = str(process.get("command") or "")
+        expected_command = f"lokay-process-{process_id}"
+        if command != expected_command:
+            raise ConfigError(f"dispatch command for {process_id} must be {expected_command!r}")
+        commands.append(
+            _process_program_arguments(
+                python_path=python_path,
+                command=command,
+                config_path=config_path,
+                db_path=db_path,
+                mode=mode,
+            )
+        )
+    return commands
+
+
+def _assert_no_forbidden_launchd_artifacts(launchd_dir: Path) -> None:
+    """Reject aggregate and per-process launchd plists in candidate/version trees."""
+    if not launchd_dir.is_dir():
+        raise ConfigError(f"launchd directory is missing: {launchd_dir}")
+    forbidden = launchd_dir / f"{AGGREGATE_FALA_LABEL}.plist"
+    if forbidden.exists():
+        raise ConfigError("aggregate production launchd artifact is forbidden")
+    expected = launchd_dir / f"{SUPERVISOR_LABEL}.plist"
+    for path in sorted(launchd_dir.glob("*.plist")):
+        if path.resolve() != expected.resolve():
+            raise ConfigError(f"per-process production launchd artifact is forbidden: {path.name}")
+    if not expected.is_file():
+        raise ConfigError(f"missing supervisor launchd artifact: {SUPERVISOR_LABEL}")
+
+
+def _render_supervisor_plist(
+    *,
+    project_root: Path,
+    config_path: Path,
+    db_path: Path,
+    mode: str,
+    home: Path,
+    log_dir: Path,
+    candidate_id: str,
+) -> bytes:
+    template = project_root / "templates" / "launchd" / "lokay-supervisor.plist.template"
     if not template.is_file():
-        raise ConfigError(f"Fala launchd template not found: {template}")
+        raise ConfigError(f"Fala launchd supervisor template not found: {template}")
+    python_path = project_root / ".venv" / "bin" / "python"
+    pythonpath = project_root / "src"
+    fala_home = project_root / "Fala"
+    effector_root = project_root / "effectors"
+    if not python_path.is_absolute() or python_path.is_symlink() or not python_path.is_file() or not os.access(python_path, os.X_OK):
+        raise ConfigError(f"Fala candidate interpreter is unavailable: {python_path}")
+    if not pythonpath.is_absolute() or not pythonpath.is_dir() or pythonpath.is_symlink():
+        raise ConfigError(f"Fala candidate source is unavailable: {pythonpath}")
+    if not fala_home.is_dir() or not effector_root.is_dir():
+        raise ConfigError("Fala candidate runtime directories are missing")
+    environment = _process_environment(
+        home=home,
+        project_root=project_root,
+        db_path=db_path,
+        candidate_id=candidate_id,
+    )
     values = {
-        "{{UV_BIN}}": str(uv_bin),
+        "{{LABEL}}": SUPERVISOR_LABEL,
+        "{{PYTHON_PATH}}": str(python_path),
+        "{{PYTHONPATH}}": environment["PYTHONPATH"],
+        "{{FALA_HOME}}": environment["FALA_HOME"],
+        "{{FALA_EFFECTOR_ROOT}}": environment["FALA_EFFECTOR_ROOT"],
         "{{PROJECT_ROOT}}": str(project_root),
-        "{{REPO_ROOT}}": str(project_root),
         "{{CONFIG_PATH}}": str(config_path),
         "{{DB_PATH}}": str(db_path),
         "{{MODE_ARG}}": f"--{mode}",
-        "{{HOME}}": str(home),
+        "{{HOME}}": environment["HOME"],
         "{{LOG_DIR}}": str(log_dir),
+        "{{CANDIDATE_ID}}": environment["FALA_CANDIDATE_ID"],
+        "{{GENERATION}}": environment["HERMES_LOKAY_GENERATION"],
+        "{{PROCESS_STATE_ROOT}}": environment["HERMES_LOKAY_PROCESS_STATE_ROOT"],
     }
     text = template.read_text(encoding="utf-8")
     for marker, value in values.items():
         text = text.replace(marker, value)
-    if "{{" in text or "}}" in text:
-        raise ConfigError("unresolved Fala launchd template placeholder")
+    unresolved = sorted(set(re.findall(r"\{\{[^}]+\}\}", text)))
+    if unresolved:
+        raise ConfigError(f"unresolved Fala launchd template placeholder: {', '.join(unresolved)}")
     try:
         document = plistlib.loads(text.encode("utf-8"))
     except plistlib.InvalidFileException as exc:
         raise ConfigError(f"invalid Fala launchd template: {exc}") from exc
-    arguments = document.get("ProgramArguments")
-    required = [str(uv_bin), "run", "--frozen", "--project", str(project_root), "lokay-tick-all", "--config", str(config_path), "--db", str(db_path), f"--{mode}", "--json"]
-    if arguments != required:
-        raise ConfigError("Fala ProgramArguments do not match immutable candidate contract")
+    required = _supervisor_program_arguments(
+        python_path=python_path,
+        config_path=config_path,
+        db_path=db_path,
+        mode=mode,
+    )
+    if document.get("ProgramArguments") != required:
+        raise ConfigError("Fala ProgramArguments do not match immutable supervisor contract")
+    if document.get("WorkingDirectory") != str(project_root):
+        raise ConfigError("Fala WorkingDirectory does not match immutable candidate project")
+    if document.get("EnvironmentVariables") != environment:
+        raise ConfigError("Fala launchd environment does not match immutable candidate contract")
     if (
-        document.get("Label") != "com.mikolaj92.lokay.fala-tick-all"
-        or document.get("StartInterval") != 600
+        document.get("Label") != SUPERVISOR_LABEL
+        or "StartInterval" in document
         or document.get("ProcessType") != "Background"
-        or document.get("RunAtLoad") is not False
+        or document.get("RunAtLoad") is not True
+        or document.get("KeepAlive") is not True
         or document.get("LimitLoadToSessionType") != "Background"
     ):
         raise ConfigError("Fala launchd schedule or session contract is invalid")
+    if document.get("StandardOutPath") != str(log_dir / f"{SUPERVISOR_LABEL}.out.log"):
+        raise ConfigError("Fala StandardOutPath does not match supervisor label")
+    if document.get("StandardErrorPath") != str(log_dir / f"{SUPERVISOR_LABEL}.err.log"):
+        raise ConfigError("Fala StandardErrorPath does not match supervisor label")
     return plistlib.dumps(document, fmt=plistlib.FMT_XML, sort_keys=False)
-def _runtime_identity(document: dict[str, Any], plist_data: bytes) -> dict[str, Any]:
+
+
+def _runtime_identity(document: dict[str, Any], plist_data: bytes, *, label: str | None = None) -> dict[str, Any]:
     return {
+        "label": label or document.get("Label"),
         "program_arguments": list(document.get("ProgramArguments") or []),
         "working_directory": document.get("WorkingDirectory"),
         "standard_out_path": document.get("StandardOutPath"),
@@ -726,10 +1104,74 @@ def _runtime_identity(document: dict[str, Any], plist_data: bytes) -> dict[str, 
         "environment_variables": dict(document.get("EnvironmentVariables") or {}),
         "start_interval": document.get("StartInterval"),
         "run_at_load": document.get("RunAtLoad"),
+        "keep_alive": document.get("KeepAlive"),
         "process_type": document.get("ProcessType"),
         "limit_load_to_session_type": document.get("LimitLoadToSessionType"),
         "plist_sha256": _sha256_bytes(plist_data),
     }
+
+
+def _provision_candidate_environment(project: Path) -> Path:
+    """Install the bundled project into a genuine candidate-local environment."""
+    uv_bin = shutil.which("uv")
+    if not uv_bin or not Path(uv_bin).is_absolute():
+        raise ConfigError("unable to locate absolute uv executable")
+    venv = project / ".venv"
+    if venv.exists() or venv.is_symlink():
+        _remove_tree(venv)
+    try:
+        subprocess.run([sys.executable, "-m", "venv", "--copies", "--without-pip", str(venv)], check=True, capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ConfigError(f"unable to create candidate virtual environment: {exc}") from exc
+    python = venv / "bin" / "python"
+    if python.is_symlink() or not python.is_file() or not os.access(python, os.X_OK):
+        raise ConfigError(f"candidate virtual environment interpreter is not a regular executable: {python}")
+    if sys.platform == "darwin":
+        library_name = f"libpython{sys.version_info.major}.{sys.version_info.minor}.dylib"
+        source_library = Path(sys.base_prefix) / "lib" / library_name
+        target_library = venv / "lib" / library_name
+        if not source_library.is_file():
+            raise ConfigError(f"candidate Python runtime library is unavailable: {source_library}")
+        target_library.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_library, target_library)
+    env = dict(os.environ)
+    env["UV_PROJECT_ENVIRONMENT"] = str(venv)
+    env.pop("VIRTUAL_ENV", None)
+    smoke_env = dict(env)
+    smoke_env["PYTHONPATH"] = str(project / "src")
+    try:
+        subprocess.run([uv_bin, "sync", "--frozen", "--project", str(project)], check=True, capture_output=True, text=True, env=env)
+        subprocess.run([str(python), "-c", "import lokay, fala"], check=True, capture_output=True, text=True, env=smoke_env)
+        with tempfile.TemporaryDirectory(prefix="lokay-candidate-smoke-") as smoke_root:
+            smoke_db = Path(smoke_root) / "process.sqlite3"
+            config_path = project.parent / "config.toml"
+            for process_id in PROCESS_IDS:
+                subprocess.run(
+                    [
+                        str(python),
+                        "-m",
+                        "lokay.process",
+                        f"lokay-process-{process_id}",
+                        "--config",
+                        str(config_path),
+                        "--db",
+                        str(smoke_db),
+                        "--dry-run",
+                        "--json",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=smoke_env,
+                )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise ConfigError(f"candidate runtime provisioning or smoke test failed: {detail}") from exc
+    except OSError as exc:
+        raise ConfigError(f"candidate runtime provisioning or smoke test failed: {exc}") from exc
+    (project / "effectors").mkdir(parents=True, exist_ok=True)
+    return python
+
 def _safe_archive_member_path(destination: Path, member_name: str, *, allow_existing_dir: bool = False) -> Path:
     """Resolve a tar member to a path that cannot escape destination."""
     root = destination.resolve()
@@ -770,7 +1212,6 @@ def _extract_git_archive(bundle: tarfile.TarFile, destination: Path) -> None:
     root = destination.resolve()
     for member in bundle.getmembers():
         if member.isdir():
-            # Directory members may be recorded with a trailing slash.
             name = member.name.replace("\\", "/").rstrip("/")
             if not name:
                 continue
@@ -786,13 +1227,11 @@ def _extract_git_archive(bundle: tarfile.TarFile, destination: Path) -> None:
             raise ConfigError("pinned source archive contains an unsafe path")
         with source, target.open("wb") as handle:
             shutil.copyfileobj(source, handle)
-        # Keep only r-x bits from the archive mode; strip write and setuid/setgid/sticky.
         target.chmod(member.mode & 0o555)
         try:
             target.resolve().relative_to(root)
         except ValueError as exc:
             raise ConfigError("pinned source archive contains an unsafe path") from exc
-
 def _copy_git_tree(repo: Path, revision: str, destination: Path) -> None:
     try:
         archive = subprocess.run(
@@ -810,7 +1249,14 @@ def _copy_git_tree(repo: Path, revision: str, destination: Path) -> None:
         raise ConfigError(f"unable to unpack pinned source {repo}: {exc}") from exc
 
 
-def _copy_candidate_source(project_root: Path, destination: Path, config: Path, lock: Path) -> dict[str, bytes]:
+def _copy_candidate_source(
+    project_root: Path,
+    destination: Path,
+    config: Path,
+    lock: Path,
+    *,
+    config_bytes: bytes | None = None,
+) -> dict[str, bytes]:
     """Copy the runnable plugin and the complete pinned Fala dependency tree."""
     project = destination / "project"
     project.mkdir(parents=True)
@@ -892,12 +1338,18 @@ def _copy_candidate_source(project_root: Path, destination: Path, config: Path, 
         FALA_PINNED_COMMIT + "\n",
         encoding="utf-8",
     )
-    shutil.copy2(config, destination / "config.toml")
+    config_target = destination / "config.toml"
+    if config_bytes is None:
+        shutil.copy2(config, config_target)
+        config_payload = config.read_bytes()
+    else:
+        config_target.write_bytes(config_bytes)
+        config_payload = config_bytes
     pyproject = rewrite_fala_git_to_bundled_pyproject((project / "pyproject.toml").read_text(encoding="utf-8"))
     (project / "pyproject.toml").write_text(pyproject, encoding="utf-8")
     lock_data = rewrite_fala_git_to_bundled_lock(lock.read_bytes())
     (project / "uv.lock").write_bytes(lock_data)
-    return {"config.toml": config.read_bytes(), "uv.lock": lock_data}
+    return {"config.toml": config_payload, "uv.lock": lock_data}
 
 
 def render_launchd(
@@ -984,6 +1436,9 @@ def render_launchd(
         "require_test_evidence": bool(cfg.require_test_evidence),
         "executor_enabled": bool(cfg.executor.enabled),
     }
+    catalog_processes = _catalog_processes(cfg, config)
+    identity_repos = _identity_repos(cfg, config)
+    config_bytes = _materialize_candidate_config(config, catalog_processes)
     identity: dict[str, Any] = {
         "schema": 1,
         "mode": mode,
@@ -992,14 +1447,15 @@ def render_launchd(
         "fala_commit": fala_revision,
         "lock_hash": lock_hash,
         "config_path": str(config),
-        "config_hash": _sha256_file(config),
+        "config_hash": _sha256_bytes(config_bytes),
         "db_path": str(db),
         "metadata_path": "source/metadata.json",
         "lock_path": "source/project/uv.lock",
         "config_artifact_path": "source/config.toml",
         "revision_path": "source/revision.txt",
         "policy": policy,
-        "repos": sorted([{"repo": entry.repo, "board": entry.board, "clone_path": entry.clone_path} for entry in cfg.repos], key=lambda x: x["repo"]),
+        "repos": identity_repos,
+        "processes": catalog_processes,
     }
     candidate_id = _sha256_bytes(_canonical_json(identity))
     if candidate.name != candidate_id:
@@ -1023,7 +1479,13 @@ def render_launchd(
     try:
         (candidate / "launchd").mkdir()
         (candidate / "source").mkdir()
-        _copy_candidate_source(project_root, candidate / "source", config, lock)
+        _copy_candidate_source(
+            project_root,
+            candidate / "source",
+            config,
+            lock,
+            config_bytes=config_bytes,
+        )
         native_dir = candidate / "source" / "project" / "Fala" / "vendor" / "sqlite.fire" / "native"
         try:
             subprocess.run(
@@ -1105,14 +1567,33 @@ def render_launchd(
             raise ConfigError(f"unable to build candidate Fala Mojo extension: {exc}") from exc
         candidate_project = candidate / "source" / "project"
         candidate_config = candidate / "source" / "config.toml"
-        uv_bin = shutil.which("uv")
-        if not uv_bin or not Path(uv_bin).is_absolute():
-            raise ConfigError("unable to locate absolute uv executable")
-        plist_data = _render_fala_plist(project_root=candidate_project, config_path=candidate_config, db_path=db, mode=mode, home=Path.home().resolve(), uv_bin=uv_bin, log_dir=((root or candidate.parent.parent) / "logs" / candidate_id).absolute())
-        revision_data = (revision + "\n").encode()
+        _provision_candidate_environment(candidate_project)
+        log_dir = ((root or candidate.parent.parent) / "logs" / candidate_id).absolute()
+        python_path = candidate_project / ".venv" / "bin" / "python"
+        plist_data = _render_supervisor_plist(
+            project_root=candidate_project,
+            config_path=candidate_config,
+            db_path=db,
+            mode=mode,
+            home=Path.home().resolve(),
+            log_dir=log_dir,
+            candidate_id=candidate_id,
+        )
+        supervisor_relative = f"launchd/{SUPERVISOR_LABEL}.plist"
+        _atomic_write(candidate / supervisor_relative, plist_data)
         document = plistlib.loads(plist_data)
-        runtime_identity = _runtime_identity(document, plist_data)
-        _atomic_write(candidate / "launchd" / "com.mikolaj92.lokay.fala-tick-all.plist", plist_data)
+        runtime = _runtime_identity(document, plist_data, label=SUPERVISOR_LABEL)
+        program_arguments = [list(runtime["program_arguments"])]
+        runtime_identity = [runtime]
+        dispatch_commands = _dispatch_commands(
+            python_path=python_path,
+            config_path=candidate_config,
+            db_path=db,
+            mode=mode,
+            processes=catalog_processes,
+        )
+        _assert_no_forbidden_launchd_artifacts(candidate / "launchd")
+        revision_data = (revision + "\n").encode()
         _atomic_write(candidate / "source" / "metadata.json", source_data)
         _atomic_write(candidate / "source" / "revision.txt", revision_data)
         artifacts: dict[str, dict[str, Any]] = {}
@@ -1125,17 +1606,13 @@ def render_launchd(
             "candidate_id": candidate_id,
             "identity": identity,
             "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            "program_arguments": document["ProgramArguments"],
+            "program_arguments": program_arguments,
+            "dispatch_commands": dispatch_commands,
             "artifacts": artifacts,
             "runtime_identity": runtime_identity,
         })
         _atomic_write(candidate / "manifest.json", _canonical_json(manifest_payload))
-        for path in candidate.rglob("*"):
-            if path.is_file():
-                path.chmod(0o444)
-            elif path.is_dir():
-                path.chmod(0o555)
-        candidate.chmod(0o555)
+        _seal_tree(candidate)
         _fsync_tree(candidate)
         _fsync_directory(candidate.parent)
     except Exception:
@@ -1473,80 +1950,127 @@ def _verify_candidate_copy(source: Path, version: Path) -> None:
 
 
 def _promote_version_runtime(version: Path, deployment_root: Path, candidate_id: str) -> None:
-    """Rebind runtime paths to this immutable version before installation."""
-    plist_path = version / "launchd" / "com.mikolaj92.lokay.fala-tick-all.plist"
+    """Bind the supervisor launchd job to the immutable version-local runtime."""
     manifest_path = version / "manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        document = plistlib.loads(plist_path.read_bytes())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, plistlib.InvalidFileException) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ConfigError(f"invalid immutable Fala version: {version}") from exc
-    project = (version / "source" / "project").resolve()
-    config = (version / "source" / "config.toml").resolve()
-    args = list(document.get("ProgramArguments") or [])
-    if "--project" not in args or "--config" not in args or "--db" not in args:
-        raise ConfigError("Fala version plist is missing --project/--config/--db")
-    uv_bin = shutil.which("uv")
-    if not uv_bin or not Path(uv_bin).is_absolute():
-        raise ConfigError("unable to locate absolute uv executable for promoted Fala version")
-    args[0] = str(uv_bin)
-    args[args.index("--project") + 1] = str(project)
-    args[args.index("--config") + 1] = str(config)
-    document["ProgramArguments"] = args
-    environment = dict(document.get("EnvironmentVariables") or {})
-    environment["HOME"] = str(Path.home().resolve())
-    runtime_root = (deployment_root / "runtime" / candidate_id).resolve()
-    environment["UV_PROJECT_ENVIRONMENT"] = str(runtime_root / ".venv")
-    environment["UV_CACHE_DIR"] = str(runtime_root / "cache")
-    environment["FALA_EFFECTOR_ROOT"] = str(runtime_root / "effectors")
-    environment["FALA_HOME"] = str((project / "Fala").resolve())
-    environment["PATH"] = os.pathsep.join(
-        (
-            str((Path.home() / ".local" / "share" / "mise" / "shims").resolve()),
-            str((Path.home() / ".local" / "bin").resolve()),
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        )
+    version = version.resolve()
+    deployment_root = deployment_root.resolve()
+    if not isinstance(manifest, dict):
+        raise ConfigError(f"invalid immutable Fala version: {version}")
+    identity = manifest.get("identity")
+    processes = identity.get("processes") if isinstance(identity, dict) else manifest.get("processes")
+    if not isinstance(processes, list) or len(processes) != len(PROCESS_IDS):
+        raise ConfigError("Fala version process catalog must match PROCESS_IDS")
+    for expected_id, process in zip(PROCESS_IDS, processes):
+        if not isinstance(process, Mapping):
+            raise ConfigError("Fala version process catalog entry is invalid")
+        if str(process.get("id") or "") != expected_id:
+            raise ConfigError(
+                f"Fala version process catalog order mismatch: expected {expected_id!r}"
+            )
+        _process_identity_row(process)
+    project = version / "source" / "project"
+    config = version / "source" / "config.toml"
+    python = project / ".venv" / "bin" / "python"
+    mode = manifest.get("mode")
+    db_path = manifest.get("db_path")
+    if mode not in {"dry-run", "live"} or not isinstance(db_path, str) or not db_path:
+        raise ConfigError("Fala version identity has invalid mode or database path")
+    if not python.is_file() or python.is_symlink() or not os.access(python, os.X_OK):
+        raise ConfigError(f"Fala version interpreter is unavailable: {python}")
+    environment = _process_environment(
+        home=Path.home(),
+        project_root=project,
+        db_path=Path(db_path),
+        candidate_id=candidate_id,
     )
-    document["EnvironmentVariables"] = environment
-    document["WorkingDirectory"] = str(project)
-    runtime_root.mkdir(parents=True, exist_ok=True)
-    Path(environment["UV_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
-    Path(environment["FALA_EFFECTOR_ROOT"]).mkdir(parents=True, exist_ok=True)
     log_dir = (deployment_root / "logs" / candidate_id).resolve()
-    for key in ("StandardOutPath", "StandardErrorPath"):
-        value = str(document.get(key) or "")
-        if value:
-            document[key] = str(log_dir / Path(value).name)
-    plist_data = plistlib.dumps(document, fmt=plistlib.FMT_XML, sort_keys=False)
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         raise ConfigError("Fala version manifest artifacts are missing")
-    plist_relative = "launchd/com.mikolaj92.lokay.fala-tick-all.plist"
-    artifacts[plist_relative] = {"sha256": _sha256_bytes(plist_data), "bytes": len(plist_data)}
-    manifest["program_arguments"] = args
-    manifest["runtime_identity"] = _runtime_identity(document, plist_data)
+    version.chmod(0o755)
+    (version / "launchd").chmod(0o755)
+    _assert_no_forbidden_launchd_artifacts(version / "launchd")
+    relative = f"launchd/{SUPERVISOR_LABEL}.plist"
+    plist_path = version / relative
+    try:
+        document = plistlib.loads(plist_path.read_bytes())
+    except (OSError, plistlib.InvalidFileException) as exc:
+        raise ConfigError(f"invalid immutable Fala supervisor plist: {plist_path}") from exc
+    if not isinstance(document, dict):
+        raise ConfigError(f"invalid immutable Fala supervisor plist: {plist_path}")
+    expected_args = _supervisor_program_arguments(
+        python_path=python,
+        config_path=config,
+        db_path=Path(db_path),
+        mode=mode,
+    )
+    source_arguments = document.get("ProgramArguments")
+    if (
+        not isinstance(source_arguments, list)
+        or len(source_arguments) != 9
+        or source_arguments[1:3] != ["-m", SUPERVISOR_MODULE]
+        or source_arguments[3] != "--config"
+        or source_arguments[5] != "--db"
+        or source_arguments[6] != db_path
+        or source_arguments[7] != f"--{mode}"
+        or source_arguments[8] != "--json"
+        or not Path(str(source_arguments[0])).is_absolute()
+    ):
+        raise ConfigError(f"Fala version plist does not match supervisor command contract: {SUPERVISOR_LABEL}")
+    document["ProgramArguments"] = expected_args
+    document["EnvironmentVariables"] = environment
+    document["WorkingDirectory"] = str(project)
+    document["Label"] = SUPERVISOR_LABEL
+    document["RunAtLoad"] = True
+    document["KeepAlive"] = True
+    if "StartInterval" in document:
+        raise ConfigError(f"Fala version supervisor plist must not set StartInterval: {SUPERVISOR_LABEL}")
+    for key in ("StandardOutPath", "StandardErrorPath"):
+        value = document.get(key)
+        if not isinstance(value, str) or not value:
+            raise ConfigError(f"Fala version plist is missing {key}: {SUPERVISOR_LABEL}")
+        document[key] = str(log_dir / Path(value).name)
+    plist_data = plistlib.dumps(document, fmt=plistlib.FMT_XML, sort_keys=False)
+    artifacts[relative] = {"sha256": _sha256_bytes(plist_data), "bytes": len(plist_data)}
+    runtime = _runtime_identity(document, plist_data, label=SUPERVISOR_LABEL)
+    program_arguments = [list(runtime["program_arguments"])]
+    runtime_identity = [runtime]
+    dispatch_commands = _dispatch_commands(
+        python_path=python,
+        config_path=config,
+        db_path=Path(db_path),
+        mode=mode,
+        processes=list(processes),
+    )
+    manifest["program_arguments"] = program_arguments
+    manifest["runtime_identity"] = runtime_identity
+    manifest["dispatch_commands"] = dispatch_commands
     manifest["artifacts"] = artifacts
     manifest["candidate_id"] = candidate_id
-    for directory in (version, version / "launchd"):
-        directory.chmod(0o755)
     _atomic_write(plist_path, plist_data)
     _atomic_write(manifest_path, _canonical_json(manifest))
-    for directory in (version, version / "launchd"):
-        directory.chmod(0o555)
-    plist_path.chmod(0o444)
-    manifest_path.chmod(0o444)
-    if document.get("ProgramArguments") != manifest.get("program_arguments"):
-        raise ConfigError("promoted Fala plist arguments do not match version manifest")
+    _seal_tree(version)
+    if len(manifest.get("program_arguments") or []) != 1:
+        raise ConfigError("promoted Fala program_arguments must contain the supervisor only")
+    if len(manifest.get("dispatch_commands") or []) != len(PROCESS_IDS):
+        raise ConfigError("promoted Fala dispatch_commands must cover all catalog processes")
+    if len(manifest.get("runtime_identity") or []) != 1 or any(
+        runtime.get("program_arguments") != args
+        for runtime, args in zip(manifest["runtime_identity"], manifest["program_arguments"])
+    ):
+        raise ConfigError("promoted Fala runtime identities do not match program_arguments")
 
 
 def _verify_version_reuse(candidate: Path, version: Path) -> None:
     """Compare copied immutable bytes while allowing promotion-bound runtime metadata."""
-    excluded = {Path("manifest.json"), Path("launchd/com.mikolaj92.lokay.fala-tick-all.plist")}
+    excluded = {
+        Path("manifest.json"),
+        Path(f"launchd/{SUPERVISOR_LABEL}.plist"),
+    }
     candidate_files = {path.relative_to(candidate) for path in candidate.rglob("*") if path.is_file()} - excluded
     version_files = {path.relative_to(version) for path in version.rglob("*") if path.is_file()} - excluded
     if candidate_files != version_files:
@@ -1556,6 +2080,7 @@ def _verify_version_reuse(candidate: Path, version: Path) -> None:
         installed = version / relative
         if source.read_bytes() != installed.read_bytes() or _sha256_file(source) != _sha256_file(installed):
             raise ConfigError(f"existing deployment version byte/hash mismatch: {relative}")
+
 
 def _assert_deployment_root_inventory(root: Path) -> None:
     """Reject untracked pointer aliases before mutating deployment state."""
@@ -1607,59 +2132,87 @@ def deploy_fala(cfg: LokayConfig, candidate_value: str, promote: bool, *, deploy
                 raise ConfigError("deployment current manifest candidate_id mismatch")
             # Historical deployments may predate stricter provenance gates. Keep
             # the exact target for rollback without blocking a validated candidate.
-        plist = candidate / "launchd" / "com.mikolaj92.lokay.fala-tick-all.plist"
         try:
-            subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True, text=True)
-        except (OSError, subprocess.CalledProcessError) as exc:
-            raise ConfigError(f"Fala plist lint failed: {exc}") from exc
+            candidate_manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ConfigError(f"invalid candidate manifest: {candidate}") from exc
+        identity = candidate_manifest.get("identity")
+        processes = identity.get("processes") if isinstance(identity, dict) else candidate_manifest.get("processes")
+        if not isinstance(processes, list) or len(processes) != len(PROCESS_IDS):
+            raise ConfigError("candidate process catalog must match PROCESS_IDS")
+        for expected_id, process in zip(PROCESS_IDS, processes):
+            if not isinstance(process, Mapping) or str(process.get("id") or "") != expected_id:
+                raise ConfigError("candidate process catalog must match PROCESS_IDS order")
+            _process_identity_row(process)
+        labels = [SUPERVISOR_LABEL]
+        stale_labels = [label for label in STALE_FALA_LABELS if label != SUPERVISOR_LABEL]
+        launchd_dir = candidate / "launchd"
+        _assert_no_forbidden_launchd_artifacts(launchd_dir)
+        plists = {SUPERVISOR_LABEL: launchd_dir / f"{SUPERVISOR_LABEL}.plist"}
+        for label, plist in plists.items():
+            try:
+                subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True, text=True)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                raise ConfigError(f"Fala plist lint failed for {label}: {exc}") from exc
         legacy_states = _snapshot_legacy_mutators()
-        label = "com.mikolaj92.lokay.fala-tick-all"
-        domain_states = _launchctl_domain_states(label)
-        domain = _launchctl_intended_domain(label, domain_states)
+        # Supervisor-only installation; transition out aggregate and per-process jobs.
+        managed_labels = [SUPERVISOR_LABEL, *stale_labels]
+        domain_states_by_label: dict[str, dict[str, dict[str, Any]]] = {
+            label: _launchctl_domain_states(label) for label in managed_labels
+        }
+        primary_label = SUPERVISOR_LABEL
+        domain = _launchctl_intended_domain(primary_label, domain_states_by_label[primary_label])
         launch_agents = Path.home() / "Library" / "LaunchAgents"
-        target = launch_agents / plist.name
-        old_agent_exists = target.is_file()
-        old_agent_data = target.read_bytes() if old_agent_exists else None
-        if any(state.get("loaded") for state in domain_states.values()) and not old_agent_exists:
-            raise ConfigError("loaded Fala service has no canonical installed plist to preserve")
+        launch_agents.mkdir(parents=True, exist_ok=True)
+        installed_snapshot: dict[str, dict[str, Any]] = {}
+        for label in [*labels, *stale_labels]:
+            target = launch_agents / f"{label}.plist"
+            if target.is_symlink():
+                raise ConfigError(f"installed Fala LaunchAgent plist must be a regular file: {target}")
+            if target.exists() and not target.is_file():
+                raise ConfigError(f"installed Fala LaunchAgent path is not a regular file: {target}")
+            old_agent_exists = target.is_file()
+            old_agent_data = target.read_bytes() if old_agent_exists else None
+            states = domain_states_by_label.get(label, {})
+            if any(state.get("loaded") for state in states.values()) and not old_agent_exists:
+                raise ConfigError(f"loaded Fala service has no canonical installed plist to preserve: {label}")
+            installed_snapshot[label] = {
+                "present": old_agent_exists,
+                "sha256": _sha256_bytes(old_agent_data) if old_agent_data is not None else None,
+                "data_base64": base64.b64encode(old_agent_data).decode("ascii") if old_agent_data is not None else None,
+                "path": str(target),
+            }
         previous_path = root / "previous.json"
         previous_data = previous_path.read_bytes() if previous_path.is_file() else None
         previous = {
             "candidate_id": old_current_target.name if old_current_target else None,
             "path": str(old_current_target) if old_current_target else None,
-            "loaded_state": domain_states,
+            "loaded_state": domain_states_by_label,
             "legacy_loaded_state": {},
-            "label": label,
+            "labels": managed_labels,
             "domain": domain,
-            "installed_plist": {
-                "present": old_agent_exists,
-                "sha256": _sha256_bytes(old_agent_data) if old_agent_data is not None else None,
-                "data_base64": base64.b64encode(old_agent_data).decode("ascii") if old_agent_data is not None else None,
-            }
+            "installed_plists": installed_snapshot,
         }
         version_created = False
+        version_plists = dict(plists)
         try:
             if version.exists():
                 validate_fala_candidate(version, deployment_root=root)
                 version_manifest = json.loads((version / "manifest.json").read_text(encoding="utf-8"))
-                candidate_manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
                 if version_manifest.get("candidate_id") != candidate_id or version_manifest.get("identity") != candidate_manifest.get("identity"):
                     raise ConfigError("existing deployment version identity differs from candidate")
                 _verify_version_reuse(candidate, version)
-                plist = version / "launchd" / plist.name
+                version_plists = {SUPERVISOR_LABEL: version / "launchd" / f"{SUPERVISOR_LABEL}.plist"}
             else:
                 shutil.copytree(candidate, version, copy_function=shutil.copy2)
                 version_created = True
-                for path in version.rglob("*"):
-                    if path.is_file():
-                        path.chmod(0o444)
-                for directory in (version, *(path for path in version.rglob("*") if path.is_dir())):
-                    directory.chmod(0o555)
+                _seal_tree(version)
                 _verify_candidate_copy(candidate, version)
                 _promote_version_runtime(version, root, candidate_id)
                 validate_fala_candidate(version, deployment_root=root)
-                plist = version / "launchd" / plist.name
-                subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True, text=True)
+                version_plists = {SUPERVISOR_LABEL: version / "launchd" / f"{SUPERVISOR_LABEL}.plist"}
+                for label, plist in version_plists.items():
+                    subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True, text=True)
                 _fsync_tree(version)
                 _fsync_directory(versions_root)
         except Exception:
@@ -1677,10 +2230,18 @@ def deploy_fala(cfg: LokayConfig, candidate_value: str, promote: bool, *, deploy
                 _fsync_directory(versions_root)
             raise
         # Re-probe immediately before current/pointer and launchd cutover so a
-        # legacy mutator that loaded during staging aborts before activation.
+        # legacy mutator that loaded during staging aborts before activation,
+        # and so previous.json / bootout verification / rollback use launchd
+        # state observed after staging rather than a stale pre-staging snapshot.
         try:
             legacy_states = _snapshot_legacy_mutators()
             previous["legacy_loaded_state"] = _legacy_state_summary(legacy_states)
+            domain_states_by_label = {
+                label: _launchctl_domain_states(label) for label in managed_labels
+            }
+            domain = _launchctl_intended_domain(primary_label, domain_states_by_label[primary_label])
+            previous["loaded_state"] = domain_states_by_label
+            previous["domain"] = domain
         except Exception:
             if version_created:
                 for path in sorted(version.rglob("*"), key=lambda item: len(item.parts), reverse=True):
@@ -1696,6 +2257,7 @@ def deploy_fala(cfg: LokayConfig, candidate_value: str, promote: bool, *, deploy
                 _fsync_directory(versions_root)
             raise
 
+        installed_targets = {label: launch_agents / f"{label}.plist" for label in [*labels, *stale_labels]}
         try:
             _bootout_legacy_mutators(legacy_states)
             _atomic_write(previous_path, _canonical_json(previous))
@@ -1705,14 +2267,32 @@ def deploy_fala(cfg: LokayConfig, candidate_value: str, promote: bool, *, deploy
             tmp_link.symlink_to(version, target_is_directory=True)
             os.replace(tmp_link, current)
             _fsync_directory(root)
-            for observed_domain, observed_state in domain_states.items():
-                _launchctl_bootout(observed_domain, label, ignore_failure=True)
-                if observed_state.get("available") is not False:
-                    _verify_launchctl_unloaded(label, observed_domain)
-            _atomic_write(target, plist.read_bytes())
-            subprocess.run(["launchctl", "bootstrap", domain, str(target)], check=True, capture_output=True, text=True)
-            subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{label}"], check=True, capture_output=True, text=True)
-            _verify_launchctl_exact(label, domain)
+            for label, states in domain_states_by_label.items():
+                for observed_domain, observed_state in states.items():
+                    _launchctl_bootout(observed_domain, label, ignore_failure=True)
+                    if observed_state.get("available") is not False:
+                        _verify_launchctl_unloaded(label, observed_domain)
+            for label in stale_labels:
+                target = installed_targets[label]
+                if target.exists() or target.is_symlink():
+                    target.unlink()
+            _fsync_directory(launch_agents)
+            residual_installed = [
+                label for label in stale_labels
+                if installed_targets[label].exists() or installed_targets[label].is_symlink()
+            ]
+            if residual_installed:
+                raise ConfigError(
+                    "stale Fala LaunchAgent plist remains after removal: "
+                    + ", ".join(residual_installed)
+                )
+            for label, plist in version_plists.items():
+                target = installed_targets[label]
+                _atomic_write(target, plist.read_bytes())
+                subprocess.run(["launchctl", "bootstrap", domain, str(target)], check=True, capture_output=True, text=True)
+                subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{label}"], check=True, capture_output=True, text=True)
+                _verify_launchctl_exact(label, domain)
+            _publish_generation(candidate_id)
         except (OSError, subprocess.CalledProcessError, ConfigError) as exc:
             rollback_errors: list[str] = []
 
@@ -1722,33 +2302,44 @@ def deploy_fala(cfg: LokayConfig, candidate_value: str, promote: bool, *, deploy
                 except (OSError, subprocess.CalledProcessError, ConfigError) as restore_exc:
                     rollback_errors.append(f"{step_label}: {restore_exc}")
 
-            for observed_domain, observed_state in domain_states.items():
-                restore_step(
-                    f"unload {observed_domain}",
-                    lambda observed_domain=observed_domain: _launchctl_bootout(observed_domain, label, ignore_failure=True),
-                )
-                if observed_state.get("available") is not False:
+            for label, states in domain_states_by_label.items():
+                for observed_domain, observed_state in states.items():
                     restore_step(
-                        f"verify unload {observed_domain}",
-                        lambda observed_domain=observed_domain: _verify_launchctl_unloaded(label, observed_domain),
+                        f"unload {observed_domain}/{label}",
+                        lambda observed_domain=observed_domain, label=label: _launchctl_bootout(observed_domain, label, ignore_failure=True),
                     )
+                    if observed_state.get("available") is not False:
+                        restore_step(
+                            f"verify unload {observed_domain}/{label}",
+                            lambda observed_domain=observed_domain, label=label: _verify_launchctl_unloaded(label, observed_domain),
+                        )
             if current.exists() or current.is_symlink():
                 restore_step("remove current", lambda: current.unlink())
                 restore_step("sync deployment root", lambda: _fsync_directory(root))
             if old_current_target is not None:
                 restore_step("restore current", lambda: current.symlink_to(old_current_target, target_is_directory=True))
                 restore_step("sync deployment root", lambda: _fsync_directory(root))
-            if old_agent_exists and old_agent_data is not None:
-                restore_step("restore installed plist", lambda: _atomic_write(target, old_agent_data))
-            elif target.exists():
-                restore_step("remove installed plist", lambda: target.unlink())
-                restore_step("sync launch agents", lambda: _fsync_directory(target.parent))
+            for label, snapshot in installed_snapshot.items():
+                target = installed_targets[label]
+                if snapshot.get("present") and snapshot.get("data_base64") is not None:
+                    data = base64.b64decode(str(snapshot["data_base64"]))
+                    restore_step(f"restore installed plist {label}", lambda target=target, data=data: _atomic_write(target, data))
+                elif target.exists():
+                    restore_step(f"remove installed plist {label}", lambda target=target: target.unlink())
+                    restore_step("sync launch agents", lambda target=target: _fsync_directory(target.parent))
             if previous_data is not None:
                 restore_step("restore previous.json", lambda: _atomic_write(previous_path, previous_data))
             elif previous_path.exists():
                 restore_step("remove previous.json", lambda: previous_path.unlink())
                 restore_step("sync deployment root", lambda: _fsync_directory(root))
-            restore_step("restore launchd state", lambda: _launchctl_restore_states(domain_states, target))
+            for label in managed_labels:
+                target = installed_targets[label]
+                states = domain_states_by_label.get(label) or {}
+                if states:
+                    restore_step(
+                        f"restore launchd state {label}",
+                        lambda states=states, target=target: _launchctl_restore_states(states, target),
+                    )
             restore_step("restore legacy launchd state", lambda: _restore_legacy_mutators(legacy_states))
             if rollback_errors:
                 detail = "; ".join(rollback_errors)
@@ -1759,7 +2350,8 @@ def deploy_fala(cfg: LokayConfig, candidate_value: str, promote: bool, *, deploy
             raise ConfigError(f"Fala promotion rolled back after launchd failure: {exc}") from exc
         result["promoted"] = True
         result["current"] = str(current)
-        result["launch_agent"] = str(target)
-        result["loaded_state"] = domain_states
+        result["launch_agents"] = [str(installed_targets[label]) for label in labels]
+        result["launch_agent"] = result["launch_agents"][0]
+        result["loaded_state"] = domain_states_by_label
         result["legacy_loaded_state"] = previous["legacy_loaded_state"]
         return result

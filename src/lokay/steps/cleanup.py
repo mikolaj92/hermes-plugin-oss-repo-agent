@@ -58,34 +58,106 @@ def _cleanup_aggregate(request: Request) -> tuple[str, dict[str, Any]] | None:
 
 
 def _cleanup_aggregate_gate(request: Request, operation: str) -> tuple[Result | None, dict[str, Any]]:
-    """Require the verified aggregate identity before any cleanup work."""
+    """Require a verified, authorized aggregate identity before any cleanup work.
+
+    Presence of an aggregate predecessor is authoritative: unauthorized, malformed,
+    or incomplete identity fails closed and never falls back to bare input/config.
+    """
     aggregate_entry = _cleanup_aggregate(request)
     if aggregate_entry is None:
         return None, {}
     name, aggregate = aggregate_entry
-    if not aggregate or aggregate.get("ok") is False or str(aggregate.get("status") or "") in _TERMINAL_PROCESS_STATUSES:
-        return fail("upstream_failed", failure_class="terminal", retry_safe=False, operation=operation, upstream_effector=name, upstream=aggregate), {}
+    if (
+        not aggregate
+        or aggregate.get("ok") is not True
+        or str(aggregate.get("status") or "") in _TERMINAL_PROCESS_STATUSES
+    ):
+        return fail(
+            "upstream_failed",
+            failure_class="terminal",
+            retry_safe=False,
+            operation=operation,
+            upstream_effector=name,
+            upstream=aggregate,
+        ), {}
     if aggregate.get("cleanup_authorized") is not True:
-        return noop("cleanup_not_authorized", aggregate=name), {}
+        return fail(
+            "cleanup_not_authorized",
+            failure_class="terminal",
+            retry_safe=False,
+            operation=operation,
+            aggregate=name,
+        ), {}
     identity = aggregate.get("cleanup_identity")
     repair_identity = isinstance(identity, dict) and identity.get("local_branch") not in (None, "")
-    required = (("repo", "issue", "pr_number", "branch", "head_oid", "board", "clone_path", "priority")
-                if not repair_identity else ("repo", "issue", "pr_number", "branch", "local_branch", "worktree_path", "receipt", "remote_oid", "target_branch", "clone_path"))
+    required = (
+        ("repo", "issue", "pr_number", "branch", "head_oid", "board", "clone_path", "priority")
+        if not repair_identity
+        else (
+            "repo",
+            "issue",
+            "pr_number",
+            "branch",
+            "local_branch",
+            "worktree_path",
+            "receipt",
+            "remote_oid",
+            "target_branch",
+            "clone_path",
+        )
+    )
     if not isinstance(identity, dict) or any(identity.get(key) in (None, "") for key in required):
-        return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False, operation=operation, upstream_effector=name, aggregate=aggregate), {}
+        return fail(
+            "cleanup_identity_invalid",
+            failure_class="terminal",
+            retry_safe=False,
+            operation=operation,
+            upstream_effector=name,
+            aggregate=aggregate,
+        ), {}
     if repair_identity and str(identity.get("target_branch")) != str(identity.get("branch")):
-        return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False, operation=operation, field="target_branch", aggregate=aggregate), {}
+        return fail(
+            "cleanup_identity_invalid",
+            failure_class="terminal",
+            retry_safe=False,
+            operation=operation,
+            field="target_branch",
+            aggregate=aggregate,
+        ), {}
     try:
         if isinstance(identity["issue"], bool) or int(identity["issue"]) <= 0:
             raise ValueError("issue must be positive")
         if isinstance(identity["pr_number"], bool) or int(identity["pr_number"]) <= 0:
             raise ValueError("pr_number must be positive")
     except (TypeError, ValueError) as exc:
-        return fail("cleanup_identity_invalid", failure_class="terminal", retry_safe=False, operation=operation, error=str(exc), aggregate=aggregate), {}
+        return fail(
+            "cleanup_identity_invalid",
+            failure_class="terminal",
+            retry_safe=False,
+            operation=operation,
+            error=str(exc),
+            aggregate=aggregate,
+        ), {}
     data, cfg = input_of(request), cfg_of(request)
-    aliases = {"issue": ("issue",), "pr_number": ("pr_number", "number"), "branch": ("branch", "head_ref"), "repo": ("repo",), "clone_path": ("clone_path",), "head_oid": ("head_oid",)}
+    aliases = {
+        "issue": ("issue",),
+        "pr_number": ("pr_number", "number"),
+        "branch": ("branch", "head_ref"),
+        "repo": ("repo",),
+        "clone_path": ("clone_path",),
+        "head_oid": ("head_oid",),
+    }
     if repair_identity:
-        aliases.update({"local_branch": ("local_branch",), "worktree_path": ("worktree_path",), "target_branch": ("target_branch",), "receipt": ("receipt", "receipt_path"), "remote_oid": ("remote_oid", "after_oid"), "task": ("task", "task_id")})
+        aliases.update(
+            {
+                "local_branch": ("local_branch",),
+                "worktree_path": ("worktree_path",),
+                "target_branch": ("target_branch",),
+                "receipt": ("receipt", "receipt_path"),
+                "remote_oid": ("remote_oid", "after_oid"),
+                "task": ("task", "task_id"),
+            }
+        )
     else:
         aliases.update({"worktree_path": ("worktree_path",)})
     for key, names in aliases.items():
@@ -94,14 +166,31 @@ def _cleanup_aggregate_gate(request: Request, operation: str) -> tuple[Result | 
             for candidate in names:
                 value = source.get(candidate)
                 if value not in (None, "") and str(value) != expected:
-                    return fail("cleanup_identity_conflict", failure_class="terminal", retry_safe=False, operation=operation, field=key, source=source_name, expected=expected, actual=value), {}
+                    return fail(
+                        "cleanup_identity_conflict",
+                        failure_class="terminal",
+                        retry_safe=False,
+                        operation=operation,
+                        field=key,
+                        source=source_name,
+                        expected=expected,
+                        actual=value,
+                    ), {}
     return None, dict(identity)
 
+
 def _cleanup_value(request: Request, key: str, *aliases: str, default: Any = "") -> Any:
-    """Resolve aggregate identity before static cleanup configuration."""
+    """Resolve aggregate identity before static cleanup configuration.
+
+    When an aggregate predecessor is present, only a verified authorized identity
+    may supply values. Gate failures and missing identity fields never fall back
+    to bare input/config (fail closed).
+    """
     data, cfg = input_of(request), cfg_of(request)
     if _cleanup_aggregate(request) is not None:
-        _, identity = _cleanup_aggregate_gate(request, "resolve_cleanup_context")
+        gate, identity = _cleanup_aggregate_gate(request, "resolve_cleanup_context")
+        if gate is not None or not identity:
+            return default
         for candidate in (key, *aliases):
             if identity.get(candidate) not in (None, ""):
                 return identity[candidate]
@@ -113,6 +202,7 @@ def _cleanup_value(request: Request, key: str, *aliases: str, default: Any = "")
         if cfg.get(candidate) not in (None, ""):
             return cfg[candidate]
     return default
+
 
 
 
@@ -470,9 +560,13 @@ def _cleanup_identity(data: dict[str, Any], cfg: dict[str, Any], payload: dict[s
 
 
 def _cleanup_upstream_failure(request: Request, operation: str, *ids: str) -> Result | None:
-    """Return a fail-closed terminal peer result for a cleanup operation."""
+    """Return a fail-closed terminal peer result for a cleanup operation.
+
+    Any aggregate gate decision (unauthorized, invalid, or failed) is authoritative
+    and blocks cleanup; never ignore non-failed aggregate statuses.
+    """
     aggregate, _ = _cleanup_aggregate_gate(request, operation)
-    if aggregate is not None and aggregate.get("status") == "failed":
+    if aggregate is not None:
         return aggregate
     from lokay.envelope import terminal_upstream
     return terminal_upstream(request, operation, *ids)
@@ -487,6 +581,7 @@ def _cleanup_upstream_noop(request: Request, operation: str, *ids: str) -> Resul
     if upstream:
         return noop(str(upstream.get("reason") or "no_branch"), operation=operation)
     return None
+
 
 
 def resolve_cleanup_branch_source(request: Request) -> Result:
@@ -748,6 +843,17 @@ def read_worktree_ownership(request: Request) -> Result:
     except CommandError as exc:
         return fail("worktree_ownership_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, worktree_path=path, branch=branch)
     if not matches:
+        # Inventory absence is not enough: a dangling path/symlink still owns residual state.
+        if os.path.lexists(path):
+            return fail(
+                "worktree_path_residual",
+                failure_class="terminal",
+                retry_safe=False,
+                clone_path=clone,
+                worktree_path=path,
+                branch=branch,
+                matches=matches,
+            )
         return ok(status="already_absent", clone_path=clone, worktree_path=path, branch=branch, absent=True, matches=matches, mutated=False)
     if len(matches) != 1:
         return fail("worktree_ownership_mismatch", failure_class="terminal", retry_safe=False, clone_path=clone, worktree_path=path, branch=branch, matches=matches)
@@ -801,8 +907,18 @@ def verify_worktree_absent(request: Request) -> Result:
         present = any(str(Path(row.get("path") or "").resolve()) == str(Path(path).resolve()) for row in rows)
     except CommandError as exc:
         return fail("worktree_absence_read_failed", failure_class="retryable_read", retry_safe=True, error=str(exc), clone_path=clone, worktree_path=path)
-    if present:
-        return fail("worktree_not_absent", failure_class="reconcile_then_retry", retry_safe=False, clone_path=clone, worktree_path=path, mutated=bool(cond_blob(request, "remove_worktree").get("mutated")))
+    residual = os.path.lexists(path)
+    if present or residual:
+        return fail(
+            "worktree_not_absent",
+            failure_class="reconcile_then_retry",
+            retry_safe=False,
+            clone_path=clone,
+            worktree_path=path,
+            inventory_present=present,
+            path_residual=residual,
+            mutated=bool(cond_blob(request, "remove_worktree").get("mutated")),
+        )
     return ok(status="verified", clone_path=clone, worktree_path=path, absent=True)
 
 
@@ -1049,7 +1165,7 @@ def decide_cleanup_outcome(request: Request) -> Result:
     parse = evidence.get("parse_cleanup_issue_number") or {}
     if parse.get("status") == "noop" and parse.get("reason") == "no_branch" and all(not bool(item.get("mutated")) for item in evidence.values() if isinstance(item, dict)):
         return noop("no_branch")
-    if any(item.get("ok") is False for item in evidence.values() if isinstance(item, dict)):
+    if any(item.get("ok") is not True for item in evidence.values() if isinstance(item, dict)):
         return ok(status="decided", outcome="partial" if any(item.get("mutated") for item in evidence.values() if isinstance(item, dict)) else "failure")
     return ok(status="decided", outcome="success")
 

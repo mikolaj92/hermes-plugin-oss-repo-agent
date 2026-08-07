@@ -5,6 +5,7 @@ base_branch = "main"
 
 [github]
 cli = "gh"
+default_limit = 10
 assignee = "owner"
 
 [labels]
@@ -28,7 +29,6 @@ fixer_assignee = "lokay-fixer"
 merge_method = "merge"
 
 [direction]
-# Free-text goal; issues must share tokens with this text when set.
 repo_goal = ""
 require_keywords = []
 deny_keywords = []
@@ -39,7 +39,7 @@ min_goal_overlap = 1
 enabled = true
 context_paths = ["README.md"]
 context_max_bytes = 131072
-auto_close_duplicates = false
+auto_close_duplicates = true
 auto_close_out_of_scope = true
 
 [executor]
@@ -48,21 +48,271 @@ command = "omp"
 model = "omniroute/omp/default"
 thinking = "medium"
 timeout_seconds = 7200
+max_attempts = 3
+retry_backoff_seconds = 60
 
 [paths]
 worktree_root = "~/.hermes/worktrees/lokay"
-dispatch_receipts = "~/.hermes/state/lokay-dispatch"
-task_receipts = "~/.hermes/state/lokay-receipts"
-merge_receipts = "~/.hermes/state/lokay-merge"
-active_issue = "~/.hermes/state/lokay-active"
+dispatch_receipts = "~/.hermes/state/lokay-dispatch-live"
+task_receipts = "~/.hermes/state/lokay-receipts-live"
+merge_receipts = "~/.hermes/state/lokay-merge-live"
+active_issue = "~/.hermes/state/lokay-active-live"
+triage_receipts = "~/.hermes/state/lokay-triage-live"
 
-triage_receipts = "~/.hermes/state/lokay-triage"
 [[repos]]
 repo = "owner/example-repo"
 board = "owner-example-repo"
 clone_path = "~/.hermes/repos/example-repo"
 priority = 100
-# triage_goal = ""
-# triage_context_paths = ["README.md"]
-# auto_close_duplicates = false
-# auto_close_out_of_scope = true
+
+[[processes]]
+id = "repo_issue_poll"
+enabled = true
+interval_seconds = 60
+concurrency = 1
+selector = "all_repos"
+lease_seconds = 120
+lease_renew_seconds = 30
+stale_owner_after_seconds = 240
+lock_scope = "poll/repo"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "poll/repo/{repo}"
+output_receipts = ["repo_poll", "issue_snapshot"]
+health_id = "repo_issue_poll"
+candidate_fencing = true
+predecessors = []
+successors = ["issue_triage"]
+command = "lokay-process-repo_issue_poll"
+
+[[processes]]
+id = "issue_triage"
+enabled = true
+interval_seconds = 60
+concurrency = 1
+selector = "eligible"
+lease_seconds = 180
+lease_renew_seconds = 30
+stale_owner_after_seconds = 360
+lock_scope = "issue/repo/number"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "triage/decision"
+output_receipts = ["issue_decision"]
+health_id = "issue_triage"
+candidate_fencing = true
+predecessors = ["issue_snapshot", "child_handoff"]
+successors = ["issue_feedback", "issue_split", "issue_close", "issue_ready"]
+command = "lokay-process-issue_triage"
+
+[[processes]]
+id = "issue_feedback"
+enabled = true
+interval_seconds = 60
+concurrency = 1
+selector = "eligible"
+lease_seconds = 180
+lease_renew_seconds = 30
+stale_owner_after_seconds = 360
+lock_scope = "issue/repo/number"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "feedback/decision"
+output_receipts = ["feedback", "feedback_verified"]
+health_id = "issue_feedback"
+candidate_fencing = true
+predecessors = ["issue_decision"]
+successors = []
+command = "lokay-process-issue_feedback"
+
+[[processes]]
+id = "issue_split"
+enabled = true
+interval_seconds = 60
+concurrency = 1
+selector = "eligible"
+lease_seconds = 300
+lease_renew_seconds = 30
+stale_owner_after_seconds = 600
+lock_scope = "split/repo/number"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "split/decision"
+output_receipts = ["split", "child_handoff", "split_verified"]
+health_id = "issue_split"
+candidate_fencing = true
+predecessors = ["issue_decision"]
+successors = ["issue_triage", "issue_close"]
+command = "lokay-process-issue_split"
+
+[[processes]]
+id = "issue_close"
+enabled = true
+interval_seconds = 60
+concurrency = 1
+selector = "eligible"
+lease_seconds = 180
+lease_renew_seconds = 30
+stale_owner_after_seconds = 360
+lock_scope = "issue/repo/number"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "close/decision"
+output_receipts = ["close_authorization", "close_verified"]
+health_id = "issue_close"
+candidate_fencing = true
+predecessors = ["issue_decision", "split_verified"]
+successors = []
+command = "lokay-process-issue_close"
+
+[[processes]]
+id = "issue_ready"
+enabled = true
+interval_seconds = 60
+concurrency = 1
+selector = "eligible"
+lease_seconds = 180
+lease_renew_seconds = 30
+stale_owner_after_seconds = 360
+lock_scope = "issue/repo/number"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "ready/decision"
+output_receipts = ["claim", "task_handoff"]
+health_id = "issue_ready"
+candidate_fencing = true
+predecessors = ["issue_decision"]
+successors = ["issue_to_pr"]
+command = "lokay-process-issue_ready"
+
+[[processes]]
+id = "issue_to_pr"
+enabled = true
+interval_seconds = 60
+concurrency = 1
+selector = "eligible"
+lease_seconds = 7800
+lease_renew_seconds = 60
+stale_owner_after_seconds = 15600
+lock_scope = "task/board/id"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "dispatch/claim"
+output_receipts = ["implementation", "pr_opened"]
+health_id = "issue_to_pr"
+candidate_fencing = true
+predecessors = ["claim", "task_handoff"]
+successors = ["pr_triage"]
+command = "lokay-process-issue_to_pr"
+
+[[processes]]
+id = "pr_triage"
+enabled = true
+interval_seconds = 60
+concurrency = 1
+selector = "eligible"
+lease_seconds = 180
+lease_renew_seconds = 30
+stale_owner_after_seconds = 360
+lock_scope = "pr/repo/number"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "pr/decision"
+output_receipts = ["pr_decision"]
+health_id = "pr_triage"
+candidate_fencing = true
+predecessors = ["pr_opened", "repair_verified"]
+successors = ["pr_repair", "pr_merge"]
+command = "lokay-process-pr_triage"
+
+[[processes]]
+id = "pr_repair"
+enabled = true
+interval_seconds = 60
+concurrency = 1
+selector = "eligible"
+lease_seconds = 7800
+lease_renew_seconds = 60
+stale_owner_after_seconds = 15600
+lock_scope = "repair/repo/number/head"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "repair/decision"
+output_receipts = ["repair_reservation", "repair_verified"]
+health_id = "pr_repair"
+candidate_fencing = true
+predecessors = ["pr_decision"]
+successors = ["pr_triage"]
+command = "lokay-process-pr_repair"
+
+[[processes]]
+id = "pr_merge"
+enabled = true
+interval_seconds = 60
+concurrency = 1
+selector = "eligible"
+lease_seconds = 300
+lease_renew_seconds = 30
+stale_owner_after_seconds = 600
+lock_scope = "merge/repo/number/head"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "merge/decision"
+output_receipts = ["merge_verified", "finalization"]
+health_id = "pr_merge"
+candidate_fencing = true
+predecessors = ["pr_decision"]
+successors = ["cleanup"]
+command = "lokay-process-pr_merge"
+
+[[processes]]
+id = "cleanup"
+enabled = true
+interval_seconds = 60
+concurrency = 1
+selector = "eligible"
+lease_seconds = 300
+lease_renew_seconds = 30
+stale_owner_after_seconds = 600
+lock_scope = "cleanup/repo/number/head"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "cleanup/finalization"
+output_receipts = ["cleanup_verified"]
+health_id = "cleanup"
+candidate_fencing = true
+predecessors = ["finalization"]
+successors = []
+command = "lokay-process-cleanup"
+
+[[processes]]
+id = "cleanup_reconcile"
+enabled = true
+interval_seconds = 300
+concurrency = 1
+selector = "eligible"
+lease_seconds = 300
+lease_renew_seconds = 30
+stale_owner_after_seconds = 600
+lock_scope = "cleanup_reconcile/subject"
+retry_classes = ["retryable_read", "reconcile_then_retry"]
+max_attempts = 5
+backoff_seconds = [30, 60, 120, 300, 600]
+input_cursor = "cleanup/unresolved"
+output_receipts = ["cleanup_reconciliation"]
+health_id = "cleanup_reconcile"
+candidate_fencing = true
+predecessors = ["unresolved cleanup evidence"]
+successors = []
+command = "lokay-process-cleanup_reconcile"

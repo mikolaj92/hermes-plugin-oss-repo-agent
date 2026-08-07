@@ -10,7 +10,9 @@ export PATH="${PATH:-/Users/mini-m4-main/.local/bin:/opt/homebrew/bin:/usr/local
 DRY_RUN="${HERMES_LOKAY_UPDATE_DRY_RUN:-1}"
 LOG_FILE="${HERMES_LOKAY_UPDATE_LOG:-/Users/mini-m4-main/.hermes/logs/lokay-hermes-update.log}"
 LOCK_DIR="${HERMES_LOKAY_UPDATE_LOCK_DIR:-/tmp/hermes-lokay-update.lock}"
-WORKTREE_ROOT="${HERMES_LOKAY_WORKTREE_ROOT:-/Users/mini-m4-main/.hermes/worktrees/lokay}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lokay_repos.sh"
+WORKTREE_ROOT=""
 
 validate_dry_run() {
   case "$DRY_RUN" in
@@ -56,7 +58,11 @@ require_cmd() {
 
 require_cmd hermes
 require_cmd find
-
+require_cmd realpath
+if ! WORKTREE_ROOT="$(lokay_worktree_root)"; then
+  log "WORKTREE_ROOT_UNAVAILABLE"
+  exit 1
+fi
 if mkdir "$LOCK_DIR" 2>/dev/null; then
   :
 elif [[ -d "$LOCK_DIR" ]]; then

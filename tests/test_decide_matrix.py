@@ -12,6 +12,49 @@ import unittest
 from unittest import mock
 
 from lokay.steps import issue_direction, triage
+from lokay.process_runtime import payload_digest
+
+
+def durable_merge_request(*, action="merge", path_id="pr_merge", repo="owner/repo", number=42, head_oid="head-42"):
+    subject = {"repo": repo, "number": number, "head_oid": head_oid}
+    decision = {"status": "decided", "ok": True, "action": action, **subject}
+    identity = {
+        "schema_version": 1,
+        "process_id": "pr_triage",
+        "candidate_id": "candidate-42",
+        "config_sha256": "config-42",
+        "generation": "generation-42",
+        "correlation_id": payload_digest({"process_id": "pr_triage", "kind": "pr_decision", "subject": payload_digest(subject)}),
+        "subject": subject,
+        "predecessor_digests": [],
+        "operation": "publish",
+        "source": "lokay.process_runtime",
+        "mutation_status": "mutated",
+        "payload": decision,
+    }
+    digest = payload_digest(identity)
+    body = {**identity, "content_digest": digest, "verified_readback_state": "verified"}
+    return req({
+        "path_id": path_id,
+        "repo": repo,
+        "number": number,
+        "head_oid": head_oid,
+        "pr_decision": digest,
+        "generation": identity["generation"],
+        "candidate_id": identity["candidate_id"],
+        "config_sha256": identity["config_sha256"],
+        "predecessor_evidence": {
+            "groups": [["pr_decision"]],
+            "required_inputs": ["pr_decision"],
+            "subject": subject,
+            "receipts": {"pr_decision": {
+                "process_id": "pr_triage",
+                "receipt_kind": "pr_decision",
+                "digest": digest,
+                "payload": body,
+            }},
+        },
+    })
 
 
 def req(input_data=None, config=None):
@@ -144,9 +187,11 @@ class IssueDecideMatrixTests(unittest.TestCase):
 class PrDecideMatrixTests(unittest.TestCase):
     def _pr(self, **overrides):
         base = {
+            "number": 42,
             "state": "OPEN",
             "mergeable": "MERGEABLE",
             "headRefName": "ai/fix/42-timeout",
+            "headRefOid": "head-42",
             "baseRefName": "main",
             "isDraft": False,
             "author": {"login": "owner"},
@@ -186,12 +231,106 @@ class PrDecideMatrixTests(unittest.TestCase):
         self.assertEqual(out["reason"], "upstream_failed")
         self.assertFalse(out["mutated"])
 
+    def test_standalone_merge_uses_durable_predecessor(self) -> None:
+        request = durable_merge_request()
+        request["input"]["dry_run"] = True
+        request["input"]["conduction"] = {
+            "read_merge_preconditions": {
+                "status": "merge_preconditions_read",
+                "ok": True,
+                "repo": "owner/repo",
+                "number": 42,
+                "head_oid": "head-42",
+            }
+        }
+        out = triage.merge_pr(request)
+        self.assertEqual(
+            (out["status"], out["repo"], out["number"], out["head_oid"]),
+            ("planned", "owner/repo", 42, "head-42"),
+        )
+    def test_foreign_triage_path_cannot_mutate_with_durable_merge_evidence(self) -> None:
+        request = durable_merge_request(path_id="pr_triage")
+        request["input"]["dry_run"] = False
+        request["input"]["conduction"] = {
+            "decide_triage_action": {
+                "status": "decided",
+                "ok": True,
+                "action": "merge",
+                "repo": "owner/repo",
+                "number": 42,
+                "head_oid": "head-42",
+            },
+            "read_merge_preconditions": {
+                "status": "merge_preconditions_read",
+                "ok": True,
+                "repo": "owner/repo",
+                "number": 42,
+                "head_oid": "head-42",
+            },
+        }
+        with mock.patch("lokay.steps.triage.run_cmd") as run:
+            out = triage.merge_pr(request)
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["reason"], "decision_gate_identity_mismatch")
+        self.assertFalse(out["mutated"])
+        run.assert_not_called()
+    def test_merge_requires_verified_predecessor_evidence(self) -> None:
+        request = durable_merge_request()
+        request["input"].pop("predecessor_evidence")
+        request["input"]["dry_run"] = False
+        with mock.patch("lokay.steps.triage.run_cmd") as run:
+            out = triage.merge_pr(request)
+        self.assertEqual((out["status"], out["reason"]), ("failed", "merge_predecessor_missing"))
+        self.assertFalse(out["mutated"])
+        run.assert_not_called()
+
+    def test_merge_rejects_predecessor_digest_mismatch(self) -> None:
+        request = durable_merge_request()
+        request["input"]["pr_decision"] = "f" * 64
+        request["input"]["dry_run"] = False
+        with mock.patch("lokay.steps.triage.run_cmd") as run:
+            out = triage.merge_pr(request)
+        self.assertEqual((out["status"], out["reason"]), ("failed", "merge_predecessor_digest_mismatch"))
+        self.assertFalse(out["mutated"])
+        run.assert_not_called()
+    def test_merge_rejects_self_consistent_forged_receipt_digest(self) -> None:
+        request = durable_merge_request()
+        forged_digest = "a" * 64
+        request["input"]["pr_decision"] = forged_digest
+        receipt = request["input"]["predecessor_evidence"]["receipts"]["pr_decision"]
+        receipt["digest"] = forged_digest
+        receipt["payload"]["content_digest"] = forged_digest
+        request["input"]["dry_run"] = False
+        with mock.patch("lokay.steps.triage.run_cmd") as run:
+            out = triage.merge_pr(request)
+        self.assertEqual((out["status"], out["reason"]), ("failed", "merge_predecessor_digest_mismatch"))
+        self.assertFalse(out["mutated"])
+        run.assert_not_called()
+
+    def test_merge_non_merge_durable_action_is_noop(self) -> None:
+        request = durable_merge_request(action="comment_block")
+        request["input"]["dry_run"] = False
+        with mock.patch("lokay.steps.triage.run_cmd") as run:
+            out = triage.merge_pr(request)
+        self.assertEqual((out["status"], out["reason"], out["action"]), ("noop", "not_selected", "comment_block"))
+        self.assertFalse(out["mutated"])
+        run.assert_not_called()
+
+    def test_merge_preconditions_reject_live_head_drift(self) -> None:
+        request = durable_merge_request()
+        request["input"]["dry_run"] = False
+        with mock.patch("lokay.steps.triage._read_merge_view", return_value={"state": "OPEN", "headRefOid": "head-drift"}):
+            out = triage.read_merge_preconditions(request)
+        self.assertEqual((out["status"], out["reason"]), ("failed", "merge_head_mismatch"))
+        self.assertEqual(out["head_oid"], "head-42")
+
+
     def test_direct_merge_action_cannot_bypass_decision_gate(self) -> None:
         out = triage.merge_pr(
             req({"action": "merge", "repo": "owner/repo", "number": 42, "dry_run": True})
         )
         self.assertEqual(out["status"], "failed")
-        self.assertEqual(out["reason"], "merge_preconditions_required")
+        self.assertEqual(out["reason"], "decision_gate_identity_missing")
         self.assertFalse(out["mutated"])
 
     def test_string_false_evidence_cannot_merge(self) -> None:

@@ -1,22 +1,17 @@
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib  # type: ignore
-
+from lokay.registry import ConfigError as RegistryConfigError
+from lokay.registry import load_registry
 from lokay.runtime import DEFAULT_CONFIG
 
 
 class ConfigError(ValueError):
-    """Raised when the production Fala configuration is invalid."""
-
+    """Raised when the production Lokay configuration is invalid."""
 
 @dataclass(frozen=True)
 class RepoEntry:
@@ -221,6 +216,7 @@ class AgentConfig:
     executor: ExecutorConfig = field(default_factory=ExecutorConfig)
     paths: PathConfig = field(default_factory=PathConfig)
     repos: tuple[RepoEntry, ...] = field(default_factory=tuple)
+    processes: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     raw: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -303,30 +299,38 @@ def _as_dict(value: Any) -> dict[str, Any]:
 def _absolute_path(value: str) -> str:
     return str(Path(value).expanduser().absolute())
 
-
-def _env_or(mapping: Mapping[str, Any], key: str, env: Mapping[str, str], env_key: str, default: Any) -> Any:
-    return env.get(env_key) or mapping.get(key) or default
-
-
 def _bool(value: Any, name: str) -> bool:
     if isinstance(value, bool):
         return value
-    if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}:
-        return True
-    if isinstance(value, str) and value.strip().lower() in {"0", "false", "no", "off"}:
-        return False
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
     raise ConfigError(f"{name} must be a boolean")
 
 
+def _string_tuple(value: Any, name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = [part.strip() for part in value.split(",") if part.strip()]
+    if not isinstance(value, (list, tuple)):
+        raise ConfigError(f"{name} must be an array of strings")
+    return tuple(str(item) for item in value)
+
+
 def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfig:
+    del env
     github = _as_dict(data.get("github"))
     labels_data = _as_dict(data.get("labels"))
     automation_data = _as_dict(data.get("automation"))
     direction_data = _as_dict(data.get("direction"))
     executor_data = _as_dict(data.get("executor"))
     paths_data = _as_dict(data.get("paths"))
-
     triage_data = _as_dict(data.get("triage"))
+
     repos: list[RepoEntry] = []
     for index, item in enumerate(data.get("repos") or []):
         if not isinstance(item, Mapping):
@@ -340,32 +344,29 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
             priority = int(item.get("priority", 50))
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"repos[{index}].priority must be an integer") from exc
-        repos.append(RepoEntry(repo, board, clone_path, priority, str(item.get("triage_goal", "")), _context_paths(item.get("triage_context_paths"), f"repos[{index}].triage_context_paths"), item.get("auto_close_duplicates"), item.get("auto_close_out_of_scope")))
+        repos.append(
+            RepoEntry(
+                repo=repo,
+                board=board,
+                clone_path=clone_path,
+                priority=priority,
+                triage_goal=str(item.get("triage_goal", "")),
+                triage_context_paths=_context_paths(
+                    item.get("triage_context_paths"),
+                    f"repos[{index}].triage_context_paths",
+                ),
+                auto_close_duplicates=item.get("auto_close_duplicates"),
+                auto_close_out_of_scope=item.get("auto_close_out_of_scope"),
+            )
+        )
 
-    repos_file = env.get("HERMES_LOKAY_REPOS_FILE")
-    if repos_file and Path(repos_file).is_file():
-        repos = []
-        for line_number, line in enumerate(Path(repos_file).read_text(encoding="utf-8").splitlines(), 1):
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("|")
-            if len(parts) < 3 or not all(part.strip() for part in parts[:3]):
-                raise ConfigError(f"repos file line {line_number} requires repo|board|clone_path")
-            try:
-                priority = int(parts[3]) if len(parts) > 3 and parts[3] else 50
-            except ValueError as exc:
-                raise ConfigError(f"repos file line {line_number} has invalid priority") from exc
-            repos.append(RepoEntry(parts[0].strip(), parts[1].strip(), parts[2].strip(), priority))
-
-    mode = str(_env_or(data, "mode", env, "HERMES_LOKAY_MODE", "dry-run")).strip().lower()
     label_defaults = LabelConfig()
     labels = LabelConfig(
-        ready=str(_env_or(labels_data, "ready", env, "HERMES_LOKAY_LABEL_READY", label_defaults.ready)),
-        in_progress=str(_env_or(labels_data, "in_progress", env, "HERMES_LOKAY_LABEL_IN_PROGRESS", label_defaults.in_progress)),
-        blocked=str(_env_or(labels_data, "blocked", env, "HERMES_LOKAY_LABEL_BLOCKED", label_defaults.blocked)),
-        pr_opened=str(_env_or(labels_data, "pr_opened", env, "HERMES_LOKAY_LABEL_PR_OPENED", label_defaults.pr_opened)),
-        generated=str(_env_or(labels_data, "generated", env, "HERMES_LOKAY_LABEL_GENERATED", label_defaults.generated)),
+        ready=str(labels_data.get("ready", label_defaults.ready)),
+        in_progress=str(labels_data.get("in_progress", label_defaults.in_progress)),
+        blocked=str(labels_data.get("blocked", label_defaults.blocked)),
+        pr_opened=str(labels_data.get("pr_opened", label_defaults.pr_opened)),
+        generated=str(labels_data.get("generated", label_defaults.generated)),
         needs_feedback=str(labels_data.get("needs_feedback", label_defaults.needs_feedback)),
         duplicate=str(labels_data.get("duplicate", label_defaults.duplicate)),
         out_of_scope=str(labels_data.get("out_of_scope", label_defaults.out_of_scope)),
@@ -374,37 +375,28 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
     automation = AutomationConfig(
         max_active_issues=int(automation_data.get("max_active_issues", 1)),
         automerge=_bool(automation_data.get("automerge", False), "automation.automerge"),
-        require_human_approval=_bool(automation_data.get("require_human_approval", True), "automation.require_human_approval"),
+        require_human_approval=_bool(
+            automation_data.get("require_human_approval", True),
+            "automation.require_human_approval",
+        ),
         require_checks=_bool(automation_data.get("require_checks", True), "automation.require_checks"),
-        require_test_evidence=_bool(automation_data.get("require_test_evidence", True), "automation.require_test_evidence"),
+        require_test_evidence=_bool(
+            automation_data.get("require_test_evidence", True),
+            "automation.require_test_evidence",
+        ),
         fixer_assignee=str(automation_data.get("fixer_assignee", "lokay-fixer")),
         merge_method=str(automation_data.get("merge_method", "merge")),
     )
-    reject_labels_raw = direction_data.get("reject_labels")
-    if reject_labels_raw is None:
-        reject_labels = DirectionConfig().reject_labels
-    elif isinstance(reject_labels_raw, str):
-        reject_labels = tuple(x.strip() for x in reject_labels_raw.split(",") if x.strip())
-    else:
-        reject_labels = tuple(str(x).strip() for x in reject_labels_raw if str(x).strip())
-    require_raw = direction_data.get("require_keywords") or ()
-    deny_raw = direction_data.get("deny_keywords") or ()
-    if isinstance(require_raw, str):
-        require_raw = [x.strip() for x in require_raw.split(",") if x.strip()]
-    if isinstance(deny_raw, str):
-        deny_raw = [x.strip() for x in deny_raw.split(",") if x.strip()]
-    try:
-        min_overlap = int(direction_data.get("min_goal_overlap", 1))
-    except (TypeError, ValueError) as exc:
-        raise ConfigError("direction.min_goal_overlap must be an integer") from exc
     direction = DirectionConfig(
-        repo_goal=str(
-            _env_or(direction_data, "repo_goal", env, "HERMES_LOKAY_GOAL", "")
-        ),
-        require_keywords=tuple(str(x) for x in require_raw),
-        deny_keywords=tuple(str(x) for x in deny_raw),
-        reject_labels=reject_labels,
-        min_goal_overlap=min_overlap,
+        repo_goal=str(direction_data.get("repo_goal", "")),
+        require_keywords=_string_tuple(direction_data.get("require_keywords"), "direction.require_keywords"),
+        deny_keywords=_string_tuple(direction_data.get("deny_keywords"), "direction.deny_keywords"),
+        reject_labels=_string_tuple(
+            direction_data.get("reject_labels"),
+            "direction.reject_labels",
+        )
+        or DirectionConfig().reject_labels,
+        min_goal_overlap=int(direction_data.get("min_goal_overlap", 1)),
     )
     executor = ExecutorConfig(
         enabled=_bool(executor_data.get("enabled", False), "executor.enabled"),
@@ -414,46 +406,54 @@ def _build_config(data: Mapping[str, Any], env: Mapping[str, str]) -> AgentConfi
         timeout_seconds=float(executor_data.get("timeout_seconds", 7200)),
     )
     paths = PathConfig(
-        worktree_root=str(_env_or(paths_data, "worktree_root", env, "HERMES_LOKAY_WORKTREE_ROOT", "~/.hermes/worktrees/lokay")),
-        dispatch_receipts=str(_env_or(paths_data, "dispatch_receipts", env, "HERMES_LOKAY_RECEIPT_DIR", "~/.hermes/state/lokay-dispatch")),
-        task_receipts=str(_env_or(paths_data, "task_receipts", env, "HERMES_LOKAY_TASK_RECEIPT_DIR", "~/.hermes/state/lokay-receipts")),
-        merge_receipts=str(_env_or(paths_data, "merge_receipts", env, "HERMES_LOKAY_MERGE_RECEIPT_DIR", "~/.hermes/state/lokay-merge")),
-        active_issue=str(_env_or(paths_data, "active_issue", env, "HERMES_LOKAY_ACTIVE_ISSUE_DIR", "~/.hermes/state/lokay-active")),
+        worktree_root=str(paths_data.get("worktree_root", "~/.hermes/worktrees/lokay")),
+        dispatch_receipts=str(paths_data.get("dispatch_receipts", "~/.hermes/state/lokay-dispatch")),
+        task_receipts=str(paths_data.get("task_receipts", "~/.hermes/state/lokay-receipts")),
+        merge_receipts=str(paths_data.get("merge_receipts", "~/.hermes/state/lokay-merge")),
+        active_issue=str(paths_data.get("active_issue", "~/.hermes/state/lokay-active")),
         triage_receipts=str(paths_data.get("triage_receipts", "~/.hermes/state/lokay-triage")),
     )
     triage = TriageConfig(
         enabled=_bool(triage_data.get("enabled", True), "triage.enabled"),
-        context_paths=_context_paths(triage_data.get("context_paths"), "triage.context_paths", ("README.md",)),
+        context_paths=_context_paths(
+            triage_data.get("context_paths"),
+            "triage.context_paths",
+            ("README.md",),
+        ),
         context_max_bytes=triage_data.get("context_max_bytes", 131_072),
-        auto_close_duplicates=_bool(triage_data.get("auto_close_duplicates", False), "triage.auto_close_duplicates"),
-        auto_close_out_of_scope=_bool(triage_data.get("auto_close_out_of_scope", True), "triage.auto_close_out_of_scope"),
+        auto_close_duplicates=_bool(
+            triage_data.get("auto_close_duplicates", False),
+            "triage.auto_close_duplicates",
+        ),
+        auto_close_out_of_scope=_bool(
+            triage_data.get("auto_close_out_of_scope", True),
+            "triage.auto_close_out_of_scope",
+        ),
     )
     return AgentConfig(
-        mode=mode,
+        mode=str(data.get("mode", "dry-run")).strip().lower(),
         branch_prefix=str(data.get("branch_prefix", "ai/fix")),
         base_branch=str(data.get("base_branch", "main")),
         gh_cli=str(github.get("cli", "gh")),
-        assignee=str(_env_or(github, "assignee", env, "HERMES_LOKAY_ASSIGNEE", "mikolaj92")),
-        kanban_intake_assignee=str(_env_or({}, "assignee", env, "HERMES_LOKAY_KANBAN_INTAKE_ASSIGNEE", "lokay-intake")),
+        assignee=str(github.get("assignee", "mikolaj92")) or "mikolaj92",
+        kanban_intake_assignee="lokay-intake",
         labels=labels,
         automation=automation,
         direction=direction,
-        executor=executor,
         triage=triage,
+        executor=executor,
         paths=paths,
         repos=tuple(repos),
+        processes=tuple(data.get("processes", ())),
         raw=dict(data),
     )
 
 
 def load_config(path: Path | str | None = None) -> AgentConfig:
+    """Load the complete canonical TOML registry for runtime activation."""
     config_path = Path(path or DEFAULT_CONFIG).expanduser()
-    data: Mapping[str, Any] = {}
-    if config_path.is_file():
-        try:
-            data = tomllib.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError) as exc:
-            raise ConfigError(f"unable to read TOML config {config_path}: {exc}") from exc
-        if not isinstance(data, Mapping):
-            raise ConfigError("config root must be a mapping")
-    return _build_config(data, os.environ)
+    try:
+        registry = load_registry(config_path, env=os.environ)
+    except RegistryConfigError as exc:
+        raise ConfigError(str(exc)) from exc
+    return _build_config(registry.data, os.environ)

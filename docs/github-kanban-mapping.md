@@ -58,16 +58,19 @@ agent work. The adapter reconciles the two without inventing a second workflow.
 
 ## Reconciliation
 
-The GitHub/Kanban mapping is executed by the composed Fala `auto_worker` path.
-Schedule only `lokay-tick-all`; individual path ticks are manual
-diagnostics and are not operational schedulers.
+The GitHub/Kanban mapping is executed by the twelve catalog process IDs under
+the resident supervisor LaunchAgent (`com.mikolaj92.lokay.supervisor`).
+Schedule only that supervisor; individual process modules and retired path
+ticks are manual diagnostics and are not operational schedulers.
 
 ```bash
-uv run lokay-tick-all --dry-run
-uv run lokay-tick-all --live
+uv run python -m lokay.supervisor --config ~/.hermes/lokay/config.toml --db ~/.hermes/lokay/fala/state.sqlite --dry-run
+uv run python -m lokay.process lokay-process-repo_issue_poll --dry-run
 ```
 
-Use `lokay-tick-intake`, `lokay-tick-dispatch`,
-`lokay-tick-triage`, or `lokay-tick-cleanup` only to inspect one
-correlation path manually. Legacy shell intake/dispatch/triage/cleanup,
-backfill, webhook, and cron entrypoints are removed.
+Use `python -m lokay.process lokay-process-<id>`, or retired
+`lokay-tick-intake` / `lokay-tick-dispatch` / `lokay-tick-triage` /
+`lokay-tick-cleanup`, only to inspect one correlation path manually. Legacy
+shell intake/dispatch/triage/cleanup, backfill, webhook, and cron entrypoints
+are removed. Historical aggregate aliases (`auto_worker` / `lokay-tick-all`)
+remain named only as retired diagnostics, never as production LaunchAgents.

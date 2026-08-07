@@ -54,15 +54,16 @@ Machine-readable: `lokay.catalog.EFFECTORS` / `list_effectors()`.
 ## Composition (correlation paths)
 
 Defined declaratively in `fala-package.toml`; every edge is explicit
-`conduction` between subprocess effectors. `auto_worker` is the sole scheduled
-path and is invoked through `lokay-tick-all`:
+`conduction` between subprocess effectors. Production scheduling is the
+resident supervisor LaunchAgent (`com.mikolaj92.lokay.supervisor`), which
+dispatches the twelve catalog process IDs:
 
 ```bash
-uv run lokay-tick-all --dry-run
-uv run lokay-tick-all --live
+uv run python -m lokay.supervisor --config ~/.hermes/lokay/config.toml --db ~/.hermes/lokay/fala/state.sqlite --dry-run
+uv run python -m lokay.process lokay-process-repo_issue_poll --dry-run
 ```
 
-Individual ticks are manual diagnostics only:
+Individual process modules and retired tick CLIs are manual diagnostics only:
 
 ```bash
 uv run lokay-tick-intake --dry-run
@@ -71,9 +72,9 @@ uv run lokay-tick-triage --dry-run
 uv run lokay-tick-cleanup --branch 'ai/fix/N-slug' --dry-run
 ```
 
-- `issue_intake`: poll → direction decide → reject comment → claim → kanban
+- `repo_issue_poll` / `issue_*`: poll → direction decide → reject comment → claim → kanban
 - `issue_to_pr`: load → parse → worktree → omp → verify → push → open_pr → labels → receipt → complete
 - `pr_triage`: list → load → checks → evidence → **decide** → gated (`pr_merge` | `pr_comment_block` | `pr_repair`)
 - `pr_merge`: claim_pr → merge → receipt → close_issue
 - `pr_repair`: review_task → prompt → worktree → omp → push
-- `cleanup`: parse → issue_closed → no_open_pr → remove_worktree → delete_branch → release_claim
+- `cleanup` / `cleanup_reconcile`: parse → issue_closed → no_open_pr → remove_worktree → delete_branch → release_claim / no-target reconcile

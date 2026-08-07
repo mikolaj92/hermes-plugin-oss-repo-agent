@@ -1,19 +1,21 @@
 from __future__ import annotations
 
-import json
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
-    import tomli as tomllib  # type: ignore
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from lokay.registry import (
+    ConfigError as RegistryConfigError,
+    canonical_toml,
+    load_registry,
+    process_defaults,
+)
+
 
 class ConfigError(ValueError):
-    pass
+    """Raised when the production Lokay configuration is invalid."""
 
 
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -148,6 +150,7 @@ class LokayConfig:
     labels: Labels = field(default_factory=Labels)
     executor: ExecutorConfig = field(default_factory=ExecutorConfig)
     repos: tuple[RepoConfig, ...] = ()
+    processes: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "LokayConfig":
@@ -197,6 +200,7 @@ class LokayConfig:
             labels=Labels.from_mapping(data.get("labels")),
             executor=ExecutorConfig.from_mapping(data.get("executor")),
             repos=repos,
+            processes=tuple(data.get("processes", ())),
         )
 
     def effective_live(self, cli_requested_live: bool) -> bool:
@@ -210,134 +214,14 @@ def default_config_path() -> Path:
     configured = os.environ.get("HERMES_LOKAY_CONFIG")
     if configured:
         return Path(configured).expanduser()
-    return Path.home() / ".hermes" / "lokay" / "config.yaml"
-
-
-def _parse_scalar(value: str) -> Any:
-    value = value.strip()
-    if value in {"", "''", '""'}:
-        return ""
-    if value.startswith("[") and value.endswith("]"):
-        inner = value[1:-1].strip()
-        if not inner:
-            return []
-        return [_parse_scalar(part.strip()) for part in inner.split(",")]
-    if (value.startswith("'") and value.endswith("'")) or (value.startswith('"') and value.endswith('"')):
-        return value[1:-1]
-    lowered = value.lower()
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
-    if lowered in {"null", "none", "~"}:
-        return None
-    if value.lstrip("-").isdigit():
-        return int(value)
-    return value
-
-
-def _parse_yaml_block(lines: list[tuple[int, str]], index: int, indent: int) -> tuple[Any, int]:
-    if index >= len(lines):
-        return {}, index
-    if lines[index][1].startswith("- "):
-        return _parse_yaml_list(lines, index, indent)
-    return _parse_yaml_map(lines, index, indent)
-
-
-def _parse_yaml_map(lines: list[tuple[int, str]], index: int, indent: int) -> tuple[dict[str, Any], int]:
-    result: dict[str, Any] = {}
-    while index < len(lines):
-        current_indent, text = lines[index]
-        if current_indent < indent:
-            break
-        if current_indent != indent or text.startswith("- "):
-            break
-        key, separator, raw_value = text.partition(":")
-        if not separator or not key.strip():
-            raise ConfigError(f"unsupported YAML line: {text}")
-        index += 1
-        if raw_value.strip():
-            result[key.strip()] = _parse_scalar(raw_value.strip())
-        elif index < len(lines) and lines[index][0] > current_indent:
-            result[key.strip()], index = _parse_yaml_block(lines, index, lines[index][0])
-        else:
-            result[key.strip()] = {}
-    return result, index
-
-
-def _parse_yaml_list(lines: list[tuple[int, str]], index: int, indent: int) -> tuple[list[Any], int]:
-    result: list[Any] = []
-    while index < len(lines):
-        current_indent, text = lines[index]
-        if current_indent < indent:
-            break
-        if current_indent != indent or not text.startswith("- "):
-            break
-        item = text[2:].strip()
-        index += 1
-        if not item:
-            if index < len(lines) and lines[index][0] > current_indent:
-                value, index = _parse_yaml_block(lines, index, lines[index][0])
-            else:
-                value = None
-            result.append(value)
-            continue
-        if ":" in item and not item.startswith(("'", '"')):
-            key, _, raw_value = item.partition(":")
-            value: dict[str, Any] = {}
-            if raw_value.strip():
-                value[key.strip()] = _parse_scalar(raw_value.strip())
-            elif index < len(lines) and lines[index][0] > current_indent:
-                value[key.strip()], index = _parse_yaml_block(lines, index, lines[index][0])
-            else:
-                value[key.strip()] = {}
-            if index < len(lines) and lines[index][0] > current_indent:
-                extra, index = _parse_yaml_block(lines, index, lines[index][0])
-                if not isinstance(extra, dict):
-                    raise ConfigError("unsupported YAML list structure")
-                value.update(extra)
-            result.append(value)
-        else:
-            result.append(_parse_scalar(item))
-    return result, index
-
-
-def _load_simple_yaml(text: str) -> dict[str, Any]:
-    lines: list[tuple[int, str]] = []
-    for raw in text.splitlines():
-        if not raw.strip() or raw.lstrip().startswith("#"):
-            continue
-        indent = len(raw) - len(raw.lstrip(" "))
-        if indent % 2:
-            raise ConfigError("YAML indentation must use multiples of two spaces")
-        lines.append((indent, raw.strip()))
-    if not lines:
-        return {}
-    loaded, index = _parse_yaml_block(lines, 0, lines[0][0])
-    if index != len(lines) or not isinstance(loaded, dict):
-        raise ConfigError("unsupported YAML config shape")
-    return loaded
+    return Path.home() / ".hermes" / "lokay" / "config.toml"
 
 
 def load_config(path: str | os.PathLike[str] | None = None) -> LokayConfig:
-    config_path = Path(path).expanduser() if path else default_config_path()
-    if not config_path.exists():
-        raise ConfigError(f"config not found: {config_path}")
-    text = config_path.read_text(encoding="utf-8")
-    if config_path.suffix.lower() == ".json":
-        data = json.loads(text)
-    elif config_path.suffix.lower() == ".toml":
-        try:
-            data = tomllib.loads(text)
-        except tomllib.TOMLDecodeError as exc:
-            raise ConfigError(f"invalid TOML config: {config_path}") from exc
-    else:
-        try:
-            import yaml
-        except Exception:
-            data = _load_simple_yaml(text)
-        else:
-            data = yaml.safe_load(text) or {}
-    if not isinstance(data, Mapping):
-        raise ConfigError("config root must be a mapping")
-    return LokayConfig.from_mapping(data)
+    """Load the canonical TOML registry without compatibility fallbacks."""
+    config_path = Path(path).expanduser() if path is not None else default_config_path()
+    try:
+        registry = load_registry(config_path, env=os.environ)
+        return LokayConfig.from_mapping(registry.data)
+    except RegistryConfigError as exc:
+        raise ConfigError(str(exc)) from exc

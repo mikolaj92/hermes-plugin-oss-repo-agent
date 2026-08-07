@@ -55,13 +55,33 @@ class EffectorBoundaryTests(unittest.TestCase):
                 self.assertEqual(values, payload)
                 self.assertEqual(stderr, "")
 
-    def test_semantic_failure_exits_zero_with_values(self) -> None:
-        code, values, stderr = self.run_effector(
-            lambda request: {"status": "failed", "ok": False, "mutated": False, "reason": "denied"}
-        )
-        self.assertEqual(code, 0)
+    def test_semantic_failure_exits_nonzero_with_values(self) -> None:
+        failed = {"status": "failed", "ok": False, "mutated": False, "reason": "denied"}
+        code, values, stderr = self.run_effector(lambda request: failed)
+        self.assertEqual(code, 1)
+        self.assertEqual(values, failed)
         self.assertFalse(values["ok"])
+        self.assertEqual(values["status"], "failed")
         self.assertEqual(values["reason"], "denied")
+        self.assertIn("reported failure", stderr)
+
+    def test_host_facing_failed_result_persists_failed_status(self) -> None:
+        # Host/subprocess contract: failed payloads stay failed in result.json,
+        # never rewritten to success merely because the boundary wrote output.
+        payload = {
+            "status": "failed",
+            "ok": False,
+            "mutated": False,
+            "reason": "host_denied",
+            "error": "policy rejected",
+        }
+        code, values, stderr = self.run_effector(lambda request: payload)
+        self.assertEqual(code, 1)
+        self.assertEqual(values["status"], "failed")
+        self.assertIs(values["ok"], False)
+        self.assertEqual(values["reason"], "host_denied")
+        self.assertEqual(values["error"], "policy rejected")
+        self.assertNotEqual(values.get("status"), "ok")
         self.assertIn("reported failure", stderr)
 
     def test_malformed_exception_and_unknown_handler_fail_closed(self) -> None:

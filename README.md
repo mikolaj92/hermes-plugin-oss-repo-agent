@@ -31,7 +31,7 @@ hermes plugins install mikolaj92/lokay --enable
 This repository is a standalone Hermes plugin: `plugin.yaml` and `__init__.py`
 live at the repository root.
 
-After install, Hermes may show [`after-install.md`](after-install.md). The short version is: create a starter config, validate it, then run the Fala auto-worker in dry-run mode.
+After install, Hermes may show [`after-install.md`](after-install.md). The short version is: copy the canonical TOML config into place, validate it, then dry-run the resident supervisor or one catalog process.
 
 ## Deployment
 
@@ -46,24 +46,29 @@ hermes lokay --config ~/.hermes/lokay/config.toml render-launchd \
 
 Validate the candidate with parity and `plutil -lint` before separately
 controlled promotion. Production promotion accepts only the guarded-autonomous
-policy above. `lokay-tick-all` / `auto_worker` is the sole scheduled mutator.
-Individual Fala ticks are manual diagnostics only and must not be installed as
-separate scheduled jobs.
+policy above. Production topology is exactly one resident LaunchAgent
+(`com.mikolaj92.lokay.supervisor` via `python -m lokay.supervisor`). That
+supervisor dispatches the twelve catalog process IDs (`lokay-process-<id>` via
+`lokay.process`) as logical children only—never as separate LaunchAgents.
+Retired aggregate aliases (`lokay-tick-all` / `auto_worker`, `issue_intake`,
+`lifecycle_ok`) must not be installed as production LaunchAgents.
+
 
 ## 3-minute happy path
 
 ```bash
-hermes lokay --config config.yaml init
-hermes lokay --config config.yaml validate
-uv run lokay-tick-all --dry-run
+hermes lokay --config ~/.hermes/lokay/config.toml init
+hermes lokay --config ~/.hermes/lokay/config.toml validate
+uv run python -m lokay.process lokay-process-repo_issue_poll --dry-run
 ```
 
 Expected dry-run signals:
 
-- `effective_live: false`
-- `executed: false`
-- `planned_work` showing the composed auto-worker graph
-- `safety_guards` showing the no-merge, no-force-push, no-branch-deletion policy
+- `effective_live: false` / dry-run mode
+- no live mutations (`executed: false` or equivalent process payload)
+- planned or idle catalog process output without side effects
+- safety guards remaining no-merge, no-force-push, no-branch-deletion
+
 
 The plugin registers:
 
@@ -77,19 +82,19 @@ The plugin registers:
 ## Commands
 
 ```bash
-hermes lokay --config <config.json-or-yaml> init
-hermes lokay --config <config.json-or-yaml> validate
-hermes lokay --config <config> render-launchd --output <dir>
-uv run lokay-tick-all --dry-run
-uv run lokay-tick-all --live
+hermes lokay --config <config.toml> init
+hermes lokay --config <config.toml> validate
+hermes lokay --config <config.toml> render-launchd --output <dir>
+uv run python -m lokay.supervisor --config <config.toml> --db <fala.sqlite> --dry-run
+uv run python -m lokay.process lokay-process-<id> --dry-run
 ```
 
-`lokay-tick-all` / `auto_worker` is the only scheduled mutator. Use
-`lokay-tick-intake`, `lokay-tick-dispatch`,
-`lokay-tick-triage`, or `lokay-tick-cleanup` only as manual
-diagnostic runs while investigating one correlation path; they are not
-deployment or scheduling instructions. Legacy shell scripts, backfill,
-webhook, and cron entrypoints are removed and are not runnable paths.
+One resident supervisor LaunchAgent is the only scheduled mutator. Use
+`python -m lokay.process lokay-process-<id>` and retired tick CLIs only as
+manual diagnostics while investigating one correlation path; they are not
+production scheduling instructions. Legacy shell scripts, backfill, webhook,
+and cron entrypoints are removed and are not runnable paths.
+
 
 Operational health distinguishes mechanism from outcome: a completed idle run can prove a healthy scheduler but not successful issue resolution. The only end-to-end success is a real issue producing a code change whose guarded PR is merged to `main`, with the linked issue closed and immutable merge/cleanup receipts verified. Pending repair is active non-success; a terminal repair or merge failure is unhealthy and must name the failing run/process.
 
@@ -107,16 +112,14 @@ Runtime defaults:
 - `HERMES_LOKAY_UPDATE_DRY_RUN=1`
 - `HERMES_LOKAY_STALE_LOCK_MINUTES=180`
 - `HERMES_LOKAY_MIN_FREE_GB=5`
-- `HERMES_LOKAY_REPOS_FILE` optional pipe-delimited repo registry override:
-  `owner/repo|board|clone_path|priority`
 
 ## Configuration
 
-Default path: `~/.hermes/lokay/config.yaml`
+Default path: `~/.hermes/lokay/config.toml`
 
-Override with `HERMES_LOKAY_CONFIG` or `--config`.
+Override the path with `HERMES_LOKAY_CONFIG` or `--config`; the environment variable selects a TOML file and does not provide configuration content.
 
-Start from [`config.example.yaml`](config.example.yaml), or let `init` create a local starter config.
+Start from [`config.example.toml`](config.example.toml). `init` copies the canonical checkout or packaged TOML config and never generates a starter file.
 
 ## v0 limitations
 
